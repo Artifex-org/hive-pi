@@ -21,9 +21,26 @@ set -Eeuo pipefail
 # harness install`. Those links point INTO the overlay checkout, so pulling it is
 # all an update needs — there is nothing to re-stow, and a second stow target
 # would fight the links for the same paths.
+# AN EXPLICIT ENVIRONMENT VARIABLE BEATS THE FILE. Sourcing unconditionally
+# means a caller who exported HIVE_PI_BASE — a test with a fixture repo, an
+# operator pointing this at a second checkout — is silently overridden by
+# whatever the machine's file says.
+#
+# That is not hypothetical: this script's own test sets HOME to a temp dir but
+# inherits XDG_CONFIG_HOME from systemd, so under the service it sourced the
+# REAL update.env and ran the updater against the operator's live checkout. It
+# passed in a shell (no XDG_CONFIG_HOME) and failed only in the unit, which is
+# the least useful place to find out.
 env_file="${XDG_CONFIG_HOME:-${HOME}/.config}/hive-pi/update.env"
-# shellcheck disable=SC1090
-[[ -f "${env_file}" ]] && . "${env_file}"
+if [[ -f "${env_file}" ]]; then
+  _base_arg="${HIVE_PI_BASE:-}"
+  _overlay_arg="${HIVE_PI_OVERLAY:-}"
+  # shellcheck disable=SC1090
+  . "${env_file}"
+  [[ -n "${_base_arg}" ]] && HIVE_PI_BASE="${_base_arg}"
+  [[ -n "${_overlay_arg}" ]] && HIVE_PI_OVERLAY="${_overlay_arg}"
+  unset _base_arg _overlay_arg
+fi
 
 repo="${HIVE_PI_BASE:-${HOME}/repos/hive-pi__worktrees/main}"
 overlay="${HIVE_PI_OVERLAY:-}"

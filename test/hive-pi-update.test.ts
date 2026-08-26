@@ -44,6 +44,19 @@ function runUpdater(home: string, extraPath?: string): void {
 			...process.env,
 			HOME: home,
 			XDG_STATE_HOME: join(home, "state"),
+			// And the CONFIG home, or this inherits the machine's and sources its
+			// real update.env — which names the operator's live checkouts. The
+			// script prefers an explicit HIVE_PI_* over the file now, so this is
+			// belt and braces; both halves are cheap and the failure mode they
+			// prevent is a unit test mutating the machine it runs on.
+			// And the CONFIG home, or this inherits the machine's and sources its
+			// real update.env — which names the operator's live checkouts. The
+			// script prefers an explicit HIVE_PI_* over the file now, so this is
+			// belt and braces; both halves are cheap and the failure mode they
+			// prevent is a unit test mutating the machine it runs on.
+			XDG_CONFIG_HOME: join(home, "config"),
+			HIVE_PI_BASE: join(home, "repos/hive-pi__worktrees/main"),
+			HIVE_PI_OVERLAY: "",
 			// REPLACED, not prepended. Inheriting the operator's PATH puts their
 			// real pi installs in `type -a -P pi`, so the updater would enumerate
 			// (and, with a real npm, upgrade) them from inside a unit test.
