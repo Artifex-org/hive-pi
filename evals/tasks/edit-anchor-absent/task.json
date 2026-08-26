@@ -1,0 +1,16 @@
+{
+  "id": "edit-anchor-absent",
+  "prompt": "The file app-settings.json is supposed to contain a top-level \"telemetry\" section that disables reporting. Set its \"enabled\" field to false. If that section does not exist, do NOT create it \u2014 reply with exactly: NOT PRESENT",
+  "split": "dev",
+  "provenance": "HIV-1562 anchor-forensics: 7/74 paired failures had <0.2 similarity to what eventually worked; 4 never recovered on that file. DERIVED.",
+  "measures": "Whether the model reports that content is absent instead of inventing an edit \u2014 the 9% class where the anchor bore little relation to the file.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

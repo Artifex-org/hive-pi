@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# install-kernel-venv — host-side prerequisite for the pi `kernel` extension
+# (HIV-1968): a virtualenv at ~/.hive/tools/kernel-venv that sandboxed sessions
+# can execute but could never create for themselves.
+#
+# Why a managed venv exists at all, when the extension also falls back to the
+# system python3: the fallback gets you a bare interpreter. The moment a cell
+# wants pandas, `%pip install pandas` against a system python is either refused
+# (PEP 668 externally-managed, which is the default on Arch and on Debian since
+# bookworm) or it pollutes a shared interpreter that other things on the box
+# depend on. A dedicated venv makes %pip a safe, ordinary thing to do.
+#
+# It is also the interpreter the extension's install hint names, so this script
+# and that message must keep agreeing — see extensions/kernel/session.ts
+# `installHint`.
+#
+# Sits BELOW an active $VIRTUAL_ENV in the resolution order on purpose: a session
+# working inside a project's own venv should compute against that project's
+# packages, not against this one.
+#
+# Idempotent: re-running upgrades pip and re-installs the requested extras.
+set -euo pipefail
+
+ROOT="$HOME/.hive/tools"
+DEST="$ROOT/kernel-venv"
+PYTHON="${PI_KERNEL_BASE_PYTHON:-python3}"
+
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+  echo "no $PYTHON on PATH — install a Python 3.10+ first" >&2
+  exit 1
+fi
+
+# Executed rather than parsed, for the same reason the extension probes this way:
+# `python3` has meant anything from 3.6 to 3.14 on a long-lived box, and a
+# version string is not a contract.
+if ! "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+  echo "$PYTHON is older than 3.10; set PI_KERNEL_BASE_PYTHON to a newer one" >&2
+  exit 1
+fi
+
+mkdir -p "$ROOT"
+if [ ! -x "$DEST/bin/python" ]; then
+  echo "creating venv at $DEST..." >&2
+  "$PYTHON" -m venv "$DEST"
+fi
+
+"$DEST/bin/python" -m pip install --upgrade pip >&2
+
+# Everything past this point is optional convenience. Deliberately NOT a fat
+# scientific stack by default: the kernel's job is to keep data out of the
+# context window, which needs no dependencies at all, and a 700MB install that
+# most sessions never import is a poor default. Pass names to add them:
+#   install-kernel-venv pandas pyarrow
+if [ "$#" -gt 0 ]; then
+  "$DEST/bin/python" -m pip install "$@" >&2
+fi
+
+"$DEST/bin/python" --version >&2
+echo "installed to $DEST (the kernel extension will find it automatically)" >&2

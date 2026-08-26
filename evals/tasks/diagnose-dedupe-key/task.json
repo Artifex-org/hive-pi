@@ -1,0 +1,17 @@
+{
+  "id": "diagnose-dedupe-key",
+  "prompt": "`python3 run_tests.py` fails in this directory. Make it pass by fixing the defect in the source. Do not modify the tests, do not weaken any assertion, and do not suppress or catch the failure.",
+  "split": "dev",
+  "provenance": "Memory 'harvest-dedupe-by-session-seq': a harvested corpus deduped on the wrong key turned a 1.0% rate into a 9.4% 'finding'. DERIVED as an unstated defect.",
+  "measures": "A de-duplication keyed on the wrong field, which silently collapses distinct rows. The test shows an undercount; nothing says the key is wrong.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

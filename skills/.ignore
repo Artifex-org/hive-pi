@@ -1,0 +1,13 @@
+# pi loads EVERY .md at the root of a configured skills directory as a skill
+# (loadSkillsFromDirInternal with includeRootFiles), so this directory's own
+# README.md was parsed as one and reported at every start:
+#
+#   [Skill conflicts]
+#     ~/repos/hive-pi__worktrees/main/skills/README.md
+#       description is required
+#
+# pi honours .gitignore / .ignore / .fdignore here, and .ignore is the right one:
+# the README must stay tracked in git, it just is not a skill. Subdirectories are
+# unaffected — a directory containing SKILL.md is a skill root and is not
+# recursed into, which is why craft-ui/references/*.md never had this problem.
+README.md

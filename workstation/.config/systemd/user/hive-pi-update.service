@@ -1,0 +1,8 @@
+[Unit]
+Description=Update the local hive-pi harness after upstream changes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/hive-pi-update

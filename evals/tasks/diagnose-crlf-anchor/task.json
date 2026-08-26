@@ -1,0 +1,17 @@
+{
+  "id": "diagnose-crlf-anchor",
+  "prompt": "`python3 run_tests.py` fails in this directory. Make it pass by fixing the defect in the source. Do not modify the tests, do not weaken any assertion, and do not suppress or catch the failure.",
+  "split": "test",
+  "provenance": "pi's edit applier LF-normalises before matching, and extensions/edit-common/diagnose.ts had to mirror that to avoid reporting phantom mismatches (HIV-1562). DERIVED as an unstated defect.",
+  "measures": "A matcher that fails only on CRLF input. Held out: line-ending normalisation is exactly what the shipped edit-diagnosis work touches, so it must not be iterated against.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

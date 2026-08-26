@@ -1,0 +1,16 @@
+{
+  "id": "edit-anchor-ambiguous",
+  "prompt": "In calc.py, the function named `total` must return 0 instead of 1. Leave the function named `subtotal` exactly as it is.",
+  "split": "dev",
+  "provenance": "HIV-1562 anchor-forensics: 16/74 paired failures were 'ambiguous, recovery ADDED context'. pi's error says only 'provide more context'. DERIVED.",
+  "measures": "Whether the model extends an ambiguous anchor rather than retrying it \u2014 22% of paired failures were resolved by simply adding a neighbouring line.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

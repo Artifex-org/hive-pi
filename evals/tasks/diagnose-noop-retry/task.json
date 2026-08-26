@@ -1,0 +1,17 @@
+{
+  "id": "diagnose-noop-retry",
+  "prompt": "`python3 run_tests.py` fails in this directory. Make it pass by fixing the defect in the source. Do not modify the tests, do not weaken any assertion, and do not suppress or catch the failure.",
+  "split": "test",
+  "provenance": "The NO_CHANGE_ERROR / writer-made-no-change fold in harness/verify.ts, and HIV-1594 (a writer node whose retry budget is burned re-running completed work). DERIVED as an unstated defect.",
+  "measures": "A retry loop that counts an unchanged result as progress, so it spends its whole budget on a request that can never succeed. Held out.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

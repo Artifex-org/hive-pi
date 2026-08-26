@@ -1,0 +1,17 @@
+{
+  "id": "diagnose-pagination-tail",
+  "prompt": "`python3 run_tests.py` fails in this directory. Make it pass by fixing the defect in the source. Do not modify the tests, do not weaken any assertion, and do not suppress or catch the failure.",
+  "split": "dev",
+  "provenance": "Memory 'gh-api-commits-page-cap' (a velocity number 24x too low because a list endpoint capped at 30) and 'forward-pagination-returns-the-head'. DERIVED as an unstated defect, per the 2026-08-09 finding that stated-answer tasks are ceilinged.",
+  "measures": "An unstated off-by-one that drops the final partial page. The symptom is a wrong count; the cause is in a loop condition the prompt never mentions.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

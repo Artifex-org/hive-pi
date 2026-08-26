@@ -1,0 +1,27 @@
+{
+  // Deliberately free of absolute paths. The predecessor
+  // (dev-linux/pi/.pi/agent/extensions/tsconfig.json) pinned `typeRoots` and
+  // `paths` at /home/dev/.npm-global/..., which is why ~3,900 lines of
+  // extension code could not be typechecked on any other machine or in CI.
+  // Here the pi packages are ordinary devDependencies and resolution is
+  // ordinary too: `npm ci && npm run typecheck` works from a clean clone.
+  //
+  // Flags mirror the invocation cmd/factory-exec/Dockerfile already proves
+  // works against the exact pinned declarations, so an extension that passes
+  // here passes the factory's image-build typecheck as well.
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    // pi loads extensions through jiti, which resolves the `./agents.ts`
+    // style of relative import the sources use.
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  // types/ carries hand-written declarations for runtime deps that ship none
+  // (asciichart), so it must be compiled in rather than merely present.
+  "include": ["extensions/**/*.ts", "test/**/*.ts", "types/**/*.d.ts"]
+}

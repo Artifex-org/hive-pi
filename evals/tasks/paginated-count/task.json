@@ -1,0 +1,17 @@
+{
+  "id": "paginated-count",
+  "prompt": "The script ./api.sh returns one page of records at a time; it accepts a --page argument starting at 1 and prints one record per line, printing nothing when the page is past the end. Count the TOTAL number of records across all pages and write just that number (digits only) to count.txt.",
+  "split": "dev",
+  "provenance": "CLAUDE.md learned rule / memory 'gh-api-commits-page-cap': gh api list endpoints cap at 30 per page; a measured number was 24x under. DERIVED into a local paginated fixture.",
+  "measures": "Whether a count over a paginated source is complete. A real velocity figure was 24x too low because a list API capped at 30 and the cap was not noticed.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

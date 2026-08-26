@@ -1,0 +1,26 @@
+# The public repo's own gate.
+#
+# Hive gates our private repos, and a public repo cannot reach it: a fork's PR
+# has no fleet credential and would report a red check nobody outside the org
+# could act on. So this mirrors what `npm run check` runs — typecheck and the
+# vitest suite — on GitHub's own runners, where a contributor can read the log.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # --ignore-scripts deliberately: nothing here needs a postinstall, and a
+      # public repo must not run one from a transitive dependency on CI.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test

@@ -1,0 +1,17 @@
+{
+  "id": "diagnose-rate-denominator",
+  "prompt": "`python3 run_tests.py` fails in this directory. Make it pass by fixing the defect in the source. Do not modify the tests, do not weaken any assertion, and do not suppress or catch the failure.",
+  "split": "dev",
+  "provenance": "MEASURED IN THIS REPO on 2026-08-09: the eval harness's own first baseline reported a 223% cache hit rate because cacheRead was divided by input, which excludes it. DERIVED from that defect.",
+  "measures": "A rate computed against the wrong denominator, producing values above 100%. The test asserts a bound; the cause is that two token counts are disjoint, not nested.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

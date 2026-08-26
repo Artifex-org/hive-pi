@@ -1,0 +1,39 @@
+# A .stow-local-ignore REPLACES stow's built-in ignore list rather than adding
+# to it, so the defaults are repeated here verbatim; dropping them would start
+# stowing this package's own README.md into ~/README.md.
+
+RCS
+.+,v
+
+CVS
+\.\#.+
+\.cvsignore
+
+\.svn
+_darcs
+\.hg
+
+\.git
+\.gitignore
+\.gitmodules
+
+.+~
+\#.*\#
+
+^/README.*
+^/LICENSE.*
+^/COPYING
+
+# The default settings template is READ by the provisioner and substituted, not
+# stowed: stowing it would put a file full of {{HIVE_PI_ROOT}} tokens beside the
+# real settings.json, where the next person to look would reasonably assume pi
+# reads it.
+^/\.pi/agent/settings\.default\.json
+
+# skills/omarchy is an absolute symlink into the machine's own Omarchy install,
+# so its target carries that machine's $HOME. GNU stow refuses to stow an
+# absolute symlink outright — "source is an absolute symlink" — and that aborts
+# the entire package, including the `stow --restow` that hive-pi-update runs on
+# every timer tick. Skipping it lets each machine keep its own
+# ~/.pi/agent/skills/omarchy link while the rest of the package stows normally.
+omarchy

@@ -1,0 +1,19 @@
+# A secret pushed to a public repo is public the moment it lands, and deleting
+# the commit does not unpublish it. This runs on every push and PR rather than
+# only at release.
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

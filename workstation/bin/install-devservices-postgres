@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# install-devservices-postgres — host-side prerequisite for the pi
+# `devservices` extension (HIV-1636): a portable PostgreSQL under
+# ~/.hive/tools/postgres that sandboxed sessions can execute but could never
+# download themselves.
+#
+# Uses the theseus-rs portable build, GLIBC variant: the musl variant needs
+# /lib/ld-musl-x86_64.so.1, which a glibc host (Arch) does not have. The one
+# missing link on Arch is libxml2.so.2 (Arch ships libxml2.so.16 since
+# libxml2 2.13); postgres only uses the stable xml API, so a compat symlink
+# inside the bundle's own lib/ is sufficient — measured working 2026-08-09
+# (initdb + server + psql round trip; harmless "no version information"
+# warnings on stderr).
+#
+# Idempotent: re-running replaces the version dir and repoints the symlink.
+set -euo pipefail
+
+VER="${1:-18.4.0}"
+ROOT="$HOME/.hive/tools"
+DEST="$ROOT/postgres-$VER"
+URL="https://github.com/theseus-rs/postgresql-binaries/releases/download/$VER/postgresql-$VER-x86_64-unknown-linux-gnu.tar.gz"
+
+mkdir -p "$ROOT"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+echo "downloading postgresql $VER (glibc portable build)..." >&2
+curl -fsSL -o "$tmp/pg.tar.gz" "$URL"
+tar -xzf "$tmp/pg.tar.gz" -C "$tmp"
+rm -rf "$DEST"
+mv "$tmp/postgresql-$VER-x86_64-unknown-linux-gnu" "$DEST"
+
+# Arch compat: libxml2 soname moved from .so.2 to .so.16 upstream.
+if [ ! -e /usr/lib/libxml2.so.2 ] && [ -e /usr/lib/libxml2.so.16 ]; then
+  ln -sfn /usr/lib/libxml2.so.16 "$DEST/lib/libxml2.so.2"
+fi
+
+ln -sfn "postgres-$VER" "$ROOT/postgres"
+
+LD_LIBRARY_PATH="$ROOT/postgres/lib" "$ROOT/postgres/bin/initdb" --version >&2
+LD_LIBRARY_PATH="$ROOT/postgres/lib" "$ROOT/postgres/bin/postgres" --version >&2
+echo "installed to $ROOT/postgres" >&2

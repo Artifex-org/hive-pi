@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# Update the workstation hive-pi checkout and its unpinned pi package safely.
+set -Eeuo pipefail
+
+# TWO checkouts, because the harness is split (HIV-2792): a public BASE holding
+# the extensions and this script, and an optional private OVERLAY holding a
+# machine's own `~/.pi/agent` configuration and its organisation's agent roles.
+#
+# The overlay is OPTIONAL and empty by default. A machine that has none is a
+# fully supported state — it runs the base's defaults — so an unset variable
+# here must never be an error.
+#
+# Both come from an env file the provisioner writes, so a machine that keeps its
+# checkouts somewhere else does not need this script edited:
+#
+#   ~/.config/hive-pi/update.env   HIVE_PI_BASE=… HIVE_PI_OVERLAY=…
+#
+# NOTE the asymmetry, and it is deliberate: the base is STOWED (this script, the
+# timer, the shared scripts are files that must exist at fixed paths), while the
+# overlay is SYMLINKED entry-by-entry into ~/.pi/agent by `hive-agent workstation
+# harness install`. Those links point INTO the overlay checkout, so pulling it is
+# all an update needs — there is nothing to re-stow, and a second stow target
+# would fight the links for the same paths.
+env_file="${XDG_CONFIG_HOME:-${HOME}/.config}/hive-pi/update.env"
+# shellcheck disable=SC1090
+[[ -f "${env_file}" ]] && . "${env_file}"
+
+repo="${HIVE_PI_BASE:-${HOME}/repos/hive-pi__worktrees/main}"
+overlay="${HIVE_PI_OVERLAY:-}"
+state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-pi-update"
+revision_file="${state_dir}/activated-revision"
+available_revision_file="${state_dir}/available-revision"
+run_file="${state_dir}/last-run"
+
+# A lock older than this has no owner worth waiting for. Every git operation in
+# this script holds the index for milliseconds, and the timer's own period is
+# ~17 minutes, so five is generous in both directions.
+STALE_LOCK_AFTER_S=300
+
+# Leave a record of EVERY run, success or failure (HIV-1974).
+#
+# The defect this closes is not that a run failed — it is that three consecutive
+# runs failed in silence while the harness sat two merges behind, because the
+# only trace was `systemctl --user status`, which nobody reads. The `readiness`
+# extension probes this file, so a stalled deploy path now shows up in the
+# session that is about to be misled by it.
+record_run() {
+  mkdir -p "${state_dir}"
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:-}" >"${run_file}"
+}
+trap 'record_run failed "exit at line ${LINENO}"' ERR
+
+if [[ ! -d "${repo}/.git" && ! -f "${repo}/.git" ]]; then
+  echo "hive-pi worktree is unavailable: ${repo}" >&2
+  exit 1
+fi
+
+# Clear a stale index.lock before touching the worktree (HIV-1974).
+#
+# Measured 2026-08-16: an EMPTY, three-hour-old `worktrees/main/index.lock`
+# failed this unit at 21:34, 21:50 and 22:07, so the harness stayed on a build
+# from two merges earlier — including the stow-symlinked mcp.json, which made a
+# merged config change look like it had no effect. The lock's timestamp matched
+# a `gwq add -b <name>` run from inside the anchor worktree, which is the
+# documented way to make a worktree here, so this will recur.
+#
+# Age is the test rather than "is a process holding it": an index.lock records
+# no owner, `fuser` is not guaranteed present, and a lock this script's own git
+# calls created would be milliseconds old. A young lock is left alone precisely
+# because it might be someone's live operation.
+clear_stale_index_lock() {
+  local gitdir lock age
+  gitdir="$(git -C "${repo}" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  lock="${gitdir}/index.lock"
+  [[ -f "${lock}" ]] || return 0
+  age=$(( $(date +%s) - $(stat -c %Y "${lock}") ))
+  if (( age < STALE_LOCK_AFTER_S )); then
+    echo "index.lock is ${age}s old — assuming a live git operation, leaving it" >&2
+    return 0
+  fi
+  echo "clearing a stale index.lock (${age}s old, no owner): ${lock}" >&2
+  rm -f "${lock}"
+}
+
+clear_stale_index_lock
+
+git -C "${repo}" fetch --prune origin main
+head_revision="$(git -C "${repo}" rev-parse HEAD)"
+remote_revision="$(git -C "${repo}" rev-parse origin/main)"
+if git -C "${repo}" merge-base --is-ancestor HEAD origin/main; then
+  available_revision="${remote_revision}"
+elif git -C "${repo}" merge-base --is-ancestor origin/main HEAD; then
+  # A local checkout ahead of the remote is already newer; reporting the older
+  # remote as available would make readiness falsely claim it was unactivated.
+  available_revision="${head_revision}"
+else
+  echo "refusing update: ${repo} diverged from origin/main" >&2
+  exit 1
+fi
+mkdir -p "${state_dir}"
+available_tmp="$(mktemp "${available_revision_file}.XXXXXX")"
+printf '%s\n' "${available_revision}" >"${available_tmp}"
+mv "${available_tmp}" "${available_revision_file}"
+
+# settings.json is BOTH ours and pi's. We curate the extension pins, the model
+# list and the theme; pi stamps `lastChangelogVersion` into the same file
+# whenever it shows a new version's changelog. stow makes those one file, so
+# every pi upgrade dirties this pull-only worktree — and the guard below then
+# refused every subsequent run, permanently. Measured 2026-08-06: updates had
+# been dead since the 0.83.0 → 0.84.0 bump, so the harness this script exists to
+# keep current was the one thing it had stopped updating.
+#
+# pi's own scribble is therefore NOT local work, and is excluded from the guard.
+# It is left in place rather than reverted: reverting would walk the marker
+# backwards every run and make pi re-show the same changelog on a 17-minute
+# timer.
+settings="workstation/.pi/agent/settings.json"
+
+# Never discard local work from the pull-only main worktree. `diff HEAD` so a
+# STAGED change counts too — plain `git diff` sees only unstaged, and staged
+# work is exactly what you would least like silently overwritten.
+git -C "${repo}" diff --quiet HEAD -- . ":(exclude)${settings}" || {
+  echo "refusing update: ${repo} has local changes" >&2
+  exit 1
+}
+
+if [[ "${head_revision}" != "${remote_revision}" && "${available_revision}" == "${remote_revision}" ]]; then
+  # `pull --ff-only` refuses to start with *any* unstaged change, even one in
+  # a path the incoming commit does not touch. Reset Pi's owned changelog
+  # marker only when upstream is strictly ahead; all other local work was
+  # rejected above. Pi stamps the marker again at its next launch.
+  git -C "${repo}" checkout -- "${settings}"
+  git -C "${repo}" pull --ff-only
+fi
+
+# ...AND THE BINARY THEY RUN AGAINST. `--extensions` is exactly what it says: it
+# advanced the extensions and never touched pi itself, so the two drifted until
+# an extension refused outright.
+#
+# Measured 2026-08-19, three pi installs on one workstation:
+#
+#   ~/.npm-global/bin/pi   0.84.0   <- what every LAUNCHED agent runs
+#   mise                   0.84.1   <- what the operator's shell runs
+#   factory image          0.84.2   <- the reviewed pin
+#
+# The npm one was installed by hand on Aug 6 and owned by nothing. Its extensions
+# were 13 days newer than it, and `claude-oauth supports Pi 0.84.1, 0.84.2;
+# running Pi is 0.84.0` was already failing in every launched session — visible
+# only as "1 degraded" in a status line nobody reads. A cursor agent on that pair
+# produced no work at all and cost an afternoon to explain.
+#
+# Best-effort per install, and NEVER fatal: a workstation that cannot reach npm
+# still has a working harness, and failing the unit here would strand the
+# extension update that already succeeded above.
+update_pi_binaries() {
+  if command -v mise >/dev/null 2>&1 && mise ls pi >/dev/null 2>&1; then
+    mise upgrade pi || echo "hive-pi-update: mise pi upgrade failed (continuing)" >&2
+  fi
+  # Every npm-installed pi on PATH, updated IN ITS OWN PREFIX.
+  #
+  # The prefix is derived from the resolved binary rather than `npm prefix -g`,
+  # which reports the npm default and not where this pi actually lives — on the
+  # measured machine that default was /usr/lib, so an install there needs root
+  # and silently leaves the real one stale. Deriving it means a second install,
+  # or a differently-configured machine, is handled without editing this script.
+  local bin real prefix
+  for bin in $(type -a -P pi 2>/dev/null | sort -u); do
+    real="$(readlink -f "${bin}" 2>/dev/null)" || continue
+    case "${real}" in
+      */lib/node_modules/@earendil-works/pi-coding-agent/*) ;;
+      *) continue ;;
+    esac
+    prefix="${real%%/lib/node_modules/@earendil-works/pi-coding-agent/*}"
+    [[ -n "${prefix}" ]] || continue
+    # NEVER the Hive-managed prefix. `workstation harness install` puts a pi
+    # there at the version the TENANT pins, and hive-agent compares the two
+    # hourly and reinstalls on drift. Upgrading it to @latest here would move it
+    # off the pin every seventeen minutes while the node kept pulling it back —
+    # a fight neither side can win, and the losing state is a machine whose pi
+    # version nobody chose.
+    case "${prefix}" in
+      "${HIVE_HARNESS_ROOT:-${HOME}/.hive/harness}"*)
+        echo "hive-pi-update: leaving the Hive-pinned pi in ${prefix} alone" >&2
+        continue
+        ;;
+    esac
+    npm i -g --prefix "${prefix}" "@earendil-works/pi-coding-agent@latest" \
+      || echo "hive-pi-update: npm pi upgrade in ${prefix} failed (continuing)" >&2
+  done
+}
+update_pi_binaries
+
+# THE OVERLAY RELEASES ON ITS OWN SCHEDULE TOO, so it is pulled here — before
+# the "nothing new in the base" early return below, for exactly the reason the
+# pi-binary update is: a config change landing on a quiet base week would
+# otherwise never reach the machine, while the unit reported `ok` every
+# seventeen minutes. That is the original HIV-1974 defect with a different
+# subject.
+#
+# Fast-forward only, and NEVER fatal: a machine whose overlay is unreachable,
+# dirty or diverged still has a working harness from the base, and failing here
+# would strand the base update. The reason is recorded in the run line instead,
+# where the `readiness` extension already looks.
+#
+# Nothing is re-stowed. `hive-agent workstation harness install` symlinks the
+# overlay's entries INTO ~/.pi/agent, so those links point at the checkout and a
+# pull is the whole update.
+update_overlay() {
+  [[ -n "${overlay}" ]] || return 0
+  if [[ ! -e "${overlay}/.git" ]]; then
+    overlay_note=" (overlay ${overlay} is not a checkout)"
+    return 0
+  fi
+  if ! git -C "${overlay}" diff --quiet HEAD 2>/dev/null; then
+    overlay_note=" (overlay has local changes; left alone)"
+    return 0
+  fi
+  git -C "${overlay}" fetch --prune origin >/dev/null 2>&1 \
+    && git -C "${overlay}" pull --ff-only >/dev/null 2>&1 \
+    || overlay_note=" (overlay pull failed)"
+}
+update_overlay
+
+# PI RELEASES ON ITS OWN SCHEDULE, so this runs on EVERY tick — before the
+# "nothing new in hive-pi" early return below, not after it.
+#
+# Placing it after was the first version of this change, and it was wrong in a
+# way that reproduces the original bug: pi 0.84.3 landing on a quiet hive-pi
+# week would never be installed, and the binary would drift behind its
+# extensions again while the unit reported `ok` every seventeen minutes. Caught
+# by running it — the tick recorded "ok already at 8c9d056e" and updated nothing.
+
+revision="$(git -C "${repo}" rev-parse HEAD)"
+if [[ -f "${revision_file}" && "$(<"${revision_file}")" == "${revision}" ]]; then
+  # Nothing to activate is a SUCCESSFUL run, and recording it is the point:
+  # "no new revision" and "the unit has been failing for hours" look identical
+  # from the outside unless the quiet path leaves a timestamp too.
+  record_run ok "already at ${revision:0:9}${overlay_note:-}"
+  exit 0
+fi
+
+npm --prefix "${repo}" ci --ignore-scripts
+npm --prefix "${repo}" run check
+
+# The hive-pi source intentionally has no @ref, so this advances only it;
+# the other extension sources in settings.json remain version-pinned.
+pi update --extensions
+
+# --no-folding, and the directories made first.
+#
+# Without it stow FOLDS: if ~/.pi/agent does not already exist as a real
+# directory, stow satisfies the package by linking ~/.pi straight into this
+# checkout. Every later write — settings.json, hive-telemetry/credentials.json,
+# sessions/ — then lands inside a pull-only PUBLIC worktree, where the next
+# `git pull --ff-only` refuses to run because the tree is dirty. The failure
+# arrives as "refusing update: has local changes", hours later, naming none of
+# this.
+mkdir -p "${HOME}/.pi/agent" "${HOME}/.local/bin" "${HOME}/.config/systemd/user"
+stow --restow --no-folding -d "${repo}" -t "${HOME}" workstation
+
+
+mkdir -p "${state_dir}"
+printf '%s\n' "${revision}" >"${revision_file}"
+record_run ok "activated ${revision:0:9}${overlay_note:-}"
