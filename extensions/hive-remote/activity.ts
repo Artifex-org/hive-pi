@@ -204,6 +204,8 @@ export interface ActivityPayload {
 	 * heartbeats that follow, where the server preserves the stored value.
 	 */
 	detail?: string;
+	/** Final assistant transcript sequence when the agenda declares completion. */
+	completion_summary_seq?: number;
 }
 
 /**
