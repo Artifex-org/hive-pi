@@ -52,11 +52,15 @@ import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
 import { classifyCommand, classifyTool } from "./policy.ts";
 import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
+import { TEMPLATE_NAMES_TUPLE } from "./templates.ts";
 import {
 	applyOps,
 	emptyPlan,
 	isEmpty,
+	isLanesOnly,
 	PLAN_ENTRY_TYPE,
+	PLAN_TICK_ENTRY_TYPE,
+	tickEntry,
 	rehydratePlan,
 	stepCounts,
 	toEntry,
@@ -78,18 +82,45 @@ const PLAN_TOOLS = ["plan_write", "plan_ask", "plan_ready"] as const;
  */
 const PLAN_DECISION_WAIT_MS = 30 * 60_000;
 
-const StepStatusSchema = StringEnum(["pending", "in_progress", "done", "skipped", "blocked"] as const, {
-	description: "Step status.",
+const StepStatusSchema = StringEnum(
+	["pending", "in_progress", "done", "failed", "skipped", "blocked", "completed", "running"] as const,
+	{
+		description:
+			"Item status. `completed` and `running` are accepted as synonyms of `done` and `in_progress`, " +
+			"because the todo and workflow tools have always spelled them that way.",
+	},
+);
+
+const ItemSchema = Type.Object({
+	id: Type.Optional(Type.String({ description: "Stable item id. Re-state it to preserve status across a reword." })),
+	title: Type.Optional(Type.String({ description: "Short imperative title. Required when creating." })),
+	activeForm: Type.Optional(Type.String({ description: 'Present-continuous form, e.g. "Running the migration".' })),
+	detail: Type.Optional(Type.String()),
+	kind: Type.Optional(
+		Type.String({
+			description:
+				'What kind of work this is. Omit (or "task") for your own work. Use push, pr.open, ci.green, ' +
+				"review or merged for delivery steps — Hive resolves those from its own runs and pull requests, " +
+				"and this tool refuses a status on them.",
+		}),
+	),
+	status: Type.Optional(StepStatusSchema),
+	files: Type.Optional(Type.Array(Type.String(), { description: "Files this item touches." })),
+	dependsOn: Type.Optional(
+		Type.Array(Type.String(), {
+			description: "Item ids this waits on; may name an item in another lane. Refused if it would close a cycle.",
+		}),
+	),
+	parentId: Type.Optional(
+		Type.String({ description: "The item this one decomposes, within the same lane. Up to three levels." }),
+	),
+	linearKey: Type.Optional(Type.String()),
+	owner: Type.Optional(Type.String({ description: "Worker id, when the item is delegated." })),
+	note: Type.Optional(Type.String()),
 });
 
-const StepSchema = Type.Object({
-	id: Type.Optional(Type.String({ description: "Stable step id. Re-state it to preserve status across a reword." })),
-	title: Type.String({ description: "Short imperative title." }),
-	detail: Type.Optional(Type.String()),
-	status: Type.Optional(StepStatusSchema),
-	files: Type.Optional(Type.Array(Type.String(), { description: "Files this step touches." })),
-	blockedBy: Type.Optional(Type.Array(Type.String(), { description: "Step ids this waits on. Advisory." })),
-});
+/** @deprecated The pre-merge name. */
+const StepSchema = ItemSchema;
 
 /**
  * The block union, as the model supplies it.
@@ -109,7 +140,7 @@ const BlockSchema = Type.Union([
 	Type.Object({
 		type: Type.Literal("steps"),
 		title: Type.Optional(Type.String()),
-		steps: Type.Array(StepSchema, { minItems: 1 }),
+		steps: Type.Array(ItemSchema, { minItems: 1 }),
 	}),
 	Type.Object({
 		type: Type.Literal("chart"),
@@ -186,7 +217,23 @@ const OpSchema = Type.Union([
 		op: Type.Literal("header"),
 		title: Type.Optional(Type.String()),
 		goal: Type.Optional(Type.String({ description: "One sentence." })),
-		phase: Type.Optional(StringEnum(["drafting", "ready", "approved", "abandoned"] as const)),
+		phase: Type.Optional(StringEnum(["none", "drafting", "ready", "approved", "abandoned"] as const)),
+		stage: Type.Optional(
+			Type.String({ description: "The lifecycle stage the session is in. A tick, never a re-plan." }),
+		),
+		label: Type.Optional(Type.String({ description: "A name for THIS revision, shown in the version picker." })),
+		tickets: Type.Optional(
+			Type.Array(
+				Type.Object({
+					key: Type.String({ description: 'Linear issue key, e.g. "HIV-2904".' }),
+					url: Type.Optional(Type.String()),
+					role: Type.Optional(StringEnum(["primary", "related"] as const)),
+				}),
+			),
+		),
+		milestone: Type.Optional(
+			Type.Union([Type.Object({ goalId: Type.String(), stepId: Type.Optional(Type.String()) }), Type.Null()]),
+		),
 	}),
 	Type.Object({
 		op: Type.Literal("upsert"),
@@ -204,12 +251,54 @@ const OpSchema = Type.Union([
 	Type.Object({ op: Type.Literal("move"), id: Type.String(), after: Type.Optional(Type.String()) }),
 	Type.Object({
 		op: Type.Literal("set_step"),
-		id: Type.String({ description: "Step id. The containing block is found for you." }),
+		id: Type.String({ description: "Item id. The containing lane is found for you." }),
 		status: Type.Optional(StepStatusSchema),
 		note: Type.Optional(Type.String({ description: "What actually happened, when it differed from the plan." })),
 		owner: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-		taskId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 		linearKey: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+	}),
+	Type.Object({
+		op: Type.Literal("lane"),
+		id: Type.Optional(Type.String({ description: "Lane block id. Omit to address by kind." })),
+		kind: Type.Optional(
+			Type.String({
+				description:
+					"Which phase of the work this lane holds — frame, research, plan, execute, verify, deliver, " +
+					"consolidate, or a name of your own. Addressing by kind reaches the lane whoever created it, " +
+					"which is how your lane and any the harness already made become ONE lane rather than two.",
+			}),
+		),
+		title: Type.Optional(Type.String()),
+		before: Type.Optional(Type.String({ description: "Place before this lane. Omit — known kinds are ranked for you." })),
+		items: Type.Optional(Type.Array(ItemSchema, { description: "Items to create or update, applied in order." })),
+	}),
+	Type.Object({
+		op: Type.Literal("item"),
+		lane: Type.Optional(
+			Type.String({ description: "Lane id or kind for a NEW item. Omit to use the lane you are working in." }),
+		),
+		item: ItemSchema,
+	}),
+	Type.Object({
+		op: Type.Literal("move_item"),
+		id: Type.String(),
+		lane: Type.Optional(Type.String({ description: "Destination lane id or kind. Children travel with it." })),
+		parentId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+	}),
+	Type.Object({
+		op: Type.Literal("loop"),
+		lane: Type.String({ description: "Lane id or kind." }),
+		steps: Type.Optional(Type.Array(Type.String(), { description: "Item ids forming the loop body, in body order." })),
+		until: Type.Optional(Type.String({ description: "The exit condition, in words." })),
+		active: Type.Optional(Type.Boolean()),
+	}),
+	Type.Object({ op: Type.Literal("loop_tick"), lane: Type.String({ description: "Lane id or kind." }) }),
+	Type.Object({
+		op: Type.Literal("template"),
+		name: StringEnum(TEMPLATE_NAMES_TUPLE, {
+			description: "A recognisable lane shape. Idempotent: asking twice is a no-op, never a second lane.",
+		}),
+		title: Type.Optional(Type.String()),
 	}),
 ]);
 
@@ -384,19 +473,60 @@ export default function (pi: ExtensionAPI) {
 		default: false,
 	});
 
-	const persist = (next: PlanDoc) => {
+	/**
+	 * Write the document, and ring the doorbell.
+	 *
+	 * A TICK IS NOT A SNAPSHOT. Before the merge, both this document and the
+	 * workflow re-emitted their whole selves on every mutation, a ticked
+	 * checkbox included: measured across 594 sessions, 10.2 plan snapshots
+	 * (37.8 KB) plus 12.6 workflow snapshots (42.4 KB) per session, 34.7 MB of
+	 * transcript across the corpus. Now a revision bump writes the full
+	 * snapshot — it is a new version of the document, and HIV-2906 stores one
+	 * row per revision — while a bare progress bump writes only what moved.
+	 *
+	 * `rehydratePlan` folds the ticks over the newest snapshot, so a resumed
+	 * session sees the same document either way. The ordering that makes that
+	 * safe is the session log's own: entries are append-only and read in order.
+	 */
+	/**
+	 * Apply and persist in one step.
+	 *
+	 * It exists so the PREVIOUS document is never forgotten: `persist` decides
+	 * between a snapshot and a tick by comparing the two counters, and a caller
+	 * that applied first and persisted second would hand it a document to
+	 * compare against itself. Every internal mutation goes through here.
+	 */
+	const persistOps = (base: PlanDoc, ops: readonly PlanOp[], now: number): PlanDoc => {
+		const result = applyOps(base, ops, now);
+		persist(result.doc, base);
+		return result.doc;
+	};
+
+	const persist = (next: PlanDoc, previous?: PlanDoc) => {
+		const tickOnly =
+			previous !== undefined && next.revision === previous.revision && next.progress !== previous.progress;
 		doc = next;
 		try {
-			pi.appendEntry(PLAN_ENTRY_TYPE, toEntry(next));
+			if (tickOnly) pi.appendEntry(PLAN_TICK_ENTRY_TYPE, tickEntry(next));
+			else pi.appendEntry(PLAN_ENTRY_TYPE, toEntry(next));
 		} catch {
 			/* session went away; the in-memory copy still drives this process */
 		}
 		try {
-			// A doorbell, not a delivery: the revision only. Anything that wants
+			// A doorbell, not a delivery: the counters only. Anything that wants
 			// the document reads it from the session entries under its own
 			// consent — see hive-common/channels.ts. This extension deliberately
 			// does not know whether Hive is configured.
-			pi.events.emit(HIVE_PLAN_CHANNEL, { revision: next.revision } satisfies HivePlanEvent);
+			//
+			// BOTH counters ride, because a viewer has to refetch when either
+			// moves and the two mean different things: a revision change is a new
+			// version of the document, a progress change is the same document
+			// further along. A doorbell carrying only the revision would leave
+			// every open tab showing a plan whose checkboxes never move.
+			pi.events.emit(HIVE_PLAN_CHANNEL, {
+				revision: next.revision,
+				progress: next.progress,
+			} satisfies HivePlanEvent);
 		} catch {
 			/* no bus, or nothing listening */
 		}
@@ -545,7 +675,7 @@ export default function (pi: ExtensionAPI) {
 
 	const beginGrill = (): PlanGrillEvent | null => {
 		if (!active || doc.phase !== "ready") return null;
-		persist(applyOps(doc, [{ op: "header", phase: "drafting" }], Date.now()).doc);
+		persistOps(doc, [{ op: "header", phase: "drafting" }], Date.now());
 		grillRound++;
 		grillOwesQuestions = true;
 		paint();
@@ -688,7 +818,7 @@ export default function (pi: ExtensionAPI) {
 				// either: the card is discriminated on the OTHER branch's first
 				// line. Calling `plan_ready` is the request for a gate; honour it.
 				if (isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID) && remoteAnswersAvailable) {
-					persist(applyOps(doc, [{ op: "header", phase: "ready" }], Date.now()).doc);
+					persistOps(doc, [{ op: "header", phase: "ready" }], Date.now());
 					paint();
 					return await presentAndWait(readySummary());
 				}
@@ -714,7 +844,7 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			persist(applyOps(doc, [{ op: "header", phase: "ready" }], Date.now()).doc);
+			persistOps(doc, [{ op: "header", phase: "ready" }], Date.now());
 			paint();
 
 			const summary = readySummary();
@@ -775,7 +905,7 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			persist(applyOps(doc, [{ op: "header", phase: "approved" }], Date.now()).doc);
+			persistOps(doc, [{ op: "header", phase: "approved" }], Date.now());
 			active = false;
 			clearGrill();
 			restoreTools();
@@ -940,7 +1070,7 @@ export default function (pi: ExtensionAPI) {
 			// is where launched agents live, so this no longer requires `active`.
 			if (doc.phase !== "ready" || (!active && !awaitingDecision)) return;
 			releaseWaiters("approve");
-			persist(applyOps(doc, [{ op: "header", phase: "approved" }], Date.now()).doc);
+			persistOps(doc, [{ op: "header", phase: "approved" }], Date.now());
 			active = false;
 			clearGrill();
 			restoreTools();
@@ -1099,7 +1229,7 @@ export default function (pi: ExtensionAPI) {
 					// leave an operator typing `/plan approve` at a session that went
 					// on waiting.
 					releaseWaiters("approve");
-					persist(applyOps(doc, [{ op: "header", phase: "approved" }], Date.now()).doc);
+					persistOps(doc, [{ op: "header", phase: "approved" }], Date.now());
 					active = false;
 					clearGrill();
 					restoreTools();

@@ -22,12 +22,16 @@ import { describe, expect, it } from "vitest";
 import { activeFront, isObservedKind, targetLane, treeOrder } from "../extensions/plan/lanes.ts";
 import {
 	applyOps,
+	applyTick,
 	emptyPlan,
 	hasPlan,
 	isLanesOnly,
 	normalizeStatus,
+	PLAN_ENTRY_TYPE,
+	PLAN_TICK_ENTRY_TYPE,
 	rehydratePlan,
 	stepCounts,
+	tickEntry,
 	toEntry,
 	validateSnapshot,
 	type LaneBlock,
@@ -477,5 +481,111 @@ describe("loops", () => {
 		const result = applyOps(doc, [{ op: "loop", lane: "orchestrate", steps: ["a", "renamed-away"] }], LATER);
 		expect(result.problems).toEqual([]);
 		expect(lane(result.doc, "orchestrate")!.loop?.steps).toEqual(["a"]);
+	});
+});
+
+describe("ticks are not snapshots", () => {
+	// Before the merge both documents re-emitted their whole selves on every
+	// mutation, a ticked checkbox included: 10.2 plan snapshots (37.8 KB) plus
+	// 12.6 workflow snapshots (42.4 KB) per session across 594 sessions, 34.7 MB
+	// of transcript. A tick now carries only what moved.
+
+	const planned = (): PlanDoc =>
+		applyOps(
+			emptyPlan(NOW),
+			[
+				{ op: "header", title: "the plan", phase: "approved" },
+				{ op: "lane", kind: "execute", items: [{ id: "a", title: "a" }, { id: "b", title: "b" }] },
+			],
+			NOW,
+		).doc;
+
+	it("folds a tick over the snapshot it belongs to", () => {
+		const base = planned();
+		const ticked = applyOps(base, [{ op: "set_step", id: "a", status: "done", note: "was already done" }], LATER).doc;
+
+		const folded = applyTick(base, tickEntry(ticked));
+		expect(folded.progress).toBe(ticked.progress);
+		expect(folded.blocks.flatMap((b) => (b.type === "steps" ? b.steps : []))[0]).toMatchObject({
+			status: "done",
+			note: "was already done",
+		});
+		// The parts a tick cannot change are untouched.
+		expect(folded.revision).toBe(base.revision);
+		expect(folded.title).toBe("the plan");
+	});
+
+	it("skips a tick written against a different revision", () => {
+		// A tick belongs to the snapshot it was written against. Applying a stale
+		// one over a re-planned document would revive statuses the re-plan
+		// deliberately reset.
+		const base = planned();
+		const stale = tickEntry(applyOps(base, [{ op: "set_step", id: "a", status: "done" }], LATER).doc);
+		const replanned = applyOps(base, [{ op: "lane", kind: "verify", title: "Verify" }], LATER).doc;
+
+		expect(applyTick(replanned, stale)).toEqual(replanned);
+	});
+
+	it("rehydrates a session whose last entry was a tick", () => {
+		const base = planned();
+		const ticked = applyOps(base, [{ op: "set_step", id: "b", status: "in_progress" }], LATER).doc;
+		const back = rehydratePlan([
+			{ customType: PLAN_ENTRY_TYPE, data: toEntry(base) },
+			{ customType: PLAN_TICK_ENTRY_TYPE, data: tickEntry(ticked) },
+		]);
+		expect(back?.progress).toBe(ticked.progress);
+		expect(back?.blocks.flatMap((b) => (b.type === "steps" ? b.steps : []))[1].status).toBe("in_progress");
+	});
+
+	it("ignores ticks that precede the newest snapshot", () => {
+		// The scan is bounded by RECENCY: work proportional to what has happened
+		// since the last re-plan, not to the length of the session.
+		const base = planned();
+		const early = tickEntry(applyOps(base, [{ op: "set_step", id: "a", status: "done" }], LATER).doc);
+		const replanned = applyOps(base, [{ op: "header", goal: "a different goal" }], LATER).doc;
+
+		const back = rehydratePlan([
+			{ customType: PLAN_ENTRY_TYPE, data: toEntry(base) },
+			{ customType: PLAN_TICK_ENTRY_TYPE, data: early },
+			{ customType: PLAN_ENTRY_TYPE, data: toEntry(replanned) },
+		]);
+		expect(back?.goal).toBe("a different goal");
+		expect(back?.blocks.flatMap((b) => (b.type === "steps" ? b.steps : []))[0].status).toBe("pending");
+	});
+
+	it("carries a loop's wave counter", () => {
+		const base = applyOps(
+			emptyPlan(NOW),
+			[
+				{ op: "lane", kind: "orchestrate", items: [{ id: "launch", title: "launch" }] },
+				{ op: "loop", lane: "orchestrate", steps: ["launch"], until: "everyone is collected" },
+			],
+			NOW,
+		).doc;
+		const ticked = applyOps(base, [{ op: "loop_tick", lane: "orchestrate" }], LATER).doc;
+		const folded = applyTick(base, tickEntry(ticked));
+		expect(lane(folded, "orchestrate")!.loop?.iteration).toBe(2);
+	});
+});
+
+describe("applyOps does not mutate what it was given", () => {
+	// The invariant the stored revision history rests on (HIV-2906): every
+	// version has to stay diffable against the one the operator approved.
+	// Before this was enforced, `applyOps` shared its block objects with the
+	// input and the handlers wrote straight through the share, so the previous
+	// document silently acquired the next one's checkboxes.
+	it("leaves the previous document's items alone", () => {
+		const base = applyOps(
+			emptyPlan(NOW),
+			[{ op: "lane", kind: "execute", items: [{ id: "a", title: "a" }] }],
+			NOW,
+		).doc;
+		const snapshot = JSON.stringify(base);
+
+		applyOps(base, [{ op: "set_step", id: "a", status: "done", note: "done it" }], LATER);
+		applyOps(base, [{ op: "item", item: { id: "new", title: "new" } }], LATER);
+		applyOps(base, [{ op: "lane", kind: "execute", title: "Renamed" }], LATER);
+
+		expect(JSON.stringify(base)).toBe(snapshot);
 	});
 });

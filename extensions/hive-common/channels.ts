@@ -44,8 +44,13 @@ export interface HiveSessionEvent {
 export const HIVE_PLAN_CHANNEL = "hive.plan";
 
 export interface HivePlanEvent {
-	/** The plan's revision counter after the change. */
 	revision: number;
+	/**
+	 * The tick counter (HIV-2904). Optional on the wire so a client that
+	 * predates the merge still type-checks against this channel; a listener
+	 * that only knows `revision` keeps working and simply refetches less often.
+	 */
+	progress?: number;
 }
 
 /**

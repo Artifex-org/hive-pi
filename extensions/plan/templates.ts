@@ -283,7 +283,27 @@ export const LANE_TEMPLATES: Readonly<Record<string, LaneTemplate>> = {
 	},
 };
 
-export const TEMPLATE_NAMES = Object.keys(LANE_TEMPLATES);
+/**
+ * The template names, as a literal tuple.
+ *
+ * The tool schema needs a tuple for its enum and `Object.keys` gives a
+ * `string[]`, so the list is written once HERE and the record is checked
+ * against it — rather than the other way round, which is how an enum comes to
+ * offer a shape the record does not have.
+ */
+export const TEMPLATE_NAMES_TUPLE = [
+	"delivery",
+	"orchestration",
+	"audit",
+	"incident",
+	"research",
+	"review",
+	"fix",
+	"bugfix",
+	"migration",
+] as const;
+
+export const TEMPLATE_NAMES: readonly string[] = TEMPLATE_NAMES_TUPLE;
 
 /**
  * The ops that build a template lane — ONE batch, because ids work.
