@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { hostname } from "node:os";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { headerTitle } from "./profile-common/profile.ts";
 import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 function displayPath(cwd: string): string {
@@ -39,7 +40,7 @@ function installHeader(ctx: ExtensionContext): void {
 
 	ctx.ui.setHeader((_tui, theme) => ({
 		render(width: number): string[] {
-			const title = `${theme.fg("accent", "π")} ${theme.bold("JOAN'S PI")} ${theme.fg("dim", `v${VERSION}`)}`;
+			const title = `${theme.fg("accent", "π")} ${theme.bold(headerTitle())} ${theme.fg("dim", `v${VERSION}`)}`;
 			const subtitle = theme.fg("muted", `${greeting()} · ${machine} · ${workspace}`);
 			const shortcuts = theme.fg("dim", "Ctrl+P model · Shift+Tab thinking · / commands · Ctrl+O resources");
 			return ["", truncateToWidth(title, width), truncateToWidth(subtitle, width), truncateToWidth(shortcuts, width), ""];
@@ -52,7 +53,7 @@ export default function welcomeHeader(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => installHeader(ctx));
 
 	pi.registerCommand("welcome-header", {
-		description: "Restore Joan's compact welcome header for this session",
+		description: "Restore the compact welcome header for this session",
 		handler: async (_args, ctx) => {
 			installHeader(ctx);
 			ctx.ui.notify("Welcome header restored", "info");

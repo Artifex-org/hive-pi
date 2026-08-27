@@ -20,6 +20,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
 
 const runBriefer = vi.hoisted(() => vi.fn());
 vi.mock("../extensions/brief/run.ts", () => ({ runBriefer, BRIEFER_ROLE: "briefer" }));
@@ -70,6 +71,11 @@ function progress() {
 		.filter((e) => e.name === HIVE_BRIEF_PROGRESS_CHANNEL)
 		.map((e) => e.payload as { phase?: string; lanes?: string[] });
 }
+
+// Ticket keys come from the house profile; with none configured no prompt
+// names a ticket and the ticket lane never spawns.
+beforeEach(() => setHouseProfileForTest({ ticketKeys: ["HIV", "AUR", "BOR"] }));
+afterEach(() => setHouseProfileForTest(null));
 
 describe("announcing the held turn", () => {
 	it("says `start` before the pass and `end` after it", async () => {

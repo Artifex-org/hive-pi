@@ -123,7 +123,7 @@ export const HINTS: readonly ToolHint[] = [
 		tools: ["bash", "background_bash"],
 		match: /cannot lock ref '[^']*': '[^']*' exists; cannot create/i,
 		hint:
-			"A git branch cannot be nested under a branch name that already exists — Aurora has a real `feature` branch, " +
+			"A git branch cannot be nested under a branch name that already exists — some repos have a real `feature` branch, " +
 			"so Linear's suggested `feature/tes-NNNN` cannot be created verbatim there. Use a flat name " +
 			"(`tes-NNNN-short-slug`); the Linear link is made by the ticket key in the branch name and the PR body, " +
 			"not by the prefix.",

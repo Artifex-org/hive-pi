@@ -168,7 +168,7 @@ describe("matchesProject", () => {
 });
 
 describe("extractIssueKeys", () => {
-	const teams = new Set(["HIV", "TES", "ASF"]);
+	const teams = new Set(["HIV", "AUR", "BOR"]);
 
 	it("finds keys in lowercase branch names and uppercases them", () => {
 		expect(extractIssueKeys(["feature/hiv-1080"], teams)).toEqual(["HIV-1080"]);
@@ -180,8 +180,8 @@ describe("extractIssueKeys", () => {
 	});
 
 	it("dedupes across the branch and the PR title, keeping first-seen order", () => {
-		expect(extractIssueKeys(["feature/tes-7062-7081-followups", "TES-7062 and HIV-1080"], teams)).toEqual([
-			"TES-7062",
+		expect(extractIssueKeys(["feature/aur-7062-7081-followups", "AUR-7062 and HIV-1080"], teams)).toEqual([
+			"AUR-7062",
 			"HIV-1080",
 		]);
 	});
@@ -204,10 +204,10 @@ describe("buildOrFilter", () => {
 	it("nests team and number under `and` inside each `or` branch", () => {
 		// The flat {team, number} sibling form is ACCEPTED by Linear and then
 		// silently ignores the number, returning every issue on the team.
-		expect(buildOrFilter(["HIV-1075", "TES-7055"])).toEqual({
+		expect(buildOrFilter(["HIV-1075", "AUR-7055"])).toEqual({
 			or: [
 				{ and: [{ team: { key: { eq: "HIV" } } }, { number: { eq: 1075 } }] },
-				{ and: [{ team: { key: { eq: "TES" } } }, { number: { eq: 7055 } }] },
+				{ and: [{ team: { key: { eq: "AUR" } } }, { number: { eq: 7055 } }] },
 			],
 		});
 	});

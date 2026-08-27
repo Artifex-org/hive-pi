@@ -8,7 +8,8 @@
  * own worker's task recurses).
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
 import {
 	BRIEF_MARKER,
 	isWorkerProcess,
@@ -45,6 +46,12 @@ Below about four genuinely independent parts this is usually not worth it — th
 coordination costs more than the parallelism returns. Say so and carry on.
 `;
 
+// Which team keys exist is the house profile's answer, not this package's.
+// With none configured no prompt names a ticket at all, which is the
+// out-of-the-box behaviour these fixtures must not depend on.
+beforeEach(() => setHouseProfileForTest({ ticketKeys: ["HIV", "AUR", "BOR"] }));
+afterEach(() => setHouseProfileForTest(null));
+
 describe("splitTeamProtocol", () => {
 	it("leaves a plain prompt whole", () => {
 		const { task, protocol } = splitTeamProtocol("fix the flaky scheduler test");
@@ -72,7 +79,7 @@ describe("splitTeamProtocol", () => {
 
 describe("ticketKeys", () => {
 	it("finds our three teams and dedupes", () => {
-		expect(ticketKeys("see HIV-1798 and TES-5925, again HIV-1798")).toEqual(["HIV-1798", "TES-5925"]);
+		expect(ticketKeys("see HIV-1798 and AUR-5925, again HIV-1798")).toEqual(["HIV-1798", "AUR-5925"]);
 	});
 
 	it("ignores a lookalike", () => {

@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 // (hive-agent injects HIVE_LAUNCH_ID and mints $HIVE_TOKEN for exactly that
 // run) the ranking inverts, because a stale stored token shadowing the fresh
 // launch token is how a launched session 401s on every call and sits at
-// "session attaching…" forever (2026-08-11, node omarchy).
+// "session attaching…" forever (2026-08-11, on a linux workstation).
 
 const home = mkdtempSync(join(tmpdir(), "hive-auth-test-"));
 

@@ -10,7 +10,7 @@
 # preserved, and runs are NOT collapsed — verified against pi 0.84
 # (core/session-manager.js: `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g,
 # "-")}--`), e.g.
-#   /home/dev/repos/Aurora__worktrees -> --home-leon-repos-Aurora__worktrees--
+#   /home/dev/repos/Aurora__worktrees -> --home-dev-repos-Aurora__worktrees--
 #
 # The timestamp prefix means the uuid alone does not name the file, so this
 # globs for the suffix rather than testing one path.

@@ -61,7 +61,7 @@ const issue = (identifier: string, stateType: LinearIssue["stateType"], stateNam
 	url: `https://linear.app/x/issue/${identifier}`,
 	stateName,
 	stateType,
-	assignee: "joan",
+	assignee: "dev",
 	priority: 2,
 	source: "attachment",
 });
@@ -171,7 +171,7 @@ describe("linearSegments", () => {
 	const three = linear([
 		issue("HIV-1080", "started", "In Progress"),
 		issue("HIV-1075", "backlog", "Backlog"),
-		issue("TES-7055", "completed", "Done"),
+		issue("AUR-7055", "completed", "Done"),
 	]);
 
 	it("shows the first two and counts the rest", () => {

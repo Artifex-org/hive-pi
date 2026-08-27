@@ -15,8 +15,8 @@
  *   - `uv run ruff format --check …` reported 16 files formatted, none of them
  *     in the worktree being repaired: "making the reported 16 formatted files
  *     non-evidence for the repair diff".
- *   - `git status` in the wrong worktree made a freshly created ASF-3685
- *     checkout appear to be on branch ASF-3686, which was then filed as a gwq
+ *   - `git status` in the wrong worktree made a freshly created BOR-3685
+ *     checkout appear to be on branch BOR-3686, which was then filed as a gwq
  *     bug. It was not one.
  *
  * That last one is why this is worth an extension rather than a line of advice:

@@ -768,7 +768,7 @@ describe("declaring a stage the machine already made", () => {
 	// and then declared its own kind would still end up with two.
 	/**
 	 * Replayed from a live 53-turn Borealis session (`agents-borealis-ops-ea9842fc`,
-	 * ASF-3681), which is how this was found — monitoring running agents, not a
+	 * BOR-3681), which is how this was found — monitoring running agents, not a
 	 * test.
 	 *
 	 * The model declared its lane with its own id AND a kind the mirror had

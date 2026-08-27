@@ -20,7 +20,7 @@
  * which a steering message sits queued is a deadlock: the model waits for an
  * answer, the user's already-typed message waits for the model, and nobody
  * moves until someone finds the pane and hits Esc-Esc (observed 2026-08-19,
- * TES-5500 planning session). So execute() refuses to open when
+ * AUR-5500 planning session). So execute() refuses to open when
  * `ctx.hasPendingMessages()` is already true, and an `input` event arriving
  * while the overlay is up closes it — both return a `superseded` envelope
  * telling the model to read the user's message instead of re-asking.

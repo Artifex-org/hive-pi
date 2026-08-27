@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { hostname } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { headerTitle } from "./profile-common/profile.ts";
 
 type PersonalizationState = {
 	focus: boolean;
@@ -45,7 +46,7 @@ function installHeader(ctx: ExtensionContext, state: PersonalizationState): void
 	ctx.ui.setHeader((_tui, theme) => ({
 		render(width: number): string[] {
 			const workspace = [state.workspace, state.branch].filter(Boolean).join(" · ");
-			const title = `${theme.fg("accent", "π")} ${theme.bold("JOAN'S PI")}`;
+			const title = `${theme.fg("accent", "π")} ${theme.bold(headerTitle())}`;
 			if (width < 70) return [truncateToWidth(`${title}  ${workspace}`, width)];
 
 			const subtitle = theme.fg("muted", `${greeting()} · ${hostname()} · ${workspace}`);

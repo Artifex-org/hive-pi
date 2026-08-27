@@ -79,7 +79,7 @@ function parseIpv4(address: string): number[] | null {
 }
 
 function isPrivateIpv4(octets: number[]): boolean {
-	const [a, b] = octets;
+	const [a, b, c, d] = octets;
 	if (a === 0 || a === 10 || a === 127) return true;
 	if (a === 169 && b === 254) return true; // link-local + cloud metadata
 	if (a === 172 && b >= 16 && b <= 31) return true;
@@ -87,7 +87,86 @@ function isPrivateIpv4(octets: number[]): boolean {
 	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT — the Tailscale range
 	if (a === 192 && b === 0) return true;
 	if (a === 198 && (b === 18 || b === 19)) return true;
+	// Azure's wireserver. A PUBLIC address that every Azure VM routes to its own
+	// host agent, so the 169.254.169.254 rule does not cover it and no range
+	// rule ever will — it has to be named.
+	if (a === 168 && b === 63 && c === 129 && d === 16) return true;
 	return a >= 224; // multicast + reserved
+}
+
+/**
+ * The v4 embedded in a v6 literal, or null.
+ *
+ * THE BUG THIS EXISTS FOR. The previous check matched only the DOTTED form
+ * `::ffff:10.0.0.1` — and `URL` never produces it. WHATWG normalisation
+ * compresses every v4-mapped literal to hex:
+ *
+ *   new URL("http://[::ffff:127.0.0.1]/").hostname  ===  "[::ffff:7f00:1]"
+ *
+ * So at the only call site that matters the regex could not match, execution
+ * fell through to "public", and `http://[::ffff:7f00:1]/` reached loopback.
+ * Same for the LAN, for CGNAT, and for 169.254.169.254. The unit tests passed
+ * because they called the helper with dotted strings the parser cannot emit —
+ * a guard tested against a shape its real input never has.
+ *
+ * Also handles the two transitional prefixes that carry a v4 destination in
+ * their low bits: NAT64 `64:ff9b::/96` and 6to4 `2002::/16`.
+ */
+function embeddedIpv4(bare: string): number[] | null {
+	// Dotted tail, in any of the forms that carry one.
+	const dotted = bare.match(/(?:^|:)((?:\d{1,3}\.){3}\d{1,3})$/);
+	if (dotted) return parseIpv4(dotted[1]);
+
+	const groups = expandIpv6(bare);
+	if (!groups) return null;
+
+	const hexToOctets = (hi: number, lo: number) => [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff];
+
+	// v4-mapped ::ffff:0:0/96 and the deprecated v4-compatible ::0:0/96.
+	if (groups.slice(0, 5).every((g) => g === 0)) {
+		if (groups[5] === 0xffff || groups[5] === 0) return hexToOctets(groups[6], groups[7]);
+	}
+	// NAT64 well-known prefix 64:ff9b::/96 — the v4 is the last two groups.
+	if (groups[0] === 0x64 && groups[1] === 0xff9b && groups.slice(2, 6).every((g) => g === 0)) {
+		return hexToOctets(groups[6], groups[7]);
+	}
+	// 6to4 2002::/16 — the v4 is groups 1-2.
+	if (groups[0] === 0x2002) return hexToOctets(groups[1], groups[2]);
+
+	return null;
+}
+
+/** Eight 16-bit groups, or null when this is not a parseable v6 literal. */
+function expandIpv6(bare: string): number[] | null {
+	if (!bare.includes(":")) return null;
+	const zone = bare.indexOf("%"); // scoped literal — drop the zone id
+	const addr = zone === -1 ? bare : bare.slice(0, zone);
+	const halves = addr.split("::");
+	if (halves.length > 2) return null;
+
+	const toGroups = (part: string): number[] | null => {
+		if (part === "") return [];
+		const out: number[] = [];
+		for (const piece of part.split(":")) {
+			if (piece.includes(".")) {
+				const v4 = parseIpv4(piece);
+				if (!v4) return null;
+				out.push((v4[0] << 8) | v4[1], (v4[2] << 8) | v4[3]);
+				continue;
+			}
+			if (!/^[0-9a-f]{1,4}$/.test(piece)) return null;
+			out.push(Number.parseInt(piece, 16));
+		}
+		return out;
+	};
+
+	const head = toGroups(halves[0]);
+	const tail = halves.length === 2 ? toGroups(halves[1]) : [];
+	if (head === null || tail === null) return null;
+	if (halves.length === 1) return head.length === 8 ? head : null;
+	const fill = 8 - head.length - tail.length;
+	if (fill < 1) return null;
+	return [...head, ...Array(fill).fill(0), ...tail];
 }
 
 export function isPrivateAddress(address: string): boolean {
@@ -97,16 +176,20 @@ export function isPrivateAddress(address: string): boolean {
 	if (v4) return isPrivateIpv4(v4);
 
 	if (bare.includes(":")) {
-		if (bare === "::" || bare === "::1") return true;
-		// v4-mapped (::ffff:10.0.0.1) — judge the embedded v4.
-		const mapped = bare.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-		if (mapped) {
-			const octets = parseIpv4(mapped[1]);
-			return octets ? isPrivateIpv4(octets) : true;
-		}
-		if (bare.startsWith("fc") || bare.startsWith("fd")) return true; // ULA
-		if (bare.startsWith("fe8") || bare.startsWith("fe9") || bare.startsWith("fea") || bare.startsWith("feb"))
-			return true; // link-local
+		const groups = expandIpv6(bare);
+		// Unparseable but colon-bearing: FAIL CLOSED. An address shape we cannot
+		// classify is not evidence that it is public.
+		if (!groups) return true;
+		if (groups.every((g) => g === 0)) return true; // ::
+		if (groups.slice(0, 7).every((g) => g === 0) && groups[7] === 1) return true; // ::1
+
+		// Any v4 carried inside a v6 literal is judged as that v4 — mapped,
+		// compatible, NAT64 or 6to4. This is what the dotted-only check missed.
+		const embedded = embeddedIpv4(bare);
+		if (embedded) return isPrivateIpv4(embedded);
+
+		if ((groups[0] & 0xfe00) === 0xfc00) return true; // ULA fc00::/7
+		if ((groups[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
 		return false;
 	}
 

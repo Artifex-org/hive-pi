@@ -1,5 +1,5 @@
 /**
- * Ported from dev-linux `pi/tests/inline-charts.test.ts` (node:test + tsx +
+ * Ported from a dotfiles repo `pi/tests/inline-charts.test.ts` (node:test + tsx +
  * its own tsconfig.test.json + a setup script). The assertions are unchanged;
  * only the runner is, because this repo already has vitest and a second test
  * toolchain would need its own CI wiring to be worth anything.

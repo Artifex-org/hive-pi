@@ -36,7 +36,7 @@ describe("ssrf guard", () => {
 
 	it("rejects non-http protocols, private literals, and hostnames resolving private", async () => {
 		await expect(assertPublicHttpUrl("file:///etc/passwd")).rejects.toThrow(/only http/);
-		await expect(assertPublicHttpUrl("http://192.168.0.10:30111/")).rejects.toThrow(/private address/);
+		await expect(assertPublicHttpUrl("http://192.168.0.10:31111/")).rejects.toThrow(/private address/);
 		await expect(
 			assertPublicHttpUrl("https://evil.example.com/", async () => [{ address: "10.0.0.5" }], {}),
 		).rejects.toThrow(/resolves to a private address/);
@@ -79,7 +79,7 @@ describe("ssrf guard", () => {
 		const unused: Resolver = async () => {
 			throw new Error("resolver must not be consulted under a proxy");
 		};
-		await expect(assertPublicHttpUrl("http://192.168.0.10:30500/v2/", unused, proxied)).rejects.toThrow(/private address/);
+		await expect(assertPublicHttpUrl("http://192.168.0.10:31500/v2/", unused, proxied)).rejects.toThrow(/private address/);
 		await expect(assertPublicHttpUrl("https://hive.example-tailnet.ts.net/", unused, proxied)).rejects.toThrow(/internal hostname/);
 		await expect(assertPublicHttpUrl("http://localhost:8000/", unused, proxied)).rejects.toThrow(/internal hostname/);
 		await expect(assertPublicHttpUrl("file:///etc/passwd", unused, proxied)).rejects.toThrow(/only http/);
@@ -203,5 +203,71 @@ describe("exa keyless MCP path", () => {
 		expect(items).toHaveLength(2);
 		expect(items[0]).toMatchObject({ title: "First", url: "https://a.example", publishedDate: "2026-08-01", snippet: "alpha body" });
 		expect(items[1].snippet).toBe("beta body");
+	});
+});
+
+
+/**
+ * THE GAP THAT SHIPPED A BYPASS.
+ *
+ * The IPv6 cases above call `isPrivateAddress("::ffff:10.0.0.1")` directly, in
+ * DOTTED form. `URL` never produces that shape — it normalises every v4-mapped
+ * literal to compressed hex:
+ *
+ *   new URL("http://[::ffff:127.0.0.1]/").hostname  ===  "[::ffff:7f00:1]"
+ *
+ * So the helper was proven correct on an input its real caller cannot emit,
+ * while `assertPublicHttpUrl` let loopback, the LAN, CGNAT and the cloud
+ * metadata endpoint straight through.
+ *
+ * These go through `assertPublicHttpUrl` with a real URL string, which is the
+ * only shape that proves anything. Every new blocklist rule belongs here, not
+ * only beside the helper.
+ */
+describe("assertPublicHttpUrl — through the call site, with URL-normalised literals", () => {
+	const unused = (() => {
+		throw new Error("the resolver must not be reached for an IP literal");
+	}) as never;
+
+	it("refuses a v4 smuggled inside a v6 literal, in every form URL emits", async () => {
+		for (const url of [
+			"http://[::ffff:127.0.0.1]/", // -> [::ffff:7f00:1]   loopback
+			"http://[::ffff:192.168.0.1]/", // -> [::ffff:c0a8:1]   LAN
+			"http://[::ffff:10.0.0.1]/", // -> [::ffff:a00:1]    private
+			"http://[::ffff:169.254.169.254]/", // -> cloud metadata
+			"http://[::ffff:100.100.1.1]/", // -> CGNAT
+			"http://[0:0:0:0:0:ffff:127.0.0.1]/", // uncompressed, same address
+		]) {
+			await expect(assertPublicHttpUrl(url, unused)).rejects.toThrow(/private address/);
+		}
+	});
+
+	it("refuses the transitional prefixes that carry a v4 destination", async () => {
+		// NAT64 well-known prefix and 6to4 — both route to the embedded v4.
+		await expect(assertPublicHttpUrl("http://[64:ff9b::7f00:1]/", unused)).rejects.toThrow(/private address/);
+		await expect(assertPublicHttpUrl("http://[2002:7f00:1::]/", unused)).rejects.toThrow(/private address/);
+	});
+
+	it("refuses Azure's wireserver, which no range rule covers", async () => {
+		// A PUBLIC address every Azure VM routes to its own host agent, so it has
+		// to be named rather than derived.
+		await expect(assertPublicHttpUrl("http://168.63.129.16/", unused)).rejects.toThrow(/private address/);
+	});
+
+	it("refuses a colon-bearing literal it cannot parse, rather than assuming it is public", async () => {
+		await expect(assertPublicHttpUrl("http://[::ffff:zzzz]/", unused)).rejects.toThrow();
+	});
+
+	// The other half of the property: a guard that blocks the real internet is
+	// useless, and an over-broad rule is the easiest way to "fix" this wrongly.
+	it("still allows genuinely public v6 and v4, including 6to4 onto a public v4", async () => {
+		for (const url of [
+			"http://[2606:4700:4700::1111]/",
+			"http://[2001:4860:4860::8888]/",
+			"http://8.8.8.8/",
+			"http://[2002:0808:0808::]/", // 6to4 wrapping 8.8.8.8
+		]) {
+			await expect(assertPublicHttpUrl(url, unused)).resolves.toBeDefined();
+		}
 	});
 });

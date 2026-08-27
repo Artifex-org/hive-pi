@@ -142,7 +142,7 @@ describe("render", () => {
 		const out = render("No files changed - skipping quality gate", null, {
 			...opts,
 			exitCode: 0,
-			cwd: "/home/dev/repos/Borealis-PMware__worktrees/agents-borealis-ops-8fa85aaf",
+			cwd: "/home/dev/repos/Borealis-Ops__worktrees/agents-borealis-ops-8fa85aaf",
 			scope: "changed",
 			uncommitted: 24,
 		});

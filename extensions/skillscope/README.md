@@ -7,7 +7,7 @@ Per-skill, per-project scoping for a skill library that is otherwise global.
 Our settings point pi at the entire Claude Code skill library (`~/.claude/skills`)
 plus the hive-pi skills, in **every project**. pi puts every loaded skill's name
 and description in the system prompt of every session, so a Aurora session carries
-`borealis-hedge-review` and an Borealis session carries `sales-flow-walkthrough`. The
+`borealis-hedge-review` and an Aurora session carries `aurora-order-walkthrough`. The
 library is global; relevance is per-project. This closes that gap.
 
 The idea is salvaged from [`supi-skills`](https://github.com/badlogic/pi-skills);
@@ -141,7 +141,7 @@ Named rather than papered over — each one is a real hole:
   (segment-aware, so `/skills/foo` does not match `/skills/foobar`) but without
   `realpath`, because the matcher is pure and runs in an event handler. This is
   not hypothetical here: several entries under `~/.claude/skills/` are stow
-  symlinks into `dev-linux` (and one into `/usr/share/omarchy`), so the same
+  symlinks into `a dotfiles repo` (and one into `/usr/share/omarchy`), so the same
   skill has two spellings on disk and only the one pi actually loaded — the one
   it prints in `<location>` — is matched.
 - **If pi changes how it formats the skills block, the splice stops finding it.**

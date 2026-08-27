@@ -14,6 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
 
 const runBriefer = vi.hoisted(() => vi.fn());
 vi.mock("../extensions/brief/run.ts", () => ({ runBriefer, BRIEFER_ROLE: "briefer" }));
@@ -82,6 +83,11 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.useRealTimers();
 });
+
+// Ticket keys come from the house profile; with none configured no prompt
+// names a ticket and the ticket lane never spawns.
+beforeEach(() => setHouseProfileForTest({ ticketKeys: ["HIV", "AUR", "BOR"] }));
+afterEach(() => setHouseProfileForTest(null));
 
 describe("the two halves, in one process", () => {
 	it("turns a held first turn into a beat on the wire", async () => {

@@ -40,7 +40,7 @@ export interface TaskItem {
 	blockedBy?: string[];
 	/** Worker id, once HIV-1106 lands. Written and displayed here; nothing populates it yet. */
 	owner?: string;
-	/** Linear issue this task mirrors, e.g. "TES-1234". Set by `/tasks linear <KEY>`. */
+	/** Linear issue this task mirrors, e.g. "AUR-1234". Set by `/tasks linear <KEY>`. */
 	linearKey?: string;
 	createdAt: number;
 	updatedAt: number;

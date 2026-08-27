@@ -317,7 +317,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("tasks", {
-		description: "Show the task list, hydrate it from Linear (`/tasks linear TES-1234`), or clear it",
+		description: "Show the task list, hydrate it from Linear (`/tasks linear AUR-1234`), or clear it",
 		handler: async (args: string, ctx: ExtensionContext) => {
 			const raw = args.trim();
 			const argument = raw.toLowerCase();
@@ -367,7 +367,7 @@ export default function (pi: ExtensionAPI) {
 
 		const key = argument.toUpperCase();
 		if (!/^[A-Z][A-Z0-9]{1,5}-\d{1,6}$/.test(key)) {
-			ctx.ui.notify(`tasks: "${argument}" is not a Linear issue key (expected e.g. TES-1234).`, "warning");
+			ctx.ui.notify(`tasks: "${argument}" is not a Linear issue key (expected e.g. AUR-1234).`, "warning");
 			return;
 		}
 

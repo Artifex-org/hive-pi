@@ -26,7 +26,7 @@ const CLI_OUT = [
 	"running only: lint (+ deps)",
 	"packed 214 files (1.2 MB), uploading…",
 	"run #2481 started on your working tree (base 6f1aa065)",
-	"http://198.51.100.10:30895/runs/6f1aa065-102d-42d2-b769-98d69691c380",
+	"http://198.51.100.10:31895/runs/6f1aa065-102d-42d2-b769-98d69691c380",
 ].join("\n");
 
 const REF = { id: "6f1aa065-102d-42d2-b769-98d69691c380", number: 2481, url: "http://h/runs/6f1aa065-102d-42d2-b769-98d69691c380" };
@@ -63,7 +63,7 @@ describe("parseRunRef", () => {
 		expect(parseRunRef(CLI_OUT)).toEqual({
 			id: "6f1aa065-102d-42d2-b769-98d69691c380",
 			number: 2481,
-			url: "http://198.51.100.10:30895/runs/6f1aa065-102d-42d2-b769-98d69691c380",
+			url: "http://198.51.100.10:31895/runs/6f1aa065-102d-42d2-b769-98d69691c380",
 		});
 	});
 

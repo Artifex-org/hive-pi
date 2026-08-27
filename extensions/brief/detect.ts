@@ -18,6 +18,8 @@
  */
 
 /** Stamped into every compiled brief; seeing it again means "already done". */
+import { ticketKeyPattern } from "../profile-common/profile.ts";
+
 export const BRIEF_MARKER = "<!-- brief:v1";
 
 /**
@@ -45,7 +47,10 @@ const HIVE_PROTOCOL_HEADINGS = [
 ] as const;
 
 /** Ticket keys worth a Linear lookup. Deliberately our three teams only. */
-const TICKET_KEY = /\b(?:TES|ASF|HIV)-\d+\b/g;
+// The house profile's keys, not a literal. Null when none are configured, in
+// which case no prompt names a ticket and the ticket lane never spawns — the
+// conservative default, and correct for anyone who is not us.
+const ticketKey = () => ticketKeyPattern();
 
 /** The end-of-prompt opt-in marker, pi-clarify's `-clarify` shape. */
 const INLINE_MARKER = /\s*-brief\s*$/;
@@ -90,7 +95,9 @@ export function splitTeamProtocol(prompt: string): SplitPrompt {
 
 /** Ticket keys named in the prompt, deduped, in first-seen order. */
 export function ticketKeys(prompt: string): string[] {
-	return Array.from(new Set(prompt.match(TICKET_KEY) ?? []));
+	const pattern = ticketKey();
+	if (!pattern) return [];
+	return Array.from(new Set(prompt.match(pattern) ?? []));
 }
 
 /** Strip a trailing `-brief`, reporting whether it was there. */

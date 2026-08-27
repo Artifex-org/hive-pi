@@ -83,12 +83,28 @@ export interface HouseProfile {
 	/** Repository names worth recognising in a prompt. Plain names, no regex. */
 	repoNames?: string[];
 	/**
+	 * Issue-tracker team keys, e.g. `["HIV", "ACME"]`. Used to spot a ticket
+	 * reference in a prompt. Empty means no key is recognised — a conservative
+	 * default: the ticket lane simply does not fire, and the caller falls back to
+	 * the prompt's other evidence.
+	 */
+	ticketKeys?: string[];
+	/**
 	 * MCP tools reviewed as read-only, by exact `server_tool` name. Exact names
 	 * rather than a server prefix on purpose: this list is an assertion that
 	 * somebody read the implementation, and a prefix would extend that claim to
 	 * every tool the server grows later.
 	 */
 	readOnlyMcpTools?: string[];
+	/**
+	 * What the welcome header calls this install. Defaults to `pi`.
+	 *
+	 * Here rather than hardcoded because it is the one string in this package
+	 * that is purely somebody's own: it used to be a personal name, which is
+	 * correct on one machine and wrong on every other. Personalisation belongs
+	 * with the rest of an organisation's facts, not in shared code.
+	 */
+	headerTitle?: string;
 }
 
 const EMPTY: HouseProfile = {};
@@ -184,6 +200,26 @@ export function repoNamePattern(profile = houseProfile()): RegExp | null {
 	const names = (profile.repoNames ?? []).filter((n) => n && /^[\w.-]+$/.test(n));
 	if (names.length === 0) return null;
 	return new RegExp(`\\b(${names.join("|")})\\b`, "gi");
+}
+
+/**
+ * A pattern matching this organisation's ticket keys (`HIV-1234`), or null when
+ * none are configured.
+ *
+ * These were a literal `/\b(?:TES|ASF|HIV)-\d+\b/` in the public code — three
+ * team keys of three private trackers, which both leaks an inventory and is
+ * useless to anybody else.
+ */
+export function ticketKeyPattern(profile = houseProfile()): RegExp | null {
+	const keys = (profile.ticketKeys ?? []).filter((k) => /^[A-Z][A-Z0-9]{1,9}$/.test(k));
+	if (keys.length === 0) return null;
+	return new RegExp(`\\b(?:${keys.join("|")})-\\d+\\b`, "g");
+}
+
+/** What the welcome header calls this install. `pi` when nobody has said. */
+export function headerTitle(profile = houseProfile()): string {
+	const t = profile.headerTitle?.trim();
+	return t && t.length > 0 ? t : "pi";
 }
 
 /** MCP tools somebody has reviewed as read-only. Empty by default. */
