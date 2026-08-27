@@ -671,6 +671,19 @@ export interface ItemOp {
 	item: ItemInput;
 }
 
+/**
+ * Remove one work item, and everything decomposed under it.
+ *
+ * Children travel with the parent rather than being promoted to roots: an item
+ * that only existed as part of something deleted is not suddenly independent
+ * work, and every reader here treats an orphan as a root, so leaving them would
+ * silently reshape the lane.
+ */
+export interface RemoveItemOp {
+	op: "remove_item";
+	id: string;
+}
+
 /** Move one item to another lane, or under another parent. */
 export interface MoveItemOp {
 	op: "move_item";
@@ -720,6 +733,7 @@ export type PlanOp =
 	| LaneOp
 	| ItemOp
 	| MoveItemOp
+	| RemoveItemOp
 	| LoopOp
 	| LoopTickOp
 	| TemplateOp;
@@ -824,6 +838,9 @@ function isIntentOp(op: PlanOp): boolean {
 		case "loop_tick":
 		case "move_item":
 			return false;
+		case "remove_item":
+			// Deleting work changes what the plan says will be done.
+			return true;
 		case "item": {
 			// MIRRORS `set_step`, deliberately and by construction. The same
 			// update reaching this document through two ops must move the same
@@ -935,6 +952,9 @@ export function applyOps(doc: PlanDoc, ops: readonly PlanOp[], now: number): OpR
 				break;
 			case "move_item":
 				applyMoveItem(next, op, now, updated, problems, label);
+				break;
+			case "remove_item":
+				applyRemoveItem(next, op, now, removed, problems, label);
 				break;
 			case "loop":
 				applyLoop(next, op, now, updated, problems, label);
@@ -1282,12 +1302,44 @@ function writeItem(
 ): void {
 	const supplied = cleanString(input.id);
 	const at = supplied === undefined ? -1 : lane.steps.findIndex((item) => item.id === supplied);
+
+	// THE GATE-GREEN REFUSAL LIVES HERE, on the shared write path, not on one op.
+	//
+	// It was originally only in `applySetStep`, which was enough while that was
+	// the only way to change a status. It is not: `item` reaches the same field,
+	// and `workflow_write`'s own `set_step` maps onto `item` — so the rule that
+	// an agent cannot mark its own gate green was bypassable by spelling the
+	// call differently. A rule about the DOCUMENT has to sit where every writer
+	// passes, or it is a rule about one vocabulary.
+	if (at !== -1 && input.status !== undefined) {
+		const existing = lane.steps[at];
+		if (isObservedKind(existing.kind)) {
+			problems.push(
+				`${label}: "${existing.id}" is a ${existing.kind} item, whose status Hive resolves from its own runs and ` +
+					`pull requests; leave it alone and let the observation speak`,
+			);
+			return;
+		}
+	}
+
 	if (at === -1 && cleanString(input.title) === undefined) {
 		problems.push(`${label}: a new item needs a title${supplied === undefined ? "" : ` (nothing here has id "${supplied}")`}`);
 		return;
 	}
 	const id = supplied ?? String(doc.nextId++);
 	const item = normalizeItem(input, id);
+
+	// The same claim, made on the way in: declaring `{kind:"ci.green", status:"done"}`
+	// asserts a gate result exactly as setting it afterwards would. The item is
+	// kept — the delivery lane is supposed to exist — and only the status is
+	// refused, so it lands pending and waits for the observation.
+	if (at === -1 && isObservedKind(item.kind) && normalizeStatus(input.status) !== undefined) {
+		problems.push(
+			`${label}: "${id}" is a ${item.kind} item, whose status Hive resolves from its own runs and pull ` +
+				`requests; it was created pending`,
+		);
+		item.status = "pending";
+	}
 
 	if (item.dependsOn && dependsWouldCycle(doc, id, item.dependsOn)) {
 		problems.push(`${label}: dependsOn on "${id}" would close a cycle; the edge was dropped, the item was kept`);
@@ -1464,6 +1516,31 @@ function applyMoveItem(
 	}
 	to.updatedAt = now;
 	updated.push(to.id);
+}
+
+/** Remove an item and its subtree. */
+function applyRemoveItem(
+	doc: PlanDoc,
+	op: RemoveItemOp,
+	now: number,
+	removed: string[],
+	problems: string[],
+	label: string,
+): void {
+	const id = cleanString(op.id);
+	if (id === undefined) {
+		problems.push(`${label}: remove_item needs an item id`);
+		return;
+	}
+	const lane = lanesOf(doc).find((candidate) => candidate.steps.some((item) => item.id === id));
+	if (!lane) {
+		problems.push(`${label}: no lane contains item "${id}"`);
+		return;
+	}
+	const doomed = new Set([id, ...descendants(lane, id).map((item) => item.id)]);
+	lane.steps = lane.steps.filter((item) => !doomed.has(item.id));
+	lane.updatedAt = now;
+	for (const gone of doomed) removed.push(gone);
 }
 
 /** Declare or update a lane's loop annotation. At most one per lane. */
