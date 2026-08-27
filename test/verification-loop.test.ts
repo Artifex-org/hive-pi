@@ -140,17 +140,33 @@ describe("verification-loop — the injection", () => {
 		);
 	});
 
+	// SPAWN_BUDGET_MS on the two below, and nowhere else.
+	//
+	// They each run the gate FIVE times, and the gate is a real bash process —
+	// deliberately, per this file's header: the spawn/exit-code path is part of
+	// what is being characterized, so mocking it would delete the point of the
+	// test. Five spawns do not fit vitest's default 5s budget on a loaded
+	// machine, and this suite runs from a systemd timer that competes with
+	// everything else on the box.
+	//
+	// Measured: green in a quiet foreground run, and 1 failure in 4 runs under
+	// that load — a flake whose only symptom was the harness updater refusing to
+	// activate. Raising the budget for the two tests that genuinely do five
+	// times the work is the honest fix; raising it file-wide would hide a real
+	// slowdown in the other thirteen.
+	const SPAWN_BUDGET_MS = 30_000;
+
 	it("stops injecting once maxInjections is reached", async () => {
 		const cwd = makeRepo({ ...FAILING, maxInjections: 2 });
 		for (let i = 0; i < 5; i++) await pi.emit({ type: "agent_settled" }, { cwd });
 		expect(pi.messages).toHaveLength(2);
-	});
+	}, SPAWN_BUDGET_MS);
 
 	it("defaults to 3 injections when maxInjections is absent", async () => {
 		const cwd = makeRepo(FAILING);
 		for (let i = 0; i < 5; i++) await pi.emit({ type: "agent_settled" }, { cwd });
 		expect(pi.messages).toHaveLength(3);
-	});
+	}, SPAWN_BUDGET_MS);
 
 	it("resets the injection budget on session_start", async () => {
 		const cwd = makeRepo({ ...FAILING, maxInjections: 1 });
