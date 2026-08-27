@@ -148,14 +148,17 @@ describe("render", () => {
 		});
 		expect(out).toContain("NOT a pass");
 		expect(out).toContain("24 uncommitted paths");
-		// Names the mechanism, so the reader can tell why their files were invisible.
-		expect(out).toContain("merge-base");
-		// And both ways out.
-		expect(out).toContain("staged");
-		expect(out).toContain("commit");
-		// The wrong-checkout advice must be GONE, not merely accompanied: handed
-		// both, an agent tries the cheaper one — which is the one that already failed.
+		// It must still blame the scope rather than the directory…
 		expect(out).not.toContain("different checkout");
+		// …but it must NOT claim the tree being dirty is the reason, and must not
+		// prescribe staging or committing. `changed` has seen the working tree
+		// since quality-gate ce86647; that advice sent people to stage work the
+		// gate would already have looked at.
+		expect(out).not.toContain("merge-base");
+		expect(out).not.toContain("git add");
+		expect(out).toContain("does NOT explain this");
+		// It has to leave the reader somewhere to go.
+		expect(out).toContain("git status --short");
 	});
 
 	// A clean tree is the case the old advice was written for, and it stays.
@@ -195,7 +198,9 @@ describe("render", () => {
 			scope: "changed",
 			uncommitted: 1,
 		});
-		expect(out).toContain("1 uncommitted path,");
+		// The trailing "." pins the SINGULAR: a bare "1 uncommitted path" would
+		// also match the plural "1 uncommitted paths" this guards against.
+		expect(out).toContain("1 uncommitted path.");
 	});
 
 	// A `staged` run that found nothing is a DIFFERENT story, and the first
@@ -222,8 +227,16 @@ describe("render", () => {
 		expect(out).not.toContain('re-run with scope "staged"');
 	});
 
-	// The `changed` wording is the one the merge-base sentence belongs to.
-	it("tells a changed run about committed history", () => {
+	// This test used to assert the opposite — that a `changed` run is told its
+	// scope is committed history and to re-run as `staged`. quality-gate ce86647
+	// (2026-08-18) made `changed` union the working tree, one day after that
+	// wording was written from the 08-17/19 papercuts, and nothing here moved
+	// with it. pyERP's vendored gate is pinned at exactly ce86647, so the repo
+	// generating most of these papercuts had the corrected behaviour throughout.
+	//
+	// The property now pinned: a `changed` run must never be sent to stage or
+	// commit, because that is work the gate has already seen.
+	it("does not send a changed run to stage or commit", () => {
 		const out = render("No files changed", null, {
 			...opts,
 			exitCode: 0,
@@ -231,8 +244,29 @@ describe("render", () => {
 			scope: "changed",
 			uncommitted: 3,
 		});
-		expect(out).toContain("merge-base");
-		expect(out).toContain('scope "staged"');
+		expect(out).not.toContain("merge-base");
+		expect(out).not.toContain('scope "staged"');
+		expect(out).not.toContain("git add");
+		// It says what `changed` actually covers…
+		expect(out).toContain("working tree");
+		expect(out).toContain("untracked");
+		// …and offers the escape that genuinely widens the scope.
+		expect(out).toContain('scope "all"');
+	});
+
+	// The `staged` half was never wrong and must survive this correction: an
+	// unstaged edit really is invisible to the index, so `git add` is the right
+	// advice THERE and only there.
+	it("still tells a staged run to git add", () => {
+		const out = render("No files changed", null, {
+			...opts,
+			exitCode: 0,
+			cwd: "/w",
+			scope: "staged",
+			uncommitted: 3,
+		});
+		expect(out).toContain("INDEX");
+		expect(out).toContain("git add");
 	});
 
 	// A findings report is about the findings. The path would be noise there,

@@ -126,16 +126,28 @@ export interface RenderOptions {
 /**
  * What to say when the gate checked nothing and the tree is NOT clean.
  *
- * `scope: "changed"` does not mean "what you changed". quality-gate resolves it
- * as
+ * `staged` reads the INDEX, so an unstaged edit is genuinely invisible to it.
+ * That half is still true and still worth saying.
  *
- *	git diff --name-only --diff-filter=d "$merge_base"...HEAD
+ * `changed` is NOT. This function used to tell its caller that `changed`
+ * resolves to `git diff <merge-base>...HEAD` — COMMITTED history only — and to
+ * `git add` or commit before re-running. quality-gate `ce86647` (2026-08-18)
+ * changed exactly that: `_qg_get_changed_vs_base` now unions the committed diff
+ * with `_qg_working_tree_files`, which is `git diff HEAD` plus
+ * `git ls-files --others --exclude-standard`, so staged edits, unstaged edits
+ * and brand-new untracked files are all in scope.
  *
- * — merge-base to HEAD, i.e. COMMITTED history only. Edit ten files and run the
- * gate before committing and the answer is honestly "no files changed", because
- * nothing has changed in the history it is comparing. `staged` is the other
- * list, `git diff --cached`, which is why staging first has been the workaround
- * people arrive at by accident.
+ * The advice was written FROM the 2026-08-17/19 papercuts and the gate was fixed
+ * the day after, so it had been sending people to stage or commit work the gate
+ * would already have seen. Measured again on 2026-08-27 (pyERP, blocking):
+ * "Its own explanation says `changed` ignores the working tree, so the default
+ * scope cannot verify active edits." pyERP's vendored copy is pinned at exactly
+ * ce86647, so the correction holds for the repo that generates most of these.
+ *
+ * The lesson worth keeping: this text describes a DIFFERENT REPOSITORY's
+ * behaviour, so it is a constant that has to track a pin, and it will drift
+ * again. It now says what the gate does without re-deriving the mechanism, which
+ * is the part that goes stale.
  *
  * This is the single largest papercut cluster in the corpus: 16 entries between
  * 2026-08-17 and 08-19, across Aurora and Borealis-Ops, every one of the form
@@ -156,25 +168,38 @@ export interface RenderOptions {
  */
 function uncommittedAdvice(count: number, scope?: string): string {
 	const files = count === 1 ? "1 uncommitted path" : `${count} uncommitted paths`;
-	const lead = `Your working tree has ${files}, so this is almost certainly the scope, not the directory. `;
+	const seen = `Your working tree has ${files}. `;
 
 	// `staged` is a DIFFERENT list, and telling its caller the merge-base story
 	// would be wrong twice over: wrong about the mechanism, and it would end by
 	// recommending the scope they just ran. That is the shape of failure this
 	// function exists to remove, so it must not reproduce it one scope along.
+	//
+	// This is also the ONLY branch that may still say "almost certainly the
+	// scope": for `staged` a dirty tree really does explain an empty result.
 	if (scope === "staged") {
 		return (
-			lead +
+			seen +
+			"That is almost certainly the scope, not the directory: " +
 			"`staged` reads the INDEX (`git diff --cached`), so edits you have not `git add`ed are " +
 			"invisible to it — an empty index checks nothing even with a dirty tree. " +
-			"`git add` the files and re-run, or use scope \"changed\" after committing."
+			'`git add` the files and re-run, or switch to scope "changed", which reads the ' +
+			"working tree directly and needs no staging or commit."
 		);
 	}
+	// `changed` DOES see uncommitted work (quality-gate ce86647), so the tree
+	// being dirty no longer explains an empty result — do not send anyone to
+	// `git add`. What is left is a scope that resolved to nothing for a reason
+	// this function cannot see from here, so name the ways to find out rather
+	// than inventing a cause.
 	return (
-		lead +
-		`\`${scope ?? "changed"}\` resolves to \`git diff <merge-base>...HEAD\` — COMMITTED history only — ` +
-		`so work you have not committed is invisible to it. ` +
-		`Either \`git add\` the files and re-run with scope "staged", or commit first and re-run.`
+		seen +
+		`\`${scope ?? "changed"}\` covers committed work on this branch AND the working tree ` +
+		`(modified, staged and new untracked files), so a dirty tree does NOT explain this — ` +
+		`do not stage or commit to work around it. Check that the files you expect are in ` +
+		`\`git status --short\` here, that the gate resolved a merge base (a detached HEAD or a ` +
+		`missing origin ref fails that), and that your paths are not excluded by the project's ` +
+		`quality-gate config. Re-run with scope "all" to check the whole repo regardless.`
 	);
 }
 

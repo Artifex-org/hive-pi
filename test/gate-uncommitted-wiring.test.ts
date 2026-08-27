@@ -93,9 +93,12 @@ describe("quality_gate names uncommitted work when it checked nothing", () => {
 		// The count had to come from a real `git status` in `repo`: two paths,
 		// one modified and one untracked.
 		expect(body).toContain("2 uncommitted paths");
-		expect(body).toContain("merge-base");
-		// And the advice that was wrong for this cause must not be what it says.
+		// The advice that was wrong for this cause must not be what it says…
 		expect(body).not.toContain("different checkout");
+		// …and neither must the merge-base story, which stopped being true when
+		// quality-gate ce86647 made `--changed` union the working tree.
+		expect(body).not.toContain("merge-base");
+		expect(body).not.toContain("git add");
 	});
 
 	// The other half of the same wiring: a CLEAN tree must still get the
