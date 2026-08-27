@@ -44,29 +44,16 @@ export interface HiveSessionEvent {
 export const HIVE_PLAN_CHANNEL = "hive.plan";
 
 export interface HivePlanEvent {
-	/** The plan's revision counter after the change. */
 	revision: number;
+	/**
+	 * The tick counter (HIV-2904). Optional on the wire so a client that
+	 * predates the merge still type-checks against this channel; a listener
+	 * that only knows `revision` keeps working and simply refetches less often.
+	 */
+	progress?: number;
 }
 
-/**
- * The same doorbell for the WORKFLOW document (stages and steps).
- *
- * A revision and nothing else, for the reason the plan's carries nothing else:
- * the document names branches, files and step titles, and this bus is
- * process-local — any loaded extension could subscribe to it. hive-remote reads
- * the document out of the session entries it already has access to, under the
- * consent its own config represents.
- *
- * A SEPARATE channel from the plan's rather than a `kind` field on one, so an
- * extension that cares about intent changes does not also wake on every step
- * tick. A workflow is revised far more often than a plan.
- */
-export const HIVE_WORKFLOW_CHANNEL = "hive.workflow";
 
-export interface HiveWorkflowEvent {
-	/** The workflow's revision counter after the change. */
-	revision: number;
-}
 
 /**
  * Asks the `plan` extension to enter read-only plan mode — the conductor's

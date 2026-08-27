@@ -21,6 +21,7 @@
  * SYNCHRONOUSLY at entry. The one exception is documented at `latestCtx`.
  */
 
+import { rehydratePlan, toEntry } from "../plan/state.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -32,7 +33,6 @@ import {
 	HIVE_STDIN_WAIT_CHANNEL,
 	type HiveStdinWaitEvent,
 	HIVE_PLAN_CHANNEL,
-	HIVE_WORKFLOW_CHANNEL,
 	HIVE_SESSION_CHANNEL,
 	HIVE_SESSION_END_CHANNEL,
 	OP_MODE_CONTROL_CHANNEL,
@@ -48,7 +48,6 @@ import {
 	type AgentStatusEvent,
 	type ConductorStageEvent,
 	type HivePlanEvent,
-	type HiveWorkflowEvent,
 	type HiveSessionEndEvent,
 	type HiveSessionEvent,
 	type OpModeControlEvent,
@@ -70,7 +69,7 @@ import {
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
-import { attach, buildCatalog, claimCommands, fetchCommandAttachment, postActivity, postDelta, postPlan, postWorkflow, postEvents, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
+import { attach, buildCatalog, claimCommands, fetchCommandAttachment, postActivity, postDelta, postPlan, postEvents, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
 import { ARGS_BUDGET, budgeted } from "./budget.ts";
 import {
 	HEARTBEAT_MS,
@@ -425,16 +424,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * otherwise be five PUTs of a snapshot that is identical by the time the
 	 * first lands. The newest pending revision wins and the rest are dropped.
 	 */
-	let pendingWorkflowRevision: number | null = null;
-	let sendingWorkflow = false;
-	let unsubscribeWorkflow: (() => void) | undefined;
-	unsubscribeWorkflow = pi.events.on(HIVE_WORKFLOW_CHANNEL, (data: unknown) => {
-		const revision = (data as HiveWorkflowEvent | undefined)?.revision;
-		if (typeof revision !== "number") return;
-		pendingWorkflowRevision = revision;
-		setTimeout(() => void flushWorkflow(), 0);
-	});
-
+	// The workflow doorbell is gone with the workflow document (HIV-2904): lanes
+	// live in the plan, so `hive:plan` is the only doorbell, and it carries the
+	// tick counter as well as the revision.
 	/**
 	 * The operating mode actually in force, as the `opmode` extension reports it.
 	 *
@@ -848,30 +840,25 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	/** The newest `plan` custom entry's payload, or null when there is none. */
 	function latestPlanEntry(ctx: ExtensionContext | null): unknown {
-		return latestEntryOfType(ctx, "plan");
-	}
-
-	async function flushWorkflow(): Promise<void> {
-		if (sendingWorkflow || !auth || !sessionID || pendingWorkflowRevision === null) return;
-		const revision = pendingWorkflowRevision;
-		pendingWorkflowRevision = null;
-
-		const document = latestEntryOfType(latestCtx, "workflow");
-		if (!document) return;
-
-		sendingWorkflow = true;
+		// FOLDED, not merely latest. Since HIV-2904 a status tick writes a small
+		// `plan.tick` entry instead of re-emitting the whole document, so the
+		// newest SNAPSHOT is the plan as of the last re-plan and knows nothing
+		// about the checkboxes ticked since. Taking it would send Hive a
+		// document whose progress never moves — the exact live view the merge
+		// exists to make possible.
+		//
+		// `rehydratePlan` is a pure function over entries; importing it here is
+		// the same cross-extension read `tasks` already does of `status-footer`.
 		try {
-			await postWorkflow(auth, sessionID, document, revision);
-			// No retry and no error surfacing, exactly as the plan flush argues:
-			// a dropped snapshot costs a stale panel until the next tick, which is
-			// seconds away in an active session, and failing loudly would put a
-			// network error in front of a developer who merely ticked a step.
+			const entries = ctx?.sessionManager.getEntries() as readonly unknown[] | undefined;
+			if (entries) {
+				const folded = rehydratePlan(entries);
+				if (folded) return toEntry(folded);
+			}
 		} catch {
-			/* the next revision re-sends the whole snapshot */
-		} finally {
-			sendingWorkflow = false;
-			if (pendingWorkflowRevision !== null) setTimeout(() => void flushWorkflow(), 0);
+			/* session replaced mid-read — fall through to the raw snapshot */
 		}
+		return latestEntryOfType(ctx, "plan");
 	}
 
 	/** The newest custom entry of a type, or null when there is none. */
@@ -1762,9 +1749,6 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		unsubscribePlan = undefined;
 		pendingPlanRevision = null;
 		// Same for the workflow doorbell, and for the same reason.
-		unsubscribeWorkflow?.();
-		unsubscribeWorkflow = undefined;
-		pendingWorkflowRevision = null;
 		unsubscribeConductor?.();
 		unsubscribeConductor = undefined;
 		unsubscribeInjection?.();

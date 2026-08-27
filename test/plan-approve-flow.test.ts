@@ -11,6 +11,12 @@ import agendaExtension from "../extensions/agenda/index.ts";
 import planExtension from "../extensions/plan/index.ts";
 import { PLAN_APPROVED_CHANNEL, PLAN_CONTROL_CHANNEL } from "../extensions/hive-common/channels.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
+import {
+	applyOps,
+	emptyPlan,
+	MODEL_WRITABLE_PHASES,
+	VALID_PHASES,
+} from "../extensions/plan/state.ts";
 
 const originalHiveLaunchId = process.env.HIVE_LAUNCH_ID;
 
@@ -433,5 +439,55 @@ describe("goal_set tool", () => {
 		const bad = await toolOf(fake, "goal_set")("g8", { condition: "make it nicer", replace: true });
 		expect(bad.isError).toBe(true);
 		expect(bad.content[0].text).toContain("machine-checkable");
+	});
+});
+/** A minimal view of the JSON Schema shape a registered tool exposes. */
+type SchemaNode = { properties?: Record<string, unknown>; anyOf?: SchemaNode[]; items?: SchemaNode };
+
+/**
+ * Approval is the operator's word, and the model must not be able to say it.
+ *
+ * Hive stores this document's phase verbatim in its revision history
+ * (`COALESCE($3::jsonb #>> '{doc,phase}', '')`) and the browser then anchors
+ * "diff since approved" on `phase === "approved"`. A model that could stamp
+ * that on its own revision would make the diff compare the plan against itself
+ * and show an operator that nothing changed — silently, because an empty diff
+ * looks exactly like an approved-and-unchanged plan.
+ *
+ * So the tool surface is deliberately NARROWER than the runtime vocabulary.
+ * These two tests pin both halves of that gap: the door is shut for the model,
+ * and still open for the three approval handlers that go through `persistOps`.
+ */
+describe("the model cannot approve its own plan", () => {
+	it("keeps `approved` out of the phase enum plan_write exposes", async () => {
+		const fake = await bootBoth();
+		const tool = fake.tools.find((candidate) => candidate.name === "plan_write");
+		if (!tool) throw new Error("plan_write not registered");
+		const parameters = (tool.definition as { parameters: SchemaNode }).parameters;
+		const ops = (parameters.properties?.ops ?? {}) as SchemaNode;
+		const variants = ops.items?.anyOf ?? [];
+		const header = variants.find((variant) => JSON.stringify(variant.properties?.op ?? {}).includes("header"));
+		if (!header) throw new Error("no header op in the plan_write schema");
+		// Compared as serialized JSON rather than by reading an `enum` key, so this
+		// keeps holding if StringEnum changes how it renders a union.
+		const phase = JSON.stringify(header.properties?.phase);
+		expect(phase).toContain("ready");
+		expect(phase).not.toContain("approved");
+	});
+
+	it("still lets the approval handlers set it through applyOps", () => {
+		// The difference between the two vocabularies is EXACTLY `approved`. If this
+		// fails because someone re-aligned the lists, read MODEL_WRITABLE_PHASES
+		// before "fixing" it: the asymmetry is the feature, not an oversight.
+		const modelWritable = MODEL_WRITABLE_PHASES as readonly string[];
+		expect(VALID_PHASES).toContain("approved");
+		expect(modelWritable).not.toContain("approved");
+		expect(VALID_PHASES.filter((phase) => !modelWritable.includes(phase))).toEqual(["approved"]);
+
+		// `persistOps` in the approval handlers reaches applyOps directly and never
+		// sees the tool schema, so approval itself keeps working.
+		const result = applyOps(emptyPlan(0), [{ op: "header", phase: "approved" }], 0);
+		expect(result.problems).toEqual([]);
+		expect(result.doc.phase).toBe("approved");
 	});
 });

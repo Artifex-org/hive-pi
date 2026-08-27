@@ -66,8 +66,9 @@ export const PLAN_INJECTION = [
 export const ADVISE_LEDGER_ID = "conductor:advise";
 
 export const ADVISE_INJECTION = [
-	"Conductor: the work looks complete. Before delivery checks, if an `advisor` tool is",
-	"available, call it once for a final review of this work — then address anything real it raises.",
+	"Conductor: the work looks complete. Before delivery checks, review any advisory composition lint returned by plan_ready;",
+	"this is the one execute→verify reminder, charged to the existing conductor:advise ledger.",
+	"If an `advisor` tool is available, call it once for a final review of this work — then address anything real it raises.",
 ].join(" ");
 
 export interface ConductorHooks {

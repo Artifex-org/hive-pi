@@ -37,6 +37,9 @@ const STATUS_BOX: Record<StepStatus, string> = {
 	pending: "[ ]",
 	in_progress: "[~]",
 	done: "[x]",
+	// Distinct from `blocked`: "tried it and it did not work" is not "waiting on
+	// something", and a reader deciding what to do next needs the difference.
+	failed: "[×]",
 	skipped: "[-]",
 	blocked: "[!]",
 };
@@ -45,6 +48,7 @@ const STATUS_WORD: Record<StepStatus, string> = {
 	pending: "pending",
 	in_progress: "in progress",
 	done: "done",
+	failed: "failed",
 	skipped: "skipped",
 	blocked: "blocked",
 };
@@ -128,6 +132,26 @@ function blockToMarkdown(block: PlanBlock, includeIds: boolean): string[] {
 		case "code":
 			out.push("```" + (block.language ?? ""), block.code, "```");
 			if (block.caption) out.push("", `*${block.caption}*`);
+			break;
+
+		case "checklist":
+			for (const item of block.items) out.push(`- ${item.checked ? "[x]" : "[ ]"} ${item.text}${item.evidence ? ` — ${item.evidence}` : ""}`);
+			break;
+
+		case "ticket":
+			out.push(`- ${block.role ? `\`${block.role}\` ` : ""}${block.url ? `[${block.key}](${block.url})` : block.key}`);
+			break;
+
+		case "milestone":
+			out.push(`- Goal: \`${block.goalId}\`${block.stepId ? ` · step \`${block.stepId}\`` : ""}`);
+			break;
+
+		case "decision":
+			out.push(`**Question:** ${block.question}`, "", ...block.options.map((option) => `- ${option === block.chosen ? "[x]" : "[ ]"} ${option}`), "", `**Rationale:** ${block.rationale}`);
+			break;
+
+		case "log":
+			for (const entry of block.entries) out.push(`- ${new Date(entry.at).toISOString()} · \`${entry.kind}\` · ${entry.text}`);
 			break;
 
 		case "artifact":

@@ -1,9 +1,54 @@
 import { describe, expect, it } from "vitest";
 import { deriveSignals, planSignalOf, tasksSignalOf } from "../extensions/agenda/signals.ts";
 
+/**
+ * A plan entry carrying ONE lane, which is where todos live since HIV-2904.
+ *
+ * The signal used to read a `tasks` entry; there is no such entry now, so the
+ * fixture builds the document the conductor actually folds. Everything the
+ * assertions below check — counting by status, taking the newest, surviving a
+ * malformed row — is unchanged, and each is still the thing that would break
+ * the conductor's "is the work done" question if it regressed.
+ */
 const taskEntry = (tasks: Array<{ status: string }>) => ({
-	customType: "tasks",
-	data: { tasks },
+	customType: "plan",
+	data: {
+		kind: "plan",
+		schemaVersion: 1,
+		doc: {
+			title: "",
+			goal: "",
+			phase: "none",
+			revision: 1,
+			progress: 0,
+			nextId: 99,
+			createdAt: 0,
+			updatedAt: 0,
+			blocks: [
+				{
+					id: "lane",
+					type: "steps",
+					kind: "execute",
+					createdAt: 0,
+					updatedAt: 0,
+					// A row with no status at all is passed through as-is, so a
+					// malformed one stays malformed all the way to the fold — which
+					// is the point of the third test below.
+					steps: tasks.map((task, index) =>
+						task && typeof task.status === "string"
+							? {
+									id: `i${index}`,
+									title: `item ${index}`,
+									// The conductor speaks the todo vocabulary; the
+									// document stores `done`, and the signal translates.
+									status: task.status === "completed" ? "done" : task.status,
+								}
+							: task,
+					),
+				},
+			],
+		},
+	},
 });
 
 const planEntry = (data: Record<string, unknown>) => ({ customType: "plan", data });

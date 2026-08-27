@@ -296,29 +296,30 @@ describe("applyOps — set_step", () => {
 		expect(stepsOf(result.doc)[0]).toMatchObject({ status: "pending", note: "turned out to need a migration" });
 	});
 
-	it("clears owner, taskId and linearKey on null", () => {
-		const base = applyOps(
-			withSteps("one"),
-			[{ op: "set_step", id: "1", owner: "w1", taskId: "7", linearKey: "HIV-1" }],
-			NOW,
-		).doc;
-		expect(stepsOf(base)[0]).toMatchObject({ owner: "w1", taskId: "7", linearKey: "HIV-1" });
+	// `taskId` used to sit beside these. It was documented as "the tasks
+	// extension id this step materialized into once approved" and
+	// `scripts/plan-shape.mjs` found ZERO producers across 594 sessions —
+	// nothing ever wrote it. Since the merge there is nothing for it to point
+	// at either: the todo IS the item, and being in a lane is the relationship
+	// the link was trying to express.
+	it("clears owner and linearKey on null", () => {
+		const base = applyOps(withSteps("one"), [{ op: "set_step", id: "1", owner: "w1", linearKey: "HIV-1" }], NOW).doc;
+		expect(stepsOf(base)[0]).toMatchObject({ owner: "w1", linearKey: "HIV-1" });
 
-		const cleared = applyOps(base, [{ op: "set_step", id: "1", owner: null, taskId: null, linearKey: null }], LATER);
+		const cleared = applyOps(base, [{ op: "set_step", id: "1", owner: null, linearKey: null }], LATER);
 		const step = stepsOf(cleared.doc)[0];
 		expect(step.owner).toBeUndefined();
-		expect(step.taskId).toBeUndefined();
 		expect(step.linearKey).toBeUndefined();
 	});
 
 	it("complains about an unknown step and an unknown status", () => {
 		const base = withSteps("one");
 		expect(applyOps(base, [{ op: "set_step", id: "9", status: "done" }], LATER).problems.join()).toContain(
-			'no steps block contains step "9"',
+			'no lane contains item "9"',
 		);
 		expect(
 			applyOps(base, [{ op: "set_step", id: "1", status: "finished" as never }], LATER).problems.join(),
-		).toContain("unknown step status");
+		).toContain("unknown item status");
 	});
 });
 
@@ -364,7 +365,7 @@ describe("applyOps — re-stating a steps block preserves progress", () => {
 		// has not started.
 		const base = applyOps(
 			withSteps("read the schema", "wire the gate"),
-			[{ op: "set_step", id: "1", status: "done", taskId: "11" }],
+			[{ op: "set_step", id: "1", status: "done", linearKey: "HIV-11" }],
 			NOW,
 		).doc;
 
@@ -387,7 +388,7 @@ describe("applyOps — re-stating a steps block preserves progress", () => {
 		);
 
 		const steps = stepsOf(result.doc);
-		expect(steps[0]).toMatchObject({ title: "read the schema carefully", status: "done", taskId: "11" });
+		expect(steps[0]).toMatchObject({ title: "read the schema carefully", status: "done", linearKey: "HIV-11" });
 		expect(steps[1].status).toBe("pending");
 	});
 

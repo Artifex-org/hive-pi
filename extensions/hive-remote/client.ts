@@ -365,26 +365,6 @@ export function postPlan(
 	return request<{ revision: number }>(auth, "PUT", `/agent-sessions/${sessionID}/plan`, { document, revision });
 }
 
-/**
- * postWorkflow replaces the stored workflow document (stages and steps).
- *
- * The plan's twin in every respect, including the revision guard — and it
- * matters more here: a workflow is rewritten on every step tick, so two
- * processes reporting for one session produce far more chances for an older
- * snapshot to arrive last.
- */
-export function postWorkflow(
-	auth: HiveAuth,
-	sessionID: string,
-	document: unknown,
-	revision: number,
-): Promise<RequestResult<{ revision: number }>> {
-	return request<{ revision: number }>(auth, "PUT", `/agent-sessions/${sessionID}/workflow`, {
-		document,
-		revision,
-	});
-}
-
 export interface RemoteCommand {
 	id: string;
 	kind:
