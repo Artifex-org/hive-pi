@@ -93,6 +93,24 @@ export function expandTargetDir(targetDir: string): string | null {
 }
 
 /**
+ * A grant name must be ONE path segment. Not a traversal, not absolute, not a
+ * nested path — the scratch root only bounds what a grant can reach if the leaf
+ * cannot climb out of it.
+ */
+export function isSafeGrantName(name: unknown): name is string {
+	return typeof name === "string" && /^[\w.-]+$/.test(name) && name !== "." && name !== "..";
+}
+
+/**
+ * `owner/name`, and nothing that could re-point the clone URL: no `@` (which
+ * would make `https://github.com/a@evil/b` resolve to `evil`), no scheme, no
+ * traversal, no second slash.
+ */
+export function isSafeRepoSlug(repo: unknown): repo is string {
+	return typeof repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(repo) && !repo.includes("..");
+}
+
+/**
  * Clone one granted repo into scratch, reporting the outcome as a line.
  *
  * Never throws. An already-present checkout is left untouched (the idempotent
@@ -104,6 +122,22 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, signal: AbortSi
 	const root = expandTargetDir(r.target_dir);
 	if (!root) {
 		return `- ${r.name}: could not resolve a scratch directory (target_dir=${JSON.stringify(r.target_dir)}). Clone ${r.repo} yourself under ~/.hive/scratch/.`;
+	}
+	// `name` and `repo` arrive in a SERVER-issued grant, and until now went
+	// straight into a path join and a URL. A grant naming `../../.config/systemd/user`
+	// places a clone outside the scratch root; a `repo` carrying `@` or `..`
+	// redirects the clone's origin away from github.com entirely.
+	//
+	// That needs a compromised or hostile control plane to exploit, so it is
+	// defence in depth rather than a live hole — but the whole point of a scratch
+	// root is that it bounds what a grant can touch, and an unvalidated join does
+	// not bound anything. Validate here rather than trusting the issuer: this
+	// process is the one that suffers if the issuer is wrong.
+	if (!isSafeGrantName(r.name)) {
+		return `- ${r.name}: refused — a grant name must be a single path segment, not a path.`;
+	}
+	if (!isSafeRepoSlug(r.repo)) {
+		return `- ${r.name}: refused — ${JSON.stringify(r.repo)} is not an owner/name slug.`;
 	}
 	const dest = join(root, r.name);
 	if (existsSync(dest)) {

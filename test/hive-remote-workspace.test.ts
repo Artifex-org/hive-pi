@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestAndWait, type WorkspaceGrantValue } from "../extensions/hive-remote/client.ts";
 import { expandTargetDir, registerWorkspaceTools } from "../extensions/hive-remote/workspace.ts";
+import { isSafeGrantName, isSafeRepoSlug } from "../extensions/hive-remote/workspace.ts";
 
 const auth = { token: "hive_test", url: "https://hive.example" };
 
@@ -272,5 +273,46 @@ describe("expandTargetDir", () => {
 		// exactly one entry; either way the empty-string fallback must not throw.
 		const result = expandTargetDir("");
 		expect(result === null || typeof result === "string").toBe(true);
+	});
+});
+
+/**
+ * A grant is SERVER-issued, and this process is the one that suffers if the
+ * issuer is wrong. The scratch root only bounds what a grant can reach if the
+ * leaf cannot climb out of it, and the clone URL only points at github.com if
+ * the slug cannot re-point it.
+ */
+describe("grant validation", () => {
+	it("refuses a name that is a path rather than a leaf", () => {
+		for (const bad of ["../../.config/systemd/user", "..", ".", "a/b", "/etc/cron.d", "x/../..", ""]) {
+			expect(isSafeGrantName(bad), bad).toBe(false);
+		}
+	});
+
+	it("accepts an ordinary checkout name", () => {
+		for (const ok of ["hive", "my-repo", "repo.git", "a_b-1"]) {
+			expect(isSafeGrantName(ok), ok).toBe(true);
+		}
+	});
+
+	// `https://github.com/a@evil.test/b` resolves to evil.test — the `@` makes
+	// everything before it userinfo. A slug is owner/name and nothing else.
+	it("refuses a repo slug that could re-point the clone URL", () => {
+		for (const bad of [
+			"a@evil.test/b",
+			"../../etc/passwd",
+			"https://evil.test/x",
+			"owner/name/extra",
+			"owner",
+			"own..er/name",
+		]) {
+			expect(isSafeRepoSlug(bad), bad).toBe(false);
+		}
+	});
+
+	it("accepts an ordinary owner/name slug", () => {
+		for (const ok of ["Artifex-org/hive-pi", "a_b/c.d-1"]) {
+			expect(isSafeRepoSlug(ok), ok).toBe(true);
+		}
 	});
 });
