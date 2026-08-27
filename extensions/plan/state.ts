@@ -160,7 +160,12 @@ export type BlockType =
 	| "metrics"
 	| "callout"
 	| "code"
-	| "artifact";
+	| "artifact"
+	| "checklist"
+	| "ticket"
+	| "milestone"
+	| "decision"
+	| "log";
 
 /**
  * The catalog, at runtime.
@@ -181,6 +186,11 @@ export const VALID_BLOCK_TYPES: readonly BlockType[] = [
 	"callout",
 	"code",
 	"artifact",
+	"checklist",
+	"ticket",
+	"milestone",
+	"decision",
+	"log",
 ];
 
 /**
@@ -440,6 +450,41 @@ export interface ArtifactBlock extends BlockBase {
 	caption?: string;
 }
 
+export interface ChecklistBlock extends BlockBase {
+	type: "checklist";
+	items: { id: string; text: string; checked: boolean; evidence?: string }[];
+}
+
+/** Ticket metadata is data; the browser may hydrate a bare key without treating it as markup. */
+export interface TicketBlock extends BlockBase {
+	type: "ticket";
+	key: string;
+	url?: string;
+	role?: "primary" | "related";
+}
+
+/** A milestone is the plan-side projection of a goal link owned by the launch integration. */
+export interface MilestoneBlock extends BlockBase {
+	type: "milestone";
+	goalId: string;
+	stepId?: string;
+}
+
+export interface DecisionBlock extends BlockBase {
+	type: "decision";
+	question: string;
+	options: string[];
+	chosen: string;
+	rationale: string;
+	source: "plan_ask" | "grill" | "comment";
+	at: number;
+}
+
+export interface LogBlock extends BlockBase {
+	type: "log";
+	entries: { at: number; kind: "stage" | "gate" | "approval" | "note"; text: string }[];
+}
+
 export type PlanBlock =
 	| TextBlock
 	| StepsBlock
@@ -450,7 +495,12 @@ export type PlanBlock =
 	| MetricsBlock
 	| CalloutBlock
 	| CodeBlock
-	| ArtifactBlock;
+	| ArtifactBlock
+	| ChecklistBlock
+	| TicketBlock
+	| MilestoneBlock
+	| DecisionBlock
+	| LogBlock;
 
 export interface PlanDoc {
 	title: string;
@@ -736,6 +786,21 @@ export interface TemplateOp {
 	title?: string;
 }
 
+/** Verification can only tick a criterion with evidence a reader can inspect. */
+export interface ChecklistTickOp {
+	op: "checklist_tick";
+	id: string;
+	itemId: string;
+	evidence: string;
+}
+
+/** Log entries are appended by the harness; callers never replace history. */
+export interface LogOp {
+	op: "log";
+	id?: string;
+	entries: { at?: number; kind: "stage" | "gate" | "approval" | "note"; text: string }[];
+}
+
 export type PlanOp =
 	| HeaderOp
 	| UpsertOp
@@ -748,7 +813,9 @@ export type PlanOp =
 	| RemoveItemOp
 	| LoopOp
 	| LoopTickOp
-	| TemplateOp;
+	| TemplateOp
+	| ChecklistTickOp
+	| LogOp;
 
 /** A block as the model supplies it: no ids, no timestamps. */
 export type BlockInput =
@@ -768,7 +835,12 @@ export type BlockInput =
 	| { type: "metrics"; title?: string; metrics: MetricsBlock["metrics"] }
 	| { type: "callout"; title?: string; tone: CalloutBlock["tone"]; markdown: string }
 	| { type: "code"; title?: string; language?: string; code: string; caption?: string }
-	| { type: "artifact"; title?: string; html: string; height?: number; caption?: string };
+	| { type: "artifact"; title?: string; html: string; height?: number; caption?: string }
+	| { type: "checklist"; title?: string; items: { id: string; text: string; checked?: boolean; evidence?: string }[] }
+	| { type: "ticket"; title?: string; key: string; url?: string; role?: "primary" | "related" }
+	| { type: "milestone"; title?: string; goalId: string; stepId?: string }
+	| { type: "decision"; title?: string; question: string; options: string[]; chosen: string; rationale: string; source: "plan_ask" | "grill" | "comment"; at: number }
+	| { type: "log"; title?: string; entries: { at: number; kind: "stage" | "gate" | "approval" | "note"; text: string }[] };
 
 export interface ItemInput {
 	/** Preserved when re-stating an existing item, so status and links survive. */
@@ -849,6 +921,7 @@ function isIntentOp(op: PlanOp): boolean {
 		case "set_step":
 		case "loop_tick":
 		case "move_item":
+		case "checklist_tick":
 			return false;
 		case "remove_item":
 			// Deleting work changes what the plan says will be done.
@@ -887,6 +960,7 @@ function isTickOp(op: PlanOp): boolean {
 		case "loop_tick":
 		case "move_item":
 		case "item":
+		case "checklist_tick":
 			return true;
 		case "header":
 			return op.stage !== undefined || op.phase !== undefined;
@@ -977,6 +1051,12 @@ export function applyOps(doc: PlanDoc, ops: readonly PlanOp[], now: number): OpR
 			case "template":
 				applyTemplate(next, op, now, created, updated, problems, label);
 				break;
+			case "checklist_tick":
+				applyChecklistTick(next, op, now, updated, problems, label);
+				break;
+			case "log":
+				applyLog(next, op, now, created, updated, problems, label);
+				break;
 			default:
 				problems.push(`${label}: unknown op "${String((op as { op?: unknown }).op)}"`);
 		}
@@ -1000,6 +1080,70 @@ export function applyOps(doc: PlanDoc, ops: readonly PlanOp[], now: number): OpR
 	};
 
 	return { doc: next, created, updated, removed, problems };
+}
+
+function applyChecklistTick(
+	doc: PlanDoc,
+	op: ChecklistTickOp,
+	now: number,
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const evidence = cleanString(op.evidence);
+	if (!evidence || !/(?:\brun\s+[\w-]+\b|\b[^\s:]+:\d+\b)/i.test(evidence)) {
+		problems.push(`${label}: checklist evidence must name a run id or file:line`);
+		return;
+	}
+	const block = doc.blocks.find((candidate): candidate is ChecklistBlock => candidate.id === cleanString(op.id) && candidate.type === "checklist");
+	if (!block) {
+		problems.push(`${label}: unknown checklist block "${String(op.id)}"`);
+		return;
+	}
+	const at = block.items.findIndex((item) => item.id === cleanString(op.itemId));
+	if (at === -1) {
+		problems.push(`${label}: unknown checklist item "${String(op.itemId)}"`);
+		return;
+	}
+	if (block.items[at].checked && block.items[at].evidence === evidence) return;
+	block.items[at] = { ...block.items[at], checked: true, evidence };
+	block.updatedAt = now;
+	updated.push(block.id);
+}
+
+function applyLog(
+	doc: PlanDoc,
+	op: LogOp,
+	now: number,
+	created: string[],
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const entries = (Array.isArray(op.entries) ? op.entries : []).flatMap((entry) => {
+		const text = cleanString(entry?.text);
+		const kind = entry?.kind;
+		if (!text || !["stage", "gate", "approval", "note"].includes(kind)) {
+			problems.push(`${label}: log entries need a kind and text`);
+			return [];
+		}
+		return [{ at: typeof entry.at === "number" && Number.isFinite(entry.at) ? Math.round(entry.at) : now, kind, text } as LogBlock["entries"][number]];
+	});
+	if (entries.length === 0) return;
+	const id = cleanString(op.id) ?? "log";
+	const existing = doc.blocks.find((block): block is LogBlock => block.id === id && block.type === "log");
+	if (existing) {
+		existing.entries.push(...entries);
+		existing.updatedAt = now;
+		updated.push(id);
+		return;
+	}
+	if (doc.blocks.some((block) => block.id === id)) {
+		problems.push(`${label}: block "${id}" is not a log`);
+		return;
+	}
+	doc.blocks.push({ id, type: "log", entries, createdAt: now, updatedAt: now });
+	created.push(id);
 }
 
 function applyHeader(doc: PlanDoc, op: HeaderOp, problems: string[], label: string): void {
@@ -1852,6 +1996,58 @@ function normalizeBlock(input: BlockInput | undefined, problems: string[], label
 				caption: cleanString((input as { caption?: unknown }).caption),
 			};
 		}
+		case "checklist": {
+			const raw = (input as { items?: unknown }).items;
+			if (!Array.isArray(raw) || raw.length === 0) {
+				problems.push(`${label}: a checklist block needs at least one item`);
+				return undefined;
+			}
+			const items: ChecklistBlock["items"] = [];
+			raw.forEach((entry, index) => {
+				const id = cleanString((entry as { id?: unknown })?.id);
+				const text = cleanString((entry as { text?: unknown })?.text);
+				if (!id || !text) problems.push(`${label}: checklist item #${index + 1} needs an id and text`);
+				else items.push({ id, text, checked: (entry as { checked?: unknown }).checked === true, evidence: cleanString((entry as { evidence?: unknown }).evidence) });
+			});
+			return items.length > 0 ? { type: "checklist", title, items } : undefined;
+		}
+		case "ticket": {
+			const key = cleanString((input as { key?: unknown }).key)?.toUpperCase();
+			if (!key) { problems.push(`${label}: a ticket block needs a key`); return undefined; }
+			const role = (input as { role?: unknown }).role;
+			return { type: "ticket", title, key, url: cleanString((input as { url?: unknown }).url), role: role === "primary" || role === "related" ? role : undefined };
+		}
+		case "milestone": {
+			const goalId = cleanString((input as { goalId?: unknown }).goalId);
+			if (!goalId) { problems.push(`${label}: a milestone block needs a goalId`); return undefined; }
+			return { type: "milestone", title, goalId, stepId: cleanString((input as { stepId?: unknown }).stepId) };
+		}
+		case "decision": {
+			const question = cleanString((input as { question?: unknown }).question);
+			const chosen = cleanString((input as { chosen?: unknown }).chosen);
+			const rationale = cleanString((input as { rationale?: unknown }).rationale);
+			const options = cleanStringList((input as { options?: unknown }).options);
+			const source = (input as { source?: unknown }).source;
+			const at = (input as { at?: unknown }).at;
+			if (!question || !chosen || !rationale || options === undefined || typeof source !== "string" || !["plan_ask", "grill", "comment"].includes(source) || typeof at !== "number" || !Number.isFinite(at)) {
+				problems.push(`${label}: a decision needs question, options, chosen, rationale, source and at`);
+				return undefined;
+			}
+			return { type: "decision", title, question, options, chosen, rationale, source: source as DecisionBlock["source"], at: Math.round(at) };
+		}
+		case "log": {
+			const raw = (input as { entries?: unknown }).entries;
+			if (!Array.isArray(raw) || raw.length === 0) { problems.push(`${label}: a log block needs entries`); return undefined; }
+			const entries: LogBlock["entries"] = [];
+			raw.forEach((entry, index) => {
+				const text = cleanString((entry as { text?: unknown })?.text);
+				const kind = (entry as { kind?: unknown })?.kind;
+				const at = (entry as { at?: unknown })?.at;
+				if (!text || typeof kind !== "string" || !["stage", "gate", "approval", "note"].includes(kind) || typeof at !== "number" || !Number.isFinite(at)) problems.push(`${label}: log entry #${index + 1} needs at, kind and text`);
+				else entries.push({ at: Math.round(at), kind: kind as LogBlock["entries"][number]["kind"], text });
+			});
+			return entries.length > 0 ? { type: "log", title, entries } : undefined;
+		}
 		case "metrics": {
 			const raw = (input as { metrics?: unknown }).metrics;
 			if (!Array.isArray(raw) || raw.length === 0) {
@@ -1960,6 +2156,9 @@ export function tickEntry(doc: PlanDoc): Record<string, unknown> {
 		loops: doc.blocks
 			.filter((block): block is LaneBlock => block.type === "steps" && block.loop !== undefined)
 			.map((lane) => ({ id: lane.id, iteration: lane.loop?.iteration, active: lane.loop?.active })),
+		checklists: doc.blocks
+			.filter((block): block is ChecklistBlock => block.type === "checklist")
+			.map((block) => ({ id: block.id, items: block.items.map((item) => ({ id: item.id, checked: item.checked, evidence: item.evidence })) })),
 	};
 }
 
@@ -1988,6 +2187,16 @@ export function applyTick(doc: PlanDoc, data: unknown): PlanDoc {
 		const loop = raw as Record<string, unknown>;
 		if (typeof loop?.id === "string") loops.set(loop.id, loop);
 	}
+	const checklists = new Map<string, Map<string, Record<string, unknown>>>();
+	for (const raw of Array.isArray(tick.checklists) ? tick.checklists : []) {
+		const checklist = raw as Record<string, unknown>;
+		if (typeof checklist?.id !== "string") continue;
+		const items = new Map<string, Record<string, unknown>>();
+		for (const item of Array.isArray(checklist.items) ? checklist.items : []) {
+			if (typeof (item as { id?: unknown })?.id === "string") items.set((item as { id: string }).id, item as Record<string, unknown>);
+		}
+		checklists.set(checklist.id, items);
+	}
 
 	return {
 		...doc,
@@ -1996,6 +2205,13 @@ export function applyTick(doc: PlanDoc, data: unknown): PlanDoc {
 		phase: VALID_PHASES.includes(tick.phase as PlanPhase) ? (tick.phase as PlanPhase) : doc.phase,
 		updatedAt: typeof tick.updatedAt === "number" ? tick.updatedAt : doc.updatedAt,
 		blocks: doc.blocks.map((block) => {
+			if (block.type === "checklist") {
+				const items = checklists.get(block.id);
+				return !items ? block : { ...block, items: block.items.map((item) => {
+					const ticked = items.get(item.id);
+					return ticked ? { ...item, checked: ticked.checked === true, evidence: typeof ticked.evidence === "string" ? ticked.evidence : item.evidence } : item;
+				}) };
+			}
 			if (block.type !== "steps") return block;
 			const loop = loops.get(block.id);
 			return {

@@ -45,11 +45,9 @@ describe("buildPlanPrompt", () => {
     expect(prompt).toMatch(/data:/);
   });
 
-  // Without this the agent writes prose and a checklist — two of ten types —
-  // because nothing asked it not to.
-  it("tells the agent to reach past prose and steps", () => {
-    expect(prompt).toContain("Show it, do not only say it");
-    // The test it gives, which is what keeps this from becoming "add charts".
-    expect(prompt).toMatch(/would a reader understand this faster/i);
+  it("makes Show it exactly two lint-directed sentences", () => {
+    const section = prompt.match(/## Show it, do not only say it\n\n([^\n]+)\n\n## Finishing/);
+    expect(section?.[1]).toContain("advisory composition lint");
+    expect(section?.[1].match(/[.!?](?:\s|$)/g)).toHaveLength(2);
   });
 });

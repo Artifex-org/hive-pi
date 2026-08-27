@@ -53,6 +53,7 @@ import { isUnattendedHiveLaunch } from "../hive-common/launch.ts";
 import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
 import { classifyCommand, classifyTool } from "./policy.ts";
 import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
+import { lintPlanComposition } from "./lint.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
 import { currentLane, isObservedKind, targetLane } from "./lanes.ts";
 import { registerFacadeTools } from "./facades.ts";
@@ -201,6 +202,23 @@ const BlockSchema = Type.Union([
 		caption: Type.Optional(Type.String()),
 	}),
 	Type.Object({
+		type: Type.Literal("checklist"),
+		title: Type.Optional(Type.String()),
+		items: Type.Array(Type.Object({ id: Type.String(), text: Type.String(), checked: Type.Optional(Type.Boolean()), evidence: Type.Optional(Type.String()) }), { minItems: 1 }),
+	}),
+	Type.Object({
+		type: Type.Literal("ticket"), title: Type.Optional(Type.String()), key: Type.String(), url: Type.Optional(Type.String()), role: Type.Optional(StringEnum(["primary", "related"] as const)),
+	}),
+	Type.Object({
+		type: Type.Literal("milestone"), title: Type.Optional(Type.String()), goalId: Type.String(), stepId: Type.Optional(Type.String()),
+	}),
+	Type.Object({
+		type: Type.Literal("decision"), title: Type.Optional(Type.String()), question: Type.String(), options: Type.Array(Type.String(), { minItems: 1 }), chosen: Type.String(), rationale: Type.String(), source: StringEnum(["plan_ask", "grill", "comment"] as const), at: Type.Number(),
+	}),
+	Type.Object({
+		type: Type.Literal("log"), title: Type.Optional(Type.String()), entries: Type.Array(Type.Object({ at: Type.Number(), kind: StringEnum(["stage", "gate", "approval", "note"] as const), text: Type.String() }), { minItems: 1 }),
+	}),
+	Type.Object({
 		type: Type.Literal("artifact"),
 		title: Type.Optional(Type.String()),
 		html: Type.String({
@@ -297,6 +315,8 @@ const OpSchema = Type.Union([
 		active: Type.Optional(Type.Boolean()),
 	}),
 	Type.Object({ op: Type.Literal("loop_tick"), lane: Type.String({ description: "Lane id or kind." }) }),
+	Type.Object({ op: Type.Literal("checklist_tick"), id: Type.String(), itemId: Type.String(), evidence: Type.String({ description: "A verification run id or file:line reference." }) }),
+	Type.Object({ op: Type.Literal("log"), id: Type.Optional(Type.String()), entries: Type.Array(Type.Object({ at: Type.Optional(Type.Number()), kind: StringEnum(["stage", "gate", "approval", "note"] as const), text: Type.String() }), { minItems: 1 }) }),
 	Type.Object({
 		op: Type.Literal("template"),
 		name: StringEnum(TEMPLATE_NAMES_TUPLE, {
@@ -732,7 +752,12 @@ export default function (pi: ExtensionAPI) {
 
 	const beginGrill = (): PlanGrillEvent | null => {
 		if (!active || doc.phase !== "ready") return null;
-		persistOps(doc, [{ op: "header", phase: "drafting" }], Date.now());
+		const now = Date.now();
+		persistOps(doc, [
+			{ op: "header", phase: "drafting" },
+			{ op: "log", entries: [{ at: now, kind: "approval", text: "Plan returned for questions." }] },
+			{ op: "upsert", id: `decision-grill-${grillRound + 1}`, block: { type: "decision", question: "What should happen after the plan was declined?", options: ["Grill me — ask me questions, then re-present", "Just revise it yourself"], chosen: "Grill me — ask me questions, then re-present", rationale: "The user requested questions before revision.", source: "grill", at: now } },
+		], now);
 		grillRound++;
 		grillOwesQuestions = true;
 		paint();
@@ -773,11 +798,13 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const readySummary = (): string => {
 		const counts = stepCounts(doc);
+		const lint = lintPlanComposition(doc);
 		return [
 			doc.title || "Untitled plan",
 			doc.goal ? `Goal: ${doc.goal}` : "",
 			`${counts.total} step(s).`,
 			counts.total > 1 ? `Approving also enables multi-agent orchestration (orchestrate tool).` : "",
+			lint.length ? `Advisory composition lint:\n${lint.map((issue) => `- ${issue.message}`).join("\n")}` : "",
 		]
 			.filter(Boolean)
 			.join("\n");
@@ -1043,13 +1070,17 @@ export default function (pi: ExtensionAPI) {
 		const stage = (data as ConductorStageEvent | undefined)?.stage;
 		if (typeof stage !== "string" || stage === "idle") return;
 		if (stage === "done") {
-			if (!isEmpty(doc)) persistOps(doc, [{ op: "header", stage: "done" }], Date.now());
+			if (!isEmpty(doc)) {
+				const now = Date.now();
+				persistOps(doc, [{ op: "header", stage: "done" }, { op: "log", entries: [{ at: now, kind: "stage", text: "Conductor entered done." }] }], now);
+			}
 			return;
 		}
 		// `opsForLane` creates the lane the conductor is walking INTO when the
 		// document lacks it — what replaced seeding: one lane per stage actually
 		// entered, rather than six boxes up front.
-		persistOps(doc, [{ op: "header", stage }, ...opsForLane(doc, stage)], Date.now());
+		const now = Date.now();
+		persistOps(doc, [{ op: "header", stage }, ...opsForLane(doc, stage), { op: "log", entries: [{ at: now, kind: "stage", text: `Conductor entered ${stage}.` }] }], now);
 		paint();
 	});
 
@@ -1117,6 +1148,12 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 			const chosen = answered[PLAN_ASK_KEY] ?? Object.values(answered)[0] ?? [];
+			const now = Date.now();
+			persistOps(doc, [{ op: "upsert", id: `decision-${callID}`, block: {
+				type: "decision", question, options: options?.map((option) => option.label) ?? [], chosen: chosen.join("; "),
+				rationale: recommendation ?? "Answer supplied by the user.", source: "plan_ask", at: now,
+			} }], now);
+			paint();
 			return text(`The user answered: ${chosen.join("; ")}`);
 		},
 	});
