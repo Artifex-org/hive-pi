@@ -48,7 +48,7 @@ import { parseArgs, SESSIONS, transcripts } from "./lib/transcripts.mjs";
 const BLOCK_TYPES = ["text", "steps", "chart", "diagram", "refs", "table", "metrics", "callout", "code", "artifact"];
 
 /** A cheap substring guard so megabyte transcripts are not JSON-parsed line by line. */
-const INTERESTING = /plan|tasks|workflow|Todo|Task/;
+const INTERESTING = /plan|tasks|workflow|Todo|Task/; // `plan.tick` matches on `plan`
 
 function toolInput(block) {
 	// Providers disagree about the field name, and one of them ships it as a
@@ -78,6 +78,14 @@ function readSession(path) {
 		tasks: null,
 		workflow: null,
 		snapshots: { plan: 0, tasks: 0, workflow: 0 },
+		// Ticks are counted SEPARATELY, never folded into `snapshots`. The whole
+		// point of a before/after here is the cost of a status change, and a
+		// measurement that added a small tick to the snapshot column would report
+		// the merge as making the transcript worse while it made it smaller. Zero
+		// on a pre-merge corpus is the correct reading, and the row prints anyway
+		// so a reader can see the instrument looked.
+		ticks: { plan: 0 },
+		tickBytes: { plan: 0 },
 		bytes: { plan: 0, tasks: 0, workflow: 0 },
 		calls: { plan_write: 0, plan_ready: 0, plan_ask: 0, todo: 0, workflow_write: 0 },
 		planOps: {},
@@ -101,6 +109,14 @@ function readSession(path) {
 			s.plan = entry.data?.doc ?? s.plan;
 			s.snapshots.plan++;
 			s.bytes.plan += line.length;
+			continue;
+		}
+		// HIV-2904: a status change writes one of these instead of re-emitting
+		// the document. An instrument that cannot see them would measure the
+		// after-state as "fewer snapshots" with the ticks nowhere at all.
+		if (entry.customType === "plan.tick") {
+			s.ticks.plan++;
+			s.tickBytes.plan += line.length;
 			continue;
 		}
 		if (entry.customType === "tasks") {
@@ -185,6 +201,8 @@ function measure(s) {
 		deps: wfSteps.filter((st) => Array.isArray(st.dependsOn) && st.dependsOn.length > 0).length,
 		// cost + calls
 		snapshots: s.snapshots,
+		ticks: s.ticks,
+		tickBytes: s.tickBytes,
 		bytes: s.bytes,
 		calls: s.calls,
 		planOps: s.planOps,
@@ -284,12 +302,20 @@ function main() {
 		},
 		cost: {
 			plan: { snapshotsAvg: avg(withPlan.map((s) => s.snapshots.plan)), bytesAvg: avg(withPlan.map((s) => s.bytes.plan)) },
+			planTicks: {
+				perSession: avg(withPlan.map((s) => s.ticks.plan)),
+				bytesAvg: avg(withPlan.map((s) => s.tickBytes.plan)),
+				sessions: withPlan.filter((s) => s.ticks.plan > 0).length,
+			},
 			tasks: { snapshotsAvg: avg(withTasks.map((s) => s.snapshots.tasks)), bytesAvg: avg(withTasks.map((s) => s.bytes.tasks)) },
 			workflow: {
 				snapshotsAvg: avg(withWorkflow.map((s) => s.snapshots.workflow)),
 				bytesAvg: avg(withWorkflow.map((s) => s.bytes.workflow)),
 			},
-			totalBytes: sessions.reduce((n, s) => n + s.bytes.plan + s.bytes.tasks + s.bytes.workflow, 0),
+				totalBytes: sessions.reduce(
+				(n, s) => n + s.bytes.plan + s.tickBytes.plan + s.bytes.tasks + s.bytes.workflow,
+				0,
+			),
 		},
 	};
 
@@ -355,6 +381,10 @@ function main() {
 	const c = summary.cost;
 	console.log("\nSnapshot cost per session (whole-document re-emission per mutation):");
 	console.log(`  plan       ${c.plan.snapshotsAvg.toFixed(1).padStart(6)} snapshots   ${kb(c.plan.bytesAvg).padStart(10)}`);
+	console.log(
+		`  plan.tick  ${c.planTicks.perSession.toFixed(1).padStart(6)} ticks       ${kb(c.planTicks.bytesAvg).padStart(10)}` +
+			`   (${c.planTicks.sessions} of ${withPlan.length} sessions)`,
+	);
 	console.log(`  tasks      ${c.tasks.snapshotsAvg.toFixed(1).padStart(6)} snapshots   ${kb(c.tasks.bytesAvg).padStart(10)}`);
 	console.log(`  workflow   ${c.workflow.snapshotsAvg.toFixed(1).padStart(6)} snapshots   ${kb(c.workflow.bytesAvg).padStart(10)}`);
 	console.log(`  corpus total                                 ${(c.totalBytes / 1024 / 1024).toFixed(1)} MB across ${N} sessions`);
