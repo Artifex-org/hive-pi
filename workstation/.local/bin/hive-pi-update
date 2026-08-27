@@ -112,6 +112,7 @@ elif git -C "${repo}" merge-base --is-ancestor origin/main HEAD; then
   available_revision="${head_revision}"
 else
   echo "refusing update: ${repo} diverged from origin/main" >&2
+  record_run failed "diverged from origin/main"
   exit 1
 fi
 mkdir -p "${state_dir}"
@@ -119,34 +120,45 @@ available_tmp="$(mktemp "${available_revision_file}.XXXXXX")"
 printf '%s\n' "${available_revision}" >"${available_tmp}"
 mv "${available_tmp}" "${available_revision_file}"
 
-# settings.json is BOTH ours and pi's. We curate the extension pins, the model
-# list and the theme; pi stamps `lastChangelogVersion` into the same file
-# whenever it shows a new version's changelog. stow makes those one file, so
-# every pi upgrade dirties this pull-only worktree — and the guard below then
-# refused every subsequent run, permanently. Measured 2026-08-06: updates had
-# been dead since the 0.83.0 → 0.84.0 bump, so the harness this script exists to
-# keep current was the one thing it had stopped updating.
+# settings.json is BOTH ours and pi's — and since HIV-2792 it lives in the
+# OVERLAY, not here. We curate the extension pins, the model list and the theme;
+# pi stamps `lastChangelogVersion` into the same file whenever it shows a new
+# version's changelog, writing through the symlink `harness install` planted at
+# ~/.pi/agent/settings.json. So the file pi dirties is the overlay's, and the
+# handling for it now lives in update_overlay() below.
 #
-# pi's own scribble is therefore NOT local work, and is excluded from the guard.
-# It is left in place rather than reverted: reverting would walk the marker
-# backwards every run and make pi re-show the same changelog on a 17-minute
-# timer.
-settings="workstation/.pi/agent/settings.json"
-
+# THE BASE TRACKS ONLY settings.default.json, which is stow-IGNORED (it is a
+# template the provisioner substitutes, never linked into ~), so nothing pi does
+# can dirty this checkout and no exclusion is needed here.
+#
+# The version of this that stayed behind after the split was not merely dead —
+# it aborted the whole updater. `git checkout -- workstation/.pi/agent/settings.json`
+# against a path git no longer knows exits 1, and under `set -Eeuo pipefail`
+# that ends the run. It sits inside the "upstream is strictly ahead" branch, so
+# it lay dormant through every quiet tick and fired on the first real update
+# after the split — measured on joan-omarchy 2026-08-27T22:01:59Z, `failed exit
+# at line 149`, with 26 merged commits stranded and the panel still reporting
+# the harness current.
+#
 # Never discard local work from the pull-only main worktree. `diff HEAD` so a
 # STAGED change counts too — plain `git diff` sees only unstaged, and staged
 # work is exactly what you would least like silently overwritten.
-git -C "${repo}" diff --quiet HEAD -- . ":(exclude)${settings}" || {
+git -C "${repo}" diff --quiet HEAD -- . || {
+  # RECORDED, not just printed. The ERR trap does not fire here — `exit` is not
+  # a failing command — so this path used to end the run leaving the previous
+  # SUCCESS as the newest line in last-run. The readiness extension and the
+  # desktop update panel both read that file, so a checkout that had been
+  # declining every update for days still reported "last update succeeded".
+  # That is the defect HIV-1974 exists to prevent, surviving in the one branch
+  # that returns without raising an error.
   echo "refusing update: ${repo} has local changes" >&2
+  record_run failed "${repo} has local changes"
   exit 1
 }
 
 if [[ "${head_revision}" != "${remote_revision}" && "${available_revision}" == "${remote_revision}" ]]; then
-  # `pull --ff-only` refuses to start with *any* unstaged change, even one in
-  # a path the incoming commit does not touch. Reset Pi's owned changelog
-  # marker only when upstream is strictly ahead; all other local work was
-  # rejected above. Pi stamps the marker again at its next launch.
-  git -C "${repo}" checkout -- "${settings}"
+  # Nothing to reset first: the guard above already rejected every local change,
+  # and this checkout has no file pi writes to.
   git -C "${repo}" pull --ff-only
 fi
 
@@ -222,19 +234,44 @@ update_pi_binaries
 # Nothing is re-stowed. `hive-agent workstation harness install` symlinks the
 # overlay's entries INTO ~/.pi/agent, so those links point at the checkout and a
 # pull is the whole update.
+# The overlay owns settings.json now, so it owns the pi-scribble problem too.
+#
+# ~/.pi/agent/settings.json is a symlink INTO this checkout, so pi stamping
+# `lastChangelogVersion` after showing a changelog leaves the overlay
+# permanently dirty. Without the exclusion below, the guard then declined every
+# overlay update for the life of the machine and said so only as a parenthetical
+# inside a run line that still began with `ok`. Measured on joan-omarchy: the
+# entire recorded difference was 0.83.0 -> 0.84.3 plus pi reformatting the file
+# from tabs to spaces — `git diff -w --stat` reported one changed line — and on
+# that basis the overlay had not updated since.
+#
+# This is the same defect the base carried until 2026-08-06, arriving one layer
+# down because the file moved and its special case did not travel with it.
+overlay_settings="workstation/.pi/agent/settings.json"
+
 update_overlay() {
   [[ -n "${overlay}" ]] || return 0
   if [[ ! -e "${overlay}/.git" ]]; then
     overlay_note=" (overlay ${overlay} is not a checkout)"
     return 0
   fi
-  if ! git -C "${overlay}" diff --quiet HEAD 2>/dev/null; then
+  if ! git -C "${overlay}" diff --quiet HEAD -- . ":(exclude)${overlay_settings}" 2>/dev/null; then
     overlay_note=" (overlay has local changes; left alone)"
     return 0
   fi
-  git -C "${overlay}" fetch --prune origin >/dev/null 2>&1 \
-    && git -C "${overlay}" pull --ff-only >/dev/null 2>&1 \
-    || overlay_note=" (overlay pull failed)"
+  git -C "${overlay}" fetch --prune origin >/dev/null 2>&1 || {
+    overlay_note=" (overlay fetch failed)"
+    return 0
+  }
+  # Reset pi's marker only when there is something to pull, and only if git
+  # still tracks it — `pull --ff-only` refuses to start with ANY unstaged
+  # change, including one the incoming commit does not touch, and a checkout of
+  # an untracked pathspec exits 1. That pair is exactly what took the base down.
+  if ! git -C "${overlay}" diff --quiet HEAD 2>/dev/null \
+    && git -C "${overlay}" ls-files --error-unmatch -- "${overlay_settings}" >/dev/null 2>&1; then
+    git -C "${overlay}" checkout -- "${overlay_settings}" >/dev/null 2>&1 || true
+  fi
+  git -C "${overlay}" pull --ff-only >/dev/null 2>&1 || overlay_note=" (overlay pull failed)"
 }
 update_overlay
 
