@@ -273,6 +273,9 @@ export function isBlocked(state: WorkerState): boolean {
  * the worker's in-flight reasoning, and a `follow_up` for a stop-now correction
  * lets it finish work that is already wrong.
  */
-export function deliveryCommand(id: string, mode: DeliveryMode, message: string): OutboundCommand {
+export function deliveryCommand(id: string, mode: DeliveryMode, message: string, initial = false): OutboundCommand {
+	// A fresh RPC session is idle. `steer` and `follow_up` both only queue a
+	// message, while `prompt` starts the first agent turn.
+	if (initial) return { id, type: "prompt", message };
 	return mode === "steer" ? { id, type: "steer", message } : { id, type: "follow_up", message };
 }

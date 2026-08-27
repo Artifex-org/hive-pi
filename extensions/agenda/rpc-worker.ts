@@ -31,6 +31,7 @@ import { acquireWriterLock, isWriterCapable, noWriterLock } from "../harness/wri
 import { guardWorkerCwd, workerCwdRefusal } from "../guards-common/capability.ts";
 import {
 	type DeliveryMode,
+	deliveryCommand,
 	emptyWorkerState,
 	finalText,
 	foldLine,
@@ -202,7 +203,7 @@ interface StartOptions {
 	env?: Record<string, string>;
 }
 
-export function startDurableWorker(options: StartOptions): WorkerHandle {
+export function startDurableWorker(options: StartOptions, spawnChild: typeof spawn = spawn): WorkerHandle {
 	const args = ["--mode", "rpc", "--no-session"];
 	if (options.model) args.push("--model", options.model);
 	if (options.tools && options.tools.length > 0) args.push("--tools", options.tools.join(","));
@@ -225,7 +226,7 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 	// answers "how do we re-invoke ourselves".
 	const invocation = getPiInvocation(args);
 
-	const child: ChildProcess = spawn(invocation.command, invocation.args, {
+	const child: ChildProcess = spawnChild(invocation.command, invocation.args, {
 		cwd: options.cwd,
 		shell: false,
 		stdio: ["pipe", "pipe", "pipe"],
@@ -238,6 +239,7 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 	let exited = false;
 	let stderr = "";
 	let commandId = 0;
+	let hasPrompted = false;
 	// Every prompt/steer/follow-up owns one eventual turn_end. This watermark is
 	// shared by ALL waiters: when the parent steers an in-flight worker, the
 	// original dispatch must wait for the replacement turn too rather than
@@ -366,7 +368,8 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 			commandId++;
 			desiredTurns = advanceDesiredTurns(desiredTurns, state.turns);
 			const id = `${options.id}-${commandId}`;
-			write(mode === "steer" ? { id, type: "steer", message } : { id, type: "follow_up", message });
+			write(deliveryCommand(id, mode, message, !hasPrompted));
+			hasPrompted = true;
 		},
 		waitForSettle,
 		stop,
