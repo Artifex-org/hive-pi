@@ -61,11 +61,11 @@ export const HINTS: readonly ToolHint[] = [
 			"Do NOT re-authenticate yet — three different failures print this, and only one of them is a credential. " +
 			"(1) The BINARY may not have run: on a mise-managed node `gh` on PATH is a shim that reinstalls before " +
 			"exec'ing, which fails read-only (`mise ERROR … Read-only file system`); try `/usr/bin/gh` — it is " +
-			"usually there and works. (2) The NETWORK may be blocked: `gh auth status` makes a request and reports a " +
-			"blocked one as `The token in keyring is invalid`. `gh auth token` reads the credential with no network, " +
-			"and `curl -sS -o /dev/null -w '%{http_code}' https://api.github.com` tells you whether you can reach " +
-			"GitHub at all — from a sandboxed agent that is normally 200, so `gh pr create` works from right there. " +
-			"(3) Only if `gh auth token` fails for its own reasons is `gh auth login` the answer. And do not go " +
+			"usually there and works. (2) `gh auth status` aggregates every saved profile: an unrelated stale profile can " +
+			"make it fail while the active token works. Check active authentication with `gh api user --jq .login`; " +
+			"`curl -sS -o /dev/null -w '%{http_code}' https://api.github.com` separately tests GitHub transport. " +
+			"From a sandboxed agent that is normally 200, so `gh pr create` works from right here. (3) Only if `gh auth " +
+			"token` fails for its own reasons is `gh auth login` the answer. And do not go " +
 			"hunting for a Hive tool that opens pull requests: Hive's MCP is read-only about PRs " +
 			"(`hive_get_pull`, `hive_list_pulls`); `gh pr create` is the only path.",
 		evidence:

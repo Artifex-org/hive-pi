@@ -421,11 +421,13 @@ export const openrouterProbe: Probe = async (deps) => {
  * proximate cause of a stalled agent, and the advice it gave would have had
  * someone re-authenticate a healthy credential.
  *
- * So the two questions are asked separately, and the cheap one first:
- * `gh auth token` reads the config/keyring and returns in ~60 ms with NO network
- * call, which answers "is there a credential". Only then is reachability worth
- * reporting, and a credential that exists but cannot reach GitHub is `degraded`
- * with a hint that says so — never "log in again".
+ * So executable/token discovery is asked first, without a network call:
+ * `gh auth token` reads the config/keyring and returns in ~60 ms. The returned
+ * token then authenticates `GET /user`, which proves both the active credential
+ * and GitHub reachability. `gh auth status` is deliberately NOT used: it
+ * aggregates every saved profile, so an unrelated stale profile can make it fail
+ * while the active injected token works. Only when `/user` fails is a public
+ * GitHub request needed to distinguish transport failure from credential denial.
  *
  * ## And the third question, which the first fix still got wrong (HIV-1979)
  *
@@ -443,18 +445,17 @@ export const openrouterProbe: Probe = async (deps) => {
  * never ran.
  *
  * The rule this file now follows: **a tool that could not execute has told you
- * nothing about your credentials.** Say so, quote what it actually printed, and
- * do not issue a remedy for a diagnosis you have not made.
+ * nothing about your credentials.** Say so without echoing arbitrary process
+ * output — readiness is durable session state and must not carry credentials.
  */
 
-/** Tells "the binary never ran" apart from "the binary answered no". */
+/** Tells "the binary never ran" apart from "the binary answered no", without retaining process output. */
 export function execFailureDetail(result: ExecResult): string | null {
 	const text = `${result.stdout}\n${result.stderr}`;
-	const line = text
-		.split("\n")
-		.map((l) => l.trim())
-		.find((l) => /mise ERROR|command not found|ENOENT|No such file or directory|Permission denied/i.test(l));
-	return line ? line.slice(0, 160) : null;
+	if (/mise ERROR/i.test(text)) return "mise shim failed to execute";
+	if (/command not found|ENOENT|No such file or directory/i.test(text)) return "executable not found";
+	if (/Permission denied/i.test(text)) return "executable permission denied";
+	return null;
 }
 
 export const ghProbe: Probe = async (deps) => {
@@ -483,22 +484,81 @@ export const ghProbe: Probe = async (deps) => {
 		};
 	}
 
-	const status = await deps.exec("gh", ["auth", "status"], PROBE_TIMEOUT_MS);
-	if (status.code === 0) {
-		const account = /account (\S+)/.exec(`${status.stdout}\n${status.stderr}`)?.[1];
+	const credential = token.stdout.trim();
+	if (!credential) {
+		return {
+			id: "gh",
+			label: "gh auth",
+			status: "degraded",
+			detail: "no credential",
+			hint: "`gh auth login` — PR and review commands will fail without it",
+		};
+	}
+	const authenticated = await deps.getJson(
+		"https://api.github.com/user",
+		{ Authorization: `Bearer ${credential}` },
+		PROBE_TIMEOUT_MS,
+	);
+	if (authenticated.ok) {
+		const account =
+			typeof authenticated.body === "object" &&
+			authenticated.body !== null &&
+			typeof (authenticated.body as { login?: unknown }).login === "string"
+				? (authenticated.body as { login: string }).login
+				: null;
 		return { id: "gh", label: "gh auth", status: "ready", ...(account ? { detail: account } : {}) };
+	}
+
+	// Any HTTP response from the authenticated request proves transport works;
+	// do not let a later public fallback overwrite that fact.
+	if (authenticated.status === 401) {
+		return {
+			id: "gh",
+			label: "gh auth",
+			status: "degraded",
+			detail: "GitHub rejected the active credential (401)",
+			hint:
+				"GitHub is reachable, but the active token was rejected. Refresh the launch credential and start a new " +
+				"session; use `gh auth login` only when the host's own credential is the intended source.",
+		};
+	}
+	if (authenticated.status === 403) {
+		return {
+			id: "gh",
+			label: "gh auth",
+			status: "degraded",
+			detail: "GitHub denied the active credential (403)",
+			hint: "GitHub is reachable; check token policy, scopes, or rate limits before changing authentication.",
+		};
+	}
+	if (authenticated.status !== 0) {
+		return {
+			id: "gh",
+			label: "gh auth",
+			status: "degraded",
+			detail: `GitHub authentication failed (HTTP ${authenticated.status})`,
+			hint: "GitHub is reachable; inspect the authenticated API response before changing credentials.",
+		};
+	}
+
+	const transport = await deps.getJson("https://api.github.com", {}, PROBE_TIMEOUT_MS);
+	if (transport.status === 0) {
+		return {
+			id: "gh",
+			label: "gh auth",
+			status: "degraded",
+			detail: "credential present, GitHub unreachable",
+			hint:
+				"do NOT re-authenticate — the credential was found, but neither authenticated nor public GitHub " +
+				"requests reached an HTTP server. Check the sandbox proxy and allowlist before concluding you cannot deliver.",
+		};
 	}
 	return {
 		id: "gh",
 		label: "gh auth",
 		status: "degraded",
-		detail: "credential present, GitHub unreachable",
-		hint:
-			"do NOT re-authenticate — `gh auth token` succeeded, so the credential is fine and `gh auth status` " +
-			"failed on the network. Check reachability before concluding you cannot deliver: a sandboxed agent " +
-			"has its own netns and no DNS, but egress rides an injected proxy and github.com/api.github.com are " +
-			"normally allowlisted, so `curl -sS -o /dev/null -w '%{http_code}' https://api.github.com` answering " +
-			"200 means `gh pr create` will work from right here.",
+		detail: "GitHub authentication failed",
+		hint: "GitHub is reachable; inspect the authenticated API response before changing credentials.",
 	};
 };
 
@@ -841,10 +901,13 @@ export function realDeps(toolNames: () => string[], cwd: string = process.cwd())
 		exec: (file, args, timeoutMs) =>
 			new Promise<ExecResult>((resolve) => {
 				execFile(file, args, { timeout: timeoutMs, encoding: "utf8" }, (error, stdout, stderr) => {
+					const errorCode = error && (error as { code?: unknown }).code;
+					const failure =
+						typeof errorCode === "string" ? errorCode : error instanceof Error ? error.message : "";
 					resolve({
-						code: error && typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : error ? 1 : 0,
+						code: typeof errorCode === "number" ? errorCode : error ? 1 : 0,
 						stdout: stdout ?? "",
-						stderr: stderr ?? "",
+						stderr: [stderr, failure].filter(Boolean).join("\n"),
 					});
 				});
 			}),
