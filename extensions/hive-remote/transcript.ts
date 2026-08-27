@@ -57,6 +57,7 @@ export interface Transcript {
 	/** Client-minted, monotonic. It is BOTH the ordering and the idempotency key
 	 *  server-side, which is what lets the flush loop be "retry until 2xx". */
 	seq: number;
+	lastAssistantSeq: number;
 	queue: WireEvent[];
 	/** toolCallId -> {name, args} for pairing a start with its end. */
 	pending: Map<string, { name: string; args?: string; batch?: ToolBatch }>;
@@ -68,7 +69,7 @@ export interface Transcript {
 }
 
 export function createTranscript(): Transcript {
-	return { seq: 0, queue: [], pending: new Map(), batches: new Map(), nextBatch: 0, dropped: 0 };
+	return { seq: 0, lastAssistantSeq: 0, queue: [], pending: new Map(), batches: new Map(), nextBatch: 0, dropped: 0 };
 }
 
 /**
@@ -180,6 +181,7 @@ export function foldUserText(
 export function foldAssistantText(t: Transcript, text: string, atMs?: number): void {
 	if (!text) return;
 	push(t, { role: "assistant", kind: "text", text, client_ts: iso(atMs) });
+	t.lastAssistantSeq = t.seq;
 }
 
 /**

@@ -780,7 +780,6 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 */
 	let unsubscribeStatus: (() => void) | undefined;
 	unsubscribeStatus = pi.events.on(AGENT_STATUS_CHANNEL, (data: unknown) => {
-		if (!cfg.reportActivity) return;
 		const revision = (data as AgentStatusEvent | undefined)?.revision;
 		if (typeof revision !== "number") return;
 		const status = latestStatusEntry(latestCtx);
@@ -795,12 +794,16 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			// calm "ready for review", not the amber "needs you".
 			enterPhase(activity, "completed", at);
 		}
-		if (!auth || !sessionID) return;
+		const completionSummarySeq = status.taskState === "completed" && transcript.lastAssistantSeq > 0
+			? transcript.lastAssistantSeq
+			: undefined;
+		if (!auth || !sessionID || (!cfg.reportActivity && completionSummarySeq === undefined)) return;
 		const a = auth;
 		const s = sessionID;
 		const payload = {
 			...buildPayload(activity, at),
 			...(status.recap ? { recap: status.recap } : {}),
+			...(completionSummarySeq === undefined ? {} : { completion_summary_seq: completionSummarySeq }),
 		};
 		setTimeout(() => void postActivity(a, s, payload), 0);
 	});
@@ -1183,6 +1186,22 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				kick();
 				return;
 			}
+			case "complete": {
+				if (!cfg.allowKill) return;
+				// The reviewed final assistant message and acknowledgement are already
+				// durable before this command is claimed. Do not add a best-effort
+				// terminal notice that could race graceful shutdown and imply delivery.
+				setTimeout(() => {
+					try {
+						latestCtx?.shutdown();
+					} catch {
+						// A failed graceful shutdown leaves the session available for the
+						// operator to inspect or end explicitly; never crash the downlink.
+					}
+				}, 0);
+				if (!process.stdout.isTTY) setTimeout(() => process.exit(0), 2_000);
+				return;
+			}
 			case "kill": {
 				if (!cfg.allowKill) return;
 				// Fold the notice BEFORE shutting down: this is the last thing this
@@ -1546,6 +1565,10 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				can_steer: cfg.allowSteer,
 				can_interrupt: cfg.allowInterrupt,
 				can_kill: cfg.allowKill,
+				// Completion uses the same local shutdown primitive as kill, but has
+				// distinct server semantics: it records the completed outcome instead
+				// of an operator termination.
+				...(cfg.allowKill ? { can_complete: true } : {}),
 				can_set_mode: cfg.allowSetMode,
 				// Declared only when the `opmode` extension is actually loaded. The
 				// config flag alone is not enough: it says the OPERATOR permits remote
