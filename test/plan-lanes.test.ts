@@ -187,6 +187,13 @@ describe("one lane, whoever made it", () => {
 		expect(lane(result.doc, "research")!.steps).toHaveLength(1);
 	});
 
+	it("refuses to create an item with no title, and says which id it could not find", () => {
+		const doc = applyOps(emptyPlan(NOW), [{ op: "lane", kind: "execute", items: [{ id: "e1", title: "write" }] }], NOW).doc;
+		const result = applyOps(doc, [{ op: "item", item: { id: "typo", status: "done" } }], LATER);
+		expect(result.problems.join()).toContain('nothing here has id "typo"');
+		expect(lane(result.doc, "execute")!.steps).toHaveLength(1);
+	});
+
 	it("patches an existing item where it is rather than relocating it", () => {
 		// A caller that names a lane while ticking an item meant to tick it, not
 		// to move it. Moving work somebody only meant to update is `move_item`.
