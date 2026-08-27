@@ -29,12 +29,39 @@
  *     a chart baked into HTML is a picture of a chart
  *   - every block is independently patchable, which is the requirement above
  *
+ * WHAT A LANE IS, since HIV-2902. A `steps` block carrying a `kind` is a LANE,
+ * and its items are WORK ITEMS — which is what a todo, a plan step and a
+ * workflow step each were before the three stores were merged into this one.
+ * The rules that keep lanes navigable (the `parentId` tree, the `dependsOn`
+ * DAG, rank placement, which kinds Hive resolves) live in `lanes.ts`; this file
+ * owns the shape and the mutation.
+ *
+ * TWO CLOCKS, ONE DOCUMENT. `revision` counts INTENT and `progress` counts
+ * TICKS. That split is not new — `isIntentOp` below has kept status changes out
+ * of `revision` since the beginning, which is precisely why the workflow could
+ * be folded in here without a checkbox re-arming the approval timer. What is
+ * new is that a tick now increments something, so a reader can tell "nothing
+ * has happened" from "nothing has been re-planned".
+ *
  * Persistence is `pi.appendEntry("plan", snapshot)` — the idiom `tasks/state.ts`
  * and `agenda/goal-state.ts` already use, for the same verified reasons: custom
  * entries are structurally invisible to the LLM, survive compaction, and are
  * copied into a fork. The model sees the plan through TOOL RESULTS, never
  * through a `context` handler (a prompt-cache hazard this repo bans and tests).
  */
+
+import {
+	dependsWouldCycle,
+	descendants,
+	isObservedKind,
+	laneAnchor,
+	lanesOf,
+	MAX_DEPTH,
+	parentWouldCycle,
+	targetLane,
+	depthOf,
+} from "./lanes.ts";
+import { LANE_TEMPLATES, templateLaneOps } from "./templates.ts";
 
 export const PLAN_ENTRY_TYPE = "plan";
 
@@ -48,12 +75,69 @@ const SCHEMA_VERSION = 1;
  * tried to also mean "half the steps are done" would be a second copy of
  * something already recorded, and the two would disagree.
  */
-export type PlanPhase = "drafting" | "ready" | "approved" | "abandoned";
+export type PlanPhase = "none" | "drafting" | "ready" | "approved" | "abandoned";
 
-export type StepStatus = "pending" | "in_progress" | "done" | "skipped" | "blocked";
+/**
+ * The one status vocabulary, replacing three.
+ *
+ * `TaskItem` had `pending | in_progress | completed`, `PlanStep` had
+ * `pending | in_progress | done | skipped | blocked`, and `WorkflowStep` had
+ * those plus `failed` and spelled in-progress `running`. This is their union
+ * with the two synonyms collapsed: `completed` and `running` are accepted on
+ * the way in (see `normalizeStatus`) and stored as `done` and `in_progress`.
+ *
+ * `failed` is kept from the workflow vocabulary because a step genuinely can
+ * fail — a gate that went red, a repro that did not reproduce — and reporting
+ * that as `blocked` loses the difference between "waiting on something" and
+ * "tried it and it did not work".
+ */
+export type WorkItemStatus = "pending" | "in_progress" | "done" | "failed" | "skipped" | "blocked";
 
-const VALID_PHASES: readonly PlanPhase[] = ["drafting", "ready", "approved", "abandoned"];
-const VALID_STEP_STATUSES: readonly StepStatus[] = ["pending", "in_progress", "done", "skipped", "blocked"];
+/** @deprecated The pre-merge name. Kept so existing imports keep compiling. */
+export type StepStatus = WorkItemStatus;
+
+const VALID_PHASES: readonly PlanPhase[] = ["none", "drafting", "ready", "approved", "abandoned"];
+
+/**
+ * `none` is the phase of a document that has LANES and no plan.
+ *
+ * It is the initial phase since the merge, and it exists so that the common
+ * case — a short task that writes three todos and never enters plan mode — does
+ * not present itself to an operator as an unapproved plan awaiting their
+ * approval. Measured before the merge: 98% of sessions kept a todo list and
+ * only 71% kept a plan, so "lanes but no plan" is the majority state, not an
+ * edge case.
+ *
+ * Every consumer that reacts to a plan must treat `none` as NO PLAN: the
+ * approval gate, the handsfree sweep, the conductor's phase signal, the
+ * sidebar's phase chip, `plan_ready`, and the deck's plan section.
+ */
+export function hasPlan(doc: PlanDoc): boolean {
+	return doc.phase !== "none";
+}
+const VALID_STEP_STATUSES: readonly WorkItemStatus[] = [
+	"pending",
+	"in_progress",
+	"done",
+	"failed",
+	"skipped",
+	"blocked",
+];
+
+/**
+ * Accept the two synonyms the merged vocabularies brought with them.
+ *
+ * A façade caller that still says `completed` (the todo word) or `running` (the
+ * workflow word) is not making a mistake — it is speaking the vocabulary its
+ * tool has always had, and those tools keep their schemas. Translating on the
+ * way in is what lets `TodoWrite` and `workflow_write` stay unchanged.
+ */
+export function normalizeStatus(value: unknown): WorkItemStatus | undefined {
+	if (typeof value !== "string") return undefined;
+	if (value === "completed") return "done";
+	if (value === "running") return "in_progress";
+	return (VALID_STEP_STATUSES as readonly string[]).includes(value) ? (value as WorkItemStatus) : undefined;
+}
 
 export type BlockType =
 	| "text"
@@ -99,29 +183,83 @@ export const VALID_BLOCK_TYPES: readonly BlockType[] = [
  */
 export const MAX_ARTIFACT_CHARS = 128 * 1024;
 
-export interface PlanStep {
+/**
+ * One piece of work — what a todo, a plan step and a workflow step each were.
+ *
+ * The three carried nine overlapping fields between them and were kept in step
+ * by `taskId` and `planStepId` links that something had to write and something
+ * else had to trust. Both links are gone: an item is in a lane, and that IS the
+ * relationship the links were expressing.
+ *
+ * `taskId` in particular is not merely redundant now — it never worked. It is
+ * documented as "the tasks extension id this step materialized into once
+ * approved", and `scripts/plan-shape.mjs` finds **0 producers across 594
+ * sessions**. Nothing ever wrote it.
+ */
+export interface WorkItem {
 	id: string;
 	title: string;
+	/**
+	 * Present-continuous form, shown while the item is in progress.
+	 *
+	 * From the todo list, where it is the dual-text trick that lets a live view
+	 * read "Running the migration" while the list reads "Run the migration".
+	 */
+	activeForm?: string;
 	detail?: string;
-	status: StepStatus;
-	/** Files this step is expected to touch. Advisory; nothing enforces it. */
+	/**
+	 * What KIND of work this is, and therefore WHOSE claim its status is.
+	 *
+	 * `task` (the default, and anything unrecognised) is the agent's own work
+	 * and its status is read as written. A kind Hive can observe — `push`,
+	 * `pr.open`, `ci.green`, `merged` … — has its status resolved from Hive's
+	 * own run and pull rows on read, and `applyOps` REFUSES to set one here
+	 * rather than accepting a value that would be discarded. See lanes.ts.
+	 */
+	kind?: string;
+	status: WorkItemStatus;
+	/** Files this item is expected to touch. Advisory; nothing enforces it. */
 	files?: string[];
-	/** Ids of steps this one waits on. Advisory — see `applyOps`. */
+	/**
+	 * Ids this item waits on. ENFORCED to be acyclic (lanes.ts), not enforced
+	 * as a gate: nothing here refuses to start an item whose dependency is
+	 * unfinished. A harness that enforces its own edges turns a bad edge into a
+	 * deadlock the model cannot argue its way out of.
+	 *
+	 * Used by 96% of measured sessions — the most-adopted structural field in
+	 * the whole document.
+	 */
+	dependsOn?: string[];
+	/**
+	 * The item this one decomposes — nesting, within the same lane.
+	 *
+	 * Absent for a root item. Depth is capped and a parent that would close a
+	 * loop is refused (lanes.ts). Kept through the merge on measurement rather
+	 * than on the stale note that said nothing used it: 14% of sessions do, and
+	 * the rate is rising.
+	 */
+	parentId?: string;
+	/** @deprecated The pre-merge name for `dependsOn`, still read on the way in. */
 	blockedBy?: string[];
-	/** The `tasks` extension id this step materialized into once approved. */
-	taskId?: string;
 	linearKey?: string;
-	/** Worker id, when a step is delegated. */
+	/** Worker id, when the item is delegated. */
 	owner?: string;
+	/** ms epoch — also what attaches a delegation to this item in the diagram. */
+	startedAt?: number;
+	endedAt?: number;
 	/**
 	 * What ACTUALLY happened, when it diverged from what was planned.
 	 *
 	 * The single cheapest anti-drift device in the design: a plan that records
 	 * where reality went differently stays honest, where one that silently
-	 * absorbs the change reads as though it predicted it.
+	 * absorbs the change reads as though it predicted it. 87% of measured
+	 * sessions wrote at least one.
 	 */
 	note?: string;
 }
+
+/** @deprecated The pre-merge name. Kept so existing imports keep compiling. */
+export type PlanStep = WorkItem;
 
 interface BlockBase {
 	id: string;
@@ -137,10 +275,64 @@ export interface TextBlock extends BlockBase {
 	markdown: string;
 }
 
-export interface StepsBlock extends BlockBase {
+/**
+ * A LANE: a list of work items that knows which phase of the work it holds.
+ *
+ * It is still a `steps` block on the wire — no reader has to learn a new block
+ * type, and a lane written by a new client renders in an old one as the step
+ * list it has always been. Everything the merge added is optional.
+ */
+export interface LaneBlock extends BlockBase {
 	type: "steps";
-	steps: PlanStep[];
+	/**
+	 * `frame` | `research` | `plan` | `execute` | `verify` | `deliver` |
+	 * `consolidate`, or anything the model invents.
+	 *
+	 * OPEN on purpose. A closed set would make the model's own vocabulary —
+	 * "Triage", "Fix", "Verification" — unrepresentable, and the measured
+	 * consequence of forcing it into a closed set was a fourth box restating
+	 * the first three. Known kinds get RANKED placement (lanes.ts); unknown
+	 * kinds are placed where the model put them.
+	 */
+	kind?: string;
+	/**
+	 * Set while this lane exists only because a MACHINE made it — the conductor
+	 * walking into a stage, or the todo façade needing somewhere to write — and
+	 * cleared the moment the model writes to it.
+	 *
+	 * It exists to settle one race, which was the single most damaging defect
+	 * in the pre-merge corpus: the todo mirror wrote its lane on turn one, with
+	 * items in it, long before the model declared its own; 13 of 15 measured
+	 * sessions ended with two "Execute" lanes. A lane a machine made is
+	 * CLAIMABLE, so the model's declaration lands in the lane that already
+	 * holds the todos instead of beside it.
+	 */
+	origin?: "conductor" | "mirror";
+	/**
+	 * One optional iteration annotation; never a dependency edge.
+	 *
+	 * HIV-2155's contract, carried across the merge verbatim. An orchestrator's
+	 * watch → collect → dispatch is a loop, and a DAG cannot say so: `dependsOn`
+	 * stays acyclic and the back-edge is decoration. Without it a lead running
+	 * waves for hours reads as "almost done" rather than "iterating".
+	 */
+	loop?: LaneLoop;
+	steps: WorkItem[];
 }
+
+export interface LaneLoop {
+	/** Item ids WITHIN this lane forming the loop body, in body order. */
+	steps: string[];
+	/** Human-readable exit condition. */
+	until?: string;
+	/** 1-based wave counter. */
+	iteration?: number;
+	/** False once the loop has exited; absent means active. */
+	active?: boolean;
+}
+
+/** @deprecated The pre-merge name. Kept so existing imports keep compiling. */
+export type StepsBlock = LaneBlock;
 
 /**
  * A chart as DATA plus a spec, never as an image or as markup.
@@ -262,6 +454,40 @@ export interface PlanDoc {
 	 * and one that was rewritten forty times identically.
 	 */
 	revision: number;
+	/**
+	 * The TICK clock — bumped by an item's status, note or timestamps, by a loop
+	 * tick, and by a stage advance. Never by an edit to what the plan means.
+	 *
+	 * It exists so that merging execution into this document costs the approval
+	 * machinery nothing. `revision` drives approval, the handsfree timer and the
+	 * stored revision history; `progress` drives the live view and nothing else.
+	 * A viewer refetches when EITHER moves; an approval re-arms only when
+	 * `revision` does.
+	 */
+	progress: number;
+	/**
+	 * Which phase of the work the session is in — the conductor's answer, not
+	 * the model's, and a single value rather than a lane.
+	 *
+	 * Carried here rather than derived from the lanes because it is the glance
+	 * an operator wants and because it is an ORCHESTRATION fact: Hive reports it
+	 * from `diagnose_agent_session`, `recap_session` and every roster row. A
+	 * session that never declared one has none, which is the truth about it.
+	 */
+	stage?: string;
+	/**
+	 * Linear tickets this session serves. The model writes a key; the browser
+	 * hydrates the rest through the broker.
+	 *
+	 * Before this, ticket chips in the workspace were DERIVED — from a `refs`
+	 * block, an item's `linearKey`, or, failing both, a guess at the branch
+	 * name. Measured: 0 of 581 task lists carried a `linearKey` and only 6% of
+	 * plans named a ticket in `refs`, so in practice the chips were the branch
+	 * guess almost every time.
+	 */
+	tickets?: { key: string; url?: string; role?: "primary" | "related" }[];
+	/** The project milestone this session contributes to, when one is linked. */
+	milestone?: { goalId: string; stepId?: string };
 	blocks: PlanBlock[];
 	/**
 	 * Monotonic id source, persisted rather than derived.
@@ -279,8 +505,11 @@ export function emptyPlan(now: number): PlanDoc {
 	return {
 		title: "",
 		goal: "",
-		phase: "drafting",
+		// Lanes before a plan: a session that only ever writes todos must not
+		// present itself as a plan waiting to be approved. See `hasPlan`.
+		phase: "none",
 		revision: 0,
+		progress: 0,
 		blocks: [],
 		nextId: 1,
 		createdAt: now,
@@ -290,6 +519,16 @@ export function emptyPlan(now: number): PlanDoc {
 
 export function isEmpty(doc: PlanDoc): boolean {
 	return doc.blocks.length === 0 && doc.title === "" && doc.goal === "";
+}
+
+/**
+ * Whether this document is only lanes — work, but nothing anybody planned.
+ *
+ * The distinction `plan_ready` needs: presenting a bare todo list for approval
+ * is not what the approval gate is for.
+ */
+export function isLanesOnly(doc: PlanDoc): boolean {
+	return doc.blocks.length > 0 && doc.blocks.every((block) => block.type === "steps");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -302,6 +541,12 @@ export interface HeaderOp {
 	title?: string;
 	goal?: string;
 	phase?: PlanPhase;
+	/** The lifecycle stage. A tick, not an intent change — see `isIntentOp`. */
+	stage?: string;
+	/** A label for THIS revision, shown in the version picker (HIV-2906). */
+	label?: string;
+	tickets?: { key: string; url?: string; role?: "primary" | "related" }[];
+	milestone?: { goalId: string; stepId?: string } | null;
 }
 
 /**
@@ -355,21 +600,117 @@ export interface MoveOp {
  */
 export interface SetStepOp {
 	op: "set_step";
-	/** Step id. Blocks are searched for it; the containing block need not be named. */
+	/** Item id. Lanes are searched for it; the containing lane need not be named. */
 	id: string;
-	status?: StepStatus;
+	status?: WorkItemStatus | "completed" | "running";
 	note?: string;
 	owner?: string | null;
-	taskId?: string | null;
 	linearKey?: string | null;
+	startedAt?: number;
+	endedAt?: number;
 }
 
-export type PlanOp = HeaderOp | UpsertOp | RemoveOp | MoveOp | SetStepOp;
+/**
+ * Create or update a LANE, addressed by id or by kind.
+ *
+ * By KIND is the half that matters, and it is what ended the duplicate-lane
+ * defect: a caller that says "the execute lane" gets the execute lane whether
+ * the conductor made it, the todo façade made it, or it does not exist yet. A
+ * lane a machine made is CLAIMED by this op — its `origin` is cleared — so the
+ * model's declaration lands in the lane that already holds the mirrored todos
+ * rather than in a second lane beside it.
+ *
+ * Placement is by RANK when the caller expresses no position, because the
+ * documented `before` argument that preceded it was used zero times in 213 ops
+ * while 11 of 11 sessions put their research lane in the wrong place.
+ */
+export interface LaneOp {
+	op: "lane";
+	/** Lane block id. Omit to address by kind. */
+	id?: string;
+	/** Lifecycle kind. Creates the lane when neither id nor kind matches one. */
+	kind?: string;
+	title?: string;
+	/** Insert before this lane. Omit to place by rank. */
+	before?: string;
+	/** Marks the lane machine-made. Only the conductor and the façade set it. */
+	origin?: "conductor" | "mirror";
+	/** Items to create or update in the lane, applied in order. */
+	items?: ItemInput[];
+}
+
+/**
+ * Create or update ONE work item, addressed by id.
+ *
+ * `lane` names where a NEW item goes (by lane id or kind); it is ignored when
+ * the id already exists, because moving an item between lanes is `move_item`
+ * and doing it silently here would relocate work a caller only meant to tick.
+ */
+export interface ItemOp {
+	op: "item";
+	id?: string;
+	/** Lane id or kind for a new item. Defaults to the target lane (lanes.ts). */
+	lane?: string;
+	item: ItemInput;
+}
+
+/** Move one item to another lane, or under another parent. */
+export interface MoveItemOp {
+	op: "move_item";
+	id: string;
+	lane?: string;
+	/** New parent within the destination lane; null detaches to the root. */
+	parentId?: string | null;
+}
+
+/** Declare or update a lane's loop annotation (HIV-2155). */
+export interface LoopOp {
+	op: "loop";
+	lane: string;
+	steps?: string[];
+	until?: string;
+	active?: boolean;
+}
+
+/** Advance a lane's wave counter. Body item statuses are the model's to reset. */
+export interface LoopTickOp {
+	op: "loop_tick";
+	lane: string;
+}
+
+/**
+ * Ask for one of the recognisable lane shapes.
+ *
+ * Seeding is not coming back — it assumed every session ships code, and an
+ * orchestration run, an infra audit and a research sweep each got a delivery
+ * lane they would never walk, then reported themselves blocked on a merge that
+ * was never going to happen. What was worth keeping is narrower: for a handful
+ * of shapes the lane is the same every time and is the least interesting thing
+ * for a model to author. So the shapes are asked for, never given.
+ */
+export interface TemplateOp {
+	op: "template";
+	name: string;
+	title?: string;
+}
+
+export type PlanOp =
+	| HeaderOp
+	| UpsertOp
+	| RemoveOp
+	| MoveOp
+	| SetStepOp
+	| LaneOp
+	| ItemOp
+	| MoveItemOp
+	| LoopOp
+	| LoopTickOp
+	| TemplateOp;
 
 /** A block as the model supplies it: no ids, no timestamps. */
 export type BlockInput =
 	| { type: "text"; title?: string; markdown: string }
-	| { type: "steps"; title?: string; steps: StepInput[] }
+	| { type: "steps"; title?: string; steps: ItemInput[] }
 	| {
 			type: "chart";
 			title?: string;
@@ -386,15 +727,26 @@ export type BlockInput =
 	| { type: "code"; title?: string; language?: string; code: string; caption?: string }
 	| { type: "artifact"; title?: string; html: string; height?: number; caption?: string };
 
-export interface StepInput {
-	/** Preserved when re-stating an existing step, so status and links survive. */
+export interface ItemInput {
+	/** Preserved when re-stating an existing item, so status and links survive. */
 	id?: string;
 	title: string;
+	activeForm?: string;
 	detail?: string;
-	status?: StepStatus;
+	kind?: string;
+	status?: WorkItemStatus | "completed" | "running";
 	files?: string[];
+	dependsOn?: string[];
+	parentId?: string;
+	linearKey?: string;
+	owner?: string;
+	note?: string;
+	/** @deprecated Read as `dependsOn` on the way in. */
 	blockedBy?: string[];
 }
+
+/** @deprecated The pre-merge name. Kept so existing imports keep compiling. */
+export type StepInput = ItemInput;
 
 export interface OpResult {
 	doc: PlanDoc;
@@ -422,11 +774,58 @@ function cleanStringList(value: unknown): string[] | undefined {
 	return value.map((v) => cleanString(v)).filter((v): v is string => v !== undefined);
 }
 
-/** Ops that change what the plan MEANS, as opposed to how far along it is. */
+/**
+ * Ops that change what the plan MEANS, as opposed to how far along it is.
+ *
+ * This function is the whole reason the workflow document could be folded into
+ * this one. It has always kept a ticked checkbox out of `revision`; the merge
+ * only had to add the ops that tick, and give them somewhere to count.
+ *
+ * The two judgement calls in here:
+ *
+ *   `header` is intent only when it names the title, the goal, the tickets or
+ *   the milestone. A `stage` advance is the conductor reporting where it got
+ *   to — it happens several times in a session that never re-planned once, and
+ *   counting it would re-arm the approval timer on a machine's beat.
+ *
+ *   `lane` IS intent. Declaring a lane is declaring the shape of the work, and
+ *   an operator who approved a three-lane plan should see a fourth lane as a
+ *   change to what they approved. Ticking the items inside it is not.
+ */
 function isIntentOp(op: PlanOp): boolean {
-	if (op.op === "set_step") return false;
-	if (op.op === "header") return op.title !== undefined || op.goal !== undefined;
-	return true;
+	switch (op.op) {
+		case "set_step":
+		case "loop_tick":
+		case "move_item":
+			return false;
+		case "item":
+			// Creating work is intent; setting a status on existing work is not.
+			return op.item.id === undefined || op.item.status === undefined || Object.keys(op.item).length > 2;
+		case "header":
+			return (
+				op.title !== undefined ||
+				op.goal !== undefined ||
+				op.tickets !== undefined ||
+				op.milestone !== undefined
+			);
+		default:
+			return true;
+	}
+}
+
+/** Ops that move the PROGRESS clock: something happened, nothing was re-planned. */
+function isTickOp(op: PlanOp): boolean {
+	switch (op.op) {
+		case "set_step":
+		case "loop_tick":
+		case "move_item":
+		case "item":
+			return true;
+		case "header":
+			return op.stage !== undefined || op.phase !== undefined;
+		default:
+			return false;
+	}
 }
 
 /**
@@ -446,6 +845,7 @@ export function applyOps(doc: PlanDoc, ops: readonly PlanOp[], now: number): OpR
 	const removed: string[] = [];
 	const problems: string[] = [];
 	let intentChanged = false;
+	let ticked = false;
 
 	ops.forEach((op, index) => {
 		const label = `op #${index + 1}`;
@@ -467,18 +867,44 @@ export function applyOps(doc: PlanDoc, ops: readonly PlanOp[], now: number): OpR
 			case "set_step":
 				applySetStep(next, op, now, updated, problems, label);
 				break;
+			case "lane":
+				applyLane(next, op, now, created, updated, problems, label);
+				break;
+			case "item":
+				applyItem(next, op, now, created, updated, problems, label);
+				break;
+			case "move_item":
+				applyMoveItem(next, op, now, updated, problems, label);
+				break;
+			case "loop":
+				applyLoop(next, op, now, updated, problems, label);
+				break;
+			case "loop_tick":
+				applyLoopTick(next, op, now, updated, problems, label);
+				break;
+			case "template":
+				applyTemplate(next, op, now, created, updated, problems, label);
+				break;
 			default:
 				problems.push(`${label}: unknown op "${String((op as { op?: unknown }).op)}"`);
 		}
 
-		// Only a op that actually applied counts toward the revision.
-		if (problems.length === before && isIntentOp(op)) intentChanged = true;
+		// Only an op that actually applied counts toward either clock.
+		if (problems.length === before) {
+			if (isIntentOp(op)) intentChanged = true;
+			if (isTickOp(op)) ticked = true;
+		}
 	});
 
 	next = {
 		...next,
 		revision: intentChanged ? next.revision + 1 : next.revision,
-		updatedAt: created.length + updated.length + removed.length > 0 || intentChanged ? now : next.updatedAt,
+		// One increment per BATCH, not per op: a façade that writes six status
+		// changes in one call did one thing, and a counter that made it look
+		// like six would make "how much has happened" unreadable at a glance.
+		progress: ticked ? next.progress + 1 : next.progress,
+		updatedAt:
+			created.length + updated.length + removed.length > 0 || intentChanged || ticked ? now : next.updatedAt,
 	};
 
 	return { doc: next, created, updated, removed, problems };
@@ -496,7 +922,34 @@ function applyHeader(doc: PlanDoc, op: HeaderOp, problems: string[], label: stri
 	const goal = cleanString(op.goal);
 	if (title !== undefined) doc.title = title;
 	if (goal !== undefined) doc.goal = goal;
+
+	const stage = cleanString(op.stage);
+	if (stage !== undefined) doc.stage = stage;
+
+	if (op.tickets !== undefined) {
+		const tickets = (Array.isArray(op.tickets) ? op.tickets : [])
+			.map((ticket) => {
+				const key = cleanString(ticket?.key)?.toUpperCase();
+				if (key === undefined) return undefined;
+				return {
+					key,
+					url: cleanString(ticket?.url),
+					role: ticket?.role === "primary" ? ("primary" as const) : ("related" as const),
+				};
+			})
+			.filter((ticket): ticket is NonNullable<typeof ticket> => ticket !== undefined)
+			.slice(0, MAX_TICKETS);
+		doc.tickets = tickets.length > 0 ? tickets : undefined;
+	}
+
+	if (op.milestone !== undefined) {
+		const goalId = op.milestone === null ? undefined : cleanString(op.milestone.goalId);
+		doc.milestone = goalId === undefined ? undefined : { goalId, stepId: cleanString(op.milestone?.stepId) };
+	}
 }
+
+/** A plan naming a dozen tickets is not naming any of them. */
+const MAX_TICKETS = 12;
 
 function applyUpsert(
 	doc: PlanDoc,
@@ -584,7 +1037,6 @@ function mergeSteps(previous: readonly PlanStep[], incoming: readonly PlanStep[]
 		return {
 			...step,
 			status: step.status === "pending" ? prior.status : step.status,
-			taskId: step.taskId ?? prior.taskId,
 			linearKey: step.linearKey ?? prior.linearKey,
 			owner: step.owner ?? prior.owner,
 			note: step.note ?? prior.note,
@@ -653,8 +1105,9 @@ function applySetStep(
 		problems.push(`${label}: set_step needs a step id`);
 		return;
 	}
-	if (op.status !== undefined && !VALID_STEP_STATUSES.includes(op.status)) {
-		problems.push(`${label}: unknown step status "${String(op.status)}"`);
+	const status = op.status === undefined ? undefined : normalizeStatus(op.status);
+	if (op.status !== undefined && status === undefined) {
+		problems.push(`${label}: unknown item status "${String(op.status)}"`);
 		return;
 	}
 
@@ -664,33 +1117,354 @@ function applySetStep(
 		if (at === -1) continue;
 
 		const current = block.steps[at];
+
+		// An agent cannot mark its own gate green. For a kind whose truth lives
+		// in Hive's own run and pull rows, a status written here is DISCARDED on
+		// read — so the tool refuses it and says why, rather than accepting a
+		// value that quietly goes nowhere. A tool that ignores half its argument
+		// teaches the model nothing.
+		if (status !== undefined && isObservedKind(current.kind)) {
+			problems.push(
+				`${label}: "${id}" is a ${current.kind} item, whose status Hive resolves from its own runs and pull requests; ` +
+					`leave it alone and let the observation speak`,
+			);
+			return;
+		}
+
 		let owner = current.owner;
 		if (op.owner === null) owner = undefined;
 		else if (typeof op.owner === "string") owner = cleanString(op.owner);
-
-		let taskId = current.taskId;
-		if (op.taskId === null) taskId = undefined;
-		else if (typeof op.taskId === "string") taskId = cleanString(op.taskId);
 
 		let linearKey = current.linearKey;
 		if (op.linearKey === null) linearKey = undefined;
 		else if (typeof op.linearKey === "string") linearKey = cleanString(op.linearKey);
 
+		// Timestamps are stamped from the transition rather than asked for: an
+		// item that just started is starting now, and a caller that had to
+		// supply the clock would supply a wrong one half the time. They are what
+		// attaches a delegation to the right item in the diagram.
+		const started = status === "in_progress" && current.status !== "in_progress";
+		const ended = status !== undefined && status !== "in_progress" && status !== "pending";
+
 		block.steps[at] = {
 			...current,
-			status: op.status ?? current.status,
+			status: status ?? current.status,
 			note: op.note === undefined ? current.note : cleanString(op.note),
 			owner,
-			taskId,
 			linearKey,
+			startedAt: op.startedAt ?? (started ? now : current.startedAt),
+			endedAt: op.endedAt ?? (ended ? now : current.endedAt),
 		};
 		block.updatedAt = now;
 		updated.push(block.id);
 		return;
 	}
 
-	problems.push(`${label}: no steps block contains step "${id}"`);
+	problems.push(`${label}: no lane contains item "${id}"`);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Lanes and work items                                                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Find the lane an op is addressing.
+ *
+ * By id first, then by kind. Addressing by KIND is what ended the duplicate
+ * lane: the todo façade, the conductor and the model all say "execute" and all
+ * three reach the same block, whichever of them created it.
+ */
+function findLane(doc: PlanDoc, ref: string | undefined): LaneBlock | undefined {
+	const key = cleanString(ref);
+	if (key === undefined) return undefined;
+	const lanes = lanesOf(doc);
+	return lanes.find((lane) => lane.id === key) ?? lanes.find((lane) => lane.kind === key);
+}
+
+/** A work item as the model supplies it, bounded and with synonyms resolved. */
+function normalizeItem(input: ItemInput, id: string): WorkItem {
+	const deps = cleanStringList(input.dependsOn) ?? cleanStringList(input.blockedBy);
+	return {
+		id,
+		title: cleanString(input.title) ?? id,
+		activeForm: cleanString(input.activeForm),
+		detail: cleanString(input.detail),
+		kind: cleanString(input.kind),
+		status: normalizeStatus(input.status) ?? "pending",
+		files: cleanStringList(input.files),
+		dependsOn: deps && deps.length > 0 ? deps : undefined,
+		parentId: cleanString(input.parentId),
+		linearKey: cleanString(input.linearKey),
+		owner: cleanString(input.owner),
+		note: cleanString(input.note),
+	};
+}
+
+/**
+ * Write one item into a lane, creating or patching by id.
+ *
+ * The two structural edges are checked HERE rather than trusted, because both
+ * are load-bearing for the diagram: a `parentId` that would close a loop or
+ * exceed the depth cap is dropped with a complaint, and a `dependsOn` that would
+ * close a cycle is dropped with a complaint. Neither refuses the ITEM — losing a
+ * piece of work over a bad edge is a worse trade than keeping it and saying the
+ * edge was wrong.
+ */
+function writeItem(
+	doc: PlanDoc,
+	lane: LaneBlock,
+	input: ItemInput,
+	now: number,
+	created: string[],
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const supplied = cleanString(input.id);
+	const at = supplied === undefined ? -1 : lane.steps.findIndex((item) => item.id === supplied);
+	const id = supplied ?? String(doc.nextId++);
+	const item = normalizeItem(input, id);
+
+	if (item.dependsOn && dependsWouldCycle(doc, id, item.dependsOn)) {
+		problems.push(`${label}: dependsOn on "${id}" would close a cycle; the edge was dropped, the item was kept`);
+		item.dependsOn = undefined;
+	}
+	if (item.parentId !== undefined) {
+		if (parentWouldCycle(lane, id, item.parentId)) {
+			problems.push(`${label}: parentId on "${id}" would close a loop; the item was kept at the root`);
+			item.parentId = undefined;
+		} else if (depthOf(lane, item.parentId) >= MAX_DEPTH) {
+			problems.push(
+				`${label}: "${id}" would nest deeper than ${MAX_DEPTH}; the item was kept at its parent's level`,
+			);
+			item.parentId = lane.steps.find((s) => s.id === item.parentId)?.parentId;
+		}
+	}
+
+	if (at === -1) {
+		lane.steps.push(item);
+		lane.updatedAt = now;
+		created.push(id);
+		return;
+	}
+
+	const current = lane.steps[at];
+	// A re-stated item keeps what it has earned. Without this, a model rewording
+	// its own list resets every status to pending and the document reports that
+	// finished work had not started.
+	lane.steps[at] = {
+		...current,
+		...Object.fromEntries(Object.entries(item).filter(([, v]) => v !== undefined)),
+		status: input.status === undefined ? current.status : item.status,
+	} as WorkItem;
+	lane.updatedAt = now;
+	updated.push(id);
+}
+
+/**
+ * Create or claim a lane, then write its items.
+ *
+ * CLAIMING is the load-bearing half. A lane a machine made carries `origin`, and
+ * any op that names it from the model clears that mark — so the model's declared
+ * "Implement" lane merges into the lane that already holds the mirrored todos
+ * instead of appearing beside it. 13 of 15 sessions carried two Execute lanes
+ * before this rule existed, and four rounds of adoption logic in the old
+ * workflow document failed to fix it because each round keyed on something the
+ * race made untrue.
+ */
+function applyLane(
+	doc: PlanDoc,
+	op: LaneOp,
+	now: number,
+	created: string[],
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const kind = cleanString(op.kind);
+	let lane = findLane(doc, op.id) ?? findLane(doc, kind);
+
+	if (!lane) {
+		const id = cleanString(op.id) ?? String(doc.nextId++);
+		lane = {
+			type: "steps",
+			id,
+			title: cleanString(op.title) ?? cleanString(op.kind),
+			kind,
+			origin: op.origin,
+			steps: [],
+			createdAt: now,
+			updatedAt: now,
+		};
+		// Placement by RANK when the caller expressed none. A documented `before`
+		// that models never reached for is not a mechanism; a rule that fires
+		// without being remembered is.
+		const before = cleanString(op.before) ?? laneAnchor(doc, kind);
+		const at = before === undefined ? -1 : doc.blocks.findIndex((block) => block.id === before);
+		if (at === -1) doc.blocks.push(lane);
+		else doc.blocks.splice(at, 0, lane);
+		created.push(id);
+	} else {
+		const title = cleanString(op.title);
+		if (title !== undefined) lane.title = title;
+		if (kind !== undefined) lane.kind = kind;
+		// The claim. `origin` is only ever SET by the machine that made the lane,
+		// and only ever cleared here.
+		if (op.origin === undefined) lane.origin = undefined;
+		lane.updatedAt = now;
+		updated.push(lane.id);
+	}
+
+	for (const item of op.items ?? []) {
+		writeItem(doc, lane, item, now, created, updated, problems, label);
+	}
+}
+
+/** Create or update ONE item, in the named lane or in the one the session is in. */
+function applyItem(
+	doc: PlanDoc,
+	op: ItemOp,
+	now: number,
+	created: string[],
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const id = cleanString(op.item.id);
+	// An existing id is patched WHERE IT IS. Relocating an item because a caller
+	// named a lane while ticking it is `move_item`'s job, and doing it here
+	// would move work somebody only meant to update.
+	const holding = id === undefined ? undefined : lanesOf(doc).find((lane) => lane.steps.some((i) => i.id === id));
+	const lane = holding ?? findLane(doc, op.lane) ?? targetLane(doc);
+
+	if (!lane) {
+		// No lane at all: make the one the todo façade would have made. A
+		// document that has work has somewhere to put it.
+		applyLane(doc, { op: "lane", kind: "execute", title: "Execute", origin: "mirror", items: [op.item] }, now, created, updated, problems, label);
+		return;
+	}
+	writeItem(doc, lane, op.item, now, created, updated, problems, label);
+}
+
+/** Move an item to another lane, or under another parent. */
+function applyMoveItem(
+	doc: PlanDoc,
+	op: MoveItemOp,
+	now: number,
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const id = cleanString(op.id);
+	if (id === undefined) {
+		problems.push(`${label}: move_item needs an item id`);
+		return;
+	}
+	const from = lanesOf(doc).find((lane) => lane.steps.some((item) => item.id === id));
+	if (!from) {
+		problems.push(`${label}: no lane contains item "${id}"`);
+		return;
+	}
+	const to = findLane(doc, op.lane) ?? from;
+
+	if (op.parentId !== undefined) {
+		const parentId = op.parentId === null ? undefined : cleanString(op.parentId);
+		if (parentId !== undefined && parentWouldCycle(to, id, parentId)) {
+			problems.push(`${label}: parentId on "${id}" would close a loop; left where it was`);
+			return;
+		}
+		const at = from.steps.findIndex((item) => item.id === id);
+		from.steps[at] = { ...from.steps[at], parentId };
+	}
+
+	if (to !== from) {
+		// The subtree travels with its root: a child left behind in the old lane
+		// would be an orphan whose parent is elsewhere, which every reader here
+		// promotes to a root — silently reshaping work nobody moved.
+		const moving = [id, ...descendants(from, id).map((item) => item.id)];
+		const taken = from.steps.filter((item) => moving.includes(item.id));
+		from.steps = from.steps.filter((item) => !moving.includes(item.id));
+		to.steps.push(...taken);
+		from.updatedAt = now;
+		updated.push(from.id);
+	}
+	to.updatedAt = now;
+	updated.push(to.id);
+}
+
+/** Declare or update a lane's loop annotation. At most one per lane. */
+function applyLoop(doc: PlanDoc, op: LoopOp, now: number, updated: string[], problems: string[], label: string): void {
+	const lane = findLane(doc, op.lane);
+	if (!lane) {
+		problems.push(`${label}: unknown lane "${String(op.lane)}"`);
+		return;
+	}
+	// Ids that are not in this lane are DROPPED rather than refused: a loop body
+	// naming a step that was renamed is still a loop, and refusing the whole
+	// annotation over one stale id loses the wave counter an operator reads.
+	const present = new Set(lane.steps.map((item) => item.id));
+	const steps = (cleanStringList(op.steps) ?? []).filter((id) => present.has(id));
+	const until = cleanString(op.until);
+	lane.loop = {
+		steps,
+		...(until !== undefined ? { until: until.slice(0, MAX_LOOP_UNTIL) } : {}),
+		iteration: lane.loop?.iteration ?? 1,
+		...(op.active === false ? { active: false } : {}),
+	};
+	lane.updatedAt = now;
+	updated.push(lane.id);
+}
+
+/**
+ * Advance a lane's wave counter.
+ *
+ * The body items' statuses are deliberately NOT reset: a tick that silently
+ * reopened them would erase what the last wave actually did. The model reopens
+ * what it is genuinely redoing.
+ */
+function applyLoopTick(
+	doc: PlanDoc,
+	op: LoopTickOp,
+	now: number,
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const lane = findLane(doc, op.lane);
+	if (!lane?.loop) {
+		problems.push(`${label}: lane "${String(op.lane)}" has no loop to tick`);
+		return;
+	}
+	lane.loop = { ...lane.loop, iteration: (lane.loop.iteration ?? 1) + 1 };
+	lane.updatedAt = now;
+	updated.push(lane.id);
+}
+
+/** Expand one of the recognisable lane shapes, in a single apply. */
+function applyTemplate(
+	doc: PlanDoc,
+	op: TemplateOp,
+	now: number,
+	created: string[],
+	updated: string[],
+	problems: string[],
+	label: string,
+): void {
+	const name = cleanString(op.name);
+	if (name === undefined || !(name in LANE_TEMPLATES)) {
+		problems.push(`${label}: unknown template "${String(op.name)}". Available: ${Object.keys(LANE_TEMPLATES).join(", ")}`);
+		return;
+	}
+	const ops = templateLaneOps(doc, name, cleanString(op.title));
+	if (ops.length === 0) return; // already there — asking twice is a no-op
+	for (const inner of ops) {
+		if (inner.op === "lane") applyLane(doc, inner, now, created, updated, problems, label);
+		else if (inner.op === "loop") applyLoop(doc, inner, now, updated, problems, label);
+	}
+}
+
+/** A loop's exit condition is a label, not an essay. */
+const MAX_LOOP_UNTIL = 120;
 
 /* -------------------------------------------------------------------------- */
 /* Block normalization                                                         */
@@ -949,21 +1723,39 @@ export function allSteps(doc: PlanDoc): PlanStep[] {
 	return doc.blocks.flatMap((block) => (block.type === "steps" ? block.steps : []));
 }
 
-export function stepCounts(doc: PlanDoc): Record<StepStatus, number> & { total: number } {
-	const counts = { pending: 0, in_progress: 0, done: 0, skipped: 0, blocked: 0, total: 0 };
-	for (const step of allSteps(doc)) {
-		counts[step.status] += 1;
+/**
+ * Item counts across every lane.
+ *
+ * Items whose kind Hive resolves are EXCLUDED, for the same reason the tool
+ * refuses to set their status: the number here is not a fact about them. A
+ * delivery lane's five steps are not five things the agent has left to do —
+ * they are five observations nobody has made yet — and counting them reports a
+ * finished session as 40% done forever.
+ */
+export function stepCounts(doc: PlanDoc): Record<WorkItemStatus, number> & { total: number } {
+	const counts: Record<WorkItemStatus, number> & { total: number } = {
+		pending: 0,
+		in_progress: 0,
+		done: 0,
+		failed: 0,
+		skipped: 0,
+		blocked: 0,
+		total: 0,
+	};
+	for (const item of allSteps(doc)) {
+		if (isObservedKind(item.kind)) continue;
+		counts[item.status] += 1;
 		counts.total += 1;
 	}
 	return counts;
 }
 
-/** `blockedBy` edges naming a step that no longer exists. Advisory; never repaired. */
+/** Dependency edges naming an item that no longer exists. Advisory; never repaired. */
 export function danglingBlockers(doc: PlanDoc): { id: string; missing: string[] }[] {
 	const live = new Set(allSteps(doc).map((step) => step.id));
 	const dangling: { id: string; missing: string[] }[] = [];
 	for (const step of allSteps(doc)) {
-		const missing = (step.blockedBy ?? []).filter((blocker) => !live.has(blocker));
+		const missing = [...(step.dependsOn ?? []), ...(step.blockedBy ?? [])].filter((blocker) => !live.has(blocker));
 		if (missing.length > 0) dangling.push({ id: step.id, missing });
 	}
 	return dangling;
@@ -1006,8 +1798,24 @@ export function validateSnapshot(data: unknown): PlanDoc | null {
 	return {
 		title: typeof doc.title === "string" ? doc.title : "",
 		goal: typeof doc.goal === "string" ? doc.goal : "",
+		// A snapshot written before the merge has no `phase: "none"` and never
+		// will: it defaults to `drafting`, which is what it meant. Only a NEW
+		// document starts at `none`, so an old session's plan keeps presenting
+		// itself exactly as it did.
 		phase: VALID_PHASES.includes(doc.phase as PlanPhase) ? (doc.phase as PlanPhase) : "drafting",
 		revision: typeof doc.revision === "number" && Number.isSafeInteger(doc.revision) ? doc.revision : 0,
+		// Absent in every pre-merge snapshot. Zero is right: nothing had ticked
+		// under a counter that did not exist, and the first tick after a resume
+		// moves it to 1 rather than inventing history.
+		progress: typeof doc.progress === "number" && Number.isSafeInteger(doc.progress) ? doc.progress : 0,
+		stage: typeof doc.stage === "string" && doc.stage.trim() !== "" ? doc.stage.trim() : undefined,
+		tickets: Array.isArray(doc.tickets)
+			? (doc.tickets as PlanDoc["tickets"])
+			: undefined,
+		milestone:
+			typeof doc.milestone === "object" && doc.milestone !== null && typeof (doc.milestone as { goalId?: unknown }).goalId === "string"
+				? (doc.milestone as PlanDoc["milestone"])
+				: undefined,
 		blocks,
 		nextId: Math.max(stored, highest + 1),
 		createdAt: typeof doc.createdAt === "number" ? doc.createdAt : 0,

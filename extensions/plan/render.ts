@@ -37,6 +37,9 @@ const STATUS_BOX: Record<StepStatus, string> = {
 	pending: "[ ]",
 	in_progress: "[~]",
 	done: "[x]",
+	// Distinct from `blocked`: "tried it and it did not work" is not "waiting on
+	// something", and a reader deciding what to do next needs the difference.
+	failed: "[×]",
 	skipped: "[-]",
 	blocked: "[!]",
 };
@@ -45,6 +48,7 @@ const STATUS_WORD: Record<StepStatus, string> = {
 	pending: "pending",
 	in_progress: "in progress",
 	done: "done",
+	failed: "failed",
 	skipped: "skipped",
 	blocked: "blocked",
 };
