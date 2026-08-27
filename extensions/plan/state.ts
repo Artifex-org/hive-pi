@@ -65,6 +65,17 @@ import { LANE_TEMPLATES, templateLaneOps } from "./templates.ts";
 
 export const PLAN_ENTRY_TYPE = "plan";
 
+/**
+ * The TICK entry: what moved, without re-emitting the document.
+ *
+ * A separate custom type rather than a flag on the snapshot, because the two
+ * are read differently — `rehydratePlan` scans backwards for the newest
+ * SNAPSHOT and then folds the ticks that follow it, and a reader that had to
+ * inspect every entry to learn which kind it was would lose the bounded-by-
+ * recency property that makes the scan cheap on a long session.
+ */
+export const PLAN_TICK_ENTRY_TYPE = "plan.tick";
+
 /** Bumped only for a shape a previous reader could not have understood. */
 const SCHEMA_VERSION = 1;
 
@@ -848,7 +859,29 @@ function isTickOp(op: PlanOp): boolean {
  * edges turns a bad edge into a deadlock the model cannot argue its way out of.
  */
 export function applyOps(doc: PlanDoc, ops: readonly PlanOp[], now: number): OpResult {
-	let next: PlanDoc = { ...doc, blocks: [...doc.blocks] };
+	// COPY-ON-ENTRY, one level deeper than it looks like it needs.
+	//
+	// `{...doc, blocks: [...doc.blocks]}` copies the array and SHARES every block
+	// object in it, and the handlers below write through that share:
+	// `applySetStep` assigns `block.steps[at]`, `applyLane` pushes onto
+	// `lane.steps`. The result is that applying an op MUTATES THE DOCUMENT THAT
+	// WAS PASSED IN — a caller holding the previous version finds its checkboxes
+	// already ticked.
+	//
+	// That was harmless while every caller discarded the old document. It stops
+	// being harmless the moment anything keeps one: the tick/snapshot split
+	// compares a document against its predecessor to decide what to write, and
+	// the stored revision history (HIV-2906) keeps every approved version to
+	// diff against. Found by a test asserting that a stale tick could not revive
+	// a status a re-plan had reset — it could, because the "re-planned" document
+	// and the ticked one were the same object.
+	//
+	// Copying each block and its own item array is enough: the handlers replace
+	// item objects (`{...current, ...}`) rather than writing into their fields.
+	let next: PlanDoc = {
+		...doc,
+		blocks: doc.blocks.map((block) => (block.type === "steps" ? { ...block, steps: [...block.steps] } : { ...block })),
+	};
 	const created: string[] = [];
 	const updated: string[] = [];
 	const removed: string[] = [];
@@ -1783,6 +1816,99 @@ export function toEntry(doc: PlanDoc): Record<string, unknown> {
 	return { kind: "plan", schemaVersion: SCHEMA_VERSION, doc };
 }
 
+/**
+ * A tick: the counters, the stage, and the items that moved.
+ *
+ * Deliberately NOT a diff of the whole document. Ticks carry exactly what the
+ * tick ops can change, so folding one is a bounded, total function rather than
+ * a patch application that can fail halfway — and a tick that cannot be
+ * understood is skipped, leaving the snapshot beneath it intact.
+ */
+export function tickEntry(doc: PlanDoc): Record<string, unknown> {
+	return {
+		kind: "plan.tick",
+		schemaVersion: SCHEMA_VERSION,
+		revision: doc.revision,
+		progress: doc.progress,
+		stage: doc.stage,
+		phase: doc.phase,
+		updatedAt: doc.updatedAt,
+		items: allSteps(doc).map((item) => ({
+			id: item.id,
+			status: item.status,
+			note: item.note,
+			startedAt: item.startedAt,
+			endedAt: item.endedAt,
+		})),
+		loops: doc.blocks
+			.filter((block): block is LaneBlock => block.type === "steps" && block.loop !== undefined)
+			.map((lane) => ({ id: lane.id, iteration: lane.loop?.iteration, active: lane.loop?.active })),
+	};
+}
+
+/**
+ * Fold one tick over a document.
+ *
+ * Skips a tick whose revision does not match: a tick belongs to the snapshot it
+ * was written against, and applying a stale one over a newer document would
+ * revive statuses the re-plan deliberately reset. Unknown item ids are ignored
+ * for the same reason a dangling edge is — the document is the authority on
+ * what exists.
+ */
+export function applyTick(doc: PlanDoc, data: unknown): PlanDoc {
+	if (typeof data !== "object" || data === null) return doc;
+	const tick = data as Record<string, unknown>;
+	if (tick.kind !== "plan.tick" || tick.schemaVersion !== SCHEMA_VERSION) return doc;
+	if (typeof tick.revision !== "number" || tick.revision !== doc.revision) return doc;
+
+	const statuses = new Map<string, Record<string, unknown>>();
+	for (const raw of Array.isArray(tick.items) ? tick.items : []) {
+		const item = raw as Record<string, unknown>;
+		if (typeof item?.id === "string") statuses.set(item.id, item);
+	}
+	const loops = new Map<string, Record<string, unknown>>();
+	for (const raw of Array.isArray(tick.loops) ? tick.loops : []) {
+		const loop = raw as Record<string, unknown>;
+		if (typeof loop?.id === "string") loops.set(loop.id, loop);
+	}
+
+	return {
+		...doc,
+		progress: typeof tick.progress === "number" ? tick.progress : doc.progress,
+		stage: typeof tick.stage === "string" ? tick.stage : doc.stage,
+		phase: VALID_PHASES.includes(tick.phase as PlanPhase) ? (tick.phase as PlanPhase) : doc.phase,
+		updatedAt: typeof tick.updatedAt === "number" ? tick.updatedAt : doc.updatedAt,
+		blocks: doc.blocks.map((block) => {
+			if (block.type !== "steps") return block;
+			const loop = loops.get(block.id);
+			return {
+				...block,
+				...(block.loop && loop
+					? {
+							loop: {
+								...block.loop,
+								iteration: typeof loop.iteration === "number" ? loop.iteration : block.loop.iteration,
+								...(loop.active === false ? { active: false } : {}),
+							},
+						}
+					: {}),
+				steps: block.steps.map((item) => {
+					const moved = statuses.get(item.id);
+					if (!moved) return item;
+					const status = normalizeStatus(moved.status);
+					return {
+						...item,
+						status: status ?? item.status,
+						note: typeof moved.note === "string" ? moved.note : item.note,
+						startedAt: typeof moved.startedAt === "number" ? moved.startedAt : item.startedAt,
+						endedAt: typeof moved.endedAt === "number" ? moved.endedAt : item.endedAt,
+					};
+				}),
+			};
+		}),
+	};
+}
+
 export function validateSnapshot(data: unknown): PlanDoc | null {
 	if (typeof data !== "object" || data === null) return null;
 	const record = data as Record<string, unknown>;
@@ -1844,7 +1970,20 @@ export function rehydratePlan(entries: readonly unknown[]): PlanDoc | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i] as { customType?: string; data?: unknown } | undefined;
 		if (!entry || entry.customType !== PLAN_ENTRY_TYPE) continue;
-		const doc = validateSnapshot(entry.data);
+		const snapshot = validateSnapshot(entry.data);
+		// Ticks written after this snapshot carry the progress it does not have.
+		// Folding forward from `i` keeps the scan bounded by recency: the work is
+		// proportional to what has happened since the last re-plan, not to the
+		// length of the session.
+		if (snapshot) {
+			let folded = snapshot;
+			for (let j = i + 1; j < entries.length; j++) {
+				const later = entries[j] as { customType?: string; data?: unknown } | undefined;
+				if (later?.customType === PLAN_TICK_ENTRY_TYPE) folded = applyTick(folded, later.data);
+			}
+			return folded;
+		}
+		const doc = snapshot;
 		if (doc) return doc;
 	}
 	return null;
