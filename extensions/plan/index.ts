@@ -52,6 +52,7 @@ import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
 import { classifyCommand, classifyTool } from "./policy.ts";
 import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
+import { registerFacadeTools } from "./facades.ts";
 import { TEMPLATE_NAMES_TUPLE } from "./templates.ts";
 import {
 	applyOps,
@@ -953,6 +954,27 @@ export default function (pi: ExtensionAPI) {
 					},
 				},
 			};
+		},
+	});
+
+	/**
+	 * The todo and workflow tools, writing into the same document.
+	 *
+	 * Registered HERE rather than in their own extensions because pi builds a
+	 * fresh jiti per extension with `moduleCache: false`: module state does not
+	 * cross the boundary, so an extension holding its own copy of this document
+	 * would be a second writer with a stale view. `host.apply` is the only way
+	 * in and it goes through `persistOps`, so every writer shares one document,
+	 * one pair of clocks and one persistence rule.
+	 */
+	registerFacadeTools(pi as never, {
+		doc: () => doc,
+		apply: (ops) => {
+			const before = doc;
+			const result = applyOps(doc, ops, Date.now());
+			persist(result.doc, before);
+			paint();
+			return { doc: result.doc, problems: result.problems };
 		},
 	});
 
