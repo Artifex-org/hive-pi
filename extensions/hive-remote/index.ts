@@ -21,6 +21,7 @@
  * SYNCHRONOUSLY at entry. The one exception is documented at `latestCtx`.
  */
 
+import { rehydratePlan, toEntry } from "../plan/state.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -848,6 +849,24 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	/** The newest `plan` custom entry's payload, or null when there is none. */
 	function latestPlanEntry(ctx: ExtensionContext | null): unknown {
+		// FOLDED, not merely latest. Since HIV-2904 a status tick writes a small
+		// `plan.tick` entry instead of re-emitting the whole document, so the
+		// newest SNAPSHOT is the plan as of the last re-plan and knows nothing
+		// about the checkboxes ticked since. Taking it would send Hive a
+		// document whose progress never moves — the exact live view the merge
+		// exists to make possible.
+		//
+		// `rehydratePlan` is a pure function over entries; importing it here is
+		// the same cross-extension read `tasks` already does of `status-footer`.
+		try {
+			const entries = ctx?.sessionManager.getEntries() as readonly unknown[] | undefined;
+			if (entries) {
+				const folded = rehydratePlan(entries);
+				if (folded) return toEntry(folded);
+			}
+		} catch {
+			/* session replaced mid-read — fall through to the raw snapshot */
+		}
 		return latestEntryOfType(ctx, "plan");
 	}
 
