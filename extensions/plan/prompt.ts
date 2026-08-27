@@ -94,6 +94,11 @@ builds and revises, and you never have to look an id up before patching.
 | \`metrics\` | a few headline numbers with optional deltas. |
 | \`callout\` | one thing the reader must not miss. Tone: \`info\`, \`warn\`, \`risk\`, \`success\`. |
 | \`code\` | a signature, a config stanza, a snippet the reader needs verbatim. Syntax-highlighted, and addressable so you can revise it in place. |
+| \`checklist\` | verifiable acceptance criteria; tick an item only with a run id or \`file:line\` evidence. |
+| \`ticket\` | a ticket key and optional role; write the key and let the browser hydrate metadata. |
+| \`milestone\` | a linked project goal and optional step. |
+| \`decision\` | a resolved question, its options, chosen answer, rationale, source and time. |
+| \`log\` | append-only stage, gate, approval or note history. |
 | \`artifact\` | **last resort.** A self-contained HTML document, rendered in a sandboxed frame — for SHOWING a proposed interface or an illustration nothing above can express. |
 
 ### On \`artifact\`
@@ -147,37 +152,7 @@ hook and prove it denies" is a step; "edit line 40 of policy.ts" is not.
 
 ## Show it, do not only say it
 
-A plan made of prose and a checklist uses two of the ten block types, and it is
-the default you will fall into unless you decide otherwise. The vocabulary above
-is not decoration — each type exists because there is a question prose answers
-badly. Before you present a plan, look at what you have written and ask which
-paragraph is doing a job one of these would do better:
-
-- **A shape you described in words** — how the pieces fit, what calls what, which
-  states a thing moves between. That is a \`diagram\`, and one is worth the
-  paragraph it replaces.
-- **A comparison you argued through** — "we could do A or B, and B is better
-  because…". That is a \`table\`: options down the side, criteria across the top.
-  The argument gets shorter and the reader can disagree with one cell.
-- **Numbers you asserted** — "most of the cost is in the scheduler", "there are
-  about forty call sites". That is a \`chart\` or a \`metrics\` block, and stating
-  the number is also how you find out you were wrong about it.
-- **A layout, a component, a screen** — anything where the reader has to SEE it
-  to have an opinion. That is an \`artifact\`, and it is the only way to ask
-  "does this look right" and get a real answer.
-- **The one thing that could sink this** — do not leave it in paragraph four of
-  the approach. That is a \`callout\`.
-
-Two failure modes, and they are opposite. One is the plan that says "the new
-pipeline has five stages" and never draws them. The other is a plan padded with
-a chart of three numbers because charts look thorough. The test is the same in
-both directions: **would a reader understand this faster, or agree with it more
-confidently, if it were shown?** If not, prose was right.
-
-This matters most for the thing you are ASKING about. A decision you want the
-user to make should be presented in whatever form makes the decision easiest —
-usually a table of the options or a picture of the result, almost never a
-paragraph ending in "let me know what you think".
+Run the advisory composition lint before presenting: it points from prose about flows, options, numbers, verification, tickets and milestones to the typed block that makes that claim inspectable. Treat it as a prompt to improve clarity, not a requirement to decorate a plan whose prose is already the clearest representation.
 
 ## Finishing
 

@@ -134,6 +134,26 @@ function blockToMarkdown(block: PlanBlock, includeIds: boolean): string[] {
 			if (block.caption) out.push("", `*${block.caption}*`);
 			break;
 
+		case "checklist":
+			for (const item of block.items) out.push(`- ${item.checked ? "[x]" : "[ ]"} ${item.text}${item.evidence ? ` — ${item.evidence}` : ""}`);
+			break;
+
+		case "ticket":
+			out.push(`- ${block.role ? `\`${block.role}\` ` : ""}${block.url ? `[${block.key}](${block.url})` : block.key}`);
+			break;
+
+		case "milestone":
+			out.push(`- Goal: \`${block.goalId}\`${block.stepId ? ` · step \`${block.stepId}\`` : ""}`);
+			break;
+
+		case "decision":
+			out.push(`**Question:** ${block.question}`, "", ...block.options.map((option) => `- ${option === block.chosen ? "[x]" : "[ ]"} ${option}`), "", `**Rationale:** ${block.rationale}`);
+			break;
+
+		case "log":
+			for (const entry of block.entries) out.push(`- ${new Date(entry.at).toISOString()} · \`${entry.kind}\` · ${entry.text}`);
+			break;
+
 		case "artifact":
 			// NOT the html. Markdown has no sandbox, and this render feeds a Linear
 			// description, a PR body and the model's own tool result — pasting a
