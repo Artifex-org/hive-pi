@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import deckExtension from "../extensions/deck/index.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL } from "../extensions/deck/protocol.ts";
-import tasksExtension from "../extensions/tasks/index.ts";
+import planExtension from "../extensions/plan/index.ts";
 import { createFakePi, type RecordedWidget } from "./fake-pi.ts";
 
 /**
@@ -110,10 +110,10 @@ describe("deck extension", () => {
 	});
 });
 
-describe("tasks → deck publication", () => {
+describe("the plan → deck publication", () => {
 	it("TodoWrite publishes rows on the deck channel and answers a sync request", async () => {
 		const fake = createFakePi();
-		tasksExtension(fake.api);
+		planExtension(fake.api);
 		await fake.emit({ type: "session_start", reason: "new" });
 
 		const tool = fake.tools.find((entry) => entry.name === "TodoWrite");
@@ -133,18 +133,26 @@ describe("tasks → deck publication", () => {
 			section: string;
 			state: { kind: string; rows: Array<{ activeForm?: string }> };
 		};
-		expect(last.section).toBe("tasks");
-		expect(last.state.rows[0].activeForm).toBe("Building the deck");
+		// TWO sections, ONE document since HIV-2904. Both readings stay — what am
+		// I doing next (rows) and how far along is the plan (summary) — and the
+		// plan extension publishes both, so they can no longer disagree the way
+		// two separate stores could.
+		const rowsSection = published
+			.map((event) => event.payload as { section: string; state: { kind: string; rows?: Array<{ activeForm?: string }> } })
+			.filter((payload) => payload.section === "tasks")
+			.pop();
+		expect(rowsSection?.state.rows?.[0].activeForm).toBe("Building the deck");
+		expect(last.section).toBe("plan");
 
 		const before = fake.busEvents.length;
 		fake.api.events.emit(DECK_SYNC_CHANNEL, {});
 		const replies = fake.busEvents.slice(before).filter((event) => event.name === DECK_SECTION_CHANNEL);
-		expect(replies).toHaveLength(1);
+		expect(replies).toHaveLength(2);
 	});
 
 	it("never calls setWidget itself — the deck owns the slot", async () => {
 		const fake = createFakePi();
-		tasksExtension(fake.api);
+		planExtension(fake.api);
 		await fake.emit({ type: "session_start", reason: "new" });
 		expect(fake.widgets).toHaveLength(0);
 	});

@@ -47,18 +47,27 @@ import { ensureWorkerMcpConfig } from "../mcp-common/config.ts";
  *   native `apply_patch` and where the expected delta is small or negative.
  *   It is additionally opt-in (`enabled === true`), so listing it here changes
  *   nothing until the flag is set.
- * - `opmode/index.ts` and `workflow/index.ts` — the explicit, reviewed
- *   exception to the no-hooks default for `bugfix` workers. Opmode observes
- *   tool results to bind evidence; workflow projects the same state into the
- *   visible protocol. Their hooks are necessary enforcement, not ambient
- *   policy, and `test/subagent-worker.test.ts` pins this pair as the only
- *   owned hook-bearing worker extensions.
+ * - `opmode/index.ts` — the explicit, reviewed exception to the no-hooks
+ *   default for `bugfix` workers. It observes tool results to bind evidence:
+ *   necessary enforcement, not ambient policy, and
+ *   `test/subagent-worker.test.ts` pins it as the only owned hook-bearing
+ *   worker extension.
+ *
+ *   `workflow/index.ts` stood beside it until HIV-2904 merged that document
+ *   into the plan, and it is NOT replaced by `plan/index.ts`. The reason is a
+ *   real difference rather than an oversight: the workflow extension carried
+ *   one narrow projection, while the plan extension carries plan-MODE
+ *   enforcement — a `tool_call` denial hook and a read-only posture — and
+ *   loading that into a worker would let a subagent inherit or enter a mode
+ *   nobody reviewed it for. So bugfix workers lose the workflow projection for
+ *   now. Restoring it means extracting the tool registration into a hook-free
+ *   module a worker can load, which is a deliberate follow-up and not a thing
+ *   to do by widening this list.
  */
 const WORKER_EXTENSIONS = [
 	"../knowledge-tools.ts",
 	"../edit-common/rowtool.ts",
 	"../opmode/index.ts",
-	"../workflow/index.ts",
 ];
 
 /**

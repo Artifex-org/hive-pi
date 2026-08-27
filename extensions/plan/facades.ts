@@ -36,6 +36,8 @@ import { lanesOf, targetLane } from "./lanes.ts";
 export interface TaskWrite {
 	id?: string;
 	subject?: string;
+	/** The Linear issue this item mirrors. Null unlinks it. */
+	linearKey?: string | null;
 	description?: string;
 	activeForm?: string;
 	status?: "pending" | "in_progress" | "completed" | "deleted";
@@ -94,8 +96,23 @@ export function todoWritesToOps(doc: PlanDoc, writes: readonly TaskWrite[]): Pla
 			...(write.activeForm !== undefined ? { activeForm: write.activeForm } : {}),
 			...(write.status !== undefined ? { status: write.status as WorkItemStatus | "completed" } : {}),
 			...(write.blockedBy !== undefined ? { dependsOn: write.blockedBy } : {}),
+			...(typeof write.linearKey === "string" ? { linearKey: write.linearKey } : {}),
 			...(typeof write.owner === "string" ? { owner: write.owner } : {}),
 		};
+
+		// An explicit CLEAR cannot ride the item patch: `writeItem` keeps what an
+		// item has already earned, dropping undefined fields so a reword does not
+		// wipe a status or a link. So `null` — the vocabulary's "unset this" —
+		// goes through `set_step`, which has always had the null-clearing path
+		// and is tested for it.
+		if (id !== undefined && (write.linearKey === null || write.owner === null)) {
+			ops.push({
+				op: "set_step",
+				id,
+				...(write.linearKey === null ? { linearKey: null } : {}),
+				...(write.owner === null ? { owner: null } : {}),
+			});
+		}
 
 		ops.push({
 			op: "item",
@@ -280,6 +297,7 @@ export interface TaskRow {
 	status: "pending" | "in_progress" | "completed";
 	blockedBy?: string[];
 	owner?: string;
+	linearKey?: string;
 }
 
 /**
@@ -304,6 +322,7 @@ export function taskRowsOf(doc: PlanDoc, laneId?: string): TaskRow[] {
 		status: toTaskStatus(item.status),
 		...(item.dependsOn && item.dependsOn.length > 0 ? { blockedBy: item.dependsOn } : {}),
 		...(item.owner !== undefined ? { owner: item.owner } : {}),
+		...(item.linearKey !== undefined ? { linearKey: item.linearKey } : {}),
 	}));
 }
 

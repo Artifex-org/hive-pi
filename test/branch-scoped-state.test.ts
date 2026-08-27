@@ -34,18 +34,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import plan from "../extensions/plan/index.ts";
-import tasks from "../extensions/tasks/index.ts";
-import workflow from "../extensions/workflow/index.ts";
 import { DECK_SECTION_CHANNEL } from "../extensions/deck/protocol.ts";
 import { applyOps as applyPlanOps, emptyPlan, PLAN_ENTRY_TYPE, toEntry as planEntry } from "../extensions/plan/state.ts";
 import { summaryLine as planSummary } from "../extensions/plan/render.ts";
-import { applyWrites, emptyTasks, TASKS_ENTRY_TYPE, toEntry as tasksEntry } from "../extensions/tasks/state.ts";
-import {
-	applyOps as applyWorkflowOps,
-	emptyWorkflow,
-	toEntry as workflowEntry,
-	WORKFLOW_ENTRY_TYPE,
-} from "../extensions/workflow/state.ts";
 import { createGoal, GOAL_ENTRY_TYPE, rehydrateGoal, rehydrateGoalFromBranch } from "../extensions/agenda/goal-state.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 import { readFileSync } from "node:fs";
@@ -70,11 +61,16 @@ const custom = (id: string, parentId: string, customType: string, data: unknown)
 
 /** One branch's four documents, chained so the path has a real shape. */
 function branchOf(prefix: string, label: string, steps: number) {
-	const tasksDoc = applyWrites(emptyTasks, [{ subject: `${label} todo` }], NOW).state;
+	// ONE document since HIV-2904. The todo list and the workflow stages that
+	// used to be two more entries on this chain are a LANE in the plan, so the
+	// hazard this suite exists for — an abandoned branch's document resurfacing
+	// because every rehydrate takes the newest it finds — is now asked of one
+	// document that carries all three kinds of content at once.
 	const planDoc = applyPlanOps(
 		emptyPlan(NOW),
 		[
 			{ op: "header", title: `${label} plan`, phase: prefix === "a" ? "drafting" : "approved" },
+			{ op: "lane", id: `${prefix}-lane`, kind: "execute", title: `${label} stage`, items: [{ title: `${label} todo` }] },
 			{
 				op: "upsert",
 				block: { type: "steps", steps: Array.from({ length: steps }, (_, i) => ({ title: `${label} step ${i}` })) },
@@ -82,20 +78,13 @@ function branchOf(prefix: string, label: string, steps: number) {
 		],
 		NOW,
 	).doc;
-	const workflowDoc = applyWorkflowOps(
-		emptyWorkflow(NOW),
-		[{ op: "stage", title: `${label} stage`, kind: "execute" }],
-		NOW,
-	).doc;
 	const goalDoc = createGoal(`${prefix}-goal`, `${label} is done`, NOW);
 
 	const entries = [
-		custom(`${prefix}-tasks`, "root", TASKS_ENTRY_TYPE, tasksEntry(tasksDoc)),
-		custom(`${prefix}-plan`, `${prefix}-tasks`, PLAN_ENTRY_TYPE, planEntry(planDoc)),
-		custom(`${prefix}-workflow`, `${prefix}-plan`, WORKFLOW_ENTRY_TYPE, workflowEntry(workflowDoc)),
-		custom(`${prefix}-goal`, `${prefix}-workflow`, GOAL_ENTRY_TYPE, goalDoc),
+		custom(`${prefix}-plan`, "root", PLAN_ENTRY_TYPE, planEntry(planDoc)),
+		custom(`${prefix}-goal`, `${prefix}-plan`, GOAL_ENTRY_TYPE, goalDoc),
 	];
-	return { entries, leafId: `${prefix}-goal`, tasksDoc, planDoc, workflowDoc, goalDoc };
+	return { entries, leafId: `${prefix}-goal`, planDoc, goalDoc };
 }
 
 /** The live branch, written first. */
@@ -173,11 +162,11 @@ beforeEach(() => {
 /* -------------------------------------------------------------------------- */
 
 describe("(a) a resume restores the active branch's state, not the file's newest", () => {
-	it("tasks: the abandoned branch's later list does not come back", async () => {
+	it("the abandoned branch's later LANE does not come back", async () => {
 		// Under the old `getEntries()` read this is "abandoned-branch todo": the
 		// abandoned snapshot is later in the array and every rehydrate in this
-		// repo takes the newest one it finds.
-		tasks(pi.api);
+		// repo takes the newest one it finds. The lane is what the todo list was.
+		plan(pi.api);
 		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
 		expect(subjects(pi)).toEqual(["active-branch todo"]);
 	});
@@ -189,18 +178,6 @@ describe("(a) a resume restores the active branch's state, not the file's newest
 		const state = lastSection(pi, "plan") as { summary: string };
 		expect(state.summary).toBe(planSummary(ACTIVE.planDoc));
 		expect(state.summary).not.toBe(planSummary(ABANDONED.planDoc));
-	});
-
-	it("workflow: the abandoned branch's stages do not come back", async () => {
-		workflow(pi.api);
-		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
-
-		// The tool renders the whole document, so its text is the honest read of
-		// what was restored. `ops: []` changes nothing and cannot re-seed, because
-		// a restored document already counts as seeded.
-		const result = await call(pi, "workflow_write", { ops: [] });
-		expect(result.content[0].text).toContain("active-branch stage");
-		expect(result.content[0].text).not.toContain("abandoned-branch stage");
 	});
 
 	it("the PRODUCTION call sites are wired, not just the helpers", () => {
@@ -216,8 +193,9 @@ describe("(a) a resume restores the active branch's state, not the file's newest
 		// arrive as a diff somebody has to justify.
 		const ALLOWED_ALL_ENTRY_READS: Record<string, { count: number; why: string }> = {
 			"extensions/plan/index.ts": { count: 0, why: "the plan document is branch-scoped in full" },
-			"extensions/workflow/index.ts": { count: 0, why: "same, plus its task mirror" },
-			"extensions/tasks/index.ts": { count: 0, why: "the task list is branch-scoped in full" },
+			// `extensions/workflow` and `extensions/tasks` stood here until HIV-2904
+			// merged both documents into the plan. There is one branch-scoped
+			// document now, and one entry above guards it.
 			"extensions/agenda/index.ts": {
 				count: 1,
 				why: "`/handoff` passes BOTH views to deriveSignals on purpose — it compares them",
@@ -246,8 +224,8 @@ describe("(a) a resume restores the active branch's state, not the file's newest
 });
 
 describe("(b) an in-session leaf move re-derives, with no event to tell us", () => {
-	it("tasks: the list follows a /tree move at the next turn", async () => {
-		tasks(pi.api);
+	it("the lane follows a /tree move at the next turn", async () => {
+		plan(pi.api);
 		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
 
 		session.moveTo("abandoned"); // the operator types `/tree`; pi emits nothing
@@ -265,20 +243,11 @@ describe("(b) an in-session leaf move re-derives, with no event to tell us", () 
 		expect((lastSection(pi, "plan") as { summary: string }).summary).toBe(planSummary(ABANDONED.planDoc));
 	});
 
-	it("workflow: the document follows the leaf", async () => {
-		workflow(pi.api);
-		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
-		session.moveTo("abandoned");
-		await fire(pi, "before_agent_start", { prompt: "carry on" }, session.ctx);
-
-		expect((await call(pi, "workflow_write", { ops: [] })).content[0].text).toContain("abandoned-branch stage");
-	});
-
 	it("moving to a branch that never had a list EMPTIES it", async () => {
 		// The reset-on-switch rule, and the one case where clearing is right:
 		// carrying the old branch's todos onto a branch that never wrote any is
 		// the resurfacing bug in (a), only sideways.
-		tasks(pi.api);
+		plan(pi.api);
 		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
 		session.moveTo("root");
 		await fire(pi, "before_agent_start", { prompt: "carry on" }, session.ctx);
@@ -290,7 +259,7 @@ describe("(b) an in-session leaf move re-derives, with no event to tell us", () 
 		// The difference between "cannot tell" and "this branch is empty". Reading
 		// the second as the first would wipe the list mid-session every time a
 		// session was replaced between pi's emit and this handler.
-		tasks(pi.api);
+		plan(pi.api);
 		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
 		const before = pi.busEvents.length;
 
@@ -313,7 +282,7 @@ describe("(b) an in-session leaf move re-derives, with no event to tell us", () 
 	it("re-derives once per move, not once per turn", async () => {
 		// `before_agent_start` runs on every turn. A second turn on the same leaf
 		// must not repaint, or the deck flickers and the walk is paid forever.
-		tasks(pi.api);
+		plan(pi.api);
 		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
 		const afterStart = pi.busEvents.length;
 
@@ -328,7 +297,7 @@ describe("(b) an in-session leaf move re-derives, with no event to tell us", () 
 		// would copy an entry per turn and, for the workflow, replay a revision
 		// against Hive's monotonic upsert — which refuses one behind the stored
 		// value, so the replay is not even harmless.
-		workflow(pi.api);
+		plan(pi.api);
 		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
 		const before = pi.entries.length;
 
@@ -341,36 +310,22 @@ describe("(b) an in-session leaf move re-derives, with no event to tell us", () 
 	it("the re-derive handler contributes neither a message nor a system prompt", async () => {
 		// pi collects `before_agent_start` return values: a stray one here would
 		// inject a message into the turn or overwrite the system prompt.
-		tasks(pi.api);
+		plan(pi.api);
 		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
 		const results = await fire(pi, "before_agent_start", { prompt: "go" }, session.ctx);
 		expect(results.every((r) => r === undefined)).toBe(true);
 	});
 });
 
-describe("(c) the task mirror cannot re-contaminate through the bus", () => {
-	it("mirrors the new branch's todos into the NEW branch's workflow", async () => {
-		// Load order is configuration, so `tasks` repainting before `workflow`
-		// re-derives is a real arrangement, and it is the one that used to merge
-		// new-branch todos into the abandoned document and PERSIST it — putting
-		// the old branch's stages onto the branch the operator moved to.
-		tasks(pi.api);
-		workflow(pi.api);
-		await fire(pi, "session_start", { reason: "resume" }, session.ctx);
-
-		session.moveTo("abandoned");
-		await fire(pi, "before_agent_start", { prompt: "carry on" }, session.ctx);
-
-		// The contamination check FIRST, because it is the one that lands in the
-		// session file: a merged document persisted onto the new branch is what
-		// the next rehydration would then adopt as that branch's own.
-		const persisted = pi.entries.filter((e) => e.customType === WORKFLOW_ENTRY_TYPE);
-		expect(JSON.stringify(persisted)).not.toContain("active-branch stage");
-
-		const rendered = (await call(pi, "workflow_write", { ops: [] })).content[0].text;
-		expect(rendered).toContain("abandoned-branch stage");
-		expect(rendered).not.toContain("active-branch stage");
-		// The mirror still did its job — on the branch that is now live.
-		expect(rendered).toContain("abandoned-branch todo");
-	});
-});
+/*
+ * The (c) block that stood here is GONE, with the thing it guarded.
+ *
+ * It tested that the task mirror could not re-contaminate a branch through the
+ * bus: `tasks` repainting before `workflow` re-derived used to merge the new
+ * branch's todos into the abandoned document and PERSIST it, putting the old
+ * branch's stages onto the branch the operator had moved to. That failure
+ * needed two documents and a mirror between them. HIV-2904 removed both — a
+ * todo IS an item in a lane of the one document — so there is no second writer
+ * to race and nothing to mirror. The isolation the block asserted is now
+ * covered by (a) and (b) over that single document.
+ */

@@ -93,7 +93,12 @@ describe("subagent worker invocation", () => {
 	});
 
 	it("only reviewed protocol extensions register worker event hooks", () => {
-		const allowedHooks = new Set(["opmode/index.ts", "workflow/index.ts"]);
+		// `workflow/index.ts` was the second entry until HIV-2904 merged that
+		// document into the plan. It is deliberately NOT replaced by
+		// `plan/index.ts`: that extension carries plan-mode enforcement, and a
+		// worker inheriting a read-only posture nobody reviewed it for is a
+		// worse trade than losing the projection. See worker.ts.
+		const allowedHooks = new Set(["opmode/index.ts"]);
 		const ours = workerExtensionPaths().filter((path) => path.includes("/extensions/"));
 		expect(ours.length, "expected at least one in-repo worker extension").toBeGreaterThan(0);
 		for (const path of ours) {

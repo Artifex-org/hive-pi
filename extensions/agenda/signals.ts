@@ -14,8 +14,7 @@
  * type is the whole read.
  */
 
-import { TASKS_ENTRY_TYPE } from "../tasks/state.ts";
-import { PLAN_ENTRY_TYPE, type PlanPhase } from "../plan/state.ts";
+import { PLAN_ENTRY_TYPE, rehydratePlan, type PlanPhase } from "../plan/state.ts";
 
 export interface TasksSignal {
 	total: number;
@@ -81,9 +80,37 @@ function newestCustom(entries: readonly unknown[], customType: string): unknown 
 	return null;
 }
 
+/**
+ * The task counts, read from the plan document's LANES since HIV-2904.
+ *
+ * There is no `tasks` entry any more — a todo IS a work item in a lane — so the
+ * signal folds the plan instead. It stays a count of the agent's own work:
+ * items whose kind Hive resolves are excluded by `stepCounts`, because a
+ * delivery lane's five pending observations are not five things the conductor
+ * should read as unfinished work.
+ *
+ * The fold is the full `rehydratePlan` rather than the newest snapshot, because
+ * a status change now writes a tick — and the conductor reads this to decide
+ * whether the work is DONE, which is precisely what a tick carries.
+ */
 export function tasksSignalOf(entries: readonly unknown[]): TasksSignal {
-	const data = newestCustom(entries, TASKS_ENTRY_TYPE) as { tasks?: unknown } | null;
-	const list = Array.isArray(data?.tasks) ? data.tasks : [];
+	const doc = rehydratePlan(entries);
+	const list = doc
+		? doc.blocks
+				.filter((block) => block.type === "steps")
+				.flatMap((block) => (block.type === "steps" ? block.steps : []))
+				.filter((item) => item.kind === undefined || item.kind === "task")
+				.map((item) => ({
+					// The conductor speaks the todo vocabulary; translate on read so
+					// its thresholds keep meaning what they meant.
+					status:
+						item.status === "done" || item.status === "skipped" || item.status === "failed"
+							? "completed"
+							: item.status === "in_progress"
+								? "in_progress"
+								: "pending",
+				}))
+		: [];
 	const signal: TasksSignal = { total: 0, pending: 0, inProgress: 0, completed: 0 };
 	for (const raw of list) {
 		const status = (raw as { status?: unknown })?.status;
