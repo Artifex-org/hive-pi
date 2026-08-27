@@ -26,3 +26,51 @@ describe("lintPlanComposition", () => {
 		expect(lintPlanComposition(doc)).toEqual([]);
 	});
 });
+
+/**
+ * Both directions, as a table, because this lint's only real failure mode is
+ * crying wolf.
+ *
+ * The rule it replaces was 180 words of prompt telling the model to show rather
+ * than tell, and the measured result was that 43% of plans used no block type
+ * but `text` and `steps`. A lint that fires on ordinary sentences fails the same
+ * way — an author who sees it on every plan stops reading it — so the QUIET
+ * column matters at least as much as the firing one, and each row here is a
+ * sentence that was measured misbehaving rather than one imagined.
+ */
+describe("lintPlanComposition — the quiet column", () => {
+	const lintOf = (markdown: string) =>
+		lintPlanComposition(applyOps(emptyPlan(now), [{ op: "upsert", block: { type: "text", markdown } }], now).doc)
+			.map((issue) => issue.kind);
+
+	it.each([
+		["the pipeline has five stages", "The new pipeline has five stages.", "diagram"],
+		["a request that flows", "The request flows through the cache.", "diagram"],
+		["an arrow", "push → PR → CI → merge.", "diagram"],
+		["named verification", "We verify the gate is green.", "checklist"],
+		["the tests", "The tests cover the refusal.", "checklist"],
+		["a measured share", "12% of sessions carry a duplicate lane.", "metrics"],
+		["a ticket key", "This closes HIV-2907.", "ticket"],
+	])("fires on %s", (_label, markdown, kind) => {
+		expect(lintOf(markdown)).toContain(kind);
+	});
+
+	it.each([
+		// `call` used to be in the diagram rule; in a plan the word is almost
+		// always "call sites", and the nudge it produced was to draw a diagram
+		// about a sentence asserting a quantity.
+		["call sites", "There are forty call sites to change."],
+		// `test(?:ing)?\b` with no LEFT anchor matched the tail of these two.
+		["latest", "The latest run was green."],
+		["protest", "The protest was peaceful."],
+		// The metrics rule once matched any digit at all.
+		["a version", "Bump Node to 24."],
+		["a date", "It landed on 2026-08-27."],
+		// The ticket rule once matched any CAPS-dash-digits token.
+		["an encoding", "Fix the UTF-8 handling."],
+		["a protocol", "Migrate the client to HTTP-2."],
+		["ordinary prose", "Rename the helper and update its callers."],
+	])("stays quiet on %s", (_label, markdown) => {
+		expect(lintOf(markdown)).toEqual([]);
+	});
+});
