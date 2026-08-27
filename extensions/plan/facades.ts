@@ -23,6 +23,8 @@
  * thing to the wrong place.
  */
 
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { normalizeStatus, type ItemInput, type PlanDoc, type PlanOp, type WorkItemStatus } from "./state.ts";
 import { lanesOf, targetLane } from "./lanes.ts";
 
@@ -330,4 +332,220 @@ function toTaskStatus(status: WorkItemStatus): TaskRow["status"] {
 /** Accepts the todo vocabulary's own status words. Exported for the tool schema. */
 export function todoStatus(value: unknown): WorkItemStatus | undefined {
 	return normalizeStatus(value);
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Registration                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * What a façade needs from the extension that owns the document.
+ *
+ * Deliberately three functions rather than the document itself: a façade that
+ * held a `PlanDoc` would hold a STALE one the moment anything else wrote, which
+ * is the race this whole arrangement exists to avoid. `apply` is the only way
+ * in, and it goes through the same `persistOps` every other writer uses.
+ */
+export interface FacadeHost {
+	/** The document as of right now. Call it, never cache it. */
+	doc: () => PlanDoc;
+	/** Apply ops, persist, repaint. Returns what to tell the caller. */
+	apply: (ops: readonly PlanOp[]) => { doc: PlanDoc; problems: string[] };
+}
+
+/** The status words the todo tools have always accepted. */
+const TODO_STATUSES = ["pending", "in_progress", "completed", "deleted"] as const;
+
+/**
+ * Render a task list the way the task tools always have.
+ *
+ * Their contract is that the returned TEXT is the view of the list, and the
+ * model plans against it, so this shape must not drift under existing callers.
+ */
+function renderTaskRows(rows: readonly TaskRow[], problems: readonly string[]): string {
+	if (rows.length === 0 && problems.length === 0) return "No tasks.";
+	const glyph = { pending: "[ ]", in_progress: "[~]", completed: "[x]" } as const;
+	const lines = rows.map((row) => {
+		const blocked = row.blockedBy && row.blockedBy.length > 0 ? ` (waits on ${row.blockedBy.join(", ")})` : "";
+		const owner = row.owner ? ` @${row.owner}` : "";
+		const shown = row.status === "in_progress" && row.activeForm ? row.activeForm : row.subject;
+		return `${glyph[row.status]} ${row.id}  ${shown}${owner}${blocked}`;
+	});
+    if (problems.length > 0) {
+		lines.push("", "Not applied:", ...problems.map((problem) => `  - ${problem}`));
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Register `TodoWrite`, its four compatibility aliases, and `workflow_write`.
+ *
+ * TOOL NAMING, carried over verbatim from the extensions these replace.
+ * `TodoWrite` is the primary and the only one carrying a `promptSnippet`; the
+ * four `Task*` names are compatibility aliases registered because the skill
+ * corpus references them heavily (186 `TodoWrite`, 112 `TaskCreate`/
+ * `TaskUpdate`, 62 `TaskList`/`TaskGet`) and a skill naming a tool pi does not
+ * have produces a failed call, not a graceful degradation. The aliases carry no
+ * `promptSnippet` on purpose: pi omits custom tools from the prompt's tool
+ * section when that field is absent, so they are callable when a skill names one
+ * and invisible when nothing does. Six tools in the schema, two in the prompt.
+ */
+export function registerFacadeTools(
+	pi: {
+		registerTool: (definition: Record<string, unknown>) => void;
+	},
+	host: FacadeHost,
+): void {
+	const reply = (result: { doc: PlanDoc; problems: string[] }, laneId?: string) => {
+		const rows = taskRowsOf(result.doc, laneId);
+		return {
+			content: [{ type: "text" as const, text: renderTaskRows(rows, result.problems) }],
+			// The RESULTING list, not the writes that produced it (HIV-1146):
+			// a row saying "3 tasks written" tells a reader nothing, while the
+			// current list and the agent's position in it is the single most
+			// informative thing a transcript can show. Hive's `tasks` widget keys
+			// on this shape.
+			details: { tasks: rows, ...(result.problems.length > 0 ? { problems: result.problems } : {}) },
+		};
+	};
+
+	const TaskWriteSchema = Type.Object({
+		id: Type.Optional(Type.String({ description: "Existing task id. Omit to create a new task." })),
+		subject: Type.Optional(Type.String({ description: "Short imperative title. Required when creating." })),
+		description: Type.Optional(Type.String({ description: "What needs to be done." })),
+		activeForm: Type.Optional(Type.String({ description: 'Present-continuous form, e.g. "Running tests".' })),
+		status: Type.Optional(StringEnum(TODO_STATUSES, { description: 'Task status. "deleted" removes the task.' })),
+		blockedBy: Type.Optional(Type.Array(Type.String(), { description: "Task ids this one waits on." })),
+		owner: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Worker id. Null clears it." })),
+	});
+
+	const writeTodos = (writes: readonly TaskWrite[]) => {
+		const before = host.doc();
+		const result = host.apply(todoWritesToOps(before, writes));
+		return reply(result);
+	};
+
+	pi.registerTool({
+		name: "TodoWrite",
+		label: "Tasks",
+		description: [
+			"Create, update and complete the session's task list. Returns the resulting list, which IS the view",
+			"of it — plan against what comes back rather than against what you sent.",
+		].join(" "),
+		promptSnippet: "Track multi-step work as a task list the user can see",
+		parameters: Type.Object({
+			todos: Type.Array(TaskWriteSchema, { description: "Tasks to create or update, applied in order." }),
+		}),
+		execute: async (_id: string, params: { todos?: TaskWrite[] }) => writeTodos(params.todos ?? []),
+	});
+
+	// --- compatibility aliases: no promptSnippet, so they stay out of the prompt ---
+
+	pi.registerTool({
+		name: "TaskCreate",
+		label: "Task create",
+		description: "Add one task to the session task list. Returns the full resulting list.",
+		parameters: Type.Object({
+			subject: Type.String({ description: "Short imperative title." }),
+			description: Type.Optional(Type.String()),
+			activeForm: Type.Optional(Type.String()),
+		}),
+		execute: async (_id: string, params: { subject: string; description?: string; activeForm?: string }) =>
+			writeTodos([params]),
+	});
+
+	pi.registerTool({
+		name: "TaskUpdate",
+		label: "Task update",
+		description: "Update one task by id. Returns the full resulting list.",
+		parameters: Type.Object({
+			taskId: Type.String({ description: "Id of the task to update." }),
+			subject: Type.Optional(Type.String()),
+			description: Type.Optional(Type.String()),
+			activeForm: Type.Optional(Type.String()),
+			status: Type.Optional(StringEnum(TODO_STATUSES)),
+			addBlockedBy: Type.Optional(Type.Array(Type.String(), { description: "Task ids that must finish first." })),
+			owner: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+		}),
+		execute: async (
+			_id: string,
+			params: { taskId: string; addBlockedBy?: string[] } & Omit<TaskWrite, "id" | "blockedBy">,
+		) => {
+			const { taskId, addBlockedBy, ...rest } = params;
+			return writeTodos([{ id: taskId, ...rest, ...(addBlockedBy ? { blockedBy: addBlockedBy } : {}) }]);
+		},
+	});
+
+	pi.registerTool({
+		name: "TaskList",
+		label: "Task list",
+		description: "Show the current session task list.",
+		parameters: Type.Object({}),
+		execute: async () => reply({ doc: host.doc(), problems: [] }),
+	});
+
+	pi.registerTool({
+		name: "workflow_write",
+		label: "Workflow",
+		description: [
+			"Declare the shape of the work — lanes, the items in them, their dependencies and iteration.",
+			"Lanes and their items live in the plan document; this is the same document `plan_write` edits,",
+			"under the vocabulary this tool has always used.",
+		].join(" "),
+		promptSnippet: "Build the shape of the work — stages, dependencies, and orchestration waves",
+		parameters: Type.Object({
+			ops: Type.Array(Type.Object({}, { additionalProperties: true }), {
+				minItems: 1,
+				description: "Operations, applied in order.",
+			}),
+		}),
+		execute: async (_id: string, params: { ops?: WorkflowToolOp[] }) => {
+			const before = host.doc();
+			const mapped = workflowOpsToPlanOps(before, params.ops ?? []);
+			const result = host.apply(mapped.ops);
+			const problems = [...mapped.notes, ...result.problems];
+			const rows = taskRowsOf(result.doc);
+			const summary = `${rows.length} item(s) in the current lane`;
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text:
+							problems.length > 0
+								? `${summary}\n\nNot applied:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`
+								: summary,
+					},
+				],
+				details: { tasks: rows, ...(problems.length > 0 ? { problems } : {}) },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "TaskGet",
+		label: "Task detail",
+		description: "Show one task's full detail by id.",
+		parameters: Type.Object({ taskId: Type.String({ description: "Id of the task to read." }) }),
+		execute: async (_id: string, params: { taskId: string }) => {
+			const row = taskRowsOf(host.doc()).find((candidate) => candidate.id === params.taskId);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: row
+							? [
+									`${row.id}  ${row.subject}`,
+									`status: ${row.status}`,
+									...(row.description ? [`detail: ${row.description}`] : []),
+									...(row.owner ? [`owner: ${row.owner}`] : []),
+									...(row.blockedBy?.length ? [`waits on: ${row.blockedBy.join(", ")}`] : []),
+								].join("\n")
+							: `No task ${params.taskId}.`,
+					},
+				],
+				details: { tasks: row ? [row] : [] },
+			};
+		},
+	});
 }

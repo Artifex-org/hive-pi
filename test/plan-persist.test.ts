@@ -107,3 +107,59 @@ describe("plan persistence — snapshots and ticks", () => {
 		expect(rung[1].progress).toBe((rung[0].progress ?? 0) + 1);
 	});
 });
+
+describe("the façades reach the same document", () => {
+	let fake: FakePi;
+
+	beforeEach(async () => {
+		fake = createFakePi();
+		planExtension(fake.api);
+		await fake.emit({ type: "session_start", reason: "new" });
+	});
+
+	let n = 0;
+	const call = (tool: string, params: Record<string, unknown>) =>
+		toolOf(fake, tool)(`f${n++}`, params, undefined, undefined, toolCtx());
+
+	it("registers the names the skill corpus and the prompts already use", () => {
+		// ~360 references across the skills, plus three shipped prompts naming
+		// `workflow_write`. A skill naming a tool pi does not have produces a
+		// failed call, not a graceful degradation.
+		const names = fake.tools.map((tool) => tool.name);
+		for (const name of ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "workflow_write"]) {
+			expect(names).toContain(name);
+		}
+	});
+
+	it("puts a TodoWrite and a workflow_write item in ONE lane", () => {
+		// The merge, end to end through the real tools: before it, these were two
+		// documents and 65% of sessions held the same work twice.
+		return (async () => {
+			await call("TodoWrite", { todos: [{ id: "t1", subject: "wire the gate" }] });
+			await call("workflow_write", { ops: [{ op: "stage", kind: "execute", title: "Implement" }] });
+			await call("workflow_write", { ops: [{ op: "step", stageId: "execute", id: "s1", title: "prove it" }] });
+
+			const doc = rehydratePlan(fake.entries as readonly unknown[])!;
+			const lanes = doc.blocks.filter((b) => b.type === "steps");
+			expect(lanes).toHaveLength(1);
+			expect(lanes[0].steps.map((i) => i.id)).toEqual(["t1", "s1"]);
+			expect(lanes[0].title).toBe("Implement");
+		})();
+	});
+
+	it("returns the resulting list, which is what a transcript renders", async () => {
+		const result = await call("TodoWrite", { todos: [{ subject: "one" }, { subject: "two" }] });
+		const details = (result as unknown as { details: { tasks: unknown[] } }).details;
+		expect(details.tasks).toHaveLength(2);
+	});
+
+	it("keeps a todo tick off the intent clock through the real tool", async () => {
+		await call("TodoWrite", { todos: [{ id: "t1", subject: "one" }] });
+		const before = rehydratePlan(fake.entries as readonly unknown[])!;
+		await call("TodoWrite", { todos: [{ id: "t1", status: "completed" }] });
+		const after = rehydratePlan(fake.entries as readonly unknown[])!;
+
+		expect(after.revision).toBe(before.revision);
+		expect(after.progress).toBe(before.progress + 1);
+	});
+});
