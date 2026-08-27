@@ -730,7 +730,16 @@ export type BlockInput =
 export interface ItemInput {
 	/** Preserved when re-stating an existing item, so status and links survive. */
 	id?: string;
-	title: string;
+	/**
+	 * Required when CREATING, optional when patching.
+	 *
+	 * Optional in the type because `{id, status}` is the natural shape of a
+	 * tick and a caller should not have to restate a title to change a status —
+	 * restating one is how a reword silently lands in a patch nobody reviewed.
+	 * A create without one is refused in `writeItem`, where the difference is
+	 * actually knowable.
+	 */
+	title?: string;
 	activeForm?: string;
 	detail?: string;
 	kind?: string;
@@ -1222,6 +1231,10 @@ function writeItem(
 ): void {
 	const supplied = cleanString(input.id);
 	const at = supplied === undefined ? -1 : lane.steps.findIndex((item) => item.id === supplied);
+	if (at === -1 && cleanString(input.title) === undefined) {
+		problems.push(`${label}: a new item needs a title${supplied === undefined ? "" : ` (nothing here has id "${supplied}")`}`);
+		return;
+	}
 	const id = supplied ?? String(doc.nextId++);
 	const item = normalizeItem(input, id);
 
