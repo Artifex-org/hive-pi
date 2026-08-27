@@ -63,6 +63,7 @@ import {
 	emptyPlan,
 	isEmpty,
 	isLanesOnly,
+	MODEL_WRITABLE_PHASES,
 	PLAN_ENTRY_TYPE,
 	PLAN_TICK_ENTRY_TYPE,
 	tickEntry,
@@ -239,7 +240,14 @@ const OpSchema = Type.Union([
 		op: Type.Literal("header"),
 		title: Type.Optional(Type.String()),
 		goal: Type.Optional(Type.String({ description: "One sentence." })),
-		phase: Type.Optional(StringEnum(["none", "drafting", "ready", "approved", "abandoned"] as const)),
+		// `approved` is absent on purpose — see MODEL_WRITABLE_PHASES. Approval is
+		// the operator's word, and the approval handlers below set it through
+		// `persistOps`, which bypasses this schema.
+		phase: Type.Optional(
+			StringEnum(MODEL_WRITABLE_PHASES, {
+				description: 'Set "ready" to present the plan for approval. Approval itself is the operator\'s.',
+			}),
+		),
 		stage: Type.Optional(
 			Type.String({ description: "The lifecycle stage the session is in. A tick, never a re-plan." }),
 		),

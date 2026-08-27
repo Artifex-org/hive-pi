@@ -107,7 +107,37 @@ export type WorkItemStatus = "pending" | "in_progress" | "done" | "failed" | "sk
 /** @deprecated The pre-merge name. Kept so existing imports keep compiling. */
 export type StepStatus = WorkItemStatus;
 
-const VALID_PHASES: readonly PlanPhase[] = ["none", "drafting", "ready", "approved", "abandoned"];
+export const VALID_PHASES: readonly PlanPhase[] = ["none", "drafting", "ready", "approved", "abandoned"];
+
+/**
+ * The phases a MODEL may write through `plan_write`. Deliberately NOT
+ * `VALID_PHASES` — `approved` is absent, and its absence is the feature.
+ *
+ * `approved` is the one phase that means an OPERATOR accepted the plan, and it
+ * is the only one anything downstream trusts. Hive's revision history stores
+ * the phase straight off the document (`COALESCE($3::jsonb #>> '{doc,phase}'`),
+ * its retention keeps the newest approved row, and the browser's
+ * "diff since approved" picks its comparison anchor with
+ * `history.find((r) => r.phase === "approved")`. A model that could stamp
+ * `approved` on its own revision would make that diff compare the plan against
+ * itself and show an operator nothing changed — the exact opposite of what the
+ * feature exists to show.
+ *
+ * Every legitimate producer of `approved` is an INTERNAL `persistOps` call in
+ * the approval handlers, and those go straight to `applyOps`, which validates
+ * against `VALID_PHASES` above and never sees this tool schema. So narrowing
+ * the tool surface closes the model's door and leaves all three real approval
+ * paths working.
+ *
+ * Do not "fix" the asymmetry by re-aligning these two lists. It is load-bearing,
+ * and `plan-approve-flow.test.ts` asserts the difference is exactly `approved`.
+ *
+ * Known residual, not closed here: a launched agent holding a session token can
+ * still PUT a document with `phase: "approved"` straight at Hive, which cannot
+ * tell that from a pi-side operator approval because both arrive as a document
+ * phase. Closing that needs Hive to own the approved transition — HIV-2937.
+ */
+export const MODEL_WRITABLE_PHASES = ["none", "drafting", "ready", "abandoned"] as const;
 
 /**
  * `none` is the phase of a document that has LANES and no plan.
