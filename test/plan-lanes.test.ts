@@ -589,3 +589,48 @@ describe("applyOps does not mutate what it was given", () => {
 		expect(JSON.stringify(base)).toBe(snapshot);
 	});
 });
+
+describe("what a tick may NOT swallow", () => {
+	// Both of these are ways the two-clock split could quietly break something
+	// that depends on the plan, and neither is visible in a counter.
+
+	it("mirrors set_step's clock for the same update through `item`", () => {
+		// `TodoWrite` becomes a façade over `item` ops. A predicate that called a
+		// status change "intent" here would bump `revision` on every todo tick —
+		// re-arming the approval timer and writing a full snapshot for the most
+		// common writer in the harness.
+		const base = applyOps(
+			emptyPlan(NOW),
+			[{ op: "lane", kind: "execute", items: [{ id: "a", title: "a" }] }],
+			NOW,
+		).doc;
+
+		const viaSetStep = applyOps(base, [{ op: "set_step", id: "a", status: "done", note: "n" }], LATER).doc;
+		const viaItem = applyOps(base, [{ op: "item", item: { id: "a", status: "done", note: "n" } }], LATER).doc;
+
+		expect(viaItem.revision).toBe(viaSetStep.revision);
+		expect(viaItem.progress).toBe(viaSetStep.progress);
+		expect(viaItem.revision).toBe(base.revision);
+	});
+
+	it("still calls a reworded item a re-plan", () => {
+		const base = applyOps(
+			emptyPlan(NOW),
+			[{ op: "lane", kind: "execute", items: [{ id: "a", title: "a" }] }],
+			NOW,
+		).doc;
+		const result = applyOps(base, [{ op: "item", item: { id: "a", title: "a, more precisely" } }], LATER);
+		expect(result.doc.revision).toBe(base.revision + 1);
+	});
+
+	it("does not mark a lane the model caused as machine-made", () => {
+		// A lane created because the MODEL wrote an item is the model's. Marking
+		// it claimable would leave the next writer free to take it over, which is
+		// how a second lane appears.
+		const result = applyOps(emptyPlan(NOW), [{ op: "item", item: { title: "just do it" } }], NOW);
+		expect(lanesOf(result.doc)[0].origin).toBeUndefined();
+
+		const machine = applyOps(emptyPlan(NOW), [{ op: "item", origin: "mirror", item: { title: "mirrored" } }], NOW);
+		expect(lanesOf(machine.doc)[0].origin).toBe("mirror");
+	});
+});

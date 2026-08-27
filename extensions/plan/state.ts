@@ -662,6 +662,12 @@ export interface ItemOp {
 	id?: string;
 	/** Lane id or kind for a new item. Defaults to the target lane (lanes.ts). */
 	lane?: string;
+	/**
+	 * Set ONLY by a machine writing on the agent's behalf, and only when this op
+	 * has to create the lane. It marks that lane claimable; a lane the model
+	 * caused is the model's.
+	 */
+	origin?: "conductor" | "mirror";
 	item: ItemInput;
 }
 
@@ -818,9 +824,21 @@ function isIntentOp(op: PlanOp): boolean {
 		case "loop_tick":
 		case "move_item":
 			return false;
-		case "item":
-			// Creating work is intent; setting a status on existing work is not.
-			return op.item.id === undefined || op.item.status === undefined || Object.keys(op.item).length > 2;
+		case "item": {
+			// MIRRORS `set_step`, deliberately and by construction. The same
+			// update reaching this document through two ops must move the same
+			// clock: `TodoWrite` becomes a façade over `item`, so a predicate
+			// that called a status change "intent" here would bump `revision` on
+			// every todo tick — re-arming the approval timer and writing a full
+			// snapshot for the most common writer in the harness, which is the
+			// entire failure the two clocks exist to prevent.
+			//
+			// A tick is: an item that already exists, touched only in the fields
+			// a tick may touch.
+			if (op.item.id === undefined) return true; // creating work is intent
+			const TICK_FIELDS = new Set(["id", "status", "note", "activeForm", "startedAt", "endedAt"]);
+			return Object.keys(op.item).some((key) => !TICK_FIELDS.has(key));
+		}
 		case "header":
 			return (
 				op.title !== undefined ||
@@ -1384,9 +1402,19 @@ function applyItem(
 	const lane = holding ?? findLane(doc, op.lane) ?? targetLane(doc);
 
 	if (!lane) {
-		// No lane at all: make the one the todo façade would have made. A
-		// document that has work has somewhere to put it.
-		applyLane(doc, { op: "lane", kind: "execute", title: "Execute", origin: "mirror", items: [op.item] }, now, created, updated, problems, label);
+		// No lane at all: make one. `origin` is NOT assumed — a lane created
+		// because the MODEL wrote an item is the model's lane, and marking it
+		// machine-made would leave it claimable by the next writer, which is how
+		// a second lane appears. Only a caller that knows it is a machine says so.
+		applyLane(
+			doc,
+			{ op: "lane", kind: "execute", title: "Execute", origin: op.origin, items: [op.item] },
+			now,
+			created,
+			updated,
+			problems,
+			label,
+		);
 		return;
 	}
 	writeItem(doc, lane, op.item, now, created, updated, problems, label);

@@ -503,8 +503,20 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	const persist = (next: PlanDoc, previous?: PlanDoc) => {
+		// A PHASE CHANGE ALWAYS WRITES A SNAPSHOT, whatever the counters say.
+		//
+		// `phase` is approval machinery: `plan_ready` sets it to `ready` and that
+		// transition is what arms the browser's approval card. It is a tick by
+		// the clock rule — it changes nothing about what the plan MEANS — but a
+		// tick is a partial entry, and any reader that takes the newest SNAPSHOT
+		// would carry a stale phase and leave the operator looking at a plan that
+		// never asks to be approved. Rare enough that the saving is nil and
+		// load-bearing enough that being wrong is expensive.
 		const tickOnly =
-			previous !== undefined && next.revision === previous.revision && next.progress !== previous.progress;
+			previous !== undefined &&
+			next.revision === previous.revision &&
+			next.phase === previous.phase &&
+			next.progress !== previous.progress;
 		doc = next;
 		try {
 			if (tickOnly) pi.appendEntry(PLAN_TICK_ENTRY_TYPE, tickEntry(next));
@@ -633,8 +645,15 @@ export default function (pi: ExtensionAPI) {
 			const applied = held
 				? ops.map((op) => (op.op === "header" && op.phase === "ready" ? { ...op, phase: undefined } : op))
 				: ops;
+			const before = doc;
 			const result = applyOps(doc, applied, Date.now());
-			persist(result.doc);
+			// `before`, not nothing: `persist` decides between a snapshot and a
+			// tick by comparing the two, and a call that omits it always writes a
+			// snapshot. This is the TOOL's own path — the one every plan_write
+			// takes — so omitting it here would have made the tick entry a
+			// mechanism that shipped, typechecked, passed its unit tests and never
+			// once fired in the product.
+			persist(result.doc, before);
 			paint();
 			const body = renderOpResult(result, result.doc);
 			return text(
