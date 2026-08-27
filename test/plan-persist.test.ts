@@ -12,7 +12,7 @@
  * landed, and what a reader taking only snapshots would see.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import planExtension from "../extensions/plan/index.ts";
 import { PLAN_ENTRY_TYPE, PLAN_TICK_ENTRY_TYPE, rehydratePlan } from "../extensions/plan/state.ts";
@@ -45,10 +45,6 @@ describe("plan persistence — snapshots and ticks", () => {
 		fake = createFakePi();
 		planExtension(fake.api);
 		await fake.emit({ type: "session_start", reason: "new" });
-	});
-
-	afterEach(() => {
-		fake.dispose?.();
 	});
 
 	let call = 0;
