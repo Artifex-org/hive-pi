@@ -3,8 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	HIVE_PLAN_CHANNEL,
 	HIVE_SESSION_CHANNEL,
-	HIVE_WORKFLOW_CHANNEL,
 } from "../extensions/hive-common/channels.ts";
+import {
+	applyOps,
+	emptyPlan,
+	PLAN_ENTRY_TYPE,
+	PLAN_TICK_ENTRY_TYPE,
+	tickEntry,
+	toEntry,
+} from "../extensions/plan/state.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
@@ -66,7 +73,7 @@ function deps(cfg: RemoteConfig = config()): RemoteDeps {
 }
 
 /** Records every call; answers attach so the extension gets past it. */
-function fakeHive(over: { planStatus?: number; workflowStatus?: number } = {}) {
+function fakeHive(over: { planStatus?: number } = {}) {
 	const calls: Call[] = [];
 	const json = (status: number, body: unknown) =>
 		new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -80,7 +87,6 @@ function fakeHive(over: { planStatus?: number; workflowStatus?: number } = {}) {
 		if (path.endsWith("/conversation")) return json(200, { session_id: SESSION_ID, last_seq: 0 });
 		if (path.endsWith("/commands/claim")) return json(200, { items: [] });
 		if (path.endsWith("/plan")) return json(over.planStatus ?? 200, { revision: 1 });
-		if (path.endsWith("/workflow")) return json(over.workflowStatus ?? 200, { revision: 1 });
 		return json(200, {});
 	});
 
@@ -95,14 +101,6 @@ const planEntry = (title: string) => ({
 	data: { kind: "plan", schemaVersion: 1, doc: { title, phase: "drafting", blocks: [] } },
 });
 
-const workflowEntry = (title: string) => ({
-	customType: "workflow",
-	data: {
-		kind: "workflow",
-		schemaVersion: 1,
-		doc: { title, stages: [{ id: "s1", title: "Execute", kind: "execute", status: "running", steps: [] }] },
-	},
-});
 
 /**
  * Get past attach AND leave `latestCtx` holding these entries.
@@ -132,115 +130,102 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-describe("the workflow doorbell reaches Hive", () => {
-	it("PUTs the document the bus never carried", async () => {
-		const hive = fakeHive();
-		hiveRemote(fake.api, deps());
-		await attachWith(fake, [workflowEntry("Ship the graph")]);
+describe("the plan flush, on the terms the workflow flush was held to", () => {
+	// Four assertions restored from the two workflow describes HIV-2904 removed.
+	// The endpoint they guarded is gone — lanes live in the plan, so there is one
+	// document and one endpoint — but every property below was about the FLUSH
+	// rather than about which document it carried, and each is still a way the
+	// panel goes quietly stale.
 
-		fake.api.events.emit(HIVE_WORKFLOW_CHANNEL, { revision: 4 });
-		await vi.advanceTimersByTimeAsync(50);
-
-		const puts = hive.to(`/agent-sessions/${SESSION_ID}/workflow`);
-		expect(puts).toHaveLength(1);
-		expect(puts[0].method).toBe("PUT");
-		// The REVISION rode the bus; the DOCUMENT was read from the session
-		// entries. Both have to arrive, or the server's staleness guard has
-		// nothing to compare and the panel has nothing to draw.
-		expect(puts[0].body?.revision).toBe(4);
-		const doc = puts[0].body?.document as { doc?: { title?: string } };
-		expect(doc?.doc?.title).toBe("Ship the graph");
-	});
-
-	it("sends NOTHING when no workflow entry exists", async () => {
+	it("sends NOTHING when no plan entry exists", async () => {
 		// A revision announced without a document is a client bug, not a reason
 		// to PUT `null` over a document the server already holds.
 		const hive = fakeHive();
 		hiveRemote(fake.api, deps());
-		await attachWith(fake, [planEntry("only a plan here")]);
+		await attachWith(fake, []);
 
-		fake.api.events.emit(HIVE_WORKFLOW_CHANNEL, { revision: 2 });
+		fake.api.events.emit(HIVE_PLAN_CHANNEL, { revision: 2 });
 		await vi.advanceTimersByTimeAsync(50);
 
-		expect(hive.to("/workflow")).toHaveLength(0);
+		expect(hive.to("/plan")).toHaveLength(0);
 	});
 
 	it("ignores a doorbell carrying no revision", async () => {
 		const hive = fakeHive();
 		hiveRemote(fake.api, deps());
-		await attachWith(fake, [workflowEntry("x")]);
+		await attachWith(fake, [planEntry("x")]);
 
-		fake.api.events.emit(HIVE_WORKFLOW_CHANNEL, {});
-		fake.api.events.emit(HIVE_WORKFLOW_CHANNEL, { revision: "four" });
+		fake.api.events.emit(HIVE_PLAN_CHANNEL, {});
+		fake.api.events.emit(HIVE_PLAN_CHANNEL, { revision: "four" });
 		await vi.advanceTimersByTimeAsync(50);
 
-		expect(hive.to("/workflow")).toHaveLength(0);
+		expect(hive.to("/plan")).toHaveLength(0);
 	});
 
 	it("does not fail the session when Hive rejects the PUT", async () => {
 		// A dropped snapshot costs a stale panel until the next tick. Failing
 		// loudly would put a network error in front of a developer whose only
 		// crime was ticking a step.
-		const hive = fakeHive({ workflowStatus: 409 });
+		const hive = fakeHive({ planStatus: 409 });
 		hiveRemote(fake.api, deps());
-		await attachWith(fake, [workflowEntry("stale")]);
-
-		fake.api.events.emit(HIVE_WORKFLOW_CHANNEL, { revision: 1 });
-		await vi.advanceTimersByTimeAsync(50);
-
-		expect(hive.to("/workflow")).toHaveLength(1);
-		expect(fake.notifications).toHaveLength(0);
-	});
-});
-
-describe("the two documents do not interfere", () => {
-	// The refactor that made this worth pinning: `latestPlanEntry` became a
-	// wrapper over a shared `latestEntryOfType`, so one function now carries
-	// both features. A `customType` mix-up would send a plan to /workflow, or a
-	// workflow to /plan, and both would look like "the panel is empty".
-	it("sends each document to its OWN endpoint", async () => {
-		const hive = fakeHive();
-		hiveRemote(fake.api, deps());
-		await attachWith(fake, [planEntry("the plan"), workflowEntry("the workflow")]);
+		await attachWith(fake, [planEntry("stale")]);
 
 		fake.api.events.emit(HIVE_PLAN_CHANNEL, { revision: 1 });
-		fake.api.events.emit(HIVE_WORKFLOW_CHANNEL, { revision: 1 });
 		await vi.advanceTimersByTimeAsync(50);
 
-		const plan = hive.to(`/agent-sessions/${SESSION_ID}/plan`);
-		const workflow = hive.to(`/agent-sessions/${SESSION_ID}/workflow`);
-		expect(plan).toHaveLength(1);
-		expect(workflow).toHaveLength(1);
-		expect((plan[0].body?.document as { doc?: { title?: string } })?.doc?.title).toBe("the plan");
-		expect((workflow[0].body?.document as { doc?: { title?: string } })?.doc?.title).toBe("the workflow");
+		expect(hive.to("/plan")).toHaveLength(1);
+		expect(fake.notifications).toHaveLength(0);
 	});
 
-	// The plan flush is the one that already worked; the workflow refactor could
-	// only have broken it silently, because nothing on either side would error.
-	it("still sends the plan after the shared-helper refactor", async () => {
+	// Newest wins: the reader scans backwards, so a second snapshot must
+	// supersede the first rather than resend it.
+	it("sends the NEWEST snapshot", async () => {
 		const hive = fakeHive();
 		hiveRemote(fake.api, deps());
-		await attachWith(fake, [planEntry("plan still syncs")]);
+		await attachWith(fake, [planEntry("older"), planEntry("newer")]);
 
-		fake.api.events.emit(HIVE_PLAN_CHANNEL, { revision: 9 });
+		fake.api.events.emit(HIVE_PLAN_CHANNEL, { revision: 2 });
+		await vi.advanceTimersByTimeAsync(50);
+
+		const doc = hive.to("/plan")[0].body?.document as { doc?: { title?: string } };
+		expect(doc?.doc?.title).toBe("newer");
+	});
+
+	// What replaced the two workflow describes that stood here.
+	//
+	// They pinned a second endpoint and the hazard of confusing it with the
+	// first; HIV-2904 removed both — lanes live in the plan, so there is one
+	// document and one endpoint. The hazard that took their place is sharper:
+	// a status change now writes a small `plan.tick` entry instead of
+	// re-emitting the document, and a flush that sent the newest SNAPSHOT would
+	// ship Hive a plan whose checkboxes never move. That is not a visible
+	// failure — it is a plausible, out-of-date plan — which is exactly the kind
+	// worth a test.
+	it("folds the ticks that follow the newest snapshot", async () => {
+		const hive = fakeHive();
+		hiveRemote(fake.api, deps());
+
+		const doc = applyOps(
+			emptyPlan(1_700_000_000_000),
+			[
+				{ op: "header", title: "the plan" },
+				{ op: "lane", kind: "execute", items: [{ id: "a", title: "do it" }] },
+			],
+			1_700_000_000_000,
+		).doc;
+		const ticked = applyOps(doc, [{ op: "set_step", id: "a", status: "done" }], 1_700_000_060_000).doc;
+
+		await attachWith(fake, [
+			{ customType: PLAN_ENTRY_TYPE, data: toEntry(doc) },
+			{ customType: PLAN_TICK_ENTRY_TYPE, data: tickEntry(ticked) },
+		]);
+
+		fake.api.events.emit(HIVE_PLAN_CHANNEL, { revision: doc.revision, progress: ticked.progress });
 		await vi.advanceTimersByTimeAsync(50);
 
 		const puts = hive.to(`/agent-sessions/${SESSION_ID}/plan`);
 		expect(puts).toHaveLength(1);
-		expect(puts[0].body?.revision).toBe(9);
-	});
-
-	// Newest wins: the reader scans backwards, so a second snapshot of the same
-	// type must supersede the first rather than resend it.
-	it("sends the NEWEST snapshot of a type", async () => {
-		const hive = fakeHive();
-		hiveRemote(fake.api, deps());
-		await attachWith(fake, [workflowEntry("older"), workflowEntry("newer")]);
-
-		fake.api.events.emit(HIVE_WORKFLOW_CHANNEL, { revision: 2 });
-		await vi.advanceTimersByTimeAsync(50);
-
-		const doc = hive.to("/workflow")[0].body?.document as { doc?: { title?: string } };
-		expect(doc?.doc?.title).toBe("newer");
+		const sent = puts[0].body?.document as { doc?: { blocks?: Array<{ steps?: Array<{ status?: string }> }> } };
+		expect(sent?.doc?.blocks?.[0].steps?.[0].status).toBe("done");
 	});
 });

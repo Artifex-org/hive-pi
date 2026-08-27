@@ -33,7 +33,6 @@ import {
 	HIVE_STDIN_WAIT_CHANNEL,
 	type HiveStdinWaitEvent,
 	HIVE_PLAN_CHANNEL,
-	HIVE_WORKFLOW_CHANNEL,
 	HIVE_SESSION_CHANNEL,
 	HIVE_SESSION_END_CHANNEL,
 	OP_MODE_CONTROL_CHANNEL,
@@ -428,14 +427,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 */
 	let pendingWorkflowRevision: number | null = null;
 	let sendingWorkflow = false;
-	let unsubscribeWorkflow: (() => void) | undefined;
-	unsubscribeWorkflow = pi.events.on(HIVE_WORKFLOW_CHANNEL, (data: unknown) => {
-		const revision = (data as HiveWorkflowEvent | undefined)?.revision;
-		if (typeof revision !== "number") return;
-		pendingWorkflowRevision = revision;
-		setTimeout(() => void flushWorkflow(), 0);
-	});
-
+	// The workflow doorbell is gone with the workflow document (HIV-2904): lanes
+	// live in the plan, so `hive:plan` is the only doorbell, and it carries the
+	// tick counter as well as the revision.
 	/**
 	 * The operating mode actually in force, as the `opmode` extension reports it.
 	 *
@@ -1781,8 +1775,6 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		unsubscribePlan = undefined;
 		pendingPlanRevision = null;
 		// Same for the workflow doorbell, and for the same reason.
-		unsubscribeWorkflow?.();
-		unsubscribeWorkflow = undefined;
 		pendingWorkflowRevision = null;
 		unsubscribeConductor?.();
 		unsubscribeConductor = undefined;

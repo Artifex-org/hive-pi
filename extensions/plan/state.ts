@@ -533,13 +533,25 @@ export function isEmpty(doc: PlanDoc): boolean {
 }
 
 /**
- * Whether this document is only lanes — work, but nothing anybody planned.
+ * Whether everything in this document was written by a MACHINE — work that
+ * accumulated, rather than a plan anybody authored.
  *
- * The distinction `plan_ready` needs: presenting a bare todo list for approval
- * is not what the approval gate is for.
+ * The distinction `plan_ready` needs, and the first version of it was wrong in
+ * an instructive way: "every block is a lane" also describes a perfectly good
+ * plan whose author wrote one `steps` block and nothing else, which is what
+ * most of this repo's own plan tests build. The discriminator is not the block
+ * TYPE, it is `origin` — the mark a lane carries while only the todo façade or
+ * the conductor has touched it, and which is cleared the moment the model
+ * writes to that lane itself.
+ *
+ * So: a document of mirrored todos is not a plan; the same document once the
+ * model has claimed the lane or added a single block of its own is.
  */
 export function isLanesOnly(doc: PlanDoc): boolean {
-	return doc.blocks.length > 0 && doc.blocks.every((block) => block.type === "steps");
+	return (
+		doc.blocks.length > 0 &&
+		doc.blocks.every((block) => block.type === "steps" && (block as LaneBlock).origin !== undefined)
+	);
 }
 
 /* -------------------------------------------------------------------------- */

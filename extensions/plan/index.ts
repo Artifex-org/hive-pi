@@ -29,11 +29,13 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+	CONDUCTOR_CHANNEL,
 	HIVE_PLAN_CHANNEL,
 	PLAN_APPROVED_CHANNEL,
 	PLAN_CONTROL_CHANNEL,
 	PLAN_GRILL_CHANNEL,
 	PLAN_MODE_STATE_CHANNEL,
+	type ConductorStageEvent,
 	QUESTION_ANSWER_CHANNEL,
 	QUESTION_LISTENER_CHANNEL,
 	QUESTION_REMOTE_CHANNEL,
@@ -54,7 +56,7 @@ import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
 import { currentLane, isObservedKind, targetLane } from "./lanes.ts";
 import { registerFacadeTools } from "./facades.ts";
-import { TEMPLATE_NAMES_TUPLE } from "./templates.ts";
+import { opsForLane, TEMPLATE_NAMES_TUPLE } from "./templates.ts";
 import {
 	applyOps,
 	emptyPlan,
@@ -857,6 +859,24 @@ export default function (pi: ExtensionAPI) {
 			// outside it nothing was ever withheld and there is no gate to open.
 			// One of them logged the refusal and executed anyway; the other spent
 			// the turn hunting for a way in. Saying so costs one sentence.
+			// A LANES-ONLY document is not a plan, and presenting one for approval
+			// is not what the gate is for.
+			//
+			// Since the merge, the majority of sessions hold lanes and nothing
+			// else: 98% of measured sessions kept a todo list and only 71% kept a
+			// plan. Without this, a model that wrote three todos and reached for
+			// `plan_ready` would put a bare checklist in front of an operator as
+			// something to approve — and, because approval sets a phase and arms a
+			// timer, would then wait on it.
+			if (isLanesOnly(doc)) {
+				return text(
+					"This session has a task list but no plan: every block in the document is a lane. " +
+						"`plan_ready` presents a PLAN for approval — the reasoning, the approach, the risks and " +
+						"the verification, alongside the steps. Add those with `plan_write` if you want a gate, " +
+						"or carry on: a task list needs no approval.",
+				);
+			}
+
 			if (!active) {
 				if (isEmpty(doc)) {
 					return text(
@@ -1002,6 +1022,37 @@ export default function (pi: ExtensionAPI) {
 	 * in and it goes through `persistOps`, so every writer shares one document,
 	 * one pair of clocks and one persistence rule.
 	 */
+	/**
+	 * The conductor's walk, recorded on the document it now shares.
+	 *
+	 * The workflow extension used to hold this listener; the merge moved it here
+	 * with its two rules intact, because both were earned:
+	 *
+	 *   `idle` is "has not started" — not a stage worth recording, and not a
+	 *   reason to bring a document into existence for a session that may be two
+	 *   messages long.
+	 *
+	 *   `done` has no stage of its own, and must not CREATE anything. Without
+	 *   the guard, a session that never had a plan acquires one by finishing.
+	 *
+	 * A stage advance is a TICK: it is the machine reporting where it got to,
+	 * several times in a session that re-planned nothing, so counting it as
+	 * intent would re-arm the approval timer on a conductor beat.
+	 */
+	pi.events.on(CONDUCTOR_CHANNEL, (data: unknown) => {
+		const stage = (data as ConductorStageEvent | undefined)?.stage;
+		if (typeof stage !== "string" || stage === "idle") return;
+		if (stage === "done") {
+			if (!isEmpty(doc)) persistOps(doc, [{ op: "header", stage: "done" }], Date.now());
+			return;
+		}
+		// `opsForLane` creates the lane the conductor is walking INTO when the
+		// document lacks it — what replaced seeding: one lane per stage actually
+		// entered, rather than six boxes up front.
+		persistOps(doc, [{ op: "header", stage }, ...opsForLane(doc, stage)], Date.now());
+		paint();
+	});
+
 	registerFacadeTools(pi as never, {
 		doc: () => doc,
 		apply: (ops) => {

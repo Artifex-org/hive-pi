@@ -124,6 +124,25 @@ describe("phase none — lanes without a plan", () => {
 		expect(isLanesOnly(withTodos)).toBe(true);
 	});
 
+	it("counts a plan of ONE steps block as a real plan, not as a bare todo list", () => {
+		// The first version of this guard keyed on the block TYPE and refused a
+		// perfectly good plan whose author wrote one `steps` block and nothing
+		// else — which is what most of this repo's plan tests build. The
+		// discriminator is `origin`, the mark a lane carries while only a machine
+		// has touched it.
+		const authored = applyOps(
+			emptyPlan(NOW),
+			[{ op: "upsert", id: "steps", block: { type: "steps", steps: [{ title: "do it" }] } }],
+			NOW,
+		).doc;
+		expect(isLanesOnly(authored)).toBe(false);
+	});
+
+	it("stops being lanes-only the moment the model claims the lane", () => {
+		const claimed = applyOps(withMirroredTodos("one"), [{ op: "lane", kind: "execute", title: "Implement" }], LATER).doc;
+		expect(isLanesOnly(claimed)).toBe(false);
+	});
+
 	it("stops being lanes-only the moment the agent writes anything else", () => {
 		const doc = applyOps(withMirroredTodos("one"), [{ op: "upsert", id: "why", block: { type: "text", markdown: "because" } }], LATER).doc;
 		expect(isLanesOnly(doc)).toBe(false);
