@@ -52,6 +52,7 @@ import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
 import { classifyCommand, classifyTool } from "./policy.ts";
 import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
+import { currentLane, isObservedKind, targetLane } from "./lanes.ts";
 import { registerFacadeTools } from "./facades.ts";
 import { TEMPLATE_NAMES_TUPLE } from "./templates.ts";
 import {
@@ -550,8 +551,42 @@ export default function (pi: ExtensionAPI) {
 	 * not draw. The deck extension owns the widget slot (HIV-1219); this only
 	 * states what the plan currently is.
 	 */
+	/**
+	 * Two deck sections, from ONE document.
+	 *
+	 * Before the merge the deck carried a `tasks` section (the todo rows) and a
+	 * `plan` section (a summary line) fed by two separate stores, so an operator
+	 * read the same work twice and the two could disagree — a count that did not
+	 * match the rows under it. Both sections stay, because they answer different
+	 * questions an operator genuinely has (what am I doing next; how far along
+	 * is the plan and is it approved). What changed is that they now come from
+	 * the same document and therefore cannot disagree.
+	 *
+	 * Items whose kind Hive resolves are left out of the rows for the same
+	 * reason they are left out of the counts: a delivery lane's five pending
+	 * observations are not five things to do next.
+	 */
 	const paint = () => {
 		try {
+			const lane = currentLane(doc) ?? targetLane(doc);
+			const rows = (lane?.steps ?? [])
+				.filter((item) => !isObservedKind(item.kind))
+				.map((item) => ({
+					status:
+						item.status === "in_progress"
+							? ("in_progress" as const)
+							: item.status === "pending" || item.status === "blocked"
+								? ("pending" as const)
+								: ("completed" as const),
+					subject: item.title,
+					...(item.activeForm ? { activeForm: item.activeForm } : {}),
+					...(item.dependsOn && item.dependsOn.length > 0 ? { blocked: true } : {}),
+				}));
+			pi.events.emit(DECK_SECTION_CHANNEL, {
+				section: "tasks",
+				state: rows.length > 0 ? { kind: "tasks", rows } : null,
+			} satisfies DeckSectionEvent);
+
 			const line = summaryLine(doc);
 			const label = line ? (active ? `${line} · read-only` : line) : undefined;
 			pi.events.emit(DECK_SECTION_CHANNEL, {

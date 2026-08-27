@@ -17,8 +17,56 @@ import {
 	planHydrate,
 	pushBody,
 	statusFor,
-} from "../extensions/tasks/linear.ts";
-import { applyWrites, emptyTasks, findTask, type TaskListState } from "../extensions/tasks/state.ts";
+} from "../extensions/plan/linear.ts";
+import { todoWritesToOps, taskRowsOf, type TaskRow, type TaskWrite } from "../extensions/plan/facades.ts";
+import { applyOps, emptyPlan, type PlanDoc } from "../extensions/plan/state.ts";
+
+/**
+ * Linear sync never cared about the STORE — it maps issues onto a list of
+ * titled items with a status, which a lane is. HIV-2904 moved the module from
+ * `extensions/tasks/` to `extensions/plan/` and changed its types; the sync
+ * logic and every assertion below are unchanged.
+ *
+ * These three shims keep the suite speaking the vocabulary it was written in,
+ * so a behaviour change would show as a failing assertion rather than as a
+ * rewritten test nobody can diff against the original.
+ */
+type TaskListState = { tasks: readonly TaskRow[] };
+
+const emptyTasks: TaskListState = { tasks: [] };
+
+function applyWrites(state: TaskListState, writes: readonly TaskWrite[], _now: number) {
+	// Rebuild a document holding exactly this list, apply the writes through the
+	// real façade, and read the lane back.
+	let doc: PlanDoc = emptyPlan(1_700_000_000_000);
+	// A NAMED lane, so the document's shared id counter is not consumed by the
+	// block and the items keep the ids this suite was written against.
+	doc = applyOps(doc, [{ op: "lane", id: "lane", kind: "execute" }], 1_700_000_000_000).doc;
+	if (state.tasks.length > 0) {
+		doc = applyOps(
+			doc,
+			[
+				{
+					op: "lane",
+					id: "lane",
+					items: state.tasks.map((task) => ({
+						id: task.id,
+						title: task.subject,
+						...(task.description !== undefined ? { detail: task.description } : {}),
+						status: task.status,
+						...(task.linearKey !== undefined ? { linearKey: task.linearKey } : {}),
+					})),
+				},
+			],
+			1_700_000_000_000,
+		).doc;
+	}
+	const next = applyOps(doc, todoWritesToOps(doc, writes), 1_700_000_000_001).doc;
+	return { state: { tasks: taskRowsOf(next) } };
+}
+
+const findTask = (state: TaskListState, id: string): TaskRow | undefined =>
+	state.tasks.find((task) => task.id === id);
 
 const NOW = 1_700_000_000_000;
 

@@ -3,7 +3,7 @@ name: bugfix
 aliases: bug-fixer
 op_mode: bugfix
 description: "Enforced bug investigator: reproduce, instrument, confirm the mechanism, fix, then prove the original reproduction passes."
-tools: read, grep, find, bash, edit, write, bugfix_evidence, bugfix_root_cause, workflow_write
+tools: read, grep, find, bash, edit, write, bugfix_evidence, bugfix_root_cause
 ---
 You are a focused bugfix worker. Begin by entering `/mode bugfix` (or start the
 parent with `--op-mode bugfix`). The mode will not allow edits until the

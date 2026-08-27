@@ -19,7 +19,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { activeFront, isObservedKind, targetLane, treeOrder } from "../extensions/plan/lanes.ts";
+import { activeFront, currentLane, isObservedKind, targetLane, treeOrder } from "../extensions/plan/lanes.ts";
+import { opsForLane } from "../extensions/plan/templates.ts";
 import {
 	applyOps,
 	applyTick,
@@ -632,5 +633,62 @@ describe("what a tick may NOT swallow", () => {
 
 		const machine = applyOps(emptyPlan(NOW), [{ op: "item", origin: "mirror", item: { title: "mirrored" } }], NOW);
 		expect(lanesOf(machine.doc)[0].origin).toBe("mirror");
+	});
+});
+
+describe("where the session is, and the conductor's own lane", () => {
+	// Ported from the workflow document's `currentStage` and `opsForStage` when
+	// HIV-2904 merged it in. Both answer a question an ORCHESTRATOR asks, not
+	// just a diagram: `diagnose_agent_session`, `recap_session` and every roster
+	// row report the stage, so being wrong here is wrong in Hive.
+
+	it("reports the lane holding running work", () => {
+		const doc = applyOps(
+			emptyPlan(NOW),
+			[
+				{ op: "lane", kind: "research", items: [{ id: "r", title: "r", status: "done" }] },
+				{ op: "lane", kind: "execute", items: [{ id: "e", title: "e", status: "in_progress" }] },
+				{ op: "lane", kind: "verify", items: [{ id: "v", title: "v" }] },
+			],
+			NOW,
+		).doc;
+		expect(currentLane(doc)?.kind).toBe("execute");
+	});
+
+	it("falls back to the first lane with work left", () => {
+		const doc = applyOps(
+			emptyPlan(NOW),
+			[
+				{ op: "lane", kind: "research", items: [{ id: "r", title: "r", status: "done" }] },
+				{ op: "lane", kind: "verify", items: [{ id: "v", title: "v" }] },
+			],
+			NOW,
+		).doc;
+		expect(currentLane(doc)?.kind).toBe("verify");
+	});
+
+	it("has no lane when a session declared none, which is the truth about it", () => {
+		expect(currentLane(emptyPlan(NOW))).toBeUndefined();
+	});
+
+	it("creates the conductor's lane when it walks into one that is missing", () => {
+		// This is what replaced seeding: nothing exists until something ENTERS
+		// it, so a session that never leaves execute has one lane.
+		const doc = emptyPlan(NOW);
+		const ops = opsForLane(doc, "verify");
+		expect(ops).toHaveLength(1);
+		const next = applyOps(doc, ops, LATER).doc;
+		expect(lane(next, "verify")?.origin).toBe("conductor");
+	});
+
+	it("returns nothing when the lane is already there, so a beat is not a write", () => {
+		// A no-op that still bumped a clock would be a POST to Hive per conductor
+		// beat, several times a session that re-planned nothing.
+		const doc = applyOps(emptyPlan(NOW), [{ op: "lane", kind: "verify", title: "Verify" }], NOW).doc;
+		expect(opsForLane(doc, "verify")).toEqual([]);
+	});
+
+	it("declines to invent a lane for a stage it does not own", () => {
+		expect(opsForLane(emptyPlan(NOW), "haruspicy")).toEqual([]);
 	});
 });

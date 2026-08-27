@@ -2025,11 +2025,29 @@ export function validateSnapshot(data: unknown): PlanDoc | null {
 	const doc = record.doc as Partial<PlanDoc> | undefined;
 	if (typeof doc !== "object" || doc === null || !Array.isArray(doc.blocks)) return null;
 
-	const blocks = doc.blocks.filter((block): block is PlanBlock => {
-		if (typeof block !== "object" || block === null) return false;
-		const candidate = block as Partial<PlanBlock>;
-		return typeof candidate.id === "string" && VALID_BLOCK_TYPES.includes(candidate.type as BlockType);
-	});
+	const blocks = doc.blocks
+		.filter((block): block is PlanBlock => {
+			if (typeof block !== "object" || block === null) return false;
+			const candidate = block as Partial<PlanBlock>;
+			return typeof candidate.id === "string" && VALID_BLOCK_TYPES.includes(candidate.type as BlockType);
+		})
+		// ITEMS ARE FILTERED TOO, which the block filter alone did not do.
+		//
+		// A lane is the one block whose contents come from several writers, and a
+		// malformed item — `null`, or an object with no id — used to pass straight
+		// through into the counts, the renderer and the deck. The todo store this
+		// replaced dropped such rows on rehydrate; keeping that property here is
+		// what stops a truncated or hand-edited transcript from putting an
+		// untitled ghost in somebody's task list.
+		.map((block) => {
+			if (block.type !== "steps") return block;
+			const steps = (Array.isArray(block.steps) ? block.steps : []).filter((item): item is WorkItem => {
+				if (typeof item !== "object" || item === null) return false;
+				const candidate = item as Partial<WorkItem>;
+				return typeof candidate.id === "string" && typeof candidate.title === "string";
+			});
+			return steps.length === block.steps?.length ? block : { ...block, steps };
+		});
 
 	// Repair rather than trust: a persisted `nextId` behind the live maximum
 	// would hand the next block an id that already exists.

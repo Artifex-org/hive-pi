@@ -19,7 +19,20 @@
  */
 
 import { buildOrFilter, LinearClient, type LinearStateType } from "../status-footer/linear.ts";
-import { type TaskItem, type TaskListState, type TaskStatus, type TaskWrite } from "./state.ts";
+import type { TaskRow, TaskWrite } from "./facades.ts";
+
+/**
+ * The three names this module used before HIV-2904, mapped onto the merged
+ * document's vocabulary.
+ *
+ * Linear sync never cared about the STORE — it maps issues onto a list of
+ * titled items with a status, which a lane is. So the sync logic below is
+ * unchanged and only its types moved: a `TaskRow` is what a `TaskItem` was, and
+ * the "list" it hydrates into is now the lane's rows.
+ */
+type TaskStatus = TaskRow["status"];
+type TaskItem = TaskRow;
+type TaskListState = { tasks: readonly TaskRow[] };
 
 /** Linear descriptions are unbounded; a task list is a glance surface. */
 const MAX_DESCRIPTION = 400;
@@ -202,7 +215,7 @@ const RESOLVE_QUERY = `query($filter: IssueFilter) {
 
 /** Tasks that carry a Linear key, in list order. */
 export function linkedTasks(state: TaskListState): TaskItem[] {
-	return state.tasks.filter((task): task is TaskItem & { linearKey: string } => Boolean(task.linearKey));
+	return state.tasks.filter((task): task is TaskItem & { linearKey: string } => Boolean((task as { linearKey?: string }).linearKey));
 }
 
 /**
