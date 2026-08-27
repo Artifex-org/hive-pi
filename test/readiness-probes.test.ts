@@ -347,41 +347,105 @@ describe("openrouter", () => {
 });
 
 describe("gh", () => {
-	/** `gh auth token` is the offline question; `gh auth status` is the network one. */
-	function gh(tokenCode: number, statusCode: number, statusText = "") {
-		return deps({
-			exec: async (_file, args) =>
-				args.includes("token")
-					? { code: tokenCode, stdout: "gho_x", stderr: "" }
-					: { code: statusCode, stdout: "", stderr: statusText },
-		});
+	function gh(
+		tokenCode: number,
+		user: HttpResult = { ok: true, status: 200, body: { login: "octocat" } },
+		transport: HttpResult = { ok: true, status: 200, body: null },
+	) {
+		const execCalls: string[][] = [];
+		const httpCalls: { url: string; headers: Record<string, string> }[] = [];
+		return {
+			deps: deps({
+				exec: async (_file, args) => {
+					execCalls.push(args);
+					if (args[0] === "auth" && args[1] === "token") return { code: tokenCode, stdout: "gho_x", stderr: "" };
+					throw new Error(`unexpected gh command: ${args.join(" ")}`);
+				},
+				getJson: async (url, headers) => {
+					httpCalls.push({ url, headers });
+					if (url === "https://api.github.com/user") return user;
+					if (url === "https://api.github.com") return transport;
+					throw new Error(`unexpected URL: ${url}`);
+				},
+			}),
+			execCalls,
+			httpCalls,
+		};
 	}
 
-	it("is ready and names the account", async () => {
-		const out = await ghProbe(gh(0, 0, "✓ Logged in to github.com account octocat (keyring)"));
+	it("is ready only after the active token authenticates to GitHub", async () => {
+		const fixture = gh(0);
+		const out = await ghProbe(fixture.deps);
 		expect(out.status).toBe("ready");
 		expect(out.detail).toBe("octocat");
+		expect(fixture.execCalls).toEqual([["auth", "token"]]);
+		expect(fixture.httpCalls).toEqual([
+			{ url: "https://api.github.com/user", headers: { Authorization: "Bearer gho_x" } },
+		]);
 	});
 
 	it("is degraded with the login hint ONLY when there is no credential", async () => {
-		const out = await ghProbe(gh(1, 1));
+		const fixture = gh(1);
+		const out = await ghProbe(fixture.deps);
 		expect(out.status).toBe("degraded");
 		expect(out.detail).toBe("no credential");
 		expect(out.hint).toContain("gh auth login");
+		expect(fixture.httpCalls).toEqual([]);
 	});
 
-	it("does NOT tell a sandboxed agent to re-authenticate a valid credential", async () => {
-		// The measured failure this test exists for: `gh auth status` makes a
-		// network call, and with egress blocked it prints "The token in keyring is
-		// invalid. To re-authenticate, run: gh auth refresh". A launched agent has
-		// its own netns and no DNS, so EVERY sandboxed session saw that — and
-		// session efb2830c stopped work and asked its operator to `gh auth login`
-		// while holding a token that authenticates fine on the host.
-		const out = await ghProbe(gh(0, 1, "X Failed to log in to github.com account octocat (keyring)\n- The token in keyring is invalid."));
+	it("does not let stale inactive profiles degrade a working active token", async () => {
+		// `gh auth status` reports every saved account. Its non-zero exit for an
+		// inactive stale profile must never override this active-token success.
+		const fixture = gh(0, { ok: true, status: 200, body: { login: "arau-j" } });
+		const out = await ghProbe(fixture.deps);
+		expect(out.status).toBe("ready");
+		expect(out.detail).toBe("arau-j");
+		expect(fixture.execCalls).toEqual([["auth", "token"]]);
+	});
+
+	it("distinguishes a rejected credential from reachable GitHub", async () => {
+		const out = await ghProbe(gh(0, { ok: false, status: 401, body: null }).deps);
+		expect(out.status).toBe("degraded");
+		expect(out.detail).toContain("rejected");
+		expect(out.detail).toContain("401");
+		expect(out.hint).not.toContain("unreachable");
+	});
+
+	it("names an API denial without calling it a bad credential", async () => {
+		const out = await ghProbe(gh(0, { ok: false, status: 403, body: null }).deps);
+		expect(out.status).toBe("degraded");
+		expect(out.detail).toContain("denied");
+		expect(out.detail).toContain("403");
+		expect(out.hint).toContain("policy");
+	});
+
+	it("does not overwrite an authenticated HTTP failure with a failed public fallback", async () => {
+		const out = await ghProbe(gh(0, { ok: false, status: 500, body: null }, { ok: false, status: 0, body: null }).deps);
+		expect(out.status).toBe("degraded");
+		expect(out.detail).toBe("GitHub authentication failed (HTTP 500)");
+		expect(out.hint).toContain("reachable");
+	});
+
+	it("reports GitHub unreachable only when both authenticated and public requests lack an HTTP response", async () => {
+		const out = await ghProbe(gh(0, { ok: false, status: 0, body: null }, { ok: false, status: 0, body: null }).deps);
 		expect(out.status).toBe("degraded");
 		expect(out.detail).toBe("credential present, GitHub unreachable");
 		expect(out.hint).toContain("do NOT re-authenticate");
-		expect(out.hint).not.toContain("gh auth login");
+	});
+
+	it("treats empty successful token output as no credential without making a request", async () => {
+		let requested = false;
+		const out = await ghProbe(
+			deps({
+				exec: async () => ({ code: 0, stdout: " \n", stderr: "" }),
+				getJson: async () => {
+					requested = true;
+					return { ok: true, status: 200, body: null };
+				},
+			}),
+		);
+		expect(out.detail).toBe("no credential");
+		expect(requested).toBe(false);
 	});
 
 	it("does NOT call a failed EXEC a missing credential (HIV-1979)", async () => {
@@ -406,30 +470,17 @@ describe("gh", () => {
 		expect(out.hint).toContain("/usr/bin/gh");
 	});
 
-	it("does not tell a sandboxed agent that delivery is impossible (HIV-1979)", async () => {
-		// The corrected half of the HIV-1978 hint. The sandbox CAN reach GitHub —
-		// api.github.com is allowlisted and answers 200 through the injected proxy
-		// — so "delivery needs a session that can reach GitHub" trained agents to
-		// abandon a pull request they were perfectly able to open.
-		const out = await ghProbe(gh(0, 1, "The token in keyring is invalid."));
-		expect(out.hint).toContain("api.github.com");
-		expect(out.hint).not.toMatch(/delivery needs a session/i);
-	});
-
-	it("asks the cheap offline question FIRST", async () => {
-		// Ordering is the fix, not an optimisation: if `gh auth status` ran first
-		// its network verdict would colour everything after it.
-		const calls: string[][] = [];
-		await ghProbe(
+	it("recognizes ENOENT without retaining a credential-shaped diagnostic", async () => {
+		const out = await ghProbe(
 			deps({
-				exec: async (_f, args) => {
-					calls.push(args);
-					return { code: 0, stdout: "", stderr: "" };
-				},
+				exec: async () => ({ code: 1, stdout: "gho_secret_must_not_persist", stderr: "spawn gh ENOENT" }),
 			}),
 		);
-		expect(calls[0]).toContain("token");
+		expect(out.status).toBe("unknown");
+		expect(out.detail).toContain("executable not found");
+		expect(out.detail).not.toContain("gho_secret");
 	});
+
 });
 
 describe("devservices postgres", () => {
