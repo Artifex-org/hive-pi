@@ -198,7 +198,9 @@ describe("render", () => {
 			scope: "changed",
 			uncommitted: 1,
 		});
-		expect(out).toContain("1 uncommitted path,");
+		// The trailing "." pins the SINGULAR: a bare "1 uncommitted path" would
+		// also match the plural "1 uncommitted paths" this guards against.
+		expect(out).toContain("1 uncommitted path.");
 	});
 
 	// A `staged` run that found nothing is a DIFFERENT story, and the first

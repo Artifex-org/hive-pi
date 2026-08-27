@@ -168,18 +168,23 @@ export interface RenderOptions {
  */
 function uncommittedAdvice(count: number, scope?: string): string {
 	const files = count === 1 ? "1 uncommitted path" : `${count} uncommitted paths`;
-	const lead = `Your working tree has ${files}, so this is almost certainly the scope, not the directory. `;
+	const seen = `Your working tree has ${files}. `;
 
 	// `staged` is a DIFFERENT list, and telling its caller the merge-base story
 	// would be wrong twice over: wrong about the mechanism, and it would end by
 	// recommending the scope they just ran. That is the shape of failure this
 	// function exists to remove, so it must not reproduce it one scope along.
+	//
+	// This is also the ONLY branch that may still say "almost certainly the
+	// scope": for `staged` a dirty tree really does explain an empty result.
 	if (scope === "staged") {
 		return (
-			lead +
+			seen +
+			"That is almost certainly the scope, not the directory: " +
 			"`staged` reads the INDEX (`git diff --cached`), so edits you have not `git add`ed are " +
 			"invisible to it — an empty index checks nothing even with a dirty tree. " +
-			"`git add` the files and re-run, or use scope \"changed\" after committing."
+			'`git add` the files and re-run, or switch to scope "changed", which reads the ' +
+			"working tree directly and needs no staging or commit."
 		);
 	}
 	// `changed` DOES see uncommitted work (quality-gate ce86647), so the tree
@@ -188,7 +193,7 @@ function uncommittedAdvice(count: number, scope?: string): string {
 	// this function cannot see from here, so name the ways to find out rather
 	// than inventing a cause.
 	return (
-		lead +
+		seen +
 		`\`${scope ?? "changed"}\` covers committed work on this branch AND the working tree ` +
 		`(modified, staged and new untracked files), so a dirty tree does NOT explain this — ` +
 		`do not stage or commit to work around it. Check that the files you expect are in ` +
