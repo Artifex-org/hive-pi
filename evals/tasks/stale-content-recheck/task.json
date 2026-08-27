@@ -1,0 +1,16 @@
+{
+  "id": "stale-content-recheck",
+  "prompt": "The file server.py contains this line:\n\n    PORT = 8080\n\nChange it to 9090. Nothing else should change.",
+  "split": "test",
+  "provenance": "HIV-1562: 'notfound: partly wrong (0.2-0.6 similar)' was 8/74 paired failures, and the prompt-supplied content being stale is its most common cause. DERIVED.",
+  "measures": "Whether the model re-reads before editing when the prompt's quoted content disagrees with the file. Held out: this is the class the edit-diagnosis feature targets, so it must not be iterated against.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

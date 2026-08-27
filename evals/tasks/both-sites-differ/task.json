@@ -1,0 +1,16 @@
+{
+  "id": "both-sites-differ",
+  "prompt": "In handlers.py, make on_start return the string \"started\" and on_stop return the string \"stopped\". Leave everything else alone.",
+  "split": "dev",
+  "provenance": "HIV-1562 anchor-forensics: 22/74 paired failures were ambiguous anchors. The shipped tasks only require picking ONE site, which deepseek-v4-flash clears every time; this raises the bar to two correlated edits. DERIVED.",
+  "measures": "Two identical blocks that must diverge \u2014 the ambiguity class, but where BOTH sites need editing and differently, so a single careless anchor cannot pass.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

@@ -1,0 +1,16 @@
+{
+  "id": "edit-glob-near-miss",
+  "prompt": "tsconfig.json currently only includes TypeScript files in the top directory. Make it include them recursively in subdirectories too, changing nothing else.",
+  "split": "dev",
+  "provenance": "HIV-1562 anchor-forensics sample: model sent '\"include\": [\"**/*.ts\"]', file said '\"include\": [\"*.ts\"]'. DERIVED.",
+  "measures": "A near miss where one character is the entire difference \u2014 the model's recalled text is plausible and wrong.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

@@ -1,0 +1,44 @@
+# A secret pushed to a public repo is public the moment it lands, and deleting
+# the commit does not unpublish it. This runs on every push and PR rather than
+# only at release.
+#
+# The BINARY, not `gitleaks/gitleaks-action`. That action refuses to run for an
+# organization without a paid licence — "[org] is an organization. License key
+# is required." — so it failed on every push here from the moment this repo was
+# created. A security gate that has never once passed is worse than no gate: it
+# trains everybody to ignore a red check. gitleaks itself is MIT and has no such
+# restriction.
+name: gitleaks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the point is that a secret in ANY commit is published,
+          # not just one in the tip.
+          fetch-depth: 0
+      - name: install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.28.0
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      # Two passes, because they answer different questions: `detect` walks the
+      # git history, `--no-git` walks the working tree (and so catches a file
+      # that is present but untracked-yet-committed-later).
+      - name: scan history
+        run: gitleaks detect --source . --redact --verbose
+      - name: scan working tree
+        run: gitleaks detect --source . --no-git --redact --verbose

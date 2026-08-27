@@ -1,0 +1,16 @@
+{
+  "id": "edit-anchor-near-miss",
+  "prompt": "In SKILL.md, the top-level heading currently names this skill. Change that heading so it reads exactly '# Linear Ticket Manager'. Change nothing else.",
+  "split": "dev",
+  "provenance": "HIV-1562 anchor-forensics over 182 pi sessions: 23/74 paired failures were near misses. Observed pair: model sent '# Linear Issue Management', file said '# Linear Issue Manager'. DERIVED, not replayed \u2014 the tree at failure time is not recorded.",
+  "measures": "Recovery when the anchor the model believes in is a word off the real text \u2014 the largest measured class (31% of paired anchor failures).",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

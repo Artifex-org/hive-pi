@@ -1,0 +1,14 @@
+# Every path, by default. A public repo accepts PRs from anyone, and this
+# checkout is what a Hive-provisioned machine loads into every pi session — so a
+# merge here reaches a fleet of workstations within one timer cycle. Review is
+# not a formality on that path.
+*                       @Artifex-org/core-team
+
+# Tighter still: these decide what a session may reach, or run before anything
+# else does. A change here is a change to a security boundary.
+/extensions/web/        @Artifex-org/core-team
+/extensions/guards-common/  @Artifex-org/core-team
+/extensions/hive-common/    @Artifex-org/core-team
+/extensions/hive-remote/    @Artifex-org/core-team
+/workstation/           @Artifex-org/core-team
+/.github/               @Artifex-org/core-team

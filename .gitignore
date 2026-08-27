@@ -1,0 +1,15 @@
+node_modules/
+*.log
+.DS_Store
+
+# Defence in depth for a public repo: a stranger cloning this and working in it
+# must not be one `git add -A` away from publishing their own credentials.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+auth.json
+.npmrc
+credentials.json

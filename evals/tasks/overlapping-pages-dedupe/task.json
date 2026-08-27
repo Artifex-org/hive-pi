@@ -1,0 +1,17 @@
+{
+  "id": "overlapping-pages-dedupe",
+  "prompt": "./fetch.sh --page N prints one record id per line and returns nothing past the end. Count how many DISTINCT records exist across all pages and write just that number (digits only) to count.txt.",
+  "split": "dev",
+  "provenance": "Memory 'harvest-dedupe-by-session-seq': a harvested corpus paginated with overlap, and a 9.4% finding was really 1.0% before dedup. Also the gh-api page-cap undercount. DERIVED into a local fixture.",
+  "measures": "A count over a paginated source whose pages OVERLAP. Summing page lengths gives a confident wrong number; only de-duplication gives the right one.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

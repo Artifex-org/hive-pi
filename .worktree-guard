@@ -1,0 +1,36 @@
+# Opt-in marker for the worktree guard (existence is the whole check; content is
+# never parsed).
+#
+# INERT, AND NOW INERT BY DESIGN RATHER THAN BY ACCIDENT.
+# This marker is consulted solely in a repo's MAIN worktree; hive-pi is
+# bare-repo + worktrees, so every checkout is linked and this never fires. It
+# shipped that way in PR #19 and protected nothing until 2026-08-05.
+#
+# It used to be "kept as the fallback for a non-bare clone". That fallback is
+# retired: since 2026-08-19 the guard ALLOWS a main worktree whose marker is
+# COMMITTED, and says why. A tracked file arrives with every `git clone`, and a
+# clone is a main worktree — so it could never mean "this directory is the
+# anchor", and what it did instead was block every disposable clone anyone made:
+# a rebase staging area under /tmp, a nested recovery clone, a sandbox's granted
+# workspace. Four papercuts 2026-08-15..19, one blocking.
+#
+# To protect a checkout that really IS an anchor, create this marker UNTRACKED
+# (one line in `<repo>.git/info/exclude`), the way `.worktree-pull-only` is done.
+#
+# What actually protects the anchor here is `.worktree-pull-only`, which the
+# guard checks in a LINKED worktree. That file is deliberately **untracked** —
+# one line in `hive-pi.git/info/exclude`, present only in the anchor checkout,
+# exactly as hive does it. Committing it would put it in EVERY worktree and
+# make every task worktree pull-only, which locks the repo against all work.
+# (Confirmed the hard way: doing so blocked the very commit that introduced it.)
+# The tracked-marker rule above is the same lesson, one branch over.
+#
+# hive-pi went bare-repo + worktrees on 2026-08-05, so ~/repos/hive-pi is gone
+# and ~/repos/hive-pi__worktrees/main is a pull-only anchor. Work happens in
+# task worktrees created with `gwq add -b <name>`.
+#
+# This repo has a second reason to protect that anchor, which the other guarded
+# repos do not: ~/.pi/agent/{settings.json,mcp.json,AGENTS.md,skills,scripts}
+# are stow symlinks INTO it. An edit there is not a dirty checkout — it is an
+# uncommitted change to the live harness config of every pi session on this
+# machine.

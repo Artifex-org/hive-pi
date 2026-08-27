@@ -1,0 +1,17 @@
+{
+  "id": "diagnose-shared-default",
+  "prompt": "`python3 run_tests.py` fails in this directory. Make it pass by fixing the defect in the source. Do not modify the tests, do not weaken any assertion, and do not suppress or catch the failure.",
+  "split": "dev",
+  "provenance": "Recurring class in this house's own code review; the hive-pi rule 'nothing mutable at module scope' exists for the same reason (per-extension jiti isolation makes shared state silently unshared). DERIVED as an unstated defect.",
+  "measures": "State shared between calls through a mutable default argument. The first call is correct and the second is not, so a single-case reading of the code looks fine.",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "bash",
+    "edit",
+    "write"
+  ],
+  "timeoutMs": 300000
+}

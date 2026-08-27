@@ -1,0 +1,24 @@
+{
+	"_comment": "The default pi settings a Hive-provisioned machine gets. `hive-agent workstation harness install` reads THIS file out of the cloned hive-pi checkout, substitutes {{HIVE_PI_ROOT}} with that checkout's absolute path, and writes the result to ~/.pi/agent/settings.json — but only when nothing is there yet. It never replaces an existing settings.json, and a machine whose tenant configures a private overlay gets the overlay's file symlinked instead. Keep every path in here expressed through the token: an absolute path baked in here resolves on the machine it was written on and nowhere else, which is the failure HIV-2792 named.",
+	"theme": "aether-dark",
+	"outputPad": 0,
+	"markdown": {
+		"codeBlockIndent": "  "
+	},
+	"defaultThinkingLevel": "medium",
+	"defaultProjectTrust": "ask",
+	"compaction": {
+		"enabled": true,
+		"reserveTokens": 65536,
+		"keepRecentTokens": 20000
+	},
+	"retry": {
+		"enabled": true,
+		"maxRetries": 3,
+		"provider": {
+			"maxRetries": 0
+		}
+	},
+	"skills": ["{{HIVE_PI_ROOT}}/skills"],
+	"packages": ["{{HIVE_PI_ROOT}}"]
+}

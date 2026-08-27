@@ -1,0 +1,49 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Keeps the pinned pi runtime current, one week behind each release. The delay is the point: pi ships often, and a week is long enough for a bad release to be yanked before this repo's extensions are typechecked against it.",
+    "THIS REPO AUTO-MERGES. .github/workflows/auto-merge.yml arms auto-merge on every non-draft PR, so a Renovate PR lands by itself once `hive/ci` is green. That is safe here for a specific reason rather than by luck: the gate runs `npm run typecheck`, which compiles every extension against the newly pinned pi, so an API break fails the PR instead of merging. Mark a PR draft to hold it.",
+    "IT DOES NOT MOVE HIVE'S PIN. Artifex-org/hive pins its own reviewed pi in cmd/factory-exec/Dockerfile (version + npm integrity, asserted at image build) and vendors copies of these extensions. A bump here therefore desyncs the two until hive's pin is moved by hand. That fails loudly rather than silently — hive's piext-typecheck step compiles the vendored tree against HIVE's pin — but whoever merges a pi bump here should expect to follow it there.",
+    "TWO LOCKFILES. package-lock.json and pnpm-lock.yaml are both tracked and both currently in sync; the gate uses `npm ci`, so package-lock is the authoritative one. Renovate updates both and warns that doing so is deprecated and will stop working in a future version. Nothing is broken today; when that support goes, drop whichever lockfile is not the gate's."
+  ],
+  "extends": ["config:recommended", ":dependencyDashboard"],
+  "minimumReleaseAge": "7 days",
+  "schedule": ["before 9am on Monday"],
+  "prConcurrentLimit": 5,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "A security fix waits for neither the Monday window nor the 7-day cooldown. The cooldown exists to let a bad release be yanked; an advisory is the opposite situation.",
+    "minimumReleaseAge": null,
+    "schedule": ["at any time"],
+    "labels": ["dependencies", "security"],
+    "commitMessagePrefix": "fix(deps)"
+  },
+  "packageRules": [
+    {
+      "description": "GitHub Actions in one PR. They touch no lockfile, so a failure here is independent of the dependency lanes.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "commitMessagePrefix": "chore(deps)",
+      "labels": ["dependencies", "infra"]
+    },
+    {
+      "description": "Routine npm bumps in ONE PR with a single package-lock.json regeneration. Majors are excluded and keep their own PR. Rules are applied in order and later ones win, so the pi rule BELOW deliberately overrides this for the runtime packages.",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "bump"],
+      "groupName": "weekly deps",
+      "groupSlug": "weekly",
+      "commitMessagePrefix": "chore(deps)",
+      "labels": ["dependencies"]
+    },
+    {
+      "description": "THE PI RUNTIME MOVES AS ONE UNIT, AND LAST SO THIS WINS. pi-agent-core, pi-ai, pi-coding-agent and pi-tui are published together from one source tree and are typed against each other; a PR that advanced one of them would fail `npm run typecheck` on a signature the others have not learned yet. Grouping them is not tidiness — an ungrouped bump is a broken build by construction. `rangeStrategy: pin` keeps them EXACT: these are devDependencies whose whole job is to be the version the extensions are typechecked against, so a caret range would make the gate's meaning depend on install order.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["@earendil-works/**"],
+      "groupName": "pi runtime",
+      "groupSlug": "pi-runtime",
+      "rangeStrategy": "pin",
+      "commitMessagePrefix": "chore(pi)",
+      "labels": ["dependencies", "pi"]
+    }
+  ]
+}
