@@ -1204,7 +1204,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// A failed graceful shutdown leaves the session available for the
 						// operator to inspect or end explicitly; never crash the downlink.
 					}
-				}, 0);
+				}, KILL_ABORT_GRACE_MS);
 				if (!process.stdout.isTTY) setTimeout(() => process.exit(0), 2_000);
 				return;
 			}
