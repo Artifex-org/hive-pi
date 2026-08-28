@@ -90,6 +90,8 @@ function readSession(path) {
 		calls: { plan_write: 0, plan_ready: 0, plan_ask: 0, todo: 0, workflow_write: 0 },
 		planOps: {},
 		upsertTypes: {},
+		composingUpserts: {},
+		sawReady: false,
 	};
 	let text;
 	try {
@@ -141,9 +143,20 @@ function readSession(path) {
 					if (typeof op?.op !== "string") continue;
 					bump(s.planOps, op.op);
 					const type = op.block?.type ?? op.type;
-					if (op.op === "upsert" && typeof type === "string") bump(s.upsertTypes, type);
+					if (op.op === "upsert" && typeof type === "string") {
+						bump(s.upsertTypes, type);
+						// COMPOSING means before the plan was first presented. It is the
+						// only window in which a block can change the reader's decision:
+						// after `plan_ready` the plan is on screen and the user is
+						// answering it. Splitting here is what separates "the plan grew
+						// rich" from "the plan grew rich after it was approved".
+						if (!s.sawReady) bump(s.composingUpserts, type);
+					}
 				}
-			} else if (name === "plan_ready") s.calls.plan_ready++;
+			} else if (name === "plan_ready") {
+				s.calls.plan_ready++;
+				s.sawReady = true;
+			}
 			else if (name === "plan_ask") s.calls.plan_ask++;
 			else if (name === "TodoWrite" || name === "TaskCreate" || name === "TaskUpdate") s.calls.todo++;
 			else if (name === "workflow_write") s.calls.workflow_write++;
@@ -178,6 +191,15 @@ function measure(s) {
 		// plan
 		blocks: blocks.length,
 		blockTypes,
+		// What the MODEL wrote, as opposed to what the document ended up holding.
+		// The two diverge because the harness writes blocks of its own — the
+		// conductor appends `log`, `plan_ask` resolves into `decision` — and a
+		// block-type histogram taken over the final document credits those to the
+		// author. Measured 2026-08-28: 59% of plans carried a `log` block, so
+		// "not prose-only" was reachable with zero model contribution, and the
+		// richness metric this instrument exists to take could move on its own.
+		upsertTypes: s.upsertTypes,
+		composingUpserts: s.composingUpserts,
 		proseOnly: blocks.length > 0 && blocks.every((b) => b.type === "text" || b.type === "steps"),
 		phase: s.plan?.phase ?? null,
 		revision: s.plan?.revision ?? 0,
@@ -254,6 +276,26 @@ function main() {
 	const phases = {};
 	for (const s of withPlan) bump(phases, s.phase ?? "?");
 
+	// Evidence the model itself wrote, and — the discriminating half — how much
+	// of it existed BEFORE the plan was presented for approval.
+	const EVIDENCE = ["diagram", "chart", "table", "metrics", "code", "refs", "ticket", "milestone", "decision", "checklist"];
+	const composedEvidence = (s) => EVIDENCE.reduce((n, t) => n + (s.composingUpserts[t] ?? 0), 0);
+	const authoredSessions = {};
+	const composingSessions = {};
+	for (const s of withPlan) {
+		for (const t of Object.keys(s.upsertTypes)) bump(authoredSessions, t);
+		for (const t of Object.keys(s.composingUpserts)) bump(composingSessions, t);
+	}
+	const authored = {
+		types: authoredSessions,
+		composingTypes: composingSessions,
+		// A plan that reached `plan_ready` with steps and no reasoning behind them.
+		bareAtPresentation: withPlan.filter((s) => s.calls.plan_ready > 0 && !s.composingUpserts.text && composedEvidence(s) === 0).length,
+		presented: withPlan.filter((s) => s.calls.plan_ready > 0).length,
+		evidenceBeforeReady: withPlan.reduce((n, s) => n + composedEvidence(s), 0),
+		evidenceTotal: withPlan.reduce((n, s) => n + EVIDENCE.reduce((m, t) => m + (s.upsertTypes[t] ?? 0), 0), 0),
+	};
+
 	const summary = {
 		since: args.since ? new Date(args.since).toISOString() : null,
 		sessions: N,
@@ -279,6 +321,7 @@ function main() {
 			blockTypeSessions,
 			blockTypeTotal,
 			proseOnly: withPlan.filter((s) => s.proseOnly).length,
+			authored,
 			withArtifact: withPlan.filter((s) => (s.blockTypes.artifact ?? 0) > 0).length,
 			withLinearRefs: withPlan.filter((s) => s.linearRefs > 0).length,
 			phases,
@@ -359,6 +402,22 @@ function main() {
 		console.log(`      ${type.padEnd(12)} ${String(n).padStart(5)}/${p.count}  ${pct(n, p.count).padStart(4)}   (${blockTypeTotal[type] ?? 0})`);
 	}
 	console.log(row("prose + checklist only (text/steps)", p.proseOnly, p.count));
+
+	// The reading that decides whether the richness work did anything. The
+	// histogram above is what the DOCUMENT holds; this is what the MODEL put
+	// there, and specifically what it had put there by the time it asked for
+	// approval — the only blocks that could have informed the answer.
+	const a = p.authored;
+	console.log("\n  what the MODEL wrote (plan_write upserts), sessions using >=1:");
+	console.log("      type          all   before plan_ready");
+	const authoredTypes = [...new Set([...Object.keys(a.types), ...Object.keys(a.composingTypes)])].sort(
+		(x, y) => (a.types[y] ?? 0) - (a.types[x] ?? 0),
+	);
+	for (const type of authoredTypes) {
+		console.log(`      ${type.padEnd(12)} ${String(a.types[type] ?? 0).padStart(4)}  ${String(a.composingTypes[type] ?? 0).padStart(8)}`);
+	}
+	console.log(`  evidence blocks written                      ${a.evidenceBeforeReady} before plan_ready, ${a.evidenceTotal} in total`);
+	console.log(row("presented with steps but no why or evidence", a.bareAtPresentation, a.presented) + "   of plans presented");
 	console.log(row("carries an artifact block", p.withArtifact, p.count));
 	console.log(row("names a Linear ticket in refs", p.withLinearRefs, p.count));
 	console.log(`  phase at end                                 ${Object.entries(phases).map(([k, v]) => `${k} ${v}`).join(" · ")}`);
