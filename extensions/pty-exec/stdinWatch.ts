@@ -43,6 +43,12 @@ export interface ProcSnapshot {
 	arg0: number | null;
 	/** readlink /proc/<pid>/fd/0, or null when unreadable. */
 	fd0: string | null;
+	/**
+	 * /proc/<pid>/cmdline, NUL-joined with spaces — the actual argv, which is
+	 * what tells `sleep 30` apart from `sleep 3000`. Optional so every existing
+	 * fixture stays valid, and null whenever /proc would not say.
+	 */
+	cmdline?: string | null;
 	children: number[];
 }
 
@@ -89,6 +95,21 @@ const TICK_MS = 2_000;
 const RENOTIFY_MS = 30_000;
 /** A runaway fork bomb must not turn the detector into the problem. */
 const MAX_TREE = 256;
+
+/**
+ * An argv is attacker-adjacent text on its way into the transcript.
+ *
+ * A command is free to embed ANSI, a newline, or a megabyte of base64 in its own
+ * argv, and all three would scribble on the note that quotes it. Control bytes
+ * become spaces (so a fake `[harness]` line cannot be forged on a line of its
+ * own) and the whole thing is capped.
+ */
+const MAX_CMDLINE = 200;
+export function sanitizeCmdline(s: string): string {
+	// eslint-disable-next-line no-control-regex
+	const clean = s.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+	return clean.length > MAX_CMDLINE ? `${clean.slice(0, MAX_CMDLINE)}…` : clean;
+}
 
 /** Parse one process from /proc. Never throws; returns null when unreadable. */
 export function realProcReader(): ProcReader {
@@ -137,6 +158,17 @@ export function realProcReader(): ProcReader {
 				/* stays null */
 			}
 
+			let cmdline: string | null = null;
+			try {
+				// argv, NUL-separated, usually with a trailing NUL. A kernel thread
+				// has an EMPTY cmdline, which must read as "no argv" and not as "".
+				const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+				const joined = raw.split("\0").filter((s) => s !== "").join(" ");
+				cmdline = joined === "" ? null : sanitizeCmdline(joined);
+			} catch {
+				/* stays null */
+			}
+
 			let children: number[] = [];
 			try {
 				children = fs
@@ -149,7 +181,7 @@ export function realProcReader(): ProcReader {
 				/* no children, or unreadable */
 			}
 
-			return { pid, comm, state, syscall, arg0, fd0, children };
+			return { pid, comm, state, syscall, arg0, fd0, cmdline, children };
 		},
 	};
 }
@@ -229,6 +261,71 @@ export function describeVerdict(v: BlockedVerdict): string | null {
 		return `no output for ${secs(v.quietMs)}s and nothing in this command's process tree is running. Waiting on input, or on the network?`;
 	}
 	return null;
+}
+
+/**
+ * The two frames that are ALWAYS there and are never the answer.
+ *
+ * `script` is the root we spawned; beneath it sits the bootstrap `$SHELL -c`
+ * whose pid the bootstrap wrote to `PI_PTY_PID`. Measured on the real spawn
+ * shape with SHELL=bash AND SHELL=zsh (2026-08-28): three frames, `script` →
+ * shell → `sleep 30`, for both `sleep 30` and `echo first; sleep 30`. Neither
+ * shell exec-optimises the tail command out from under `eval`.
+ *
+ * The shell is dropped by pid AND by `comm`, not by pid alone. A shell that DID
+ * exec into the command keeps the recorded pid while becoming the command, and
+ * a pid-only drop would erase the single frame that answers the question.
+ */
+const SHELL_COMMS = new Set(["sh", "bash", "zsh", "dash", "ash", "ksh", "fish"]);
+/** Enough to see a chain; not enough to bury the note under a fork bomb. */
+const MAX_NAMED = 3;
+
+/**
+ * Name what is still alive in a command's process tree, leaf-first.
+ *
+ * PURE, exactly like `classify`, so the formatting is testable from fixtures
+ * with no processes at all. Returns null when nothing but the scaffolding is
+ * left — the caller must then say it could not tell rather than invent a name.
+ */
+export function describeLiveTree(
+	tree: readonly ProcSnapshot[],
+	opts: { rootPid: number; shellPid?: number },
+): string | null {
+	const byPid = new Map(tree.map((p) => [p.pid, p]));
+
+	// Depth from the root, so "leaf-first" is a fact about the tree and not an
+	// accident of the order `readTree` happened to pop its stack in.
+	const depth = new Map<number, number>();
+	const walk = (pid: number, d: number): void => {
+		if (depth.has(pid)) return;
+		depth.set(pid, d);
+		for (const child of byPid.get(pid)?.children ?? []) walk(child, d + 1);
+	};
+	walk(opts.rootPid, 0);
+
+	const live = tree.filter((p) => {
+		if (p.pid === opts.rootPid) return false;
+		if (p.pid === opts.shellPid && SHELL_COMMS.has(p.comm)) return false;
+		return true;
+	});
+	if (live.length === 0) return null;
+
+	live.sort((a, b) => (depth.get(b.pid) ?? 0) - (depth.get(a.pid) ?? 0) || a.pid - b.pid);
+	const name = (p: ProcSnapshot) => {
+		// `comm` is truncated to 15 bytes by the kernel, so it is the fallback and
+		// never the first choice — but it is always there.
+		const label = p.cmdline ? sanitizeCmdline(p.cmdline) : p.comm;
+		return `${label === "" ? p.comm : label} (pid ${p.pid})`;
+	};
+
+	if (live.length === 1) {
+		// Only safe to say with ONE survivor: with `a & b` both alive, "earlier
+		// had finished" would contradict the list standing next to it.
+		return `${name(live[0]!)} was still running; anything earlier in the command had already finished`;
+	}
+	const shown = live.slice(0, MAX_NAMED).map(name);
+	const rest = live.length - shown.length;
+	return `${live.length} processes were still running: ${shown.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`;
 }
 
 /**

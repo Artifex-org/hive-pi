@@ -61,6 +61,38 @@ async function run(
 	};
 }
 
+/**
+ * Like `run`, but KEEPS the model sink when the command rejects.
+ *
+ * `run` throws the rejection away along with everything the command had
+ * produced, which is precisely the material the post-mortem note lives in.
+ */
+async function runExpectingFailure(
+	command: string,
+	opts: Parameters<typeof run>[1] = {},
+): Promise<{ error: Error | undefined; model: string }> {
+	const chunks: Buffer[] = [];
+	const ops = ptyBashOperations(opts);
+	if (!ops) throw new Error("pty ops unavailable");
+	let error: Error | undefined;
+	try {
+		await ops.exec(command, opts.cwd ?? process.cwd(), {
+			onData: (c) => void chunks.push(c),
+			timeout: opts.timeout,
+			signal: opts.signal,
+			env: opts.env,
+		});
+	} catch (e) {
+		error = e as Error;
+	}
+	return { error, model: Buffer.concat(chunks).toString() };
+}
+
+/** The `[harness]` line out of a model buffer, or "" when there is none. */
+function harnessNote(model: string): string {
+	return model.split("\n").find((l) => l.includes("[harness]")) ?? "";
+}
+
 /** Resolves true once `pid` is gone, or false when the budget runs out. */
 async function gone(pid: number, budgetMs: number): Promise<boolean> {
 	const deadline = Date.now() + budgetMs;
@@ -188,6 +220,40 @@ describe.runIf(canRunPty)("a command running on a real pty", () => {
 		const ac = new AbortController();
 		setTimeout(() => ac.abort(), 300);
 		await expect(run("sleep 30", { signal: ac.signal })).rejects.toThrow("aborted");
+	}, 30_000);
+
+	/**
+	 * WHAT A BARE TIMEOUT COSTS. Before this, a killed command returned its
+	 * partial output plus `script`'s own unattributed "Session terminated,
+	 * killing shell..." — nothing said which member of a chained command was
+	 * still running, so the same probe got retried blind. Nine papercuts ask for
+	 * this in those words ("does not reveal which subcommand was slow").
+	 *
+	 * The chain matters: `echo first` has ALREADY finished at the kill, and a
+	 * note that merely echoed the command string back would name it too. The
+	 * live /proc tree names only `sleep`.
+	 */
+	it("names the process still running when a timeout kills the command", async () => {
+		const { error, model } = await runExpectingFailure("echo first; sleep 30", { timeout: 2 });
+		// The sentinel is the negative control: the note must not have been
+		// smuggled in by breaking the protocol pi's error formatting matches on.
+		expect(error?.message).toBe("timeout:2");
+		const note = harnessNote(model);
+		expect(note).toContain("timed out");
+		expect(note).toContain("sleep 30");
+		// The part of the chain that already completed is not the culprit.
+		expect(note).not.toContain("echo");
+	}, 30_000);
+
+	// An abort is the identical blindness, so it gets the identical answer.
+	it("names the process still running when an abort cancels the command", async () => {
+		const ac = new AbortController();
+		setTimeout(() => ac.abort(), 1_000);
+		const { error, model } = await runExpectingFailure("echo first; sleep 30", { signal: ac.signal });
+		expect(error?.message).toBe("aborted");
+		const note = harnessNote(model);
+		expect(note).toContain("cancelled");
+		expect(note).toContain("sleep 30");
 	}, 30_000);
 
 	// The regression PTY mode creates: stdin never EOFs on its own, so a bare
