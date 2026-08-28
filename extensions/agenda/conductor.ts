@@ -54,10 +54,28 @@ export const FRAME_INJECTION = [
 	"For context gathering, fan out `retriever` subagents (fast, returns file:line references) rather than searching yourself.",
 ].join(" ");
 
+/**
+ * The first thing a model reads on entering plan mode — and therefore the shape
+ * it builds to.
+ *
+ * It used to name `steps` and the header and nothing else, which is exactly
+ * what came back: measured over 38 sessions, the composing phase (everything
+ * before the first `plan_ready`) produced 40 `upsert:steps` and 42 `header`
+ * ops against ~16 evidence-bearing blocks in TOTAL — 0.4 per session. The mode
+ * prompt teaches a three-part shape; this line taught a one-part shape, and
+ * this line is the one in front of the model when it starts composing.
+ *
+ * So it now names all three parts, in the prompt's own words. It stays a
+ * sentence rather than a lecture — the vocabulary and the worked example live
+ * in the mode prompt, which is already in context; repeating them here would
+ * cost the same tokens on every conductor injection.
+ */
 export const PLAN_INJECTION = [
 	"Conductor: this task crossed the complexity threshold, so the session is now in read-only plan mode.",
-	"Explore first, then build the plan with plan_write — include a `steps` block and a one-sentence",
-	'machine-checkable goal in the header (e.g. "PR created and its Hive checks green").',
+	"Explore first, then build the plan with plan_write — a one-sentence machine-checkable goal in the",
+	'header (e.g. "PR created and its Hive checks green"), a `text` block saying what you found and why',
+	"this approach, a `steps` block, and at least one block carrying the evidence that convinced you",
+	"(diagram, table, metrics, code or refs). A bare list of steps asks to be approved on trust.",
 	"Use plan_ask for decisions only the user can make. If an `advisor` tool is available, call it",
 	"once before plan_ready — it forwards the whole conversation to a stronger model for review.",
 	"When the plan is decision-complete, call plan_ready to present it for approval.",

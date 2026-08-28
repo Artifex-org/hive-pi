@@ -53,7 +53,7 @@ import { isUnattendedHiveLaunch } from "../hive-common/launch.ts";
 import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
 import { classifyCommand, classifyTool } from "./policy.ts";
 import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
-import { lintPlanComposition } from "./lint.ts";
+import { lintPlanComposition, type PlanLintIssue } from "./lint.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
 import { currentLane, isObservedKind, targetLane } from "./lanes.ts";
 import { registerFacadeTools } from "./facades.ts";
@@ -341,6 +341,20 @@ function text(body: string) {
 export default function (pi: ExtensionAPI) {
 	let doc: PlanDoc = emptyPlan(Date.now());
 	let active = false;
+	/**
+	 * Lint kinds already put to the model about the CURRENT plan.
+	 *
+	 * Composing takes several `plan_write` calls, and repeating "add a text
+	 * block" on each one is how advice becomes something to scroll past. Said
+	 * once, it is a suggestion; said six times it is noise, and the prompt
+	 * explicitly teaches building the plan incrementally, so the repeat would
+	 * punish exactly the behaviour we ask for.
+	 *
+	 * Cleared when a write lands on an EMPTY document — which is every reset
+	 * path at once (new session, `/plan clear`, a rehydrate that found nothing),
+	 * without a line in each of them that a later reset path could forget.
+	 */
+	const advised = new Set<PlanLintIssue["kind"]>();
 	/** Tool names captured before the mode narrowed them, so exit can restore. */
 	let toolsBeforePlanMode: string[] | null = null;
 	/**
@@ -683,6 +697,51 @@ export default function (pi: ExtensionAPI) {
 	/* Tools                                                                   */
 	/* ---------------------------------------------------------------------- */
 
+	/**
+	 * The composition lint, delivered while it can still change something.
+	 *
+	 * WHY THIS EXISTS AT ALL, given `plan_ready` already runs the same lint.
+	 * Measured over 38 sessions on the day the richness prompt shipped:
+	 * `plan_ready` returned advice 24 times, and in 22 of those the model wrote
+	 * to the plan again afterwards — but `plan_ready` is where the turn PARKS on
+	 * the operator's decision. The plan is already in front of the user by then.
+	 * Advice that arrives at the moment of presentation can only be honoured in
+	 * the version nobody was asked to approve; 29% of it was, and that is the
+	 * ceiling of a nudge delivered after the fact.
+	 *
+	 * So the same lint also runs on the way IN, on the composing writes, where
+	 * acting on it costs one more `upsert` and no one has looked yet.
+	 *
+	 * Four gates, each closing a way this could become noise:
+	 *
+	 * - **Only while composing** (`none`/`drafting`). After approval a plan_write
+	 *   is a status tick — 547 of them across those same sessions — and appending
+	 *   composition advice to a tick is nagging about a document the user has
+	 *   already accepted.
+	 * - **Never on a lanes-only document.** Those are todo lists that reached the
+	 *   plan through the `TodoWrite` façade; asking a todo list for a diagram is
+	 *   how a linter teaches people to stop reading it. (The façades do not call
+	 *   this tool, so they are already excluded — this catches a model driving
+	 *   lanes through `plan_write` directly.)
+	 * - **Each kind once per plan**, via `advised`.
+	 * - **Nothing while the plan is still empty**, since `applyOps` may have just
+	 *   created the first block and the lint's own thresholds have not been
+	 *   reached in any meaningful sense.
+	 *
+	 * The wording stays the lint's own, and stays advisory. It is the same
+	 * sentence `plan_ready` would print; the only thing this changes is when the
+	 * model hears it.
+	 */
+	const composingAdvice = (before: PlanDoc, after: PlanDoc): string => {
+		if (isEmpty(before)) advised.clear();
+		if (after.phase !== "none" && after.phase !== "drafting") return "";
+		if (isEmpty(after) || isLanesOnly(after)) return "";
+		const fresh = lintPlanComposition(after).filter((issue) => !advised.has(issue.kind));
+		if (!fresh.length) return "";
+		for (const issue of fresh) advised.add(issue.kind);
+		return `Advisory composition lint:\n${fresh.map((issue) => `- ${issue.message}`).join("\n")}`;
+	};
+
 	pi.registerTool({
 		name: "plan_write",
 		label: "Plan write",
@@ -722,12 +781,19 @@ export default function (pi: ExtensionAPI) {
 			persist(result.doc, before);
 			paint();
 			const body = renderOpResult(result, result.doc);
+			const advice = composingAdvice(before, result.doc);
 			return text(
-				held
-					? `${body}\n\nThe phase stayed \`drafting\`: the user asked to be grilled and no questions have ` +
+				[
+					body,
+					held
+						? `The phase stayed \`drafting\`: the user asked to be grilled and no questions have ` +
 							`been asked yet. Ask them with ask_user_question, fold the answers in, then present the ` +
 							`plan with plan_ready.`
-					: body,
+						: "",
+					advice,
+				]
+					.filter(Boolean)
+					.join("\n\n"),
 			);
 		},
 	});
