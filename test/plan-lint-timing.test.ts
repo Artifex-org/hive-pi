@@ -93,14 +93,24 @@ describe("the composition lint reaches the model while it is still composing", (
 		expect(second.content[0].text).not.toContain("Advisory composition lint");
 	});
 
-	it("stays silent once the plan has been approved", async () => {
+	it("stays silent once the plan has been handed over", async () => {
 		const fake = await boot();
-		await write(fake, "w1", [FIVE_STEPS]);
-		// Approval is not model-writable through the tool, so drive the phase the
-		// way the approval path does, then tick a step as an executing session does.
-		fake.api.events.emit("plan:control", { action: "approve" });
-		const tick = await write(fake, "w2", [{ op: "item", item: { id: "s1", status: "in_progress" } }]);
-		expect(tick.content[0].text).not.toContain("Advisory composition lint");
+		// A plan that already has its reasoning, so the only advice outstanding is
+		// `evidence` — and that one gets spent here.
+		const composing = await write(fake, "w1", [
+			FIVE_STEPS,
+			{ op: "upsert", id: "why", block: { type: "text", markdown: "The guard reads the pre-cd cwd." } },
+		]);
+		expect(composing.content[0].text).toContain("Advisory composition lint");
+
+		await write(fake, "w2", [{ op: "header", phase: "ready" }]);
+
+		// Prose describing a flow trips the `diagram` rule — a kind never advised
+		// on, so the dedupe cannot be what silences this. Only the phase gate can.
+		const after = await write(fake, "w3", [
+			{ op: "upsert", id: "flow", block: { type: "text", markdown: "The request flows through four stages." } },
+		]);
+		expect(after.content[0].text).not.toContain("Advisory composition lint");
 	});
 
 	it("never asks a mirrored todo list for a diagram", async () => {
