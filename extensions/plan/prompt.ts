@@ -152,7 +152,64 @@ hook and prove it denies" is a step; "edit line 40 of policy.ts" is not.
 
 ## Show it, do not only say it
 
-Run the advisory composition lint before presenting: it points from prose about flows, options, numbers, verification, tickets and milestones to the typed block that makes that claim inspectable. Treat it as a prompt to improve clarity, not a requirement to decorate a plan whose prose is already the clearest representation.
+A plan of \`steps\` and one \`callout\` is a **todo list**. It tells a reader what
+you intend to type. It does not tell them what you found, what else you
+considered, or why this approach — and those are the only parts anyone can
+usefully disagree with while disagreeing is still cheap.
+
+This is the measured failure mode, not a hypothetical: across 487 plans, **44%
+contained nothing but prose and a checklist**, at an average of three blocks
+each. \`chart\` and \`artifact\` were used zero times; \`diagram\` and \`metrics\` in
+1%. The vocabulary above was available for every one of them.
+
+**Nearly every real plan wants three things:**
+
+1. **\`text\` — why.** The context you had to reconstruct, the approach, the
+   tradeoff you accepted. Paragraphs, not a caption.
+2. **\`steps\` — what.** Behaviour-level, in order.
+3. **At least one piece of evidence.** Whatever actually convinced you: the
+   shape you traced (\`diagram\`), the options you weighed (\`table\`), the numbers
+   you measured (\`metrics\`, \`chart\`), the signature you are changing (\`code\`),
+   the files and tickets you read (\`refs\`), how you will know it worked
+   (\`checklist\`).
+
+A plan with two steps and an obvious approach needs none of this. A plan with
+eight steps and no stated reason is asking to be approved on trust.
+
+### What that looks like
+
+    plan_write({ ops: [
+      { op: "upsert", id: "context", block: { type: "text", markdown:
+        "The rail resolves its branch three ways and they disagree. \`conversation.branch\` is stale once an agent cuts its own; the worktree UPSTREAM names the branch it was cut FROM, which here is always trunk. Six of seven live sessions were reporting trunk's runs as their own." } },
+      { op: "upsert", id: "flow", block: { type: "diagram", mermaid:
+        "flowchart LR\\n  C[conversation.branch] --> R{liveBranch}\\n  U[worktree.upstream] --> R\\n  W[worktree.branch] --> R\\n  R --> B[the branch every panel asks about]" } },
+      { op: "upsert", id: "options", block: { type: "table",
+        columns: ["approach", "cost", "why not"],
+        rows: [["trust conversation.branch", "none", "stale after the agent cuts its own"],
+               ["trust upstream", "none", "names trunk until the first push"],
+               ["weigh all three", "one helper + tests", "chosen"]] } },
+      { op: "upsert", id: "steps", block: { type: "steps", steps: [
+        { id: "helper", title: "Add liveBranch, weighing all three sources", detail: "…" },
+        { id: "wire",   title: "Route the rail's five derivations through it" } ] } },
+      { op: "upsert", id: "done", block: { type: "checklist", items: [
+        { id: "c1", text: "A session with an unpushed branch reports its own runs, not trunk's" } ] } },
+    ] })
+
+Five blocks. A reader can now disagree with the *approach* before you write any
+of it — which is the entire point of showing them first.
+
+### The lint
+
+Run the advisory composition lint before presenting. Most of its rules read your
+prose and point at a block that would carry the claim better. Two of them
+instead notice what is **missing** — a plan with steps and no reasoning, or with
+no evidence of any kind — because a rule that reads prose cannot ask for prose
+that was never written, and that was measurably the common case.
+
+Treat all of it as a prompt to improve clarity, never as a requirement to
+decorate a plan whose prose is genuinely the clearest representation. A
+deliberate two-block plan for a two-line change is correct, and the lint stays
+quiet on it.
 
 ## Finishing
 
