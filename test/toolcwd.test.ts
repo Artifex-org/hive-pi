@@ -1,44 +1,83 @@
 /**
- * `bash` has no `cwd`, so a caller that passes one gets its command run in the
- * session's checkout instead — silently. Eleven papercuts in 48 hours, two of
- * which turned a passing command into false evidence (an unexecuted negative
- * control; a `ruff format` report about files in another worktree).
+ * `bash` now DECLARES `cwd` (see `pretty-tools.ts`), so the rules here are no
+ * longer about repairing an argument pi drops — they are the rules the tool
+ * itself runs on, plus what to do with the two spellings nothing declares.
+ *
+ * The history is still the reason the file exists. For eleven papercuts in 48
+ * hours (2026-08-17/18) a `cwd` was accepted and thrown away, and the failures
+ * were not cosmetic: an unexecuted negative control read as a pass, a `ruff
+ * format` reported on another worktree's files, a `git status` answered about
+ * the wrong branch and was filed as a bug against the wrong component. Thirty
+ * more followed over 2026-08-21..28, seven of them spelled `workdir` — which
+ * got no repair and no note at all, so a `git cherry-pick` landed on the wrong
+ * checkout and said nothing.
  */
 
 import { execFileSync } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import toolcwdExtension from "../extensions/toolcwd/index.ts";
 import { repairBashCwd, shellQuote } from "../extensions/toolcwd/cwd.ts";
-import { createFakePi } from "./fake-pi.ts";
 
 describe("repairBashCwd", () => {
-	it("relocates a command that named a directory it cannot reach", () => {
+	it("relocates a command that named a directory", () => {
 		const repair = repairBashCwd({ command: "uv run pytest tests/", cwd: "/home/dev/.hive/scratch/s/asf-3685" });
 		expect(repair.command).toBe("cd '/home/dev/.hive/scratch/s/asf-3685' && uv run pytest tests/");
-		expect(repair.note).toContain("no `cwd` parameter");
+		// `cwd` is a declared parameter now, so honouring it is not news.
+		expect(repair.note).toBeNull();
 	});
 
-	// `cd a && cd b` lands in `a/b` when b is relative, so a command that already
-	// located itself must never be prefixed. It still earns the sentence: the
-	// caller should stop sending an argument nothing reads.
-	it("never prefixes a command that already begins with cd", () => {
+	/**
+	 * A working-directory parameter means the command's own relative paths
+	 * resolve against it, and that includes a relative `cd`. `cd '/x' && cd sub`
+	 * lands in `/x/sub`, which is what the caller asked for; refusing to prefix
+	 * would land in `<session>/sub`, which is not. An absolute inner `cd` wins
+	 * either way, so nothing is lost.
+	 */
+	it("prefixes a declared cwd even when the command begins with cd", () => {
+		const repair = repairBashCwd({ command: "cd sub && ls", cwd: "/x" });
+		expect(repair.command).toBe("cd '/x' && cd sub && ls");
+		expect(repair.note).toBeNull();
+	});
+
+	/**
+	 * `workdir` is a guess about intent rather than a declared parameter, so it
+	 * is honoured AND reported: seven papercuts passed it, got no rewrite and no
+	 * word about it, and read the answer from the wrong tree as the truth.
+	 */
+	it("honours the spellings nothing declares, and says so", () => {
+		for (const key of ["workdir", "dir"]) {
+			const repair = repairBashCwd({ command: "git status", [key]: "/x" });
+			expect(repair.command).toBe("cd '/x' && git status");
+			expect(repair.note).toContain("`cwd`");
+			expect(repair.note).toContain(`\`${key}\``);
+		}
+	});
+
+	// For a guessed key the conservative rule stands: `cd a && cd b` lands in
+	// `a/b` when b is relative, and nothing declared that this was a directory.
+	it("never prefixes a guessed key onto a command that already begins with cd", () => {
 		for (const command of ["cd /elsewhere && ls", "  cd /elsewhere && ls", "(cd /elsewhere && ls)"]) {
-			const repair = repairBashCwd({ command, cwd: "/somewhere" });
+			const repair = repairBashCwd({ command, workdir: "/somewhere" });
 			expect(repair.command).toBeNull();
 			expect(repair.note).toContain("already began with `cd`");
 		}
 	});
 
+	it("prefers the declared key when a call carries both", () => {
+		const repair = repairBashCwd({ command: "ls", cwd: "/declared", workdir: "/guessed" });
+		expect(repair.command).toBe("cd '/declared' && ls");
+		expect(repair.note).toBeNull();
+	});
+
 	it("stays out of the way when there is nothing to honour", () => {
-		expect(repairBashCwd({ command: "ls" }).note).toBeNull();
-		expect(repairBashCwd({ command: "ls", cwd: "" }).note).toBeNull();
-		expect(repairBashCwd({ command: "ls", cwd: "   " }).note).toBeNull();
-		expect(repairBashCwd({ command: "ls", cwd: 7 }).note).toBeNull();
-		expect(repairBashCwd({ cwd: "/somewhere" }).note).toBeNull();
-		expect(repairBashCwd(undefined).note).toBeNull();
+		expect(repairBashCwd({ command: "ls" }).command).toBeNull();
+		expect(repairBashCwd({ command: "ls", cwd: "" }).command).toBeNull();
+		expect(repairBashCwd({ command: "ls", cwd: "   " }).command).toBeNull();
+		expect(repairBashCwd({ command: "ls", cwd: 7 }).command).toBeNull();
+		expect(repairBashCwd({ cwd: "/somewhere" }).command).toBeNull();
+		expect(repairBashCwd(undefined).command).toBeNull();
+		expect(repairBashCwd({ command: "ls", workdir: "" }).note).toBeNull();
 	});
 
 	// A worktree path is attacker-free but not shell-free, and the failure mode
@@ -61,83 +100,5 @@ describe("repairBashCwd", () => {
 			const out = execFileSync("sh", ["-c", `printf %s ${shellQuote(dir)}`], { encoding: "utf8" });
 			expect(out).toBe(dir);
 		}
-	});
-});
-
-describe("the toolcwd extension", () => {
-	function boot() {
-		const fake = createFakePi();
-		toolcwdExtension(fake.api as unknown as ExtensionAPI);
-		return fake;
-	}
-
-	it("rewrites the command before it runs, and drops the stray argument", async () => {
-		const fake = boot();
-		const input: Record<string, unknown> = { command: "git status --short", cwd: "/scratch/wt" };
-		await fake.emit({ type: "tool_call", toolCallId: "c1", toolName: "bash", input });
-
-		expect(input.command).toBe("cd '/scratch/wt' && git status --short");
-		// Dropped so a later handler cannot repair it a second time.
-		expect("cwd" in input).toBe(false);
-	});
-
-	// The repair must never be invisible: a harness that silently fixes calls is
-	// the same class of bug as one that silently breaks them.
-	it("appends the explanation to that call's result, and only that call's", async () => {
-		const fake = boot();
-		await fake.emit({
-			type: "tool_call",
-			toolCallId: "c1",
-			toolName: "bash",
-			input: { command: "ls", cwd: "/scratch/wt" },
-		});
-		await fake.emit({ type: "tool_call", toolCallId: "c2", toolName: "bash", input: { command: "ls" } });
-
-		const [repaired] = await fake.emit({
-			type: "tool_result",
-			toolCallId: "c1",
-			toolName: "bash",
-			content: [{ type: "text", text: "file.txt" }],
-			isError: false,
-			input: {},
-		});
-		const text = JSON.stringify((repaired as { content?: unknown } | undefined)?.content ?? "");
-		expect(text).toContain("file.txt");
-		expect(text).toContain("no `cwd` parameter");
-
-		// The untouched call gets nothing at all.
-		const [plain] = await fake.emit({
-			type: "tool_result",
-			toolCallId: "c2",
-			toolName: "bash",
-			content: [{ type: "text", text: "file.txt" }],
-			isError: false,
-			input: {},
-		});
-		expect(plain).toBeUndefined();
-	});
-
-	// Delivered once. A note that re-appended on every later result would follow
-	// the session around.
-	it("owes the note exactly once", async () => {
-		const fake = boot();
-		await fake.emit({
-			type: "tool_call",
-			toolCallId: "c1",
-			toolName: "bash",
-			input: { command: "ls", cwd: "/scratch/wt" },
-		});
-		const result = { type: "tool_result", toolCallId: "c1", toolName: "bash", content: [], isError: false, input: {} };
-		expect((await fake.emit(result))[0]).toBeDefined();
-		expect((await fake.emit(result))[0]).toBeUndefined();
-	});
-
-	it("ignores every tool that is not bash", async () => {
-		const fake = boot();
-		const input: Record<string, unknown> = { command: "ls", cwd: "/scratch/wt" };
-		await fake.emit({ type: "tool_call", toolCallId: "c1", toolName: "background_bash", input });
-		// background_bash HAS a cwd and honours it; touching that would break it.
-		expect(input.cwd).toBe("/scratch/wt");
-		expect(input.command).toBe("ls");
 	});
 });
