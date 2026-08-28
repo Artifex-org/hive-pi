@@ -99,9 +99,13 @@ const KILL_GRACE_MS = 2_000;
  * `stty` runs INSIDE the pty on its own controlling terminal, so geometry is set
  * without anyone needing to know the pts path. Measured: without it the pty
  * comes up 0x0. `tty > $PI_PTY_TTY` records the path for in-sandbox resize only.
+ *
+ * `echo $$ > $PI_PTY_PID` records THIS SHELL's pid, and it is the only way to
+ * kill what the command actually started — see `killTree`. A brace group, not a
+ * subshell, so `$$` is the shell itself and not something forked from it.
  */
 const BOOTSTRAP =
-	'{ tty > "$PI_PTY_TTY"; stty rows "$PI_PTY_ROWS" cols "$PI_PTY_COLS"; } 2>/dev/null; eval "$PI_PTY_COMMAND"';
+	'{ tty > "$PI_PTY_TTY"; echo $$ > "$PI_PTY_PID"; stty rows "$PI_PTY_ROWS" cols "$PI_PTY_COLS"; } 2>/dev/null; eval "$PI_PTY_COMMAND"';
 
 /**
  * The pts path the bootstrap recorded, or "" before the shell has written it.
@@ -156,18 +160,58 @@ export function ptyAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
 	return onPath("script", env);
 }
 
-/** SIGTERM the process group, then SIGKILL what survives. */
-function killTree(pid: number | undefined): void {
-	if (!pid) return;
+/**
+ * The pid the bootstrap recorded for the shell under the pty, or undefined.
+ *
+ * The guard is not decoration. A truncated or garbage file that parsed to 1
+ * would make the `kill(-pid)` below `kill(-1)` — SIGTERM to every process this
+ * user owns, from one unlucky write. Anything that is not a plausible pid is
+ * treated as "not recorded yet", which costs nothing: the script group is still
+ * signalled.
+ */
+function readShellPid(file: string): number | undefined {
+	try {
+		const pid = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
+		return Number.isInteger(pid) && pid > 1 ? pid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * SIGTERM everything this command owns, then SIGKILL what survives.
+ *
+ * TWO SESSIONS, AND THE SECOND ONE IS THE POINT. util-linux `script` calls
+ * setsid() for its child, so the command runs in a DIFFERENT session and
+ * process group from `script` itself — measured: script pid/pgid/sid all
+ * 1158825, the shell beneath the pty all 1158826. Signalling `-scriptPid`
+ * therefore reaches `script` alone, and the shell dies of the HANGUP that
+ * follows the pty closing. That looks identical to a working group kill right
+ * up until a grandchild traps HUP.
+ *
+ * A pre-commit hook chain does exactly that. P0408: an orphaned
+ * `vendor/quality-gate/quality-gate --changed` was still running twelve minutes
+ * after its tool call returned, holding the worktree's `index.lock` and failing
+ * every retry the agent made.
+ */
+function killTree(scriptPid: number | undefined, pidFile: string): void {
+	// Read ONCE, here: `cleanup` unlinks the file when the command closes, which
+	// is well before the SIGKILL timer below fires.
+	const shellPid = readShellPid(pidFile);
+	// The command's own session first — the shell is what owns the work.
+	const targets = [shellPid, scriptPid].filter((p): p is number => p !== undefined && p > 1);
+	if (targets.length === 0) return;
 	const send = (sig: NodeJS.Signals) => {
-		try {
-			// Negative pid = the whole group, which `detached: true` makes possible.
-			process.kill(-pid, sig);
-		} catch {
+		for (const pid of targets) {
 			try {
-				process.kill(pid, sig);
+				// Negative pid = that pid's whole process group.
+				process.kill(-pid, sig);
 			} catch {
-				/* already gone */
+				try {
+					process.kill(pid, sig);
+				} catch {
+					/* already gone */
+				}
 			}
 		}
 	};
@@ -175,6 +219,15 @@ function killTree(pid: number | undefined): void {
 	const t = setTimeout(() => send("SIGKILL"), KILL_GRACE_MS);
 	t.unref?.();
 }
+
+/**
+ * Per-command file names, unique within the process.
+ *
+ * A counter and not just `Date.now()`: pi runs a tool batch concurrently, two
+ * commands can start in the same millisecond, and a shared pid file would aim
+ * one command's kill at the other command's process group.
+ */
+let commandSeq = 0;
 
 /**
  * Build a pty-backed `BashOperations`, or null when one is not usable here.
@@ -196,7 +249,9 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 
 				const rows = opts.rows ?? DEFAULT_ROWS;
 				const cols = opts.cols ?? DEFAULT_COLS;
-				const ttyFile = join(process.env.TMPDIR ?? "/tmp", `pi-pty-${process.pid}-${Date.now()}.tty`);
+				const base = join(process.env.TMPDIR ?? "/tmp", `pi-pty-${process.pid}-${Date.now()}-${++commandSeq}`);
+				const ttyFile = `${base}.tty`;
+				const pidFile = `${base}.pid`;
 
 				const child = spawnFn("script", ["-qfec", BOOTSTRAP, "/dev/null"], {
 					cwd,
@@ -215,8 +270,34 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 						// what CI reproduced. Only defaulted, never overridden: an
 						// operator who set one meant it.
 						TERM: env?.TERM ?? process.env.TERM ?? "xterm-256color",
+						// THE COST OF A REAL TERMINAL, AND ITS PRICE TAG. With a tty on
+						// stdout `git diff|show|log|blame` invokes `less`, and `less`
+						// reads its keyboard from /dev/tty rather than fd 0 — so the
+						// stall detector's proven tier (a read on fd 0) never fires, no
+						// `[harness]` note is emitted, and the command sits at one
+						// screenful until the caller's timeout kills it. 57 of 179
+						// papercuts in a seven-day window, and ZERO of them dated before
+						// the day pty mode shipped. Measured: `git diff` on a 400-line
+						// diff hung past 8s having emitted 1107 bytes; with GIT_PAGER=cat
+						// the identical spawn returned all 9786 bytes and exit 0 in 21ms.
+						//
+						// Defaulted, never overridden, exactly like TERM above — and read
+						// only from the env pi hands us, with NO `process.env` fallback:
+						// a pager that reached the agent's environment was put there by a
+						// person, and pty mode exists so a person can use one. An agent
+						// launched from a service manager inherits none, which is every
+						// workstation launch and is where the hang lived.
+						//
+						// GIT_TERMINAL_PROMPT is deliberately NOT set: an ssh passphrase
+						// or `gh auth login` reaching a human is the whole feature.
+						GIT_PAGER: env?.GIT_PAGER ?? "cat",
+						PAGER: env?.PAGER ?? "cat",
+						// Belt and braces for anything that execs `less` directly: quit
+						// if it fits on one screen, do not clear it away afterwards.
+						LESS: env?.LESS ?? "FRX",
 						PI_PTY_COMMAND: command,
 						PI_PTY_TTY: ttyFile,
+						PI_PTY_PID: pidFile,
 						PI_PTY_ROWS: String(rows),
 						PI_PTY_COLS: String(cols),
 					},
@@ -259,7 +340,19 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 							// A human at the terminal owns the session; never yank stdin
 							// out from under someone who is typing.
 							if (opts.hasHuman?.()) return;
-							onData(Buffer.from(`\n[harness] no input was available; sent EOF after ${Math.round(after / 1000)}s.\n`));
+							// NAME THE READER. The verdict already carries the pid, comm
+							// and fd0 that proved the block, and without them "sent EOF"
+							// is a fact about the harness rather than about the command:
+							// HIV-2950 was filed believing the harness injects EOF into
+							// commands that never asked for input, which the proven tier
+							// cannot do. One nested clause makes the transcript answer
+							// the question the ticket had to guess at.
+							onData(
+								Buffer.from(
+									`\n[harness] no input was available; sent EOF after ${Math.round(after / 1000)}s ` +
+										`(pid ${verdict.pid} (${verdict.comm}) was reading stdin on ${verdict.fd0}).\n`,
+								),
+							);
 							try {
 								child.stdin?.end();
 							} catch {
@@ -319,12 +412,12 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 					timeout && timeout > 0
 						? setTimeout(() => {
 								timedOut = true;
-								killTree(child.pid);
+								killTree(child.pid, pidFile);
 							}, timeout * 1000)
 						: undefined;
 				timer?.unref?.();
 
-				const onAbort = () => killTree(child.pid);
+				const onAbort = () => killTree(child.pid, pidFile);
 				signal?.addEventListener("abort", onAbort, { once: true });
 
 				const cleanup = () => {
@@ -334,11 +427,13 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 					signal?.removeEventListener("abort", onAbort);
 					detachInput?.();
 					detachGeometry?.();
-					// The tty path file is this command's alone.
-					try {
-						unlinkSync(ttyFile);
-					} catch {
-						/* never written, or already gone */
+					// Both scratch files are this command's alone.
+					for (const file of [ttyFile, pidFile]) {
+						try {
+							unlinkSync(file);
+						} catch {
+							/* never written, or already gone */
+						}
 					}
 				};
 

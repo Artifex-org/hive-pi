@@ -154,6 +154,24 @@ export async function uncommittedCount(cwd: string, signal?: AbortSignal): Promi
 }
 
 /**
+ * What one gate invocation is known to have done.
+ *
+ * `code` and `signal` are BOTH nullable and exactly one of them is set: the
+ * kernel reports an exit code for a process that exited and a signal for one
+ * that was killed. Collapsing that into a single number is the whole of
+ * HIV-2687 — it is how "we killed it at 300s" came to read as "exit 0".
+ */
+interface GateRun {
+	out: string;
+	code: number | null;
+	signal: NodeJS.Signals | null;
+	streamed?: boolean;
+	elapsedMs?: number;
+	/** Set only when the ceiling below is what did the killing. */
+	ceilingMs?: number;
+}
+
+/**
  * Run the gate, forwarding progress as it arrives.
  *
  * `pi.exec` cannot do this for two independent reasons: it has no `env` field
@@ -170,12 +188,19 @@ async function streamGate(
 	scope: string,
 	onUpdate?: (u: { content: { type: "text"; text: string }[]; details: unknown }) => void,
 	onProgress?: (p: GateProgress) => void,
-): Promise<{ out: string; code: number; streamed: boolean }> {
+): Promise<GateRun> {
 	return await new Promise((resolve, reject) => {
 		// `env` via the env(1) binary rather than the spawn option: the marker
 		// flag then rides in argv, which keeps it visible in any process listing
 		// and avoids inheriting a mutated environment into the child's children.
-		const child = spawn("env", [`QG_SUBSTEPS=1`, gate, ...args], { cwd, signal });
+		//
+		// `detached` makes the child a process-GROUP leader, which is the only
+		// way to end the whole gate. `child.kill` signals the bash wrapper and
+		// nothing else, so a killed run left basedpyright and tsgo running —
+		// and those orphans go on holding `.git/index.lock`, which breaks the
+		// NEXT commit in that worktree with "File exists" (HIV-2687).
+		const child = spawn("env", [`QG_SUBSTEPS=1`, gate, ...args], { cwd, signal, detached: true });
+		const startedAt = Date.now();
 		const progress = emptyProgress(mode, scope);
 		const shown: string[] = [];
 		let pending = "";
@@ -217,21 +242,61 @@ async function streamGate(
 		child.stdout?.on("data", onData);
 		child.stderr?.on("data", onData);
 
-		const timer = setTimeout(() => child.kill("SIGKILL"), TIMEOUT_STREAMING[mode] ?? TIMEOUT_BUFFERED);
+		/** Signal the whole gate, not just the wrapper that spawned it. */
+		const killTree = (sig: NodeJS.Signals) => {
+			try {
+				if (child.pid) process.kill(-child.pid, sig);
+				else child.kill(sig);
+			} catch {
+				// Already gone, or never became a group leader — the direct
+				// signal is still worth trying, and a kill that cannot land
+				// must not take the run's report down with it.
+				try {
+					child.kill(sig);
+				} catch {
+					/* nothing left to signal */
+				}
+			}
+		};
+
+		const ceiling = TIMEOUT_STREAMING[mode] ?? TIMEOUT_BUFFERED;
+		let hitCeiling = false;
+		const timer = setTimeout(() => {
+			hitCeiling = true;
+			killTree("SIGKILL");
+		}, ceiling);
+		// The spawn `signal` option aborts the LEADER only, which under
+		// `detached` leaves the gate's own children behind. Same tree, same
+		// treatment.
+		const onAbort = () => killTree("SIGTERM");
+		signal?.addEventListener("abort", onAbort, { once: true });
+
 		child.on("error", (err) => {
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
 			reject(err);
 		});
-		child.on("close", (code) => {
+		child.on("close", (code, killedBy) => {
 			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
 			if (pending) {
 				const { hide } = consume(progress, pending);
 				if (!hide) shown.push(pending);
 			}
 			flush(true);
-			// The RAW stream goes to splitReport: the trailer must be parsed from
-			// exactly what the gate wrote, not from the marker-stripped view.
-			resolve({ out: raw, code: code ?? 0, streamed: true });
+			// `code` is NULL whenever the child died from a signal, and that null
+			// is the only evidence the run was killed. The old `?? 0` erased it,
+			// so a terminated gate arrived downstream wearing the exit code of a
+			// clean short-circuit and was reported as an empty scope. Carry both
+			// facts through untouched and let render decide what they mean.
+			resolve({
+				out: raw,
+				code,
+				signal: killedBy,
+				streamed: true,
+				elapsedMs: Date.now() - startedAt,
+				ceilingMs: hitCeiling ? ceiling : undefined,
+			});
 		});
 	});
 }
@@ -422,9 +487,13 @@ export default function (pi: ExtensionAPI) {
 			only: Type.Optional(
 				Type.String({
 					description:
-						"Comma-separated check names to run exclusively, e.g. typescript. " +
-						"On the Hive path these are STEP names (`lint`, `test-1`, `web-check`); default `lint`, " +
-						"and an unknown one comes back with the pipeline's own list of available steps.",
+						"Comma-separated check names to run exclusively, e.g. oxlint,ruff_lint. NARROWS THE " +
+						"MODE'S PRESET rather than overriding it: a check outside the current mode selects " +
+						"nothing and the gate runs zero checks — `typescript`, `basedpyright`, `mypy` and " +
+						"`vitest` need mode \"standard\" or above, so they select nothing under the default " +
+						"`quick`. Prefer `skip` when you mean 'everything but'. " +
+						"On the Hive path these are STEP names instead (`lint`, `test-1`, `web-check`); " +
+						"default `lint`, and an unknown one comes back with the pipeline's own step list.",
 				}),
 			),
 			stopEarly: Type.Optional(
@@ -506,7 +575,7 @@ export default function (pi: ExtensionAPI) {
 				stopEarly: params.stopEarly ?? false,
 			});
 
-			let run: { out: string; code: number };
+			let run: GateRun;
 			try {
 				run = await streamGate(gate, args, cwd, signal, mode, scope, onUpdate, (p) => publishDeck(pi, p));
 			} catch {
@@ -516,7 +585,11 @@ export default function (pi: ExtensionAPI) {
 				// applies here, because without progress a long limit is just a
 				// long silence.
 				const res = await pi.exec(gate, args, { signal, timeout: TIMEOUT_BUFFERED });
-				run = { out: `${res.stdout ?? ""}${res.stderr ?? ""}`, code: res.code ?? 0 };
+				// Same rule as the streaming path: a missing code means the run
+				// did not exit, and substituting 0 would claim it did. This path
+				// cannot say WHICH signal, so it reports the absence and lets
+				// render word it without one.
+				run = { out: `${res.stdout ?? ""}${res.stderr ?? ""}`, code: res.code ?? null, signal: null };
 			} finally {
 				// The deck shows what is HAPPENING. A finished verdict lives in the
 				// transcript card, and leaving it pinned would push live sections
@@ -536,9 +609,16 @@ export default function (pi: ExtensionAPI) {
 							maxLines: MAX_LINES,
 							cwd,
 							scope,
+							mode,
+							signal: run.signal,
+							elapsedMs: run.elapsedMs,
+							ceilingMs: run.ceilingMs,
 							// Only asked for when the gate checked nothing: that is the
-							// one branch whose message depends on the answer.
-							uncommitted: !result && run.code === 0 ? await uncommittedCount(cwd, signal) : undefined,
+							// one branch whose message depends on the answer. A run that
+							// was KILLED never got as far as a scope, so the count would
+							// only feed advice about the wrong thing.
+							uncommitted:
+								!result && run.code === 0 && !run.signal ? await uncommittedCount(cwd, signal) : undefined,
 							// Only read in the zero-check branch, where a selector that
 							// matched nothing is the likeliest explanation.
 							selector: params.only,

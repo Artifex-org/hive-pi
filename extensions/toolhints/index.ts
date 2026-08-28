@@ -28,6 +28,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import { EMPTY_CORPUS, loadToolCorpus, type McpToolCorpus } from "../mcp-common/search.ts";
 import { matchHint, renderHint, scanTail } from "./hints.ts";
 
 /** Off switch, for a session where the extra sentences are unwanted. */
@@ -73,6 +74,21 @@ export function appendHint(content: unknown, text: string): { type: "text"; text
 export default function (pi: ExtensionAPI) {
 	if (disabled(process.env)) return;
 
+	/**
+	 * The adapter's cached tool inventory, read ONCE at session start.
+	 *
+	 * This is the whole reason the corpus is not read on demand. The handler
+	 * below is a `tool_result` handler; pi awaits it inside the agent loop, and
+	 * the header above promises no fs there. The cache is ~750 KB of JSON —
+	 * parsing it per failed search would put a measurable stall on the one path
+	 * that must not have one. Held in a CLOSURE rather than module state so two
+	 * sessions (and two tests) in one process cannot see each other's corpus.
+	 */
+	let corpus: McpToolCorpus = EMPTY_CORPUS;
+	pi.on("session_start", () => {
+		corpus = loadToolCorpus();
+	});
+
 	pi.on("tool_result", (event) => {
 		// A successful call needs no next move, and scanning every success would
 		// put a regex over every tool result in the session for nothing. The
@@ -86,6 +102,6 @@ export default function (pi: ExtensionAPI) {
 		const hint = matchHint(event.toolName, text);
 		if (!hint) return;
 
-		return { content: appendHint(event.content, renderHint(hint)) };
+		return { content: appendHint(event.content, renderHint(hint, text, { corpus })) };
 	});
 }

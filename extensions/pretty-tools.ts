@@ -12,8 +12,11 @@ import {
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 
 import { diagnose, explain } from "./edit-common/diagnose.ts";
+import { repairBashCwd } from "./toolcwd/cwd.ts";
+import { appendHint } from "./toolhints/index.ts";
 import { describeMissingFile } from "./lens/locate.ts";
 import { HIVE_STDIN_WAIT_CHANNEL, type HiveStdinWaitEvent } from "./hive-common/channels.ts";
 import { blockedNote, ptyAvailable, ptyBashOperations } from "./pty-exec/ops.ts";
@@ -298,8 +301,36 @@ export default function prettyTools(pi: ExtensionAPI) {
 			: output(textContent(result), expanded, theme),
 	});
 
+	/**
+	 * `bash`, plus the parameter it should always have had.
+	 *
+	 * pi's built-in `bashSchema` is `{command, timeout}` — `background_bash` has
+	 * a `cwd` and `bash` does not — so a `cwd` the model passes is accepted by
+	 * the wire format and dropped on the floor. Thirty papercuts in the seven
+	 * days to 2026-08-28 asked for it, and 23 of them are complaints about the
+	 * SILENCE rather than about a wrong answer: `toolcwd` used to repair the
+	 * call and explain itself in the RESULT, which works and arrives one turn
+	 * after the call it was meant to prevent. The other seven passed `workdir`,
+	 * which nothing recognised at all — silently wrong answers about another
+	 * checkout.
+	 *
+	 * Declaring it here is legitimate and not a trick: pi builds its registry
+	 * from the built-ins and then `toolRegistry.set(tool.name, tool)` for every
+	 * extension tool (`agent-session.js`), so an extension tool of the same name
+	 * REPLACES the built-in — which this registration already relied on.
+	 */
+	const bashParameters = Type.Object({
+		...bash.parameters.properties,
+		cwd: Type.Optional(
+			Type.String({
+				description:
+					"Absolute directory to run the command in. Unlike the stock pi bash tool, this harness honours it.",
+			}),
+		),
+	});
+
 	pi.registerTool({
-		name: "bash", label: "Bash", description: bash.description, parameters: bash.parameters,
+		name: "bash", label: "Bash", description: bash.description, parameters: bashParameters,
 		/**
 		 * Runs the command on a real pty when one is available, so an interactive
 		 * prompt can appear and a human can answer it, and says so when a command
@@ -315,7 +346,18 @@ export default function prettyTools(pi: ExtensionAPI) {
 		 * exactly as before.
 		 */
 		execute: (id, params, signal, onUpdate) => {
-			if (!ptyAvailable()) return bash.execute(id, params, signal, onUpdate);
+			// WHERE IT RUNS, decided before either backend sees the command, so the
+			// pty path and the stock fallback cannot disagree about it. The rules
+			// are in toolcwd/cwd.ts, pure and tested; the note is null for the
+			// declared `cwd` (honouring a parameter is not news) and set only for
+			// a spelling nothing declares.
+			const repair = repairBashCwd(params as Record<string, unknown>);
+			const runParams = repair.command === null ? params : { ...params, command: repair.command };
+			const cwdNote = repair.note;
+			const withNote = <T extends { content: unknown }>(result: T): T =>
+				cwdNote ? { ...result, content: appendHint(result.content, `\n\n[harness] ${cwdNote}`) } : result;
+
+			if (!ptyAvailable()) return bash.execute(id, runParams, signal, onUpdate).then(withNote);
 
 			/**
 			 * `onUpdate` fires only when output arrives — which is precisely never
@@ -362,7 +404,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 			// straight to the pty — never through Hive, never into the transcript.
 			const surface = terminalSurface();
 			const geometry = surface?.geometry();
-			surface?.beginCommand(id, (params as { command?: string }).command ?? "", cwd);
+			surface?.beginCommand(id, runParams.command, cwd);
 
 			const operations = ptyBashOperations({
 				onBlocked,
@@ -387,15 +429,15 @@ export default function prettyTools(pi: ExtensionAPI) {
 						}
 					: undefined,
 			});
-			if (!operations) return bash.execute(id, params, signal, onUpdate);
+			if (!operations) return bash.execute(id, runParams, signal, onUpdate).then(withNote);
 
 			// Constructed PER CALL: each call needs its own watch, its own raw sink
 			// and its own tty file. Mirrors the gondolin example's shape.
 			const tool = createBashTool(cwd, { operations });
-			return tool.execute(id, params, signal, forward).then(
+			return tool.execute(id, runParams, signal, forward).then(
 				(result) => {
 					surface?.endCommand(id, 0);
-					return result;
+					return withNote(result);
 				},
 				(err: unknown) => {
 					surface?.endCommand(id, null);
@@ -405,12 +447,17 @@ export default function prettyTools(pi: ExtensionAPI) {
 				// `script` missing or unrunnable. PTY mode has latched itself off, so
 				// retrying on the stock backend costs one command, not every command.
 				if (err instanceof Error && err.message === "pty-unavailable") {
-					return bash.execute(id, params, signal, onUpdate);
+					return bash.execute(id, runParams, signal, onUpdate).then(withNote);
 				}
 				throw err;
 			});
 		},
-		renderCall: (args, theme) => new Text(`${theme.fg("accent", "›")} ${theme.fg("toolTitle", "$ ")}${theme.fg("text", preview(args.command))}`, 0, 0),
+		renderCall: (args, theme) => new Text(
+			`${theme.fg("accent", "›")} ${theme.fg("toolTitle", "$ ")}${theme.fg("text", preview(args.command))}` +
+				(args.cwd ? theme.fg("dim", ` · in ${args.cwd}`) : ""),
+			0,
+			0,
+		),
 		/**
 		 * The partial branch renders the harness note when there is one. It used to
 		 * discard the text outright, which would have made a blocked-on-stdin

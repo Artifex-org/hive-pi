@@ -111,6 +111,41 @@ describe("render", () => {
 		expect(out).not.toContain("PASS");
 	});
 
+	// A run the kernel reports as SIGNALLED is a third thing entirely: no exit
+	// code at all, no trailer, and no verdict. It used to arrive here wearing
+	// exit 0 (`code ?? 0`) and be rendered as an empty scope — a diagnosis about
+	// files, for a gate that was killed while checking them (HIV-2687).
+	it("reports a signalled run as NO VERDICT, not as an empty scope", () => {
+		const out = render("Ruff: running…\nchecking 18 files", null, {
+			...opts,
+			exitCode: null,
+			signal: "SIGKILL",
+			cwd: "/home/dev/repos/pyERP__worktrees/feature-2d24356a",
+		});
+		expect(out).not.toContain("Nothing to check");
+		expect(out).toContain("NO VERDICT");
+		expect(out).toContain("SIGKILL");
+		expect(out).not.toContain("PASS");
+		// The findings it did emit still belong in the reply.
+		expect(out).toContain("checking 18 files");
+	});
+
+	// When the tool's OWN ceiling did the killing, the way out is a narrower run
+	// — say so, rather than leaving the agent to re-run the same 300s.
+	it("names the ceiling as the cause when the ceiling is what fired", () => {
+		const out = render("Ruff: running…", null, {
+			...opts,
+			exitCode: null,
+			signal: "SIGKILL",
+			mode: "quick",
+			ceilingMs: 300_000,
+			elapsedMs: 300_412,
+		});
+		expect(out).toContain("NO VERDICT");
+		expect(out).toContain("300s");
+		expect(out).toContain("only");
+	});
+
 	// "Nothing to check" has two very different causes — there genuinely are no
 	// changes, or the gate is looking at the wrong tree — and the message used
 	// to be identical for both. An agent whose work sat in a second checkout

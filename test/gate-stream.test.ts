@@ -91,10 +91,14 @@ describe("consume", () => {
 });
 
 describe("finish", () => {
+	// The fixture carries a check because a zero-check trailer is no longer a
+	// pass anywhere (see the nosummary case below) — a PASS spec has to come
+	// from a run that actually checked something.
 	it("stamps a pass and normalises missing tools to objects", () => {
 		const p = finish(emptyProgress("quick", "changed"), {
 			passed: true,
 			total_duration_ms: 41000,
+			checks: [{ name: "python/ruff_lint", status: "pass" }],
 			skipped_missing_tools: [{ tool: "gitleaks", reason: "not installed" }, "bandit"],
 		}, 0);
 		expect(p.status).toBe("pass");
@@ -111,6 +115,24 @@ describe("finish", () => {
 		const p = finish(emptyProgress("quick", "changed"), null, 2);
 		expect(p.status).toBe("nosummary");
 		expect(p.exit_code).toBe(2);
+	});
+
+	// The widget half of "a pass that checked nothing is not a pass". The text
+	// path has refused this since gate.ts's zero-check branch; the spec that
+	// feeds the deck and the browser card still stamped `pass`, so the same run
+	// read NOTHING CHECKED in the transcript and PASS on the card.
+	it("refuses to stamp a pass on a trailer that checked nothing", () => {
+		const p = finish(emptyProgress("quick", "changed"), { passed: true }, 0);
+		expect(p.status).toBe("nosummary");
+	});
+
+	// A run that was SIGNALLED has no exit code at all. `exit_code` is a shared
+	// widget field typed `number` (HIV-1366), so it must be left unset rather
+	// than carrying a null across the contract.
+	it("leaves exit_code unset when the run was signalled", () => {
+		const p = finish(emptyProgress("quick", "changed"), null, null);
+		expect(p.status).toBe("nosummary");
+		expect(p.exit_code).toBeUndefined();
 	});
 
 	it("prefers the trailer's failures over markers cut short by fast-fail", () => {

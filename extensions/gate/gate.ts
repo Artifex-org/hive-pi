@@ -99,7 +99,15 @@ export function tail(s: string, maxLines: number): string {
 
 export interface RenderOptions {
 	command: string;
-	exitCode: number;
+	/**
+	 * The child's exit code, or NULL when it never exited.
+	 *
+	 * Null is not a missing value to be defaulted away: it is the kernel saying
+	 * the process died from a signal. Coercing it to 0 (`code ?? 0`) is what
+	 * made every killed run indistinguishable from the gate's own "No files
+	 * changed" short-circuit — see the terminated branch in render.
+	 */
+	exitCode: number | null;
 	maxLines: number;
 	/** Where the gate ran. Only surfaced when the answer is "nothing" — see render. */
 	cwd?: string;
@@ -121,6 +129,25 @@ export interface RenderOptions {
 	uncommitted?: number;
 	/** The scope this run used (`changed` / `staged` / …), named in the advice. */
 	scope?: string;
+	/** The mode this run used (`quick` / `standard` / …), named in the ceiling advice. */
+	mode?: string;
+	/**
+	 * The signal that killed the gate, when one did.
+	 *
+	 * Present ONLY for a run that was terminated. Its presence — not the exit
+	 * code — is what tells render that there is no verdict to report, because a
+	 * signalled child carries no exit code at all.
+	 */
+	signal?: string | null;
+	/** Wall time the gate ran before it was terminated, when known. */
+	elapsedMs?: number;
+	/**
+	 * The tool's OWN ceiling, in ms, when the ceiling is what fired.
+	 *
+	 * Set only for a self-inflicted kill: "your gate exceeded MY limit" is
+	 * actionable (narrow the run) in a way that "something killed it" is not.
+	 */
+	ceilingMs?: number;
 }
 
 /**
@@ -216,6 +243,38 @@ export function render(text: string, result: GateResult | null, opts: RenderOpti
 	const out: string[] = [];
 
 	if (!result) {
+		// TERMINATED IS NOT AN EMPTY SCOPE, AND IT IS NOT A PASS.
+		//
+		// This branch has to come first, because a killed gate looks exactly
+		// like the short-circuit below once its missing exit code is coerced to
+		// 0 — which is what `streamGate` used to do (`code ?? 0`). The result
+		// was the single most misleading message this tool has produced: an
+		// agent whose `quick` run hit the 300s ceiling mid-check was told the
+		// gate "found no files to run against", handed a paragraph about merge
+		// bases and quality-gate excludes, and then shown hundreds of lines of
+		// the checks that had in fact been running (HIV-2687, P0240/P0815).
+		//
+		// Nothing here is a diagnosis of the scope, because the scope was never
+		// consulted: the run simply did not finish. Deliberately NOT reaching
+		// uncommittedAdvice — that paragraph is precisely the dead end.
+		if (opts.signal || opts.exitCode === null) {
+			const how = opts.signal ? ` (${opts.signal})` : "";
+			const after = opts.elapsedMs !== undefined ? ` after ${(opts.elapsedMs / 1000).toFixed(0)}s` : "";
+			out.push(
+				`NO VERDICT — the gate was terminated${how}${after}, before it finished. Nothing was ` +
+					`verified: this is not an empty scope and not a pass.`,
+			);
+			if (opts.ceilingMs !== undefined) {
+				const ceiling = (opts.ceilingMs / 1000).toFixed(0);
+				out.push(
+					`That was this tool's own ceiling: \`${opts.mode ?? "quick"}\` mode kills the gate at ` +
+						`${ceiling}s, and this repo's gate exceeds it. Narrow the run with \`only\`/\`skip\`, ` +
+						`or run the repo's gate command directly and let it take as long as it takes.`,
+				);
+			}
+			if (clean) out.push("", tail(clean, opts.maxLines));
+			return out.join("\n");
+		}
 		// A clean exit with no trailer is the gate short-circuiting, not a
 		// malfunction: with nothing changed it prints "No files changed" and
 		// stops before the summary. Reporting that as an unparseable failure
@@ -287,8 +346,20 @@ export function render(text: string, result: GateResult | null, opts: RenderOpti
 	// nothing to run and no reason to fail.
 	if (result.passed && ran === 0 && failures.length === 0) {
 		const where = opts.cwd ? ` in ${opts.cwd}` : "";
+		// Naming the MODE is what was missing. In the vendored gate the `only`
+		// filter is applied inside the preset test (lib/resolve.sh), so it can
+		// only ever narrow the current mode's preset — it cannot reach outside
+		// it. `typescript`, `basedpyright`, `mypy` and `vitest` start at
+		// `standard`, and `quick` is the default, so the tool's own example
+		// selector expands to zero checks on a default call. Measured in a
+		// pyERP worktree: `--mode=quick --only=typescript` → 0 checks, after
+		// the agent had already waited out the run.
 		const because = opts.selector
-			? ` The selector \`only=${opts.selector}\` matched no checks — check the name against the gate's own list.`
+			? ` The selector \`only=${opts.selector}\` matched no checks in \`${opts.mode ?? "quick"}\` mode. ` +
+				`\`only\` narrows the MODE's preset rather than overriding it, so a real check outside ` +
+				`this preset selects nothing: \`typescript\`, \`basedpyright\`, \`mypy\` and \`vitest\` ` +
+				`start at \`standard\`. Re-run with mode "standard", use \`skip\` instead of \`only\`, or ` +
+				`check the name against the gate's own list.`
 			: "";
 		out.push(
 			`NOTHING CHECKED — the gate ran 0 checks${where}${secs}. This is NOT a pass: nothing was ` +

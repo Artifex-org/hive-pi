@@ -214,18 +214,31 @@ export function finish(
 	result: {
 		passed: boolean;
 		total_duration_ms?: number;
+		checks?: { name: string; status?: string }[];
 		failures?: string[];
 		skipped_missing_tools?: ({ tool: string; reason?: string } | string)[];
 	} | null,
-	exitCode: number,
+	exitCode: number | null,
 ): GateProgress {
 	p.running = [];
 	if (!result) {
 		p.status = "nosummary";
-		p.exit_code = exitCode;
+		// A signalled run has NO exit code — `exit_code` is typed `number` in
+		// the shared widget contract (HIV-1366), so leave it unset rather than
+		// shipping a null an older card will not know how to draw.
+		if (typeof exitCode === "number") p.exit_code = exitCode;
 		return p;
 	}
-	p.status = result.passed ? "pass" : "fail";
+	// A PASS THAT CHECKED NOTHING IS NOT A PASS — the widget half.
+	//
+	// render has refused this since its zero-check branch ("NOTHING CHECKED …
+	// This is NOT a pass"), but the spec that feeds the deck and the browser
+	// card did not, so one run read NOTHING CHECKED in the transcript and PASS
+	// on the card, and the card is the glanceable one. Same condition, same
+	// reading of an absent `checks` as zero, and `nosummary` — the EXISTING
+	// value for "made no verdict" — rather than a new enum member.
+	const verdictless = result.passed && (result.checks ?? []).length === 0 && !result.failures?.length;
+	p.status = verdictless ? "nosummary" : result.passed ? "pass" : "fail";
 	p.duration_ms = result.total_duration_ms;
 	// The trailer is authoritative for failures; the markers may have been cut
 	// short by a fast-fail exit.
