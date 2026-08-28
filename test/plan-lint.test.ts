@@ -74,3 +74,57 @@ describe("lintPlanComposition — the quiet column", () => {
 		expect(lintOf(markdown)).toEqual([]);
 	});
 });
+/**
+ * The ABSENCE rules — the only two that can fire on a plan with no prose.
+ *
+ * The mismatch rules above key on prose that already exists, and after they
+ * shipped the measured block mix did not move: 44% of 487 plans were still
+ * prose-and-checklist only, against a 43% baseline, at 3.0 blocks each. A rule
+ * that reads prose cannot ask for prose that is not there, so these key on the
+ * plan's SHAPE instead.
+ *
+ * Both directions again, and the quiet column is the important one: a small
+ * plan whose steps ARE the explanation must not be nagged, or the lint loses
+ * the reader it needs for the cases that matter.
+ */
+describe("lintPlanComposition — absence", () => {
+	const steps = (count: number) => ({
+		op: "upsert" as const,
+		block: { type: "steps" as const, steps: Array.from({ length: count }, (_, i) => ({ id: `s${i}`, title: `step ${i}` })) },
+	});
+	const kindsOf = (...ops: Parameters<typeof applyOps>[1]) => lintPlanComposition(applyOps(emptyPlan(now), ops, now).doc).map((issue) => issue.kind);
+
+	it("asks a stepped plan with no reasoning to say why", () => {
+		const kinds = kindsOf(steps(6));
+		expect(kinds).toContain("explain");
+		expect(kinds).toContain("evidence");
+	});
+
+	it("stays quiet on a small plan whose steps are the explanation", () => {
+		expect(kindsOf(steps(3))).toEqual([]);
+		expect(kindsOf(steps(1))).toEqual([]);
+	});
+
+	it("stops asking why once a text block exists", () => {
+		const kinds = kindsOf(steps(6), { op: "upsert", block: { type: "text", markdown: "We weighed both routes and took the cheaper one." } });
+		expect(kinds).not.toContain("explain");
+	});
+
+	it("accepts any one evidence block, not a specific one", () => {
+		for (const block of [
+			{ type: "diagram" as const, mermaid: "flowchart TD" },
+			{ type: "table" as const, columns: ["a"], rows: [["b"]] },
+			{ type: "metrics" as const, metrics: [{ label: "n", value: "1" }] },
+			{ type: "code" as const, language: "go", code: "func F() {}" },
+			{ type: "refs" as const, refs: [{ label: "policy.ts", url: "https://example.invalid/p" }] },
+		]) {
+			expect(kindsOf(steps(6), { op: "upsert", block })).not.toContain("evidence");
+		}
+	});
+
+	it("does not count prose or a callout as evidence", () => {
+		// The whole point: these are the two blocks the 44% already had.
+		const kinds = kindsOf(steps(6), { op: "upsert", block: { type: "callout", tone: "info", markdown: "Mind the gate." } });
+		expect(kinds).toContain("evidence");
+	});
+});

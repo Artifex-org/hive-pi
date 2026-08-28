@@ -45,9 +45,38 @@ describe("buildPlanPrompt", () => {
     expect(prompt).toMatch(/data:/);
   });
 
-  it("makes Show it exactly two lint-directed sentences", () => {
-    const section = prompt.match(/## Show it, do not only say it\n\n([^\n]+)\n\n## Finishing/);
-    expect(section?.[1]).toContain("advisory composition lint");
-    expect(section?.[1].match(/[.!?](?:\s|$)/g)).toHaveLength(2);
+  /**
+   * REVERSED 2026-08-28, on measurement, and worth saying plainly because the
+   * assertion this replaces was deliberate rather than careless.
+   *
+   * "Show it" was trimmed to exactly two sentences pointing at the lint, on the
+   * theory that a mechanism beats prose: let the lint carry the nudge and keep
+   * the prompt short. That theory was tested and lost. Across 487 plans written
+   * with the lint live, 44% were still prose-and-checklist only — against a 43%
+   * baseline before it — at 3.0 blocks each, with chart and artifact at 0%.
+   *
+   * The lint could not carry it because most of its rules read prose to find a
+   * better representation for it, and the failing plans had almost no prose to
+   * read. So the section now TEACHES the shape and shows one worked example,
+   * which is the lever a model actually imitates.
+   *
+   * The sentence count is therefore gone, but this is not a loosened test: it
+   * pins the four things the section must still do, including the restraint —
+   * without that last clause an author is being told to decorate.
+   */
+  it("teaches the plan's shape, shows it, and still defers to the lint", () => {
+    const section = prompt.match(/## Show it, do not only say it\n([\s\S]+?)\n## Finishing/)?.[1];
+    expect(section).toBeTruthy();
+    // The three-part shape, named.
+    expect(section).toMatch(/`text` — why/);
+    expect(section).toMatch(/`steps` — what/);
+    expect(section).toMatch(/evidence/i);
+    // A worked example, not just a description of one.
+    expect(section).toContain("plan_write({ ops: [");
+    // Still points at the mechanism rather than replacing it with prose...
+    expect(section).toContain("advisory composition lint");
+    // ...and still tells the author it is advice, which is what keeps a nudge
+    // from becoming a demand to decorate a plan that is already clear.
+    expect(section).toMatch(/never as a requirement/);
   });
 });
