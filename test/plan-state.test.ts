@@ -487,3 +487,51 @@ describe("persistence", () => {
 		expect(rehydratePlan([{ customType: "tasks", data: {} }])).toBeNull();
 	});
 });
+/**
+ * A patch must not rename the item it patches.
+ *
+ * `normalizeItem` used to default `title` to the item's id. On the create path
+ * that was invisible — a titleless new item is refused before it runs — but on
+ * the PATCH path it was destructive: `writeItem` preserves a field by dropping
+ * it when it is `undefined`, so a title that always had a value overwrote the
+ * real one with the id.
+ *
+ * This is not hypothetical and it was not caught by the suite. Measured across
+ * 77 real sessions, 27% of plans carried purely numeric step titles — "2",
+ * "3", "4", which are `String(doc.nextId++)` — and one carried "local-gate",
+ * a supplied id. Ticking a status renamed the item to its own id, so the plans
+ * worked on hardest lost the most: a finished step is a ticked step.
+ */
+describe("a patch preserves the title it does not restate", () => {
+	const NOW = 1_700_000_000_000;
+	const LATER = NOW + 60_000;
+	const titlesOf = (doc: ReturnType<typeof emptyPlan>) =>
+		doc.blocks.flatMap((block) => (block.type === "steps" ? block.steps : [])).map((item) => item.title);
+
+	it("keeps a supplied-id item's title through a status tick", () => {
+		const planned = applyOps(emptyPlan(NOW), [
+			{ op: "lane", kind: "execute", items: [{ id: "local-gate", title: "Run the local gate" }] },
+		], NOW).doc;
+		const ticked = applyOps(planned, [{ op: "item", item: { id: "local-gate", status: "done" } }], LATER).doc;
+		expect(titlesOf(ticked)).toEqual(["Run the local gate"]);
+		expect(ticked.blocks.flatMap((b) => (b.type === "steps" ? b.steps : []))[0].status).toBe("done");
+	});
+
+	it("keeps an AUTO-id item's title — the numeric case readers actually saw", () => {
+		const planned = applyOps(emptyPlan(NOW), [
+			{ op: "lane", kind: "execute", items: [{ title: "Rebase and inspect existing plan surfaces" }, { title: "Integrate the stage strip" }] },
+		], NOW).doc;
+		const ids = planned.blocks.flatMap((b) => (b.type === "steps" ? b.steps : [])).map((i) => i.id);
+		const ticked = applyOps(planned, [{ op: "item", item: { id: ids[0], status: "done" } }], LATER).doc;
+		expect(titlesOf(ticked)).toEqual(["Rebase and inspect existing plan surfaces", "Integrate the stage strip"]);
+		// The regression's signature: a title equal to its own id.
+		for (const item of ticked.blocks.flatMap((b) => (b.type === "steps" ? b.steps : []))) {
+			expect(item.title).not.toBe(item.id);
+		}
+	});
+
+	it("still refuses a new item that has no title at all", () => {
+		const result = applyOps(emptyPlan(NOW), [{ op: "item", lane: "execute", item: { status: "pending" } }], NOW);
+		expect(result.problems.join()).toContain("needs a title");
+	});
+});

@@ -1448,11 +1448,26 @@ function findLane(doc: PlanDoc, ref: string | undefined): LaneBlock | undefined 
 }
 
 /** A work item as the model supplies it, bounded and with synonyms resolved. */
-function normalizeItem(input: ItemInput, id: string): WorkItem {
+/**
+ * One item's input as a PATCH — every field absent unless the caller supplied it.
+ *
+ * `title` is optional here, and that is the whole point. It used to default to
+ * the id, which was invisible on the create path (a titleless new item is
+ * refused before this runs) and destructive on the patch path: `writeItem`
+ * preserves a field by dropping it when it is `undefined`, so a title that
+ * always had a value overwrote the real one with the id on every write.
+ *
+ * The effect reached readers. Measured over 77 sessions, 27% of plans carried
+ * purely numeric step titles — "2", "3", "4" — which are `String(doc.nextId++)`,
+ * the ids this function substituted. Any op that ticked a status without
+ * restating the title renamed the item to its own id, so the plans most worked
+ * on were the ones that lost the most: a finished step is a ticked step.
+ */
+function normalizeItem(input: ItemInput, id: string): Omit<WorkItem, "title"> & { title?: string } {
 	const deps = cleanStringList(input.dependsOn) ?? cleanStringList(input.blockedBy);
 	return {
 		id,
-		title: cleanString(input.title) ?? id,
+		title: cleanString(input.title),
 		activeForm: cleanString(input.activeForm),
 		detail: cleanString(input.detail),
 		kind: cleanString(input.kind),
@@ -1544,7 +1559,11 @@ function writeItem(
 	}
 
 	if (at === -1) {
-		lane.steps.push(item);
+		// `?? id` cannot fire: the guard above refuses a new item with no title.
+		// It is here to satisfy the type without restating that proof, NOT as a
+		// fallback — reintroducing one on the patch path is the bug this shape
+		// exists to prevent.
+		lane.steps.push({ ...item, title: item.title ?? id });
 		lane.updatedAt = now;
 		created.push(id);
 		return;
