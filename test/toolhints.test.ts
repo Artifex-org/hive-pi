@@ -96,6 +96,14 @@ describe("matchHint", () => {
 		expect(hint?.id).toBe("mcp-proxy-no-match");
 		// And names the direct tools, which is the fix that removes the search.
 		expect(hint?.hint).toContain("hive_wait_for_run");
+		// AND IT MUST BE TRUE. This hint shipped asserting the search "takes
+		// tool-NAME fragments, not a description of what you want". The adapter's
+		// FIELD_WEIGHTS include `description: 5`, and a probe over the real corpus
+		// proves it — `search("booster")` returns `get_metering_usage`, which has
+		// "booster" only in its description. Two sessions (P0175, P0556) caught
+		// the contradiction with the adapter's own tool description and burned
+		// turns reconciling it. A hint that is wrong is worse than no hint.
+		expect(renderHint(hint!)).not.toMatch(/not a description/);
 	});
 
 	it("names a schema rejection as a schema rejection", () => {

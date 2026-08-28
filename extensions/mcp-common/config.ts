@@ -61,9 +61,79 @@ export function mcpConfigPath(
 	return path.join(home, ".pi", "agent", "mcp.json");
 }
 
-/** The adapter's own tool-list cache — a server's tools, with no connection. */
-export function mcpCachePath(home: string = os.homedir()): string {
+/**
+ * The adapter's own tool-list cache — a server's tools, with no connection.
+ *
+ * `PI_MCP_CACHE` is OURS, exactly as `PI_MCP_CONFIG` is above: a test and
+ * escape seam, checked before the default because there is no adapter flag it
+ * could mask.
+ */
+export function mcpCachePath(
+	home: string = os.homedir(),
+	env: Record<string, string | undefined> = process.env,
+): string {
+	if (env.PI_MCP_CACHE) return env.PI_MCP_CACHE;
 	return path.join(home, ".pi", "agent", "mcp-cache.json");
+}
+
+/**
+ * The adapter's cache TTL (`metadata-cache.ts`, `CACHE_MAX_AGE_MS`).
+ *
+ * Duplicated rather than imported: `pi-mcp-adapter` exports only `.` and
+ * `./types`, so `metadata-cache.ts` is unreachable by subpath even though it
+ * ships. A constant hand-synced to someone else's pin drifts, so treat a
+ * mismatch as this file's bug and re-check it on an adapter bump — the failure
+ * mode is a row that is merely less accurate, never a crash.
+ *
+ * It lives HERE, with `mcpCachePath`, because two consumers now need it —
+ * `readiness/probes.ts` reports it to the operator and `mcp-common/search.ts`
+ * tells the agent why a search found nothing — and a third hand-copied 7d
+ * would be the drift this comment is warning about.
+ */
+export const MCP_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+
+/**
+ * Why a cached tool list can be present and still unusable.
+ *
+ * TOOLS KNOWN ≠ TOOLS USABLE, and the gap is the whole point of this function.
+ * `init.ts:244` seeds `state.toolMetadata` from the cache only when
+ * `isServerCacheValid(entry, definition)` passes, which checks two things: the
+ * entry is younger than the TTL, and `computeServerHash(definition)` still
+ * matches the stored `configHash`. Fail either and the adapter behaves as if it
+ * had never heard of the server — `mcp({ server: "sentry" })` answers
+ * `Server "sentry" is configured but not connected` (`proxy-modes.ts:610`), a
+ * search answers `No tools matching …`, and the agent has to
+ * `mcp({ connect: … })` by hand before it can even list.
+ *
+ * Measured on session `a78c92ef` (2026-08-17): `sentry`'s entry had been
+ * invalidated the day before, when pinning `@sentry/mcp-server@0.37.0` changed
+ * `args` and therefore the identity hash. The readiness probe reported "9 tools
+ * known · lazy-keep-alive: first call pays the connect", the agent believed it,
+ * and then spent three turns and 39 s on bounce → connect → four `describe`
+ * calls before its first real Sentry query. The row was not wrong about the
+ * file; it was wrong about what the adapter would do with it, which is the only
+ * thing the reader cares about.
+ *
+ * We can see the TTL exactly. We cannot recompute the identity hash without
+ * reimplementing `computeServerHash` (env interpolation, path resolution,
+ * stable key order) — which would be precisely the drift this file must not
+ * take on — so the hash case is approximated by "`mcp.json` was written after
+ * this entry was cached". That over-reports: editing one server's entry flags
+ * every server cached before the edit. Over-reporting is the right direction
+ * here, because the cost of the false alarm is one extra sentence, and the cost
+ * of the miss is what session `a78c92ef` paid.
+ */
+export function mcpCacheStaleness(
+	cachedAt: number | undefined,
+	configMtimeMs: number | null,
+	now: number,
+): string | null {
+	if (typeof cachedAt !== "number") return "no cache timestamp";
+	if (now - cachedAt > MCP_CACHE_MAX_AGE_MS) {
+		return `cached ${Math.floor((now - cachedAt) / (24 * 60 * 60 * 1_000))}d ago, past the adapter's 7d TTL`;
+	}
+	if (configMtimeMs !== null && configMtimeMs > cachedAt) return "mcp.json changed after it was cached";
+	return null;
 }
 
 /**

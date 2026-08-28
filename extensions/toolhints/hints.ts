@@ -37,6 +37,22 @@
  * not a note telling it to look again.
  */
 
+import { corpusStaleness, rankByAnyToken, type McpToolCorpus } from "../mcp-common/search.ts";
+
+/**
+ * What a hint may know about the session beyond the failing text.
+ *
+ * Everything here is READ-ONLY and ALREADY IN MEMORY — loaded once at
+ * `session_start` by `index.ts`. A hint that went to disk would break the one
+ * promise this extension makes about running inside the agent loop.
+ */
+export interface HintContext {
+	/** The adapter's cached tool inventory; absent when it could not be read. */
+	corpus?: McpToolCorpus | null;
+	/** Injectable clock, so a staleness assertion is not time-dependent. */
+	now?: number;
+}
+
 export interface ToolHint {
 	/** Stable id, so a test can name the case and a reader can grep for it. */
 	id: string;
@@ -46,8 +62,66 @@ export interface ToolHint {
 	match: RegExp;
 	/** What to do now. One or two sentences; it lands in the model's context. */
 	hint: string;
+	/**
+	 * Sentences computed from THIS failure — candidate names, a stale server —
+	 * appended after `hint`. Pure: it may read `ctx`, never the world. Returning
+	 * null (nothing useful to add) leaves the static hint exactly as it was.
+	 */
+	amend?: (text: string, ctx: HintContext) => string | null;
 	/** Where this came from, for the audit rule above. */
 	evidence: string;
+}
+
+/**
+ * The adapter's two miss messages, `proxy-modes.ts:528`.
+ *
+ * BOTH forms. The server suffix is emitted only when the search was scoped to
+ * one server, and the first version of this pattern required it — so an
+ * unscoped `mcp({search})`, which is how most searches are written, matched
+ * nothing and got no hint at all.
+ */
+export const MCP_NO_MATCH = /No tools matching "([^"]*)"(?: in "([^"]+)")?/i;
+
+/**
+ * Name the tools the search should have found.
+ *
+ * Two different failures print that one sentence, and they need opposite
+ * answers — so this says which one happened. If the named server's cache entry
+ * is one the adapter has stopped accepting, the search never saw those tools
+ * and no rewording will help; otherwise the query simply failed the coverage
+ * gate and the candidates below are what an OR ranking over the same corpus
+ * returns. See `mcp-common/search.ts` for both mechanisms.
+ */
+export function mcpMissAmendment(text: string, ctx: HintContext): string | null {
+	const matched = MCP_NO_MATCH.exec(text);
+	if (!matched) return null;
+	const query = matched[1] ?? "";
+	const server = matched[2];
+	const corpus = ctx.corpus;
+	if (!corpus || corpus.tools.length === 0) return null;
+
+	const sentences: string[] = [];
+	const stale = server ? corpusStaleness(corpus, server, ctx.now ?? Date.now()) : null;
+	if (server && stale) {
+		sentences.push(
+			`THE SERVER WAS NOT IN THE CORPUS: "${server}" is ${stale}, so the adapter dropped its tools at startup ` +
+				`and this search could not have found them — that is not the same as the tool not existing, and ` +
+				`rewording the query will not help. Run \`mcp({connect:"${server}"})\` and retry, or call the tool ` +
+				`with the server named (\`mcp({server:"${server}", tool:"…"})\`), which connects first.`,
+		);
+	}
+
+	const pool = server ? corpus.tools.filter((tool) => tool.server === server) : corpus.tools;
+	const ranked = rankByAnyToken(pool, query);
+	if (ranked.length > 0) {
+		sentences.push(
+			`Closest in the harness's copy of the tool cache for "${query}"${server ? ` in "${server}"` : ""}: ` +
+				`${ranked.map((r) => r.tool.qualifiedName).join(", ")}. Call one with \`mcp({tool:"<name>"})\` — ` +
+				`the proxy resolves the PREFIXED name shown here, and \`mcp({server:"…", describe:"<name>"})\` reads ` +
+				`its schema.`,
+		);
+	}
+	return sentences.length > 0 ? sentences.join(" ") : null;
 }
 
 export const HINTS: readonly ToolHint[] = [
@@ -170,15 +244,30 @@ export const HINTS: readonly ToolHint[] = [
 			"5 commit timeouts in 24h (2026-08-17/18, 30s/60s/120s ceilings), each followed by an index.lock failure or an unclear commit state; one reported 'Aurora guidance says pre-commit is ~2s' against a 120s timeout",
 	},
 	{
+		// WHAT THIS HINT USED TO SAY WAS FALSE, and agents caught it: it claimed
+		// the search "takes tool-NAME fragments, not a description of what you
+		// want". `FIELD_WEIGHTS` in the adapter includes `description: 5`, and a
+		// live probe over the real corpus proves it — `search("booster")` returns
+		// `get_metering_usage`, whose NAME has no "booster". Two sessions (P0175,
+		// P0556) noticed the contradiction with the adapter's own tool
+		// description and burned turns on it. The real filter is a coverage gate,
+		// which is a different problem with a different answer.
 		id: "mcp-proxy-no-match",
 		tools: ["mcp"],
-		match: /No tools matching ".*" in "([^"]+)"/i,
+		match: MCP_NO_MATCH,
 		hint:
-			"The `mcp` proxy's search takes tool-NAME fragments, not a description of what you want — try one word " +
-			"(`run`, `issue`, `pull`), or list the server's tools with `mcp({server:\"<name>\"})` and read the names. " +
+			"Do NOT conclude the tool does not exist. The proxy's search reads names AND descriptions, but it keeps a " +
+			"row only when the tool's own words cover almost the whole query — every token of a one- or two-word " +
+			"query, 60% of a longer one (`search-ranking.ts:82`) — so a phrase describing a capability scores zero " +
+			"even when the tool is right there. Retry with the one or two most distinctive words rather than a " +
+			"sentence, or list a server's tools with `mcp({server:\"<name>\"})`. " +
 			"The tools this house uses most are registered DIRECTLY and need no search at all: `hive_wait_for_run`, " +
 			"`hive_get_run`, `hive_get_task_logs`, `hive_get_pull`, `hive_explain_failure`, `hive_message_teammate`.",
-		evidence: "108 sessions / 7d: 697 discovery calls against 3,269 real ones; efb2830c spent 5 round trips finding `linear_list_issues`",
+		amend: mcpMissAmendment,
+		evidence:
+			"108 sessions / 7d: 697 discovery calls against 3,269 real ones; efb2830c spent 5 round trips finding `linear_list_issues`. " +
+			"Eight papercuts (P0032, P0135, P0175, P0219, P0540, P0556, P0561, P0689) are the coverage gate; two (P0035 asfam `vpm_resync`, " +
+			"P0246 sentry `search events`) are a server whose cache entry had aged past the 7d TTL — both queries score rank 1 once the corpus is present",
 	},
 	{
 		id: "mcp-schema-rejection",
@@ -203,9 +292,16 @@ export function matchHint(toolName: string, text: string, hints: readonly ToolHi
 	return null;
 }
 
-/** The line appended to a tool result. Prefixed so its origin is never a guess. */
-export function renderHint(hint: ToolHint): string {
-	return `\n\n[harness hint · ${hint.id}] ${hint.hint}`;
+/**
+ * The line appended to a tool result. Prefixed so its origin is never a guess.
+ *
+ * `text` and `ctx` are optional so the static half stays callable — and
+ * assertable — on its own. A hint with no `amend` renders identically either
+ * way.
+ */
+export function renderHint(hint: ToolHint, text: string = "", ctx: HintContext = {}): string {
+	const amendment = hint.amend?.(text, ctx) ?? null;
+	return `\n\n[harness hint · ${hint.id}] ${hint.hint}${amendment ? ` ${amendment}` : ""}`;
 }
 
 /**

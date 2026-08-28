@@ -24,7 +24,11 @@ import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 
 import { hiveBaseURL, readJSON } from "../hive-common/identity.ts";
-import { mcpCachePath as sharedCachePath, mcpConfigPath as sharedConfigPath } from "../mcp-common/config.ts";
+import {
+	mcpCacheStaleness,
+	mcpCachePath as sharedCachePath,
+	mcpConfigPath as sharedConfigPath,
+} from "../mcp-common/config.ts";
 import { pgPaths } from "../devservices/pg.ts";
 import { mcpBelongsHere, stdioMissing, type McpServerDef } from "./mcp.ts";
 import { mcpLauncherFor } from "../profile-common/profile.ts";
@@ -118,58 +122,16 @@ interface McpCache {
 }
 
 /**
- * The adapter's own cache TTL (`metadata-cache.ts`, `CACHE_MAX_AGE_MS`).
+ * The adapter's cache TTL and the "the adapter is ignoring this entry" test.
  *
- * Duplicated rather than imported: `pi-mcp-adapter` exports only `.` and
- * `./types`, so `metadata-cache.ts` is unreachable by subpath even though it
- * ships. A constant hand-synced to someone else's pin drifts, so treat a
- * mismatch as this file's bug and re-check it on an adapter bump — the failure
- * mode is a row that is merely less accurate, never a crash.
+ * Both MOVED to `mcp-common/config.ts`, which is where the cache path already
+ * lives, when `mcp-common/search.ts` became a second consumer: the search
+ * fallback has to tell an agent that a server is missing from the corpus for
+ * the same two reasons this probe reports it as `warming`. Re-exported so this
+ * module's public surface is unchanged — the reasoning, and the measurement
+ * that produced it, travelled with the code.
  */
-export const MCP_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
-
-/**
- * Why a cached tool list can be present and still unusable.
- *
- * TOOLS KNOWN ≠ TOOLS USABLE, and the gap is the whole point of this function.
- * `init.ts:244` seeds `state.toolMetadata` from the cache only when
- * `isServerCacheValid(entry, definition)` passes, which checks two things: the
- * entry is younger than the TTL, and `computeServerHash(definition)` still
- * matches the stored `configHash`. Fail either and the adapter behaves as if it
- * had never heard of the server — `mcp({ server: "sentry" })` answers
- * `Server "sentry" is configured but not connected` (`proxy-modes.ts:610`) and
- * the agent has to `mcp({ connect: … })` by hand before it can even list.
- *
- * Measured on session `a78c92ef` (2026-08-17): `sentry`'s entry had been
- * invalidated the day before, when pinning `@sentry/mcp-server@0.37.0` changed
- * `args` and therefore the identity hash. The probe reported "9 tools known ·
- * lazy-keep-alive: first call pays the connect", the agent believed it, and
- * then spent three turns and 39 s on bounce → connect → four `describe` calls
- * before its first real Sentry query. The row was not wrong about the file; it
- * was wrong about what the adapter would do with it, which is the only thing
- * the reader cares about.
- *
- * We can see the TTL exactly. We cannot recompute the identity hash without
- * reimplementing `computeServerHash` (env interpolation, path resolution,
- * stable key order) — which would be precisely the drift this file must not
- * take on — so the hash case is approximated by "`mcp.json` was written after
- * this entry was cached". That over-reports: editing one server's entry flags
- * every server cached before the edit. Over-reporting is the right direction
- * here, because the cost of the false alarm is one extra sentence in a status
- * row, and the cost of the miss is what session `a78c92ef` paid.
- */
-export function mcpCacheStaleness(
-	cachedAt: number | undefined,
-	configMtimeMs: number | null,
-	now: number,
-): string | null {
-	if (typeof cachedAt !== "number") return "no cache timestamp";
-	if (now - cachedAt > MCP_CACHE_MAX_AGE_MS) {
-		return `cached ${Math.floor((now - cachedAt) / (24 * 60 * 60 * 1_000))}d ago, past the adapter's 7d TTL`;
-	}
-	if (configMtimeMs !== null && configMtimeMs > cachedAt) return "mcp.json changed after it was cached";
-	return null;
-}
+export { MCP_CACHE_MAX_AGE_MS, mcpCacheStaleness } from "../mcp-common/config.ts";
 
 /**
  * One row per configured MCP server.
@@ -205,7 +167,10 @@ export function mcpConfigPath(deps: ProbeDeps): string {
 }
 
 export function mcpCachePath(deps: ProbeDeps): string {
-	return sharedCachePath(deps.home);
+	// `deps.env`, not ambient `process.env`: every other probe reads the world
+	// through the injected seam, and a default that reached around it would make
+	// the row describe a file the test never wrote.
+	return sharedCachePath(deps.home, deps.env);
 }
 
 /** True once the adapter is loaded: it registers a single proxy tool, `mcp`. */
