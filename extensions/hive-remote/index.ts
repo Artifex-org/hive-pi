@@ -1191,6 +1191,12 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// The reviewed final assistant message and acknowledgement are already
 				// durable before this command is claimed. Do not add a best-effort
 				// terminal notice that could race graceful shutdown and imply delivery.
+				// shutdown() only ends a waiting session, so release an active turn first.
+				try {
+					latestCtx?.abort();
+				} catch {
+					// A stale context is harmless: shutdown below still ends an idle session.
+				}
 				setTimeout(() => {
 					try {
 						latestCtx?.shutdown();
