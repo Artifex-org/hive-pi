@@ -32,7 +32,14 @@ import { delimiter, join } from "node:path";
 
 import { AnsiStripper, normalizeCRLF } from "./ansi.ts";
 import { RepaintCollapser } from "./repaint.ts";
-import { StdinWatch, describeVerdict, realProcReader, type BlockedVerdict } from "./stdinWatch.ts";
+import {
+	StdinWatch,
+	describeLiveTree,
+	describeVerdict,
+	readTree,
+	realProcReader,
+	type BlockedVerdict,
+} from "./stdinWatch.ts";
 
 /**
  * pi's `BashOperations`, restated structurally.
@@ -408,16 +415,54 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 
 				// ---- abort and timeout, preserving pi's sentinels -------------------
 				let timedOut = false;
+				/**
+				 * WHAT WAS STILL RUNNING, read at the kill and delivered at the close.
+				 *
+				 * A bare timeout says only that N seconds elapsed. The corpus asks the
+				 * next question 9 times in as many words — "does not reveal which
+				 * subcommand was slow" — and /proc answers it: at the moment of the
+				 * kill the stalled member of a chained command is sitting right there
+				 * in the tree we are about to destroy. Read BEFORE `killTree`, because
+				 * afterwards there is nothing to read.
+				 *
+				 * Wrapped whole. A throw in here would escape the timer callback and
+				 * lose the kill itself, which costs far more than the diagnosis: an
+				 * unreadable /proc (the setuid bwrap frame already is one) must degrade
+				 * to "could not tell", never to a surviving process.
+				 */
+				let postMortem: string | undefined;
+				const capturePostMortem = (what: string) => {
+					if (postMortem !== undefined) return;
+					let live: string | null = null;
+					try {
+						if (child.pid) {
+							live = describeLiveTree(readTree(child.pid, realProcReader()), {
+								rootPid: child.pid,
+								shellPid: readShellPid(pidFile),
+							});
+						}
+					} catch {
+						/* stays null — see above */
+					}
+					postMortem =
+						`\n[harness] ${what}; the output above is everything it had produced. ` +
+						`${live ?? "Nothing was left in its process tree to name"}.\n`;
+				};
+
 				const timer =
 					timeout && timeout > 0
 						? setTimeout(() => {
 								timedOut = true;
+								capturePostMortem(`timed out after ${timeout}s and was killed`);
 								killTree(child.pid, pidFile);
 							}, timeout * 1000)
 						: undefined;
 				timer?.unref?.();
 
-				const onAbort = () => killTree(child.pid, pidFile);
+				const onAbort = () => {
+					capturePostMortem("was cancelled and killed");
+					killTree(child.pid, pidFile);
+				};
 				signal?.addEventListener("abort", onAbort, { once: true });
 
 				const cleanup = () => {
@@ -452,6 +497,14 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 					// mid-run that final frame is the whole post-mortem.
 					stripper.close();
 					collapser.close();
+
+					// AFTER the flush, and straight through `onData` rather than the
+					// collapser: the note is the last word on a severed command, and a
+					// repaint collapser could otherwise eat or reorder it. pi's bash
+					// tool prepends this whole accumulated snapshot to its own
+					// "Command timed out after N seconds", so the note rides along with
+					// no change to pi core and no new protocol.
+					if (postMortem !== undefined) onData(Buffer.from(postMortem));
 
 					// These two strings are the protocol with pi's error formatting.
 					// Anything else here would render as an unexplained failure.
