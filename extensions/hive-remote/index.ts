@@ -66,6 +66,7 @@ import {
 	resolveTerminal,
 	type ResolvedAuth,
 } from "../hive-common/identity.ts";
+import { isOverflowWedged } from "../hive-common/overflow.ts";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
@@ -1097,6 +1098,23 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	// ----------------------------------------------------------------- downlink
 
+	/**
+	 * Is the session unable to send another request at all?
+	 *
+	 * Reads through `latestCtx` because that is the only ctx this extension
+	 * retains, and returns FALSE on anything it cannot read: a downlink that
+	 * suppressed deliveries because it could not see the session would be a
+	 * worse failure than the one it is preventing.
+	 */
+	function overflowWedged(ctx: ExtensionContext | null): boolean {
+		if (!ctx) return false;
+		try {
+			return isOverflowWedged(ctx.sessionManager.getBranch() as readonly unknown[]);
+		} catch {
+			return false;
+		}
+	}
+
 	async function applyCommand(cmd: RemoteCommand): Promise<void> {
 		switch (cmd.kind) {
 			case "steer":
@@ -1377,11 +1395,33 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// waits for the next turn. The digest in particular goes to every
 				// member on a timer, so waking on it would bill a turn per member
 				// per sweep for a team with nothing to report.
+				// Never WAKE a session that is wedged against its own context
+				// window. The wake does not land as a message the model reads; it
+				// lands as one more refused request, and each refusal leaves the
+				// context larger than the last. Measured, this path plus
+				// `background`'s notify kept a grok session issuing identical 400s
+				// for 12h27m (HIV-3060) — see `hive-common/overflow.ts`.
+				//
+				// The message is still DELIVERED and still folded, so nothing is
+				// lost: it sits in the queue for whenever the session can run
+				// again, exactly as a non-waking team category already does.
+				const wedged = overflowWedged(latestCtx);
 				pi.sendMessage(
 					{ customType: "team-message", content: rendered, display: true },
-					{ deliverAs: "followUp", triggerTurn: triggersTurn(msg.category) },
+					{ deliverAs: "followUp", triggerTurn: !wedged && triggersTurn(msg.category) },
 				);
 				foldNotice(transcript, rendered, Date.now(), "team");
+				if (wedged) {
+					// The only place a human learns why their teammate's message
+					// produced nothing. A wedged session looks identical to a busy
+					// one from the workspace.
+					foldNotice(
+						transcript,
+						"queued without waking the agent: this session is wedged on a context overflow",
+						Date.now(),
+						"hive",
+					);
+				}
 				kick();
 				return;
 			}

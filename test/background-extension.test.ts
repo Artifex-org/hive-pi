@@ -292,3 +292,49 @@ describe.runIf(realBashAvailable())("limits", () => {
 		expect(out).toContain("what");
 	});
 });
+
+/**
+ * A session wedged against its own context window (HIV-3060).
+ *
+ * The completion notification is the most expensive text per byte in this
+ * harness — it lands unconditionally and bills a turn. Measured 2026-08-29, it
+ * was billing that turn against sessions whose every request was already being
+ * refused for overflow, alongside hive-remote's team messages, for as long as
+ * 12h27m.
+ */
+describe.runIf(realBashAvailable())("a job that finishes while the session is wedged", () => {
+	const OVERFLOW =
+		'OpenAI API error (400): 400 "This model\'s maximum prompt length is 500000 but the request contains 505280 tokens."';
+
+	const wedged = [
+		{ message: { role: "user", content: "go" } },
+		{ message: { role: "assistant", content: "", stopReason: "error", errorMessage: OVERFLOW } },
+	];
+
+	it("withholds the notification rather than spending a refused request on it", async () => {
+		const pi = boot();
+		await pi.emit({ type: "session_start" }, { mode: "tui", branch: wedged });
+
+		await call(pi, "background_bash", { command: "echo done", what: "an echo" });
+		// The job itself must still finish and be reapable; only the ANNOUNCEMENT
+		// is withheld. Give it the same slack the delivery tests use.
+		await new Promise((resolve) => setTimeout(resolve, 400));
+
+		expect(pi.messages).toHaveLength(0);
+	});
+
+	it("re-delivers it on the next session_start, because it was never consumed", async () => {
+		// `notified` is only set after `sendMessage` returns, so withholding
+		// leaves the job announceable and the existing sweep picks it up. This is
+		// what makes the suppression safe rather than a silent drop.
+		const pi = boot();
+		await pi.emit({ type: "session_start" }, { mode: "tui", branch: wedged });
+		await call(pi, "background_bash", { command: "echo done", what: "an echo" });
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		expect(pi.messages).toHaveLength(0);
+
+		await pi.emit({ type: "session_start" }, { mode: "tui" });
+		await until(() => pi.messages.length > 0);
+		expect(pi.messages[0]?.customType).toBe("background");
+	});
+});
