@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL } from "../extensions/hive-common/channels.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
-import { createFakePi, type FakePi } from "./fake-pi.ts";
+import { createFakePi, type FakePi, type SessionEntryLike } from "./fake-pi.ts";
 
 /**
  * hive-remote's ENTRY POINT, driven through the fake pi.
@@ -441,18 +441,18 @@ describe("waking a session that cannot send a request", () => {
 	const OVERFLOW =
 		'OpenAI API error (400): 400 "This model\'s maximum prompt length is 500000 but the request contains 505280 tokens."';
 
-	const branchWedged = [
+	const branchWedged: SessionEntryLike[] = [
 		{ message: { role: "user", content: "go" } },
 		{ message: { role: "assistant", content: "", stopReason: "error", errorMessage: OVERFLOW } },
 	];
-	const branchHealthy = [
+	const branchHealthy: SessionEntryLike[] = [
 		{ message: { role: "user", content: "go" } },
 		{ message: { role: "assistant", content: "done", stopReason: "stop" } },
 	];
 
 	const directMessage = JSON.stringify({ category: "message", text: "please look at the PR" });
 
-	async function deliverTeamMessage(branch: typeof branchWedged) {
+	async function deliverTeamMessage(branch: SessionEntryLike[]) {
 		fakeHive({ commands: [{ id: "tm-1", kind: "team_message", payload: directMessage }] });
 		hiveRemote(fake.api, deps());
 		// Refreshes the extension's retained ctx, which is how it reads the branch.
