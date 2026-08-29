@@ -55,6 +55,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
+import { isOverflowWedged } from "../hive-common/overflow.ts";
 import { resolveRunUUID, runStateNote, watchCommand } from "./watch-run.ts";
 import { strandedIndexLock } from "./indexlock.ts";
 import {
@@ -156,6 +157,23 @@ export default function background(pi: ExtensionAPI) {
 	};
 
 	/**
+	 * Is the session unable to send another request at all? See
+	 * `hive-common/overflow.ts` for the measurement.
+	 *
+	 * FALSE on anything unreadable: silently withholding every completion
+	 * because the session could not be inspected is a worse failure than the one
+	 * this prevents.
+	 */
+	const overflowWedged = (): boolean => {
+		if (!latestCtx) return false;
+		try {
+			return isOverflowWedged(latestCtx.sessionManager.getBranch() as readonly unknown[]);
+		} catch {
+			return false;
+		}
+	};
+
+	/**
 	 * Deliver one job's completion into the session.
 	 *
 	 * `notified` is set only after `sendMessage` returns without throwing, so a
@@ -166,6 +184,16 @@ export default function background(pi: ExtensionAPI) {
 	 * gate refuses headless sessions to avoid.
 	 */
 	const notify = (job: Job): void => {
+		// A session wedged against its own context window cannot read this. The
+		// wake lands as one more refused request, and each refusal leaves the
+		// context larger than the last — measured, this path and hive-remote's
+		// team messages together kept a session issuing identical 400s for
+		// 12h27m (HIV-3060). Leaving the job unannounced is the SAFE side of the
+		// asymmetry documented above: `notified` stays false, so the
+		// `session_start` sweep re-delivers it to a session that can actually
+		// run. Delivering now would consume the notification into a context that
+		// will never be read.
+		if (overflowWedged()) return;
 		const content = notificationFor(job, Date.now());
 		try {
 			pi.sendMessage(

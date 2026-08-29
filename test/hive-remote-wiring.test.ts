@@ -428,3 +428,54 @@ describe("the disabled path", () => {
 		expect(hive.calls).toHaveLength(0);
 	});
 });
+
+/**
+ * A session wedged against its own context window (HIV-3060).
+ *
+ * Measured 2026-08-29: this downlink and `background`'s completion notify were
+ * waking sessions that could no longer send a request at all, every few minutes,
+ * for as long as 12h27m. The wake does not reach the model — it becomes one more
+ * refused request, and each refusal leaves the context larger than the last.
+ */
+describe("waking a session that cannot send a request", () => {
+	const OVERFLOW =
+		'OpenAI API error (400): 400 "This model\'s maximum prompt length is 500000 but the request contains 505280 tokens."';
+
+	const branchWedged = [
+		{ message: { role: "user", content: "go" } },
+		{ message: { role: "assistant", content: "", stopReason: "error", errorMessage: OVERFLOW } },
+	];
+	const branchHealthy = [
+		{ message: { role: "user", content: "go" } },
+		{ message: { role: "assistant", content: "done", stopReason: "stop" } },
+	];
+
+	const directMessage = JSON.stringify({ category: "message", text: "please look at the PR" });
+
+	async function deliverTeamMessage(branch: typeof branchWedged) {
+		fakeHive({ commands: [{ id: "tm-1", kind: "team_message", payload: directMessage }] });
+		hiveRemote(fake.api, deps());
+		// Refreshes the extension's retained ctx, which is how it reads the branch.
+		await fake.emit({ type: "session_start" }, { branch });
+		await attachAndSettle(fake);
+		await vi.advanceTimersByTimeAsync(2_200);
+	}
+
+	it("still DELIVERS a teammate's message, but does not wake the session", async () => {
+		await deliverTeamMessage(branchWedged);
+
+		// Delivered — nothing is dropped, so it lands whenever the session can
+		// run again. Just not woken, which is the only part that costs a request.
+		expect(fake.messages).toHaveLength(1);
+		expect(fake.messages[0]?.customType).toBe("team-message");
+		expect(fake.messages[0]?.options?.deliverAs).toBe("followUp");
+		expect(fake.messages[0]?.options?.triggerTurn).toBe(false);
+	});
+
+	it("wakes the session normally when it can still reach the provider", async () => {
+		// The control. Without it this suite would pass just as well against an
+		// extension that had stopped waking on team messages altogether.
+		await deliverTeamMessage(branchHealthy);
+		expect(fake.messages[0]?.options?.triggerTurn).toBe(true);
+	});
+});
