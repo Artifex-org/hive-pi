@@ -235,11 +235,52 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 				const toModel = (chunk: Buffer) => collapser.write(normalizeCRLF(stripper.write(chunk)));
 
 				let eofTimer: NodeJS.Timeout | undefined;
+				// Pagers already asked to quit, by pid. A pager gets the keystroke a
+				// person would send first and the signal only if it ignores it: `q`
+				// lets it exit cleanly, leaving what it had already drawn in the
+				// transcript, where SIGTERM takes that away too.
+				const nudgedPagers = new Set<number>();
 				const watch = new StdinWatch(
 					child.pid ?? 0,
 					realProcReader(),
 					(verdict) => {
 						opts.onBlocked?.(verdict);
+						// A PAGER CANNOT BE WAITED OUT, so this branch acts where the
+						// others report. Nothing in a tool call can press a key, so
+						// `less` holds the command — and with it the turn, and with the
+						// turn every steer queued behind it — until a human notices.
+						// Measured 2026-08-29: 25 minutes on one `git diff --stat`,
+						// released within a second of ending the pager (HIV-3053).
+						//
+						// Closing stdin, which releases the read-blocked case below,
+						// does nothing here: a pager on a tty ignores EOF.
+						if (verdict.kind === "pager") {
+							// A human at the pane owns the session and may be reading
+							// that pager on purpose — the same rule the EOF path follows.
+							if (opts.hasHuman?.()) return;
+							if (nudgedPagers.has(verdict.pid)) {
+								onData(Buffer.from(`\n[harness] pid ${verdict.pid} (${verdict.comm}) ignored q; sent SIGTERM.\n`));
+								try {
+									process.kill(verdict.pid, "SIGTERM");
+								} catch {
+									/* it exited between the poll and here */
+								}
+								nudgedPagers.delete(verdict.pid);
+								return;
+							}
+							nudgedPagers.add(verdict.pid);
+							onData(
+								Buffer.from(
+									`\n[harness] pid ${verdict.pid} (${verdict.comm}) is waiting for a keypress and nothing here can type; sent q. Re-run it non-interactively (git --no-pager …, PAGER=cat).\n`,
+								),
+							);
+							try {
+								child.stdin?.write("q");
+							} catch {
+								/* already closed; the next verdict escalates to SIGTERM */
+							}
+							return;
+						}
 						if (verdict.kind !== "blocked") {
 							if (eofTimer) clearTimeout(eofTimer);
 							eofTimer = undefined;

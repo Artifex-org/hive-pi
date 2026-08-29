@@ -54,7 +54,8 @@ export interface ProcReader {
 export type BlockedVerdict =
 	| { kind: "working" }
 	| { kind: "quiet"; quietMs: number }
-	| { kind: "blocked"; quietMs: number; pid: number; comm: string; fd0: string };
+	| { kind: "blocked"; quietMs: number; pid: number; comm: string; fd0: string }
+	| { kind: "pager"; quietMs: number; pid: number; comm: string };
 
 /**
  * Read-family syscall numbers per architecture, from the kernel's own headers
@@ -77,6 +78,28 @@ export type BlockedVerdict =
  * tier rather than guessing: calling some unrelated syscall "blocked on stdin"
  * is the failure mode that would train everyone to ignore this signal.
  */
+/**
+ * Programs that exist to wait for a keypress, by `comm`.
+ *
+ * A THIRD TIER, and it needs no syscall proof — which is the point. `less` does
+ * not block in `read(0)`: it waits in the poll/select family on the terminal,
+ * and those are excluded from the proven tier ON PURPOSE (their fd set lives
+ * behind a pointer, so a poller may be on a socket). So the commonest hang of
+ * all fell through to the weak `quiet` tier, which only describes.
+ *
+ * The presence of one of these in an agent's command tree IS the verdict: there
+ * is nobody at the keyboard, so none of them can ever make progress. Measured
+ * 2026-08-29 on a pyERP session — `git diff --stat` opened `less` under the pty
+ * and the tool call sat for 25 minutes, released within a second of that one
+ * process being killed (HIV-3053).
+ *
+ * Matched on `comm`, which the kernel truncates to 15 characters — every name
+ * here is well inside that. Deliberately NOT a general "is it interactive"
+ * guess: a wrong entry would end a working command, so the list holds only
+ * programs that cannot do anything useful unattended.
+ */
+const PAGERS: ReadonlySet<string> = new Set(["less", "more", "most", "pager", "vi", "vim", "nvim", "nano", "emacs"]);
+
 const READ_SYSCALLS: Partial<Record<string, readonly number[]>> = {
 	x64: [0, 17, 19, 275, 295], // read, pread64, readv, splice, preadv
 	arm64: [63, 67, 65, 76, 69], // read, pread64, readv, splice, preadv
@@ -195,6 +218,21 @@ export function classify(
 	if (tree.length === 0) return { kind: "working" };
 	if (quietMs < provenAfter) return { kind: "working" };
 
+	// The pager tier, ahead of the syscall tiers: it is the most actionable
+	// finding and the only one that needs no architecture table.
+	//
+	// Gated on nothing in the tree RUNNING, which is what keeps a scripted
+	// `nvim --headless` mid-edit out of it: the name alone would be enough to
+	// end a command that was working, and a killed working command is a worse
+	// failure than the hang this cures.
+	if (tree.every((p) => p.state === "S" || p.state === "I")) {
+		for (const p of tree) {
+			if (PAGERS.has(p.comm)) {
+				return { kind: "pager", quietMs, pid: p.pid, comm: p.comm };
+			}
+		}
+	}
+
 	const reads = READ_SYSCALLS[arch];
 	if (reads) {
 		for (const p of tree) {
@@ -222,6 +260,9 @@ export function classify(
 /** Human-readable one-liner for the `[harness]` note. */
 export function describeVerdict(v: BlockedVerdict): string | null {
 	const secs = (ms: number) => Math.round(ms / 1000);
+	if (v.kind === "pager") {
+		return `no output for ${secs(v.quietMs)}s — pid ${v.pid} (${v.comm}) is waiting for a keypress and nothing here can type.`;
+	}
 	if (v.kind === "blocked") {
 		return `no output for ${secs(v.quietMs)}s — pid ${v.pid} (${v.comm}) is blocked reading stdin on ${v.fd0}.`;
 	}
