@@ -399,6 +399,26 @@ export function render(text: string, result: GateResult | null, opts: RenderOpti
 }
 
 /**
+ * The vendored gate answered a `only=` selector with a zero-check "pass" — the
+ * state report() refuses to call a pass. On a repo that ALSO gates through
+ * Hive, the likeliest reading is that the caller named PIPELINE STEP NAMES
+ * (`lint`, `test-backend`) — the vocabulary that repo's own docs teach — not
+ * the vendored gate's check names. index.ts uses this to re-dispatch the same
+ * request as `hive check --step <only>` instead of reporting NOTHING CHECKED
+ * about a question the fleet was perfectly willing to answer.
+ *
+ * Measured: 17 papercuts in the 7 days to 2026-08-30 (HIV-3077), 30–166s
+ * each, every one ending in a manual `hive check --step` shell-out.
+ *
+ * `failures` is checked too: a gate that DID fail told the caller something
+ * real, and re-dispatching would bury that verdict under a different one.
+ */
+export function selectorMatchedNothing(only: string | undefined, result: GateResult | null): boolean {
+	if (!only || !result) return false;
+	return result.passed === true && (result.checks?.length ?? 0) === 0 && (result.failures?.length ?? 0) === 0;
+}
+
+/**
  * Gate argv for a request.
  *
  * `--json` keeps the machine-readable trailer while per-check diagnostics still
