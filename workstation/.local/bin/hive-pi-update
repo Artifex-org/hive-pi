@@ -136,7 +136,7 @@ mv "${available_tmp}" "${available_revision_file}"
 # against a path git no longer knows exits 1, and under `set -Eeuo pipefail`
 # that ends the run. It sits inside the "upstream is strictly ahead" branch, so
 # it lay dormant through every quiet tick and fired on the first real update
-# after the split — measured on joan-omarchy 2026-08-27T22:01:59Z, `failed exit
+# after the split — measured on a fleet workstation 2026-08-27T22:01:59Z, `failed exit
 # at line 149`, with 26 merged commits stranded and the panel still reporting
 # the harness current.
 #
@@ -240,7 +240,7 @@ update_pi_binaries
 # `lastChangelogVersion` after showing a changelog leaves the overlay
 # permanently dirty. Without the exclusion below, the guard then declined every
 # overlay update for the life of the machine and said so only as a parenthetical
-# inside a run line that still began with `ok`. Measured on joan-omarchy: the
+# inside a run line that still began with `ok`. Measured on a fleet workstation: the
 # entire recorded difference was 0.83.0 -> 0.84.3 plus pi reformatting the file
 # from tabs to spaces — `git diff -w --stat` reported one changed line — and on
 # that basis the overlay had not updated since.
