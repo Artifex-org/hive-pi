@@ -37,6 +37,7 @@ import {
 	clearAuthFailure,
 	createRun,
 	foldGate,
+	foldNestedUsageModels,
 	foldMessageEnd,
 	foldToolEnd,
 	classifyToolError,
@@ -50,6 +51,7 @@ import {
 	resolveEndOutcome,
 	shouldHeartbeat,
 	takeHeartbeatSlot,
+	type NestedUsageModel,
 	type RunAccumulator,
 } from "./accumulator.ts";
 import {
@@ -84,6 +86,36 @@ const DRAIN_DELAY_JITTER_MS = 7_000;
 const PI_VERSION = piVersion();
 
 type FlushReason = "session_start" | "interval" | "threshold" | "settle" | "shutdown" | "manual";
+
+/**
+ * Reads only the narrow metrics contract emitted by the trusted subagent tool.
+ * Its transcript-bearing `results` field stays untouched here and can never
+ * reach the payload allowlist.
+ */
+function nestedUsageByModel(details: unknown): NestedUsageModel[] | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const candidate = (details as { usageByModel?: unknown }).usageByModel;
+	if (!Array.isArray(candidate)) return undefined;
+	const models: NestedUsageModel[] = [];
+	for (const item of candidate) {
+		if (typeof item !== "object" || item === null) return undefined;
+		const model = item as Partial<NestedUsageModel>;
+		if (
+			typeof model.provider !== "string" ||
+			typeof model.model !== "string" ||
+			(model.authMode !== "api_key" && model.authMode !== "subscription" && model.authMode !== "unknown") ||
+			typeof model.turns !== "number" ||
+			typeof model.input !== "number" ||
+			typeof model.output !== "number" ||
+			typeof model.cacheRead !== "number" ||
+			typeof model.cacheWrite !== "number" ||
+			typeof model.cost !== "number" ||
+			(model.reasoning !== undefined && typeof model.reasoning !== "number")
+		) return undefined;
+		models.push(model as NestedUsageModel);
+	}
+	return models;
+}
 
 export default function (pi: ExtensionAPI) {
 	// Read once in the factory. This is a plain file read, not a long-lived
@@ -636,7 +668,9 @@ export default function (pi: ExtensionAPI) {
 		unsubscribeMetrics = pi.events.on(HIVE_METRIC_CHANNEL, (data: unknown) => {
 			try {
 				const event = data as HiveMetricEvent;
-				if (run && event && event.kind === "gate") foldGate(run, event);
+				if (!run || !event) return;
+				if (event.kind === "gate") foldGate(run, event);
+				if (event.kind === "nested_usage") foldNestedUsageModels(run, event.models);
 			} catch {
 				/* fail open */
 			}
@@ -725,8 +759,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", (event) => {
 		try {
-			// The only place a nested subagent's spend is visible.
-			if (run && event.usage) foldToolUsage(run, event.usage);
+			// The only place a nested subagent's spend is visible. Details are read
+			// only for the subagent's metric-only usageByModel contract; its result
+			// transcript remains deliberately unread.
+			if (run && event.usage) {
+				foldToolUsage(run, event.usage, event.toolName === "subagent" ? nestedUsageByModel(event.details) : undefined);
+			}
 		} catch {
 			/* fail open */
 		}
