@@ -23,7 +23,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { ancestors, gateArgs, gateCandidates, render, splitReport } from "./gate.ts";
+import { ancestors, gateArgs, gateCandidates, render, selectorMatchedNothing, splitReport } from "./gate.ts";
 import { consume, emptyProgress, finish, type GateProgress, widgetEnvelope } from "./stream.ts";
 import {
 	deckLines,
@@ -598,6 +598,24 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const { text: diagnostics, result } = splitReport(run.out);
+			// A zero-check "pass" for a NAMED selector, in a repo that also gates
+			// through Hive: the caller almost certainly wrote pipeline STEP names
+			// (`lint`, `test-backend`, …) — the vocabulary this repo's docs teach —
+			// not vendored check names. Re-dispatch as the hive check they were
+			// asking for, and say so, instead of reporting NOTHING CHECKED and
+			// leaving them to shell out to `hive check --step` by hand (HIV-3077).
+			if (selectorMatchedNothing(params.only, result) && (await hivePipelineDir(cwd))) {
+				const hive = await runHiveCheck(pi, params, cwd, signal, onUpdate);
+				const first = hive.content?.[0];
+				if (first?.type === "text") {
+					first.text =
+						`\`only=${params.only}\` matched no checks in the vendored gate — on this repo those ` +
+						`name Hive pipeline steps, so the gate was re-dispatched as ` +
+						`\`hive check --step ${stepsFrom(params.only).join(",")}\`. The verdict below is that run's.\n\n` +
+						first.text;
+				}
+				return hive;
+			}
 			const progress = finish(emptyProgress(mode, scope), result, run.code);
 			return {
 				content: [
