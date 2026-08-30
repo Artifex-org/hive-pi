@@ -76,8 +76,13 @@ export function buildJudgePrompt(condition: string, transcript: string): string 
 			? 'The excerpt was truncated. If the evidence you need is not present, answer {"ok": false, "reason": "insufficient evidence in transcript"}.'
 			: "",
 		"",
-		'Reply with ONE JSON object and nothing else: {"ok": <boolean>, "reason": "<one sentence>"}.',
+		'Reply with ONE JSON object and nothing else: {"ok": <boolean>, "reason": "<one sentence>", "pending": <boolean>}.',
 		'Set ok to true ONLY if the transcript shows the condition is already satisfied.',
+		'Set pending to true when the condition names work that is UNDERWAY and has not reported yet —',
+		'a CI run still running, a queued job, a review not yet returned. "Not finished yet" is not the',
+		'same answer as "not done": pending means there is nothing to grade, so nothing is spent waiting.',
+		'Set pending to false when the work is absent, refused, failed, or was never started — those the',
+		'worker can act on now.',
 		"Before answering ok:true, audit the transcript against EVERY requirement in the condition.",
 		"Do not accept intent, partial progress, or a plausible final answer as proof of completion.",
 		"When ok is false, the reason is read by the worker as its next instruction, so",
@@ -117,6 +122,15 @@ export function injectionFor(outcome: GoalOutcome): string | null {
 			// Repeating an unchanged objection is not progress; another turn would
 			// produce the same one. Surfacing it to the human is the only move.
 			return null;
+		case "pending":
+			// Say NOTHING while the work the condition names is still in flight.
+			//
+			// This is the whole saving. The agent that is waiting on a CI run is
+			// already doing the right thing, and "keep going" tells it to poll —
+			// billing a turn per settle for news that has not arrived. The next
+			// settle re-grades for free, and the moment the run lands the verdict
+			// becomes gradeable on its own.
+			return null;
 		case "judge_error":
 			// NEVER inject on an evaluator failure. It has told us nothing about
 			// the goal, and inventing a continuation from it hands the model a
@@ -133,6 +147,12 @@ export function metricFor(outcome: GoalOutcome): "pass" | "fail" | "timeout" | "
 		case "continue":
 			return "fail";
 		case "judge_error":
+			return "skip";
+		case "pending":
+			// "skip", with judge_error, and for the identical reason: the
+			// evaluation produced no judgement about the goal. Counting a wait as
+			// "fail" would put every polled CI minute into the failure rate and
+			// make the metric read worst exactly when the loop is behaving.
 			return "skip";
 		default:
 			// capped / blocked_user / budget_exhausted: the goal stopped without

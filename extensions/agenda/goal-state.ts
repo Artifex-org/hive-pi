@@ -62,6 +62,17 @@ export interface GoalLedger {
 	 * assessments in a row, not three repeats of a fourth.
 	 */
 	noProgressStreak: number;
+	/**
+	 * Consecutive verdicts that could not be graded because the work the
+	 * condition names was still in flight.
+	 *
+	 * Its own counter, beside `judgeErrors`, and for the same reason: neither is
+	 * evidence about the goal, so neither may spend an iteration. It is bounded
+	 * rather than free (`MAX_PENDING`) because "still running" is exactly what a
+	 * job that will NEVER finish also reports, and an unbounded wait would turn
+	 * a hung CI run into an immortal goal.
+	 */
+	pendingStreak: number;
 	/** Tokens spent by the EVALUATOR, which is the cost this feature adds. */
 	tokens: number;
 	budget?: GoalBudget;
@@ -99,6 +110,18 @@ export const MAX_CONDITION_CHARS = 4000;
 export const DEFAULT_MAX_ITERATIONS = 8;
 export const MAX_JUDGE_ERRORS = 3;
 export const MAX_NO_PROGRESS = 3;
+/**
+ * How many consecutive "still in flight" verdicts to wait through.
+ *
+ * Larger than the other two caps on purpose. A judge error and a repeated
+ * reason are both signs something is WRONG, and three is the right patience for
+ * a fault; waiting is not a fault, and the thing most often waited on here is a
+ * CI run measured in tens of minutes against a settle measured in seconds.
+ * Twelve keeps a genuinely stuck goal bounded while covering the case the
+ * measurement found. The token and wall-clock budget still apply underneath, so
+ * this is a backstop rather than the only limit.
+ */
+export const MAX_PENDING = 12;
 
 export function createGoal(
 	id: string,
@@ -120,6 +143,7 @@ export function createGoal(
 			turnsEvaluated: 0,
 			judgeErrors: 0,
 			noProgressStreak: 0,
+			pendingStreak: 0,
 			tokens: 0,
 			budget: options.budget,
 		},
@@ -133,6 +157,7 @@ export type GoalOutcome =
 	| { kind: "capped"; reason: string }
 	| { kind: "blocked_user"; reason: string }
 	| { kind: "budget_exhausted"; reason: string }
+	| { kind: "pending"; reason: string; waited: number }
 	| { kind: "judge_error"; message: string; paused: boolean };
 
 /**
@@ -144,7 +169,7 @@ export type GoalOutcome =
  */
 export function applyVerdict(
 	goal: GoalItem,
-	verdict: { ok: boolean; reason: string },
+	verdict: { ok: boolean; reason: string; pending?: boolean },
 	now: number,
 	spentTokens: number,
 ): { goal: GoalItem; outcome: GoalOutcome } {
@@ -153,6 +178,8 @@ export function applyVerdict(
 		...goal.ledger,
 		turnsEvaluated: goal.ledger.turnsEvaluated + 1,
 		judgeErrors: 0, // a real verdict clears the error streak
+		// A gradeable verdict means the wait is over, whichever way it went.
+		pendingStreak: verdict.pending && !verdict.ok ? goal.ledger.pendingStreak : 0,
 		tokens: goal.ledger.tokens + spentTokens,
 		// Counts occurrences of the current reason, so the first unmet verdict is
 		// already a streak of 1 and three identical ones in a row trip the check.
@@ -160,6 +187,26 @@ export function applyVerdict(
 	};
 
 	const base = { ...goal, lastReason: verdict.reason, updatedAt: now, ledger };
+
+	// PENDING is handled before every limit except achievement, and spends no
+	// iteration. The order mirrors `applyJudgeError`: an answer that is not
+	// evidence about the goal must not be charged as though it were.
+	//
+	// It deliberately does NOT clear on a changing reason the way
+	// `noProgressStreak` does. A pending reason names live counts ("1 of 10
+	// succeeded") that differ on every poll, so a streak that reset on a changed
+	// reason would never reach its cap — which is precisely how the binary
+	// verdict let these goals run to the iteration cap instead.
+	if (verdict.pending && !verdict.ok) {
+		const pendingStreak = goal.ledger.pendingStreak + 1;
+		const waiting: GoalItem = { ...base, ledger: { ...ledger, pendingStreak } };
+		if (pendingStreak < MAX_PENDING && !isBudgetExhausted(waiting.ledger, base.createdAt, now)) {
+			return { goal: waiting, outcome: { kind: "pending", reason: verdict.reason, waited: pendingStreak } };
+		}
+		// Out of patience: fall through and charge it as an ordinary unmet
+		// verdict, so a goal waiting on something that never lands still
+		// terminates through the paths that already exist.
+	}
 
 	if (verdict.ok) {
 		return { goal: { ...base, state: "achieved" }, outcome: { kind: "achieved", reason: verdict.reason } };
@@ -311,6 +358,7 @@ export function validateGoal(data: unknown): GoalItem | null {
 			turnsEvaluated: positiveInt(rawLedger.turnsEvaluated, 0),
 			judgeErrors: positiveInt(rawLedger.judgeErrors, 0),
 			noProgressStreak: positiveInt(rawLedger.noProgressStreak, 0),
+			pendingStreak: positiveInt(rawLedger.pendingStreak, 0),
 			tokens: positiveInt(rawLedger.tokens, 0),
 			budget,
 		},

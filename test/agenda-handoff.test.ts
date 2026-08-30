@@ -24,7 +24,8 @@ const goal: GoalItem = {
 	condition: "PR created and its checks green",
 	createdAt: 0,
 	updatedAt: 0,
-	ledger: { iterations: 0, maxIterations: 8, turnsEvaluated: 0, judgeErrors: 0, noProgressStreak: 0, tokens: 0 },
+	ledger: { iterations: 0, maxIterations: 8, turnsEvaluated: 0, judgeErrors: 0, noProgressStreak: 0,
+		pendingStreak: 0, tokens: 0 },
 };
 
 describe("buildHandoffSeed", () => {
