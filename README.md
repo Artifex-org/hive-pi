@@ -9,7 +9,7 @@ Distributed as a **pi package**. Consumers pin a release tag; a machine
 provisioned by the Hive desktop app tracks a checkout that a timer keeps current.
 
 ```bash
-pi install git:git@github.com:Artifex-org/hive-pi@v0.1.0
+pi install git:github.com/Artifex-org/hive-pi@v0.1.0
 ```
 
 ## Why this repo exists, and why it is not a fork
