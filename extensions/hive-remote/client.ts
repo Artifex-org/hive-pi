@@ -25,6 +25,8 @@ export interface Capabilities {
 	can_compact?: boolean;
 	/** End the SESSION, not the turn. Hive refuses to queue a kill without it. */
 	can_kill: boolean;
+	/** End a reviewed-complete session without recording an operator kill. */
+	can_complete?: boolean;
 	/** Switch the model and thinking level mid-session. Hive hides the mode
 	 *  selector without it, rather than offering a control that does nothing. */
 	can_set_mode: boolean;
@@ -393,6 +395,7 @@ export interface RemoteCommand {
 		| "interrupt"
 		| "compact"
 		| "kill"
+		| "complete"
 		| "start_session"
 		| "set_mode"
 		| "team_message"
