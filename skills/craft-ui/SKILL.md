@@ -30,8 +30,10 @@ This skill owns components, pages, layout, typography, color language, iconograp
 7. **Validate.** Run the audit script **that ships with this skill**, resolving its directory FIRST as a separate statement:
 
    ```bash
-   C=$(ls -d ~/.claude/skills/craft-ui ~/repos/hive-pi*/main/skills/craft-ui 2>/dev/null | head -1); "$C"/scripts/audit-hardcoded-colors.sh <changed paths>
+   for C in ~/.claude/skills/craft-ui ~/repos/hive-pi*/main/skills/craft-ui; do [ -x "$C/scripts/audit-hardcoded-colors.sh" ] && break; done; "$C"/scripts/audit-hardcoded-colors.sh <changed paths>
    ```
+
+   The loop takes the first candidate whose script actually EXISTS — not the first directory. `ls | head -1` picked `~/.claude/skills/craft-ui` even when that installed copy was a stale sync missing `scripts/`, and the audit then failed `No such file or directory` while a complete copy sat one candidate later (7 papercuts, 2026-08 sweep).
 
    Both statements in ONE bash call (`;`-joined) — but **never the inline-assignment form `CRAFT_UI=/path "$CRAFT_UI/scripts/…"`**: the shell expands `$CRAFT_UI` before the assignment takes effect, so it runs `/scripts/audit-hardcoded-colors.sh` (measured, `No such file or directory`, 2026-08-20). **A bare `scripts/audit-hardcoded-colors.sh` is equally wrong**: bash runs it from the TARGET REPO, where no such file exists — three agents hit `No such file or directory` on it in hive (2026-08-16/17/19) and validated nothing. The script exits non-zero on raw palette utilities or hex literals; it scans WHOLE FILES, so on a file with pre-existing raw utilities triage its findings against your diff — fix what your change introduced, and leave legacy hits on lines you did not touch (note them, don't restyle unrelated code to get to zero). Walk the a11y floor: visible `:focus-visible` on every interactive element, reduced motion honored, contrast ≥ 4.5:1 for text, hit targets ≥ 40px on touch surfaces, state never encoded by color alone.
 
