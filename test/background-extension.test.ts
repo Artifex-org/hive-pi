@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 import { realBashAvailable } from "./require-tools.ts";
 import background from "../extensions/background/index.ts";
+import { parseResultHeader } from "../extensions/background/jobs.ts";
 
 function boot(): FakePi {
 	const pi = createFakePi();
@@ -185,6 +186,21 @@ describe.runIf(realBashAvailable())("background_result", () => {
 		const out = await call(pi, "background_result", { id: "bg-99" });
 		expect(out).toContain("No background job");
 		expect(out).toContain("none");
+	});
+
+	// The seam the bugfix evidence gate reads: opmode learns a background job's
+	// identity and verdict by parsing THIS payload, because `isError` describes
+	// the pull and not the job. Asserting it against a header a test wrote would
+	// prove only that the test can write a header, so this drives the real tool
+	// and parses what actually came back.
+	it("emits a header the evidence gate can read back, with the job's own verdict", async () => {
+		const pi = boot();
+		await pi.emit({ type: "session_start" }, { mode: "tui" });
+		await call(pi, "background_bash", { command: "echo boom >&2; exit 3", what: "a failing gate" });
+		await until(() => pi.messages.length > 0, 4_000);
+
+		const out = await call(pi, "background_result", { id: "bg-1" });
+		expect(parseResultHeader(out)).toEqual({ id: "bg-1", status: "failed" });
 	});
 });
 

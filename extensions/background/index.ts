@@ -76,6 +76,7 @@ import {
 	pendingNotifications,
 	renderList,
 	resolveTimeoutMs,
+	resultHeader,
 	statusForExit,
 	type Job,
 } from "./jobs.ts";
@@ -617,11 +618,7 @@ export default function background(pi: ExtensionAPI) {
 				const known = allJobs().map((entry) => entry.id).join(", ") || "none";
 				return textResult(`No background job \`${params.id}\`. Known jobs: ${known}.`, true);
 			}
-			const header =
-				`${job.id} — ${job.what}\n` +
-				`status ${job.status}${job.exitCode === undefined ? "" : ` (exit ${job.exitCode})`}, ` +
-				`${formatDuration((job.endedAtMs ?? Date.now()) - job.startedAtMs)}\n` +
-				`command: ${job.detail}`;
+			const header = resultHeader(job, Date.now());
 			const dropped = job.droppedBytes
 				? `\n\n[${job.droppedBytes} earlier bytes dropped — this is the tail]`
 				: "";
