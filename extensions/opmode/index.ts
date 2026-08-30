@@ -40,6 +40,36 @@ import { buildOpModePrompt } from "./prompt.ts";
 /** Tools this extension owns; they stay callable in every mode it gates. */
 const OP_MODE_TOOLS = ["bugfix_evidence", "bugfix_root_cause"];
 
+/** A completed tool result the evidence protocol observed. */
+export type ObservedResult = { name: string; failed: boolean; text: string };
+
+/**
+ * The refusal for a missing or unknown tool_call_id — WITH the ids it was
+ * checked against.
+ *
+ * The id lives in the tool-event stream, which the model never sees: Pi's
+ * rendered transcript carries no tool-call ids, so the bare "needs the id"
+ * refusal demanded a value the caller had no way to produce. Agents holding a
+ * live reproduction were refused on every attempt and the mandated protocol
+ * could not be completed at all (HIV-3078 — 6+ blocking papercuts in the week
+ * to 2026-08-30). Handing over the newest observed ids turns the dead end
+ * into a one-call retry, without trusting anything model-authored: the ids
+ * still come from the event stream, and the binding checks are unchanged.
+ */
+export function refusalWithCandidates(results: Map<string, ObservedResult>, requested: string | undefined): string {
+	const head = requested
+		? `Tool result ${requested} was not observed in this session.`
+		: "Bugfix evidence needs the id of a completed tool result from this session.";
+	const recent = [...results.entries()].slice(-8).reverse();
+	if (recent.length === 0) {
+		return `${head} No completed tool results have been observed yet — run the reproduction first, then record it.`;
+	}
+	const rows = recent.map(
+		([id, r]) => `  ${id}  ${r.name}${r.failed ? "  (failed)" : ""}  ${r.text.replace(/\s+/g, " ").slice(0, 70)}`,
+	);
+	return `${head} Recent completed results, newest first — pass one of these ids as tool_call_id:\n${rows.join("\n")}`;
+}
+
 export default function (pi: ExtensionAPI) {
 	let mode: OpMode = DEFAULT_OP_MODE;
 	/**
@@ -191,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bugfix_evidence",
 		label: "Record bugfix evidence",
-		description: "Bind a bugfix phase to a completed tool result. The tool-call id must name an actual result from this session; a stable reproduction key binds its failing baseline to a distinct passing re-verification.",
+		description: "Bind a bugfix phase to a completed tool result. The tool-call id must name an actual result from this session; a stable reproduction key binds its failing baseline to a distinct passing re-verification. If you do not know the id, call with the phase alone — the refusal lists the recent result ids to pass.",
 		parameters: Type.Object({
 			phase: Type.Union([Type.Literal("reproduce"), Type.Literal("hypothesize"), Type.Literal("instrument"), Type.Literal("confirm"), Type.Literal("reverify"), Type.Literal("blocked")]),
 			tool_call_id: Type.Optional(Type.String()),
@@ -202,7 +232,13 @@ export default function (pi: ExtensionAPI) {
 			const p = params as { phase?: string; tool_call_id?: string; reproduction_key?: string; hypothesis?: string };
 			if (p.phase === "blocked") { phase = "blocked"; return protocolResult("blocked", "Investigation stopped honestly; no edits were unlocked."); }
 			const observed = p.tool_call_id ? results.get(p.tool_call_id) : undefined;
-			if (!observed) return text("Bugfix evidence needs the id of a completed tool result from this session.");
+			// The id lives in the tool-event stream, which the MODEL never sees —
+			// Pi's rendered transcript carries no tool-call ids, so "needs the id"
+			// alone described a value the caller had no way to produce. Agents
+			// with a live reproduction were refused every time (HIV-3078: 6+
+			// blocking papercuts in one week). The refusal now hands over the ids
+			// it is checking against, newest first, so the next call can succeed.
+			if (!observed) return text(refusalWithCandidates(results, p.tool_call_id));
 			if (p.phase === "reproduce") {
 				const key = p.reproduction_key?.trim();
 				if (observed.failed !== true || !key) return text("Reproduction evidence needs an actual failing result and a stable reproduction key.");
