@@ -33,6 +33,7 @@ function goalItem(overrides: Partial<GoalItem> = {}): GoalItem {
 			turnsEvaluated: 0,
 			judgeErrors: 0,
 			noProgressStreak: 0,
+		pendingStreak: 0,
 			tokens: 0,
 		},
 		...overrides,
