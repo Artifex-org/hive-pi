@@ -20,7 +20,7 @@
  */
 
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import type { ErrorClass, HiveMetricEvent, ProjectIdentity, ToolErrorKind } from "./types.ts";
+import type { ErrorClass, HiveGateMetricEvent, NestedUsageMetric, ProjectIdentity, ToolErrorKind } from "./types.ts";
 
 /** Cardinality caps. Overflow is dropped, never unbounded. */
 export const MAX_MODELS = 16;
@@ -536,6 +536,40 @@ function modelKey(provider: string, model: string): string {
 	return `${provider}/${model}`;
 }
 
+/** Metric-only child usage supplied by the subagent producer. */
+export type NestedUsageModel = NestedUsageMetric;
+
+function addModelUsage(a: RunAccumulator, usage: NestedUsageModel): void {
+	const key = modelKey(usage.provider, usage.model);
+	let bucket = a.models.get(key);
+	if (!bucket) {
+		if (a.models.size >= MAX_MODELS) return;
+		bucket = {
+			model: usage.model,
+			provider: usage.provider,
+			// The client only ever states HOW it authenticated. Whether that
+			// spend is money is the server's call (internal/factorybilling), and
+			// this field is advisory input to it, never the verdict.
+			authMode: usage.authMode,
+			turns: 0,
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+		};
+		a.models.set(key, bucket);
+	}
+	bucket.input += usage.input;
+	bucket.output += usage.output;
+	bucket.cacheRead += usage.cacheRead;
+	bucket.cacheWrite += usage.cacheWrite;
+	if (usage.reasoning !== undefined) bucket.reasoning = (bucket.reasoning ?? 0) + usage.reasoning;
+	if (Number.isFinite(usage.cost) && usage.cost > 0) bucket.cost += usage.cost;
+	bucket.turns += usage.turns;
+	a.dirty += 1;
+}
+
 /**
  * foldMessageEnd is the money hook: one assistant message = one LLM call that
  * was actually issued and billed.
@@ -550,82 +584,94 @@ export function foldMessageEnd(a: RunAccumulator, msg: AssistantMessage, notiona
 	const provider = String(msg.provider ?? "");
 	const model = String(msg.responseModel ?? msg.model ?? "");
 	if (!model) return;
-	const key = modelKey(provider, model);
-
-	let bucket = a.models.get(key);
-	if (!bucket) {
-		if (a.models.size >= MAX_MODELS) return;
-		bucket = {
-			model,
-			provider,
-			// The client only ever states HOW it authenticated. Whether that
-			// spend is money is the server's call (internal/factorybilling), and
-			// this field is advisory input to it, never the verdict.
-			authMode: notionalCost ? "subscription" : "api_key",
-			turns: 0,
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			cost: 0,
-		};
-		a.models.set(key, bucket);
-	}
-
 	const usage: Usage | undefined = msg.usage;
-	if (usage) {
-		bucket.input += usage.input ?? 0;
-		bucket.output += usage.output ?? 0;
-		bucket.cacheRead += usage.cacheRead ?? 0;
-		bucket.cacheWrite += usage.cacheWrite ?? 0;
-		if (usage.reasoning !== undefined) {
-			bucket.reasoning = (bucket.reasoning ?? 0) + usage.reasoning;
-		}
+	addModelUsage(a, {
+		provider,
+		model,
+		authMode: notionalCost ? "subscription" : "api_key",
+		turns: 1,
+		input: usage?.input ?? 0,
+		output: usage?.output ?? 0,
+		cacheRead: usage?.cacheRead ?? 0,
+		cacheWrite: usage?.cacheWrite ?? 0,
+		reasoning: usage?.reasoning,
 		// pi computes this client-side from a bundled price table and mutates
 		// usage.cost in place before this event fires. For an OAuth provider it
 		// is notional, which is exactly what authMode above tells the server.
-		const total = usage.cost?.total ?? 0;
-		if (Number.isFinite(total) && total > 0) bucket.cost += total;
-	}
-	bucket.turns += 1;
-	a.dirty += 1;
+		cost: usage?.cost?.total ?? 0,
+	});
+}
+
+function validNestedUsage(usage: NestedUsageModel): boolean {
+	return (
+		typeof usage.provider === "string" &&
+		typeof usage.model === "string" &&
+		usage.provider.length > 0 &&
+		usage.model.length > 0 &&
+		["api_key", "subscription", "unknown"].includes(usage.authMode) &&
+		Number.isInteger(usage.turns) && usage.turns > 0 &&
+		[usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.cost]
+			.every((value) => Number.isFinite(value) && value >= 0) &&
+		(usage.reasoning === undefined || (Number.isFinite(usage.reasoning) && usage.reasoning >= 0))
+	);
+}
+
+function reconcilesToolUsage(usage: Usage, models: readonly NestedUsageModel[]): boolean {
+	if (models.length === 0 || !models.every(validNestedUsage)) return false;
+	const totals = models.reduce(
+		(sum, model) => ({
+			input: sum.input + model.input,
+			output: sum.output + model.output,
+			cacheRead: sum.cacheRead + model.cacheRead,
+			cacheWrite: sum.cacheWrite + model.cacheWrite,
+			cost: sum.cost + model.cost,
+		}),
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+	);
+	const sameCost = Math.abs(totals.cost - (usage.cost?.total ?? 0)) <= 1e-9 * Math.max(1, totals.cost);
+	return (
+		totals.input === (usage.input ?? 0) &&
+		totals.output === (usage.output ?? 0) &&
+		totals.cacheRead === (usage.cacheRead ?? 0) &&
+		totals.cacheWrite === (usage.cacheWrite ?? 0) &&
+		sameCost
+	);
 }
 
 /**
- * foldToolUsage folds an LLM call nested inside a tool (a subagent). It is the
- * only place that spend appears, and missing it would undercount every session
- * that delegates.
+ * foldToolUsage preserves a nested subagent's per-model facts when its narrow
+ * metric contract reconciles with the tool aggregate. Old or malformed details
+ * stay in the explicit nested/subagent unknown bucket rather than acquiring a
+ * plausible identity.
  */
-export function foldToolUsage(a: RunAccumulator, usage: Usage | undefined): void {
+export function foldNestedUsageModels(a: RunAccumulator, models: readonly NestedUsageModel[]): boolean {
+	if (models.length === 0 || !models.every(validNestedUsage)) return false;
+	for (const model of models) addModelUsage(a, model);
+	return true;
+}
+
+export function foldToolUsage(
+	a: RunAccumulator,
+	usage: Usage | undefined,
+	usageByModel?: readonly NestedUsageModel[],
+): void {
 	if (!usage) return;
-	const key = modelKey("nested", "subagent");
-	let bucket = a.models.get(key);
-	if (!bucket) {
-		if (a.models.size >= MAX_MODELS) return;
-		bucket = {
-			model: "subagent",
-			provider: "nested",
-			authMode: "unknown",
-			turns: 0,
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			cost: 0,
-		};
-		a.models.set(key, bucket);
+	if (usageByModel && reconcilesToolUsage(usage, usageByModel)) {
+		foldNestedUsageModels(a, usageByModel);
+		return;
 	}
-	bucket.input += usage.input ?? 0;
-	bucket.output += usage.output ?? 0;
-	bucket.cacheRead += usage.cacheRead ?? 0;
-	bucket.cacheWrite += usage.cacheWrite ?? 0;
-	if (usage.reasoning !== undefined) {
-		bucket.reasoning = (bucket.reasoning ?? 0) + usage.reasoning;
-	}
-	const total = usage.cost?.total ?? 0;
-	if (Number.isFinite(total) && total > 0) bucket.cost += total;
-	bucket.turns += 1;
-	a.dirty += 1;
+	addModelUsage(a, {
+		provider: "nested",
+		model: "subagent",
+		authMode: "unknown",
+		turns: 1,
+		input: usage.input ?? 0,
+		output: usage.output ?? 0,
+		cacheRead: usage.cacheRead ?? 0,
+		cacheWrite: usage.cacheWrite ?? 0,
+		reasoning: usage.reasoning,
+		cost: usage.cost?.total ?? 0,
+	});
 }
 
 /** Records a tool NAME against its call id. Never the arguments. */
@@ -686,7 +732,7 @@ export function foldTurnEnd(a: RunAccumulator): void {
 }
 
 /** Bus input is untrusted: clamp the name, cap the cardinality, ignore the rest. */
-export function foldGate(a: RunAccumulator, event: HiveMetricEvent): void {
+export function foldGate(a: RunAccumulator, event: HiveGateMetricEvent): void {
 	const name = sanitizeName(event.name);
 	if (!name) return;
 

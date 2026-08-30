@@ -23,7 +23,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import type { Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
@@ -87,6 +87,7 @@ import {
 import { emptyJsonRunState, foldJsonLine } from "../harness/json-protocol.ts";
 import { frame } from "../harness/framing.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { HIVE_METRIC_CHANNEL, type HiveMetricEvent } from "../hive-telemetry/types.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -227,11 +228,119 @@ export interface SingleResult {
 	structuredError?: string;
 }
 
+export interface SubagentUsageByModel {
+	provider: string;
+	model: string;
+	authMode: "api_key" | "subscription" | "unknown";
+	turns: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	reasoning?: number;
+	cost: number;
+}
+
+type ModelAuthResolver = (provider: string, requestedModel: string) => SubagentUsageByModel["authMode"];
+
+// Retries and sampled verifiers are separate child processes but one parent tool
+// call. Keep their assistant messages off the rendered detail object while their
+// usage remains part of the parent tool's durable accounting.
+const telemetryMessages = new WeakMap<SingleResult, Message[]>();
+
+function messagesForTelemetry(result: Pick<SingleResult, "messages">): Message[] {
+	return result instanceof Object && telemetryMessages.has(result as SingleResult)
+		? telemetryMessages.get(result as SingleResult)!
+		: result.messages;
+}
+
+function appendTelemetryMessages(target: SingleResult, messages: readonly Message[]): void {
+	telemetryMessages.set(target, [...messagesForTelemetry(target), ...messages]);
+}
+
 interface SubagentDetails {
 	mode: "single" | "parallel" | "chain";
 	agentScope: AgentScope;
 	projectAgentsDir: string | null;
 	results: SingleResult[];
+	/** Metric-only child accounting for telemetry; never transcript content. */
+	usageByModel?: SubagentUsageByModel[];
+}
+
+function usageNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * subagentUsageByModel derives a narrow metrics contract from child assistant
+ * messages. Telemetry receives this result, not transcript-bearing details.
+ */
+export function subagentUsageByModel(
+	results: readonly Pick<SingleResult, "messages">[],
+	authModeFor: ModelAuthResolver,
+): SubagentUsageByModel[] {
+	const buckets = new Map<string, SubagentUsageByModel>();
+	for (const result of results) {
+		for (const message of messagesForTelemetry(result)) {
+			if (message.role !== "assistant") continue;
+			const assistant = message as AssistantMessage;
+			const provider = assistant.provider?.trim();
+			const requestedModel = assistant.model?.trim();
+			const model = assistant.responseModel?.trim() || requestedModel;
+			if (!provider || !requestedModel || !model) continue;
+			let authMode: SubagentUsageByModel["authMode"] = "unknown";
+			try {
+				authMode = authModeFor(provider, requestedModel);
+			} catch {
+				// The live registry is unavailable: unknown is an honest billing fact.
+			}
+			if (!["api_key", "subscription", "unknown"].includes(authMode)) authMode = "unknown";
+			const key = `${provider}/${model}/${authMode}`;
+			let bucket = buckets.get(key);
+			if (!bucket) {
+				bucket = { provider, model, authMode, turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+				buckets.set(key, bucket);
+			}
+			const usage = assistant.usage;
+			bucket.turns += 1;
+			bucket.input += usageNumber(usage?.input);
+			bucket.output += usageNumber(usage?.output);
+			bucket.cacheRead += usageNumber(usage?.cacheRead);
+			bucket.cacheWrite += usageNumber(usage?.cacheWrite);
+			if (usage?.reasoning !== undefined) bucket.reasoning = (bucket.reasoning ?? 0) + usageNumber(usage.reasoning);
+			bucket.cost += usageNumber(usage?.cost?.total);
+		}
+	}
+	return [...buckets.values()];
+}
+
+/**
+ * Makes Pi's required tool-level Usage from the same narrow per-model metrics
+ * contract telemetry consumes. Per-category dollar prices are unavailable on a
+ * child result, so only the authoritative total is reported.
+ */
+export function subagentToolUsage(models: readonly SubagentUsageByModel[]): Usage | undefined {
+	if (models.length === 0) return undefined;
+	const total = models.reduce(
+		(sum, model) => ({
+			input: sum.input + model.input,
+			output: sum.output + model.output,
+			cacheRead: sum.cacheRead + model.cacheRead,
+			cacheWrite: sum.cacheWrite + model.cacheWrite,
+			reasoning: sum.reasoning + (model.reasoning ?? 0),
+			cost: sum.cost + model.cost,
+		}),
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0 },
+	);
+	return {
+		input: total.input,
+		output: total.output,
+		cacheRead: total.cacheRead,
+		cacheWrite: total.cacheWrite,
+		reasoning: total.reasoning,
+		totalTokens: total.input + total.output + total.cacheRead + total.cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: total.cost },
+	};
 }
 
 function getFinalOutput(messages: Message[]): string {
@@ -840,7 +949,12 @@ async function runAgentWithSchema(
 		);
 		// Keep the retry only if it is not worse: a retry that crashed leaves the
 		// original answer, which at least contained the work.
-		if (isFailedResult(retried)) break;
+		const attemptedMessages = [...messagesForTelemetry(result), ...messagesForTelemetry(retried)];
+		if (isFailedResult(retried)) {
+			telemetryMessages.set(result, attemptedMessages);
+			break;
+		}
+		telemetryMessages.set(retried, attemptedMessages);
 		result = retried;
 	}
 	return result;
@@ -984,6 +1098,7 @@ async function runVerifierOn(
 			projectAgentsDir: null,
 			results,
 		}));
+		appendTelemetryMessages(target, messagesForTelemetry(result));
 		if (isFailedResult(result)) return null;
 		const report = getFinalOutput(result.messages).trim();
 		return report ? report : null;
@@ -1154,6 +1269,15 @@ export default function (pi: ExtensionAPI) {
 			const hasSingle = Boolean(params.agent && params.task);
 			const modeCount = Number(hasChain) + Number(hasTasks) + Number(hasSingle);
 
+			const authModeFor: ModelAuthResolver = (provider, requestedModel) => {
+				try {
+					const model = ctx.modelRegistry.find(provider, requestedModel);
+					if (!model) return "unknown";
+					return ctx.modelRegistry.isUsingOAuth(model) === true ? "subscription" : "api_key";
+				} catch {
+					return "unknown";
+				}
+			};
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
 				(results: SingleResult[]): SubagentDetails => ({
@@ -1161,6 +1285,7 @@ export default function (pi: ExtensionAPI) {
 					agentScope,
 					projectAgentsDir: discovery.projectAgentsDir,
 					results,
+					usageByModel: subagentUsageByModel(results, authModeFor),
 				});
 
 			// Closed schemas are refused before a worker is spawned. This is an ERROR,
@@ -1351,6 +1476,10 @@ export default function (pi: ExtensionAPI) {
 					params.schema,
 				)
 					.then((result) => {
+						const usageByModel = subagentUsageByModel([result], authModeFor);
+						if (usageByModel.length > 0) {
+							pi.events.emit(HIVE_METRIC_CHANNEL, { kind: "nested_usage", models: usageByModel } satisfies HiveMetricEvent);
+						}
 						// `getFinalOutput`, not a hand-rolled join over `messages`.
 						// `messages` is `Message[]`, so mapping it as if it were
 						// strings yields a run of empty strings — every successful
@@ -1449,6 +1578,7 @@ export default function (pi: ExtensionAPI) {
 								},
 							],
 							details: makeDetails("chain")(results),
+							usage: subagentToolUsage(subagentUsageByModel(results, authModeFor)),
 							isError: true,
 						};
 					}
@@ -1481,6 +1611,7 @@ export default function (pi: ExtensionAPI) {
 						{ type: "text", text: (getFinalOutput(last.messages) || "(no output)") + structuredSection(last) },
 					],
 					details: makeDetails("chain")(results),
+					usage: subagentToolUsage(subagentUsageByModel(results, authModeFor)),
 				};
 			}
 
@@ -1609,6 +1740,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: truncateParallelOutput(parallelOutput) }],
 					details: makeDetails("parallel")(results),
+					usage: subagentToolUsage(subagentUsageByModel(results, authModeFor)),
 				};
 			}
 
@@ -1636,6 +1768,7 @@ export default function (pi: ExtensionAPI) {
 							},
 						],
 						details: makeDetails("single")([result]),
+						usage: subagentToolUsage(subagentUsageByModel([result], authModeFor)),
 						isError: true,
 					};
 				}
@@ -1655,6 +1788,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					content: [{ type: "text", text: parts.join("\n\n") }],
 					details: makeDetails("single")([result]),
+					usage: subagentToolUsage(subagentUsageByModel([result], authModeFor)),
 				};
 			}
 

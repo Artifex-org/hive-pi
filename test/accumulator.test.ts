@@ -103,8 +103,8 @@ describe("foldMessageEnd — attribution and monotonicity", () => {
 });
 
 describe("foldToolUsage — nested subagent spend", () => {
-	it("captures spend that only ever appears on a tool result", () => {
-		// Missing this undercounts every session that delegates.
+	it("keeps legacy or missing details in the explicit unknown bucket", () => {
+		// Missing identity must not undercount or acquire a plausible model.
 		const a = run();
 		foldToolUsage(a, usage(5000, 400, 0.03));
 
@@ -112,6 +112,28 @@ describe("foldToolUsage — nested subagent spend", () => {
 		expect(b.input).toBe(5000);
 		expect(b.cost).toBeCloseTo(0.03);
 		expect(b.authMode).toBe("unknown");
+	});
+
+	it("preserves verified child provider/model and billing facts", () => {
+		const a = run();
+		foldToolUsage(a, usage(5000, 400, 0.05), [
+			{ provider: "zai", model: "glm-5.3-flash", authMode: "subscription", turns: 2, input: 4500, output: 350, cacheRead: 0, cacheWrite: 0, cost: 0.04 },
+			{ provider: "openrouter", model: "deepseek/deepseek-v4-flash", authMode: "api_key", turns: 1, input: 500, output: 50, cacheRead: 0, cacheWrite: 0, cost: 0.01 },
+		]);
+
+		expect(a.models.get("zai/glm-5.3-flash")).toMatchObject({ authMode: "subscription", turns: 2, input: 4500, cost: 0.04 });
+		expect(a.models.get("openrouter/deepseek/deepseek-v4-flash")).toMatchObject({ authMode: "api_key", turns: 1, input: 500, cost: 0.01 });
+		expect(a.models.has("nested/subagent")).toBe(false);
+	});
+
+	it("falls back when metric details do not reconcile with aggregate usage", () => {
+		const a = run();
+		foldToolUsage(a, usage(5000, 400, 0.03), [
+			{ provider: "zai", model: "glm-5.3-flash", authMode: "subscription", turns: 1, input: 4999, output: 400, cacheRead: 0, cacheWrite: 0, cost: 0.03 },
+		]);
+
+		expect(a.models.has("zai/glm-5.3-flash")).toBe(false);
+		expect(a.models.get("nested/subagent")?.input).toBe(5000);
 	});
 
 	it("is a no-op when the tool reported no usage", () => {

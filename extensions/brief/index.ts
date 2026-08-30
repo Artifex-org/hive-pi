@@ -42,7 +42,7 @@ import {
 	type HiveBriefEvent,
 	type HiveBriefProgressEvent,
 } from "../hive-common/channels.ts";
-import { HIVE_METRIC_CHANNEL, type HiveMetricEvent } from "../hive-telemetry/types.ts";
+import { HIVE_METRIC_CHANNEL, type HiveGateMetricEvent, type HiveMetricEvent } from "../hive-telemetry/types.ts";
 import { runBriefer, type BriefLaneOutcome } from "./run.ts";
 
 const STATUS_KEY = "brief";
@@ -452,7 +452,7 @@ function progress(pi: ExtensionAPI, phase: "start" | "end", lanes?: string[]): v
  * not loaded at all; none of those is a reason for the brief to behave
  * differently, so the emit is wrapped and its outcome ignored.
  */
-function metric(pi: ExtensionAPI, name: string, outcome: HiveMetricEvent["outcome"], valueMs: number): void {
+function metric(pi: ExtensionAPI, name: string, outcome: HiveGateMetricEvent["outcome"], valueMs: number): void {
 	try {
 		pi.events.emit(HIVE_METRIC_CHANNEL, { kind: "gate", name, outcome, value: Math.max(0, Math.round(valueMs)) } satisfies HiveMetricEvent);
 	} catch {

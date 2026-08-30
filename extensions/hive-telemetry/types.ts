@@ -10,7 +10,20 @@
 
 export const HIVE_METRIC_CHANNEL = "hive.metric";
 
-export interface HiveMetricEvent {
+export interface NestedUsageMetric {
+	provider: string;
+	model: string;
+	authMode: "api_key" | "subscription" | "unknown";
+	turns: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	reasoning?: number;
+	cost: number;
+}
+
+export interface HiveGateMetricEvent {
 	kind: "gate";
 	/** <=64 chars, sanitized to [a-z0-9_.-] by the consumer. */
 	name: string;
@@ -18,6 +31,8 @@ export interface HiveMetricEvent {
 	/** Duration in milliseconds. */
 	value?: number;
 }
+
+export type HiveMetricEvent = HiveGateMetricEvent | { kind: "nested_usage"; models: NestedUsageMetric[] };
 
 export type ErrorClass =
 	| "rate_limit"
