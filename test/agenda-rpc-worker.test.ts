@@ -1,3 +1,5 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -5,10 +7,27 @@ import {
 	durableWorkerID,
 	intentionallyStoppedResult,
 	reachedDesiredTurns,
+	startDurableWorker,
 	WorkerRegistry,
 	type WorkerHandle,
 } from "../extensions/agenda/rpc-worker.ts";
 import { emptyWorkerState } from "../extensions/agenda/rpc-protocol.ts";
+
+function rpcChild(writes: string[]): ChildProcess {
+	const child = new EventEmitter();
+	Object.assign(child, {
+		stdin: {
+			writable: true,
+			write(line: string) {
+				writes.push(line);
+				return true;
+			},
+		},
+		stdout: new EventEmitter(),
+		stderr: new EventEmitter(),
+	});
+	return child as unknown as ChildProcess;
+}
 
 function handle(id: string): WorkerHandle & { aliveValue: { value: boolean } } {
 	const aliveValue = { value: true };
@@ -24,6 +43,27 @@ function handle(id: string): WorkerHandle & { aliveValue: { value: boolean } } {
 		aliveValue,
 	};
 }
+
+describe("durable worker startup", () => {
+	it("prompts the first task and preserves later delivery modes", async () => {
+		const writes: string[] = [];
+		const worker = startDurableWorker(
+			{ id: "worker", role: "research", cwd: "/tmp/repo" },
+			(() => rpcChild(writes)) as typeof import("node:child_process").spawn,
+		);
+
+		await worker.send("start", "follow_up");
+		await worker.send("more scope", "follow_up");
+		await worker.send("change course", "steer");
+
+		expect(writes.map((line) => JSON.parse(line))).toEqual([
+			{ id: "worker-1", type: "prompt", message: "start" },
+			{ id: "worker-2", type: "follow_up", message: "more scope" },
+			{ id: "worker-3", type: "steer", message: "change course" },
+		]);
+		worker.stop();
+	});
+});
 
 describe("durable worker turn generations", () => {
 	it("makes an in-flight steer supersede the interrupted turn's settlement", () => {

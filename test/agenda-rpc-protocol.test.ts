@@ -169,6 +169,10 @@ describe("deliveryCommand", () => {
 		expect(deliveryCommand("1", "steer", "stop")).toEqual({ id: "1", type: "steer", message: "stop" });
 		expect(deliveryCommand("1", "follow_up", "also")).toEqual({ id: "1", type: "follow_up", message: "also" });
 	});
+
+	it("prompts an idle worker instead of queueing its first task", () => {
+		expect(deliveryCommand("1", "follow_up", "start", true)).toEqual({ id: "1", type: "prompt", message: "start" });
+	});
 });
 
 describe("the upward report channel", () => {
