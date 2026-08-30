@@ -32,6 +32,7 @@ import {
 	type PlanControlEvent,
 	type PlanModeStateEvent,
 } from "../hive-common/channels.ts";
+import { parseResultHeader } from "../background/jobs.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { classifyCommand, classifyDiscussionTool, classifyTool } from "../plan/policy.ts";
 import { BUGFIX_WITHHELD_TOOLS, DEFAULT_OP_MODE, isOpMode, OP_MODES, OP_MODE_ENFORCES, type OpMode } from "./modes.ts";
@@ -78,9 +79,11 @@ export default function (pi: ExtensionAPI) {
 	 * handler.
 	 */
 	let rootCause: { summary: string; evidence: string } | null = null;
-	// Completed tool results, keyed by their real call id. The evidence protocol
-	// consumes these instead of trusting a model-authored command/outcome string.
-	const results = new Map<string, { name: string; failed: boolean; text: string }>();
+	// Completed tool results, keyed by the id that identifies the run: the call
+	// id for an ordinary tool, the job id for a pulled background job. The
+	// evidence protocol consumes these instead of trusting a model-authored
+	// command/outcome string.
+	const results = new Map<string, ObservedResult>();
 	// A reproduction is a stable, model-supplied descriptor bound to two distinct
 	// observed runs: the failing baseline and its passing re-verification. Tool
 	// call IDs identify one immutable invocation, so they cannot serve as both.
@@ -205,7 +208,30 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "bugfix_evidence" || event.toolName === "bugfix_root_cause") return;
 		const text = (event.content ?? []).map((part) => "text" in part && typeof part.text === "string" ? part.text : "").join("\n");
-		results.set(event.toolCallId, { name: event.toolName, failed: Boolean(event.isError), text: text.slice(0, 1200) });
+		const observed: ObservedResult = { name: event.toolName, failed: Boolean(event.isError), text: text.slice(0, 1200) };
+		// A pulled background job is keyed by its JOB id, and carries the JOB's
+		// verdict rather than the pull's. Both halves are load-bearing.
+		//
+		// The verdict, because `background_result` succeeds whatever the job did:
+		// `isError` describes the pull, so every background run looked like a
+		// passing one and `phase: "reproduce"` refused all of them. An agent whose
+		// only way to run a multi-minute gate is a background job — the foreground
+		// shell is capped well below one — therefore could not complete the
+		// mandated protocol at all.
+		//
+		// The id, because `bg-42` is the identifier the session actually shows,
+		// and because it is the one that makes the re-verification check mean
+		// something. Keyed by call id, two pulls of the SAME failing job produce
+		// two ids, and the second would satisfy "a distinct run"; keyed by job id
+		// they collide, so a distinct id is a distinct run. The call id is not
+		// also registered: it is invisible to the model by construction, so a
+		// second row for it would only pad the candidate list.
+		const job = event.toolName === "background_result" ? parseResultHeader(text) : null;
+		if (job) {
+			results.set(job.id, { ...observed, failed: job.status === "failed" });
+			return;
+		}
+		results.set(event.toolCallId, observed);
 	});
 
 	pi.on("before_agent_start", (event) => {

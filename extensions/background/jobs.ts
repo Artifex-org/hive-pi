@@ -339,3 +339,54 @@ export function resolveTimeoutMs(seconds: number | undefined): number {
 	if (seconds === undefined || !Number.isFinite(seconds) || seconds <= 0) return DEFAULT_TIMEOUT_MS;
 	return Math.min(Math.round(seconds * 1000), MAX_TIMEOUT_MS);
 }
+
+/**
+ * The header `background_result` puts above a job's retained output.
+ *
+ * It lives here, next to `parseResultHeader`, because the two are one format
+ * and a format with its writer and its reader in different files drifts in
+ * silence. `index.ts` used to build this string inline; a reader written
+ * against that literal would have gone stale the first time somebody reworded
+ * it, and the failure would have been a background reproduction quietly
+ * refusing to bind rather than anything that looks like a bug.
+ */
+export function resultHeader(job: Job, nowMs: number): string {
+	const exit = job.exitCode === undefined ? "" : ` (exit ${job.exitCode})`;
+	return (
+		`${job.id} — ${job.what}\n` +
+		`status ${job.status}${exit}, ${formatDuration(elapsedMs(job, nowMs))}\n` +
+		`command: ${job.detail}`
+	);
+}
+
+/**
+ * Read a job's identity and verdict back out of a `background_result` payload.
+ *
+ * This exists for the bugfix evidence gate, which binds a phase to a tool
+ * result it OBSERVED. A background job's outcome is not in the tool result's
+ * `isError` flag — the pull succeeded, so the flag is false whatever the job
+ * did — it is in this header. Without a reader for it, `background_result` was
+ * a result the gate could see and could never accept: the agent held a genuine
+ * failing gate run and got "needs an actual failing result" every time. Fifteen
+ * papercuts in the week to 2026-08-30 say so, several after the refusal started
+ * listing candidate ids, because listing an id that will be rejected on the
+ * next line is not progress.
+ *
+ * It reports the STATUS, not a boolean, and the caller decides. That is the
+ * distinction `JobStatus` exists to preserve: `failed` is the command's own
+ * verdict, while `timeout` and `canceled` say nothing about the code at all, so
+ * collapsing them here would let a killed job stand in as a reproduction and
+ * send the reader debugging a phantom.
+ *
+ * Returns null for anything that is not this header. The caller also checks the
+ * tool NAME, so a model that pastes a header-shaped string into some other
+ * tool's output cannot mint evidence — the id has to come from a result the
+ * background extension actually produced.
+ */
+export function parseResultHeader(text: string): { id: string; status: JobStatus } | null {
+	const lines = text.split("\n");
+	const id = /^(bg-\d+) — /.exec(lines[0] ?? "")?.[1];
+	const status = /^status (running|done|failed|timeout|canceled)[ ,]/.exec(lines[1] ?? "")?.[1];
+	if (!id || !status) return null;
+	return { id, status: status as JobStatus };
+}
