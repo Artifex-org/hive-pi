@@ -69,6 +69,8 @@ export interface AskDetails {
 	questions: AskQuestion[];
 	answers?: Record<string, string[]>;
 	dismissed?: boolean;
+	/** The agent turn was interrupted before the operator decided. */
+	interrupted?: boolean;
 	no_ui?: boolean;
 	/** A queued or newly arrived user message closed the question unanswered. */
 	superseded?: boolean;
@@ -226,12 +228,13 @@ export default function (pi: ExtensionAPI) {
 		renderResult: (result, _options, theme) => {
 			const details = result.details as AskDetails | undefined;
 			if (details?.superseded) return new Text(theme.fg("warning", "? superseded by a user message"), 0, 0);
+			if (details?.interrupted) return new Text(theme.fg("warning", "? cancelled by interrupt"), 0, 0);
 			if (details?.dismissed) return new Text(theme.fg("warning", "? dismissed by the user"), 0, 0);
 			if (details?.no_ui) return new Text(theme.fg("dim", "? no interactive UI — asked in chat"), 0, 0);
 			const parts = Object.entries(details?.answers ?? {}).map(([, values]) => values.join("; "));
 			return new Text(theme.fg("accent", "? ") + theme.fg("dim", parts.join(" · ") || "answered"), 0, 0);
 		},
-		async execute(callID, params, _signal, _onUpdate, ctx) {
+		async execute(callID, params, signal, _onUpdate, ctx) {
 			const questions = sanitizeQuestions(params.questions);
 			const details: AskDetails = { questions };
 
@@ -259,8 +262,14 @@ export default function (pi: ExtensionAPI) {
 			signalPending(questions);
 			try {
 				if (ctx.mode === "rpc") {
-					const result = await rpcFallback(ctx, questions);
+					const result = await rpcFallback(ctx, questions, signal);
 					if (result === null) {
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text" as const, text: "The question was cancelled because the agent turn was interrupted." }],
+								details: { ...details, interrupted: true },
+							};
+						}
 						return {
 							content: [{ type: "text" as const, text: "The user dismissed the questions without answering." }],
 							details: { ...details, dismissed: true },
@@ -295,6 +304,15 @@ export default function (pi: ExtensionAPI) {
 					else early = answered;
 				});
 
+				// Pi aborts the enclosing turn, but custom UI has its own promise.
+				// Race it explicitly so an operator interrupt closes this modal too.
+				let interrupted = signal?.aborted === true;
+				const onAbort = () => {
+					interrupted = true;
+					settle?.(null);
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
+
 				// Same held-if-early shape as `remote`: a user message that lands in
 				// the instant before the overlay factory runs must still close it.
 				let superseded = false;
@@ -309,7 +327,7 @@ export default function (pi: ExtensionAPI) {
 						(tui, theme, _keybindings, done) => {
 							let state = initState(questions);
 							settle = done;
-							if (superseded) done(null);
+							if (interrupted || superseded) done(null);
 							else if (early) done(early);
 							return {
 								render: () => renderAskLines(state, askStyle(theme)),
@@ -340,8 +358,15 @@ export default function (pi: ExtensionAPI) {
 					settle = null;
 					supersedeActive = null;
 					remote.dispose();
+					signal?.removeEventListener("abort", onAbort);
 				}
 
+				if (result === null && interrupted) {
+					return {
+						content: [{ type: "text" as const, text: "The question was cancelled because the agent turn was interrupted." }],
+						details: { ...details, interrupted: true },
+					};
+				}
 				if (result === null && superseded) {
 					return supersededResult(details);
 				}
@@ -365,17 +390,38 @@ export default function (pi: ExtensionAPI) {
 /** RPC hosts get a sequential select/input walk — the sub-protocol has no
  *  custom components (the Aurora-embedding lesson: `select`/`confirm`/`input`
  *  are the only client-served callbacks). */
-async function rpcFallback(ctx: ExtensionContext, questions: AskQuestion[]): Promise<Record<string, string[]> | null> {
+async function abortable<T>(value: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
+	if (!signal) return value;
+	let onAbort: (() => void) | undefined;
+	try {
+		return await Promise.race([
+			value,
+			new Promise<undefined>((resolve) => {
+				onAbort = () => resolve(undefined);
+				if (signal.aborted) onAbort();
+				else signal.addEventListener("abort", onAbort, { once: true });
+			}),
+		]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
+}
+
+async function rpcFallback(
+	ctx: ExtensionContext,
+	questions: AskQuestion[],
+	signal?: AbortSignal,
+): Promise<Record<string, string[]> | null> {
 	const out: Record<string, string[]> = {};
 	for (const question of questions) {
 		const labels = question.options.map((option) =>
 			option.description ? `${option.label} — ${option.description}` : option.label,
 		);
 		const OTHER = "Other (type an answer)";
-		const pick = await ctx.ui.select(question.question, [...labels, OTHER]);
+		const pick = await abortable(ctx.ui.select(question.question, [...labels, OTHER]), signal);
 		if (pick === undefined) return null;
 		if (pick === OTHER) {
-			const typed = await ctx.ui.input(question.question, "your answer");
+			const typed = await abortable(ctx.ui.input(question.question, "your answer"), signal);
 			if (typed === undefined) return null;
 			out[question.id] = [typed];
 		} else {

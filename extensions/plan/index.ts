@@ -494,18 +494,25 @@ export default function (pi: ExtensionAPI) {
 	 * the model cannot recover from, and "nobody answered" is an ordinary outcome
 	 * with a perfectly good fallback (return the question as text).
 	 */
-	async function awaitRemoteAnswer(callID: string): Promise<Answers | null> {
+	async function awaitRemoteAnswer(callID: string, signal?: AbortSignal): Promise<Answers | null> {
 		const waiter = waitForAnswer(pi.events, QUESTION_ANSWER_CHANNEL, callID);
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let onAbort: (() => void) | undefined;
 		try {
 			return await Promise.race([
 				waiter.answered,
 				new Promise<null>((resolve) => {
 					timer = setTimeout(() => resolve(null), PLAN_ASK_WAIT_MS);
 				}),
+				new Promise<null>((resolve) => {
+					onAbort = () => resolve(null);
+					if (signal?.aborted) onAbort();
+					else signal?.addEventListener("abort", onAbort, { once: true });
+				}),
 			]);
 		} finally {
 			if (timer) clearTimeout(timer);
+			if (onAbort) signal?.removeEventListener("abort", onAbort);
 			waiter.dispose();
 		}
 	}
@@ -1185,7 +1192,7 @@ export default function (pi: ExtensionAPI) {
 			),
 			recommendation: Type.Optional(Type.String({ description: "Which option you would pick, and why." })),
 		}),
-		execute: async (callID, params) => {
+		execute: async (callID, params, signal) => {
 			const { question, options, recommendation } = params as {
 				question: string;
 				options?: { label: string; detail?: string }[];
@@ -1214,12 +1221,12 @@ export default function (pi: ExtensionAPI) {
 			// late rather than a session wedged at a prompt nobody can see.
 			if (!remoteAnswersAvailable) return text(out.join("\n"));
 
-			const answered = await awaitRemoteAnswer(callID);
+			const answered = await awaitRemoteAnswer(callID, signal);
 			if (!answered) {
-				return text(
-					`${out.join("\n")}\n\n(No answer arrived from the Hive workspace within the wait window. ` +
-						`The user can still answer in chat.)`,
-				);
+				const reason = signal?.aborted
+					? "The question was cancelled because the agent turn was interrupted."
+					: "No answer arrived from the Hive workspace within the wait window. The user can still answer in chat.";
+				return text(`${out.join("\n")}\n\n(${reason})`);
 			}
 			const chosen = answered[PLAN_ASK_KEY] ?? Object.values(answered)[0] ?? [];
 			const now = Date.now();
