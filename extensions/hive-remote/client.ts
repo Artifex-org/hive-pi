@@ -306,6 +306,16 @@ export function postToolStart(
 	}, 2_000);
 }
 
+/** Records a PR created by this session. The server resolves the URL to a
+ * registered project, so the client never guesses a Hive project name. */
+export function postPull(
+	auth: HiveAuth,
+	sessionID: string,
+	url: string,
+): Promise<RequestResult> {
+	return request(auth, "POST", `/agent-sessions/${sessionID}/conversation/pulls`, { url }, 2_000);
+}
+
 /**
  * postToolUpdate ships a snapshot of what an in-flight call has produced.
  *

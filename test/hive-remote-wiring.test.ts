@@ -166,6 +166,44 @@ afterEach(() => {
 });
 
 describe("attach", () => {
+	it("reports only a pull URL created by gh pr create", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+
+		await fake.emit({
+			type: "tool_execution_start",
+			toolCallId: "create-pr",
+			toolName: "bash",
+			args: { command: "gh pr create --base main" },
+		});
+		await fake.emit({
+			type: "tool_execution_end",
+			toolCallId: "create-pr",
+			toolName: "bash",
+			result: { content: [{ type: "text", text: "https://github.com/Artifex-org/hive-pi/pull/27" }] },
+			isError: false,
+		});
+		await fake.emit({
+			type: "tool_execution_start",
+			toolCallId: "view-pr",
+			toolName: "bash",
+			args: { command: "gh pr view 27" },
+		});
+		await fake.emit({
+			type: "tool_execution_end",
+			toolCallId: "view-pr",
+			toolName: "bash",
+			result: { content: [{ type: "text", text: "https://github.com/Artifex-org/hive-pi/pull/27" }] },
+			isError: false,
+		});
+		await vi.advanceTimersByTimeAsync(0);
+
+		const pulls = hive.calls.filter((call) => call.path.endsWith("/conversation/pulls"));
+		expect(pulls).toHaveLength(1);
+		expect(pulls[0]?.body).toEqual({ url: "https://github.com/Artifex-org/hive-pi/pull/27" });
+	});
+
 	it("retries an interactive question start until Hive acknowledges it", async () => {
 		const hive = fakeHive({ toolStarts: [503, 204] });
 		hiveRemote(fake.api, deps(config({ streamDeltas: true })));

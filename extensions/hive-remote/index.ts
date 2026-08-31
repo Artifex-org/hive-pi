@@ -70,7 +70,7 @@ import { isOverflowWedged } from "../hive-common/overflow.ts";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
-import { attach, buildCatalog, claimCommands, fetchCommandAttachment, postActivity, postDelta, postPlan, postEvents, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
+import { attach, buildCatalog, claimCommands, fetchCommandAttachment, postActivity, postDelta, postPlan, postEvents, postPull, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
 import { ARGS_BUDGET, budgeted } from "./budget.ts";
 import {
 	HEARTBEAT_MS,
@@ -194,6 +194,17 @@ const QUOTA_REFRESH_MS = 5 * 60_000;
  * production wiring is unchanged and only a caller that passes something gets
  * something else.
  */
+const CREATED_PULL_URL = /https:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/[1-9]\d*\/?/;
+
+function createdPullURL(toolName: string, args: unknown, result: unknown, isError: boolean): string | null {
+	if (isError || toolName !== "bash") return null;
+	const command = typeof args === "object" && args !== null && "command" in args
+		? String((args as { command?: unknown }).command ?? "")
+		: "";
+	if (!/\bgh\s+pr\s+create\b/.test(command)) return null;
+	return (JSON.stringify(result) ?? "").match(CREATED_PULL_URL)?.[0] ?? null;
+}
+
 export interface RemoteDeps {
 	loadConfig?: () => RemoteConfig;
 	resolveAuth?: (fallbackUrl?: string) => ResolvedAuth | null;
@@ -2001,6 +2012,10 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		 * `lastAtMs` enforces the throttle.
 		 */
 		const toolProgress = new Map<string, { seq: number; lastText: string; lastAtMs: number }>();
+		// End events omit arguments, but delivery reporting must distinguish a
+		// PR creation from an arbitrary command whose output happens to contain a
+		// pull URL. Retain them only for the lifetime of the tool call.
+		const toolArgs = new Map<string, unknown>();
 		// An ordinary tool-start is a best-effort progress hint. An interactive
 		// question is different: its start is the only durable copy of the call id
 		// and question arguments, so retry transient transport failures until the
@@ -2017,6 +2032,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			interactiveToolStarts.clear();
 			acknowledgedInteractiveToolStarts.clear();
 			cancelledToolEnds.clear();
+			toolArgs.clear();
 		};
 		const MAX_CANCELLED_TOOL_ENDS = 64;
 		const rememberCancelledToolEnd = (callID: string) => {
@@ -2115,6 +2131,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				if (loaded) foldNotice(transcript, skillActivationNotice(loaded), Date.now(), "skill");
 			}
 			foldToolStart(transcript, callID, toolName, event.args);
+			if (callID) toolArgs.set(callID, event.args);
 			// The command, not just the tool name: `bash` is the same word for a
 			// two-second `ls` and a twenty-minute `hive check`, and the transcript's
 			// own tool event does not reach Hive until the call ENDS.
@@ -2144,10 +2161,17 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			const callID = String(event.toolCallId ?? "");
 			if (cancelledToolEnds.delete(callID)) return;
 			turnToolCalls += 1;
+			const toolName = String(event.toolName ?? "");
+			const args = toolArgs.get(callID);
+			toolArgs.delete(callID);
+			const pullURL = cfg.streamDeltas && auth && sessionID
+				? createdPullURL(toolName, args, event.result, Boolean(event.isError))
+				: null;
+			if (pullURL && auth && sessionID) void postPull(auth, sessionID, pullURL);
 			foldToolEnd(
 				transcript,
 				callID,
-				String(event.toolName ?? ""),
+				toolName,
 				event.result,
 				Boolean(event.isError),
 				Date.now(),
@@ -2215,6 +2239,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				);
 			}
 			toolProgress.clear();
+			toolArgs.clear();
 			interactiveToolStarts.clear();
 			acknowledgedInteractiveToolStarts.clear();
 			beat();
