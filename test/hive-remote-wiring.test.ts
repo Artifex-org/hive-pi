@@ -68,9 +68,11 @@ function fakeHive(handlers: {
 	events?: Array<{ status: number; lastSeq?: number }>;
 	attach?: { status: number; lastSeq?: number };
 	commands?: Array<Record<string, unknown>>;
+	toolStarts?: number[];
 }) {
 	const calls: Call[] = [];
 	const events = [...(handlers.events ?? [])];
+	const toolStarts = [...(handlers.toolStarts ?? [])];
 	let commandsServed = false;
 
 	const json = (status: number, body: unknown) =>
@@ -87,6 +89,11 @@ function fakeHive(handlers: {
 			const a = handlers.attach ?? { status: 200, lastSeq: 0 };
 			if (a.status !== 200) return json(a.status, { error: "nope" });
 			return json(200, { session_id: SESSION_ID, last_seq: a.lastSeq ?? 0 });
+		}
+
+		if (path.endsWith("/tool-starts")) {
+			const status = toolStarts.shift() ?? 204;
+			return json(status, status >= 400 ? { error: "transient" } : {});
 		}
 
 		if (path.endsWith("/commands/claim")) {
@@ -114,6 +121,7 @@ function fakeHive(handlers: {
 		attaches: () => calls.filter((c) => c.path.endsWith("/conversation")),
 		worktrees: () => calls.filter((c) => c.path.endsWith("/worktree")),
 		patches: () => calls.filter((c) => c.path.endsWith("/worktree/patch")),
+		toolStarts: () => calls.filter((c) => c.path.endsWith("/tool-starts")),
 		/** Every event seq the client actually put on the wire, in order. */
 		seqs: () =>
 			calls
@@ -158,6 +166,62 @@ afterEach(() => {
 });
 
 describe("attach", () => {
+	it("retries an interactive question start until Hive acknowledges it", async () => {
+		const hive = fakeHive({ toolStarts: [503, 204] });
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+
+		await fake.emit({
+			type: "tool_execution_start",
+			toolCallId: "ask-1",
+			toolName: "ask_user_question",
+			args: { questions: [{ id: "scope", header: "Scope", question: "Ship now?", options: [{ label: "Yes" }, { label: "No" }] }] },
+		});
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(hive.toolStarts()).toHaveLength(2);
+		expect(hive.toolStarts()[0]?.body?.tool_call_id).toBe("ask-1");
+	});
+
+	it("retires an acknowledged question when its turn ends before tool end", async () => {
+		const hive = fakeHive({ toolStarts: [204] });
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+		await fake.emit({
+			type: "tool_execution_start",
+			toolCallId: "ask-1",
+			toolName: "ask_user_question",
+			args: { questions: [{ id: "scope", header: "Scope", question: "Ship now?", options: [{ label: "Yes" }, { label: "No" }] }] },
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		await fake.emit({ type: "turn_end", message: { role: "assistant", stopReason: "aborted" } });
+		await vi.advanceTimersByTimeAsync(1_200);
+
+		const cancelled = hive
+			.posted()
+			.flatMap((call) => (call.body?.events ?? []) as Array<{ tool_name?: string; tool_result?: string }>)
+			.filter((event) => event.tool_name === "ask_user_question");
+		expect(cancelled).toHaveLength(1);
+		expect(cancelled[0]?.tool_result).toContain("cancelled because the agent turn ended");
+	});
+
+	it("stops a transient question-start retry when the session shuts down", async () => {
+		const hive = fakeHive({ toolStarts: [503, 204] });
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+		await fake.emit({
+			type: "tool_execution_start",
+			toolCallId: "ask-1",
+			toolName: "ask_user_question",
+			args: { questions: [{ id: "scope", header: "Scope", question: "Ship now?", options: [{ label: "Yes" }, { label: "No" }] }] },
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		await fake.emit({ type: "session_shutdown", reason: "quit" });
+		await vi.advanceTimersByTimeAsync(600);
+
+		expect(hive.toolStarts()).toHaveLength(1);
+	});
+
 	it("resumes numbering above the watermark the server reports", async () => {
 		// THE RELOAD CASE, end to end. `/reload` builds a fresh Transcript
 		// numbering from 1; the server already holds 147 events and its insert
@@ -452,6 +516,39 @@ describe("flush failure handling", () => {
 		await vi.advanceTimersByTimeAsync(1_200);
 
 		expect(hive.seqs()).toEqual([1, 2, 1, 2, 3]);
+	});
+});
+
+describe("interrupt", () => {
+	it("aborts the active question and flushes its cancelled terminal event", async () => {
+		const hive = fakeHive({ commands: [{ id: "interrupt-1", kind: "interrupt", payload: "", source: "operator" }] });
+		let aborts = 0;
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await fake.emit({ type: "turn_start" }, { onAbort: () => aborts++ });
+		await attachAndSettle(fake);
+		await fake.emit(
+			{
+				type: "tool_execution_start",
+				toolCallId: "ask-1",
+				toolName: "ask_user_question",
+				args: { questions: [{ id: "scope", header: "Scope", question: "Ship now?", options: [{ label: "Yes" }, { label: "No" }] }] },
+			},
+			{ onAbort: () => aborts++ },
+		);
+
+		await vi.advanceTimersByTimeAsync(2_500);
+		expect(aborts).toBe(1);
+		await fake.emit({ type: "turn_end", message: { role: "assistant", stopReason: "aborted" } });
+		await vi.advanceTimersByTimeAsync(1_200);
+
+		await fake.emit({ type: "tool_execution_end", toolCallId: "ask-1", toolName: "ask_user_question", result: {}, isError: false });
+		await vi.advanceTimersByTimeAsync(1_200);
+		const cancelled = hive
+			.posted()
+			.flatMap((call) => (call.body?.events ?? []) as Array<{ tool_name?: string; tool_result?: string }>)
+			.filter((event) => event.tool_name === "ask_user_question");
+		expect(cancelled).toHaveLength(1);
+		expect(cancelled[0]?.tool_result).toContain("cancelled because the agent turn ended");
 	});
 });
 

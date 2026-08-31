@@ -114,6 +114,8 @@ export interface FakeCtxOptions {
 	confirm?: boolean;
 	idle?: boolean;
 	pendingMessages?: boolean;
+	/** Observe ctx.abort(), used to exercise an operator interrupt end to end. */
+	onAbort?: () => void;
 	/**
 	 * Entries returned by `sessionManager.getBranch()` — the ACTIVE root→leaf
 	 * path. Only the shape consumers actually read is modelled —
@@ -249,7 +251,7 @@ function makeCtx(
 		hasPendingMessages: () => options.pendingMessages ?? false,
 		isProjectTrusted: () => true,
 		signal: undefined,
-		abort: () => {},
+		abort: () => options.onAbort?.(),
 		getContextUsage: () => undefined,
 		compact: () => sinks.onCompact(),
 		shutdown: () => {

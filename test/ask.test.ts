@@ -184,6 +184,21 @@ describe("ask execute fallbacks", () => {
 		expect((askEvents[1].payload as { state: unknown }).state).toBeNull();
 	});
 
+	it("cancels an RPC selection when the agent turn is interrupted", async () => {
+		const { execute } = tool();
+		const controller = new AbortController();
+		const pending = execute(
+			"call-1",
+			PARAMS,
+			controller.signal,
+			undefined,
+			ctxOf("rpc", { select: async () => new Promise<string>(() => {}) }),
+		);
+		await Promise.resolve();
+		controller.abort();
+		expect((await pending).details.interrupted).toBe(true);
+	});
+
 	it("rpc mode returns picked labels keyed by id", async () => {
 		const { execute } = tool();
 		const ctx = ctxOf("rpc", { select: async (_title: string, options: string[]) => options[1] });
@@ -220,6 +235,21 @@ describe("ask execute fallbacks", () => {
 		const askEvents = fake.busEvents.filter((event) => event.name === "deck.section");
 		expect(askEvents.length).toBe(2);
 		expect((askEvents[1].payload as { state: unknown }).state).toBeNull();
+	});
+
+	it("cancels the TUI overlay when the agent turn is interrupted", async () => {
+		const { execute } = tool();
+		const controller = new AbortController();
+		const custom = async (
+			factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: unknown) => void) => unknown,
+		) =>
+			new Promise((resolve) => {
+				factory({ requestRender: () => {} }, {}, undefined, resolve);
+			});
+		const pending = execute("call-1", PARAMS, controller.signal, undefined, ctxOf("tui", { custom }));
+		await Promise.resolve();
+		controller.abort();
+		expect((await pending).details.interrupted).toBe(true);
 	});
 });
 

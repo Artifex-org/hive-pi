@@ -98,6 +98,7 @@ describe("waitForAnswer", () => {
 type ToolExecute = (
 	id: string,
 	params: Record<string, unknown>,
+	signal?: AbortSignal,
 ) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
 function planAsk(fake: FakePi): ToolExecute {
@@ -172,6 +173,19 @@ describe("plan_ask", () => {
 
 		const result = await planAsk(fake)("call-1", { question: "Ship now?" });
 		expect(result.content[0].text).toContain("Ship now?");
+	});
+
+	it("cancels a pending browser question when the turn is interrupted", async () => {
+		const fake = createFakePi();
+		planExtension(fake.api);
+		fake.api.events.emit(QUESTION_REMOTE_CHANNEL, { available: true });
+		const controller = new AbortController();
+
+		const pending = planAsk(fake)("call-1", { question: "Ship now?" }, controller.signal);
+		await Promise.resolve();
+		controller.abort();
+
+		expect((await pending).content[0].text).toContain("cancelled because the agent turn was interrupted");
 	});
 
 	it("gives up on the wait rather than blocking forever", async () => {

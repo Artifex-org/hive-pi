@@ -913,6 +913,10 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * documents.
 	 */
 	let lastWorktree: string | null = null;
+	// Tool-state maps are created when a reporting session starts. Cleanup can
+	// also run before that setup (for example, an immediate shutdown), so it
+	// reaches them through this optional teardown instead of a temporal dead zone.
+	let clearInteractiveToolState: (() => void) | undefined;
 	/**
 	 * The paths of the most recent worktree REPORT — the set a diff request is
 	 * allowed to name (HIV-1421).
@@ -1858,6 +1862,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		// to a new row whose stored tree is empty, and keeping the cache here would
 		// suppress the first send and leave the new conversation's panel blank.
 		lastWorktree = null;
+		clearInteractiveToolState?.();
+		clearInteractiveToolState = undefined;
 		reportedPaths = new Set();
 		reportedWorktreePath = "";
 	}
@@ -1995,6 +2001,53 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		 * `lastAtMs` enforces the throttle.
 		 */
 		const toolProgress = new Map<string, { seq: number; lastText: string; lastAtMs: number }>();
+		// An ordinary tool-start is a best-effort progress hint. An interactive
+		// question is different: its start is the only durable copy of the call id
+		// and question arguments, so retry transient transport failures until the
+		// active call ends. The server keys it by call id, making every retry safe.
+		const interactiveToolStarts = new Map<string, string>();
+		// Delivery and liveness are separate: an acknowledged start still needs
+		// tracking until its tool ends, so an interrupt can retire its card.
+		const acknowledgedInteractiveToolStarts = new Set<string>();
+		// A canceled turn can still surface a late tool_execution_end. Keep a
+		// bounded tombstone so that delayed event cannot duplicate the synthetic
+		// terminal result we already folded for the same call.
+		const cancelledToolEnds = new Set<string>();
+		clearInteractiveToolState = () => {
+			interactiveToolStarts.clear();
+			acknowledgedInteractiveToolStarts.clear();
+			cancelledToolEnds.clear();
+		};
+		const MAX_CANCELLED_TOOL_ENDS = 64;
+		const rememberCancelledToolEnd = (callID: string) => {
+			if (cancelledToolEnds.size >= MAX_CANCELLED_TOOL_ENDS) {
+				const oldest = cancelledToolEnds.keys().next();
+				if (!oldest.done) cancelledToolEnds.delete(oldest.value);
+			}
+			cancelledToolEnds.add(callID);
+		};
+		const INTERACTIVE_TOOL_START_RETRY_MS = 500;
+		const isInteractiveQuestionTool = (toolName: string) =>
+			toolName === "ask_user_question" || toolName === "plan_ask";
+		const postInteractiveToolStart = (
+			auth: Parameters<typeof postToolStart>[0],
+			sess: Parameters<typeof postToolStart>[1],
+			callID: string,
+			toolName: string,
+			args: Parameters<typeof postToolStart>[4],
+		) => {
+			const attempt = async () => {
+				if (!interactiveToolStarts.has(callID)) return;
+				const result = await postToolStart(auth, sess, callID, toolName, args);
+				if (!interactiveToolStarts.has(callID)) return;
+				if (result.ok || result.permanent || result.authFailed) {
+					acknowledgedInteractiveToolStarts.add(callID);
+					return;
+				}
+				setTimeout(() => void attempt(), INTERACTIVE_TOOL_START_RETRY_MS);
+			};
+			void attempt();
+		};
 		/**
 		 * 1 Hz. bash's own onUpdate fires at 100ms, which is ten network round
 		 * trips a second for a readout nobody can read that fast.
@@ -2075,25 +2128,34 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				const a = auth;
 				const s = sessionID;
 				const args = budgeted(event.args, ARGS_BUDGET);
-				setTimeout(() => {
-					void postToolStart(a, s, callID, toolName, args);
-				}, 0);
+				if (callID && isInteractiveQuestionTool(toolName)) {
+					interactiveToolStarts.set(callID, toolName);
+					postInteractiveToolStart(a, s, callID, toolName, args);
+				} else {
+					setTimeout(() => {
+						void postToolStart(a, s, callID, toolName, args);
+					}, 0);
+				}
 			}
 		});
 
 		pi.on("tool_execution_end", (event, ctx) => {
 			remember(ctx);
+			const callID = String(event.toolCallId ?? "");
+			if (cancelledToolEnds.delete(callID)) return;
 			turnToolCalls += 1;
 			foldToolEnd(
 				transcript,
-				String(event.toolCallId ?? ""),
+				callID,
 				String(event.toolName ?? ""),
 				event.result,
 				Boolean(event.isError),
 				Date.now(),
 			);
-			toolEnded(activity, String(event.toolCallId ?? ""), Date.now());
-			toolProgress.delete(String(event.toolCallId ?? ""));
+			toolEnded(activity, callID, Date.now());
+			toolProgress.delete(callID);
+			interactiveToolStarts.delete(callID);
+			acknowledgedInteractiveToolStarts.delete(callID);
 			beat();
 			if (transcript.queue.length >= cfg.eventThreshold) kick();
 		});
@@ -2138,11 +2200,23 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			// this handler is awaited by pi's runner, and collectWorktree spawns
 			// three subprocesses — running it here would put them on the agent loop.
 			if (cfg.reportWorktree) setTimeout(() => void flushWorktree(), 0);
-			// Not belt-and-braces: an aborted or interrupted tool never emits a
-			// tool_execution_end, so without this sweep its entry leaks for the
-			// life of the session. Mirrors turnEnded clearing activity's own
-			// running set for exactly the same reason.
+			// An aborted tool may never emit tool_execution_end. Progress is purely
+			// local, but a pending interactive question is persisted in Hive and
+			// must receive a normal terminal event so its durable browser card retires.
+			for (const [callID, toolName] of interactiveToolStarts) {
+				rememberCancelledToolEnd(callID);
+				foldToolEnd(
+					transcript,
+					callID,
+					toolName,
+					{ content: [{ type: "text", text: "The tool was cancelled because the agent turn ended before it returned." }] },
+					false,
+					Date.now(),
+				);
+			}
 			toolProgress.clear();
+			interactiveToolStarts.clear();
+			acknowledgedInteractiveToolStarts.clear();
 			beat();
 			kick();
 			// A turn is when context usage actually jumps; the timer would show it
