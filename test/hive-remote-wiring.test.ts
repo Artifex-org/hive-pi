@@ -1,9 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL } from "../extensions/hive-common/channels.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
-import { createFakePi, type FakePi, type SessionEntryLike } from "./fake-pi.ts";
+import { createFakePi, type FakeCtxOptions, type FakePi, type SessionEntryLike } from "./fake-pi.ts";
 
 /**
  * hive-remote's ENTRY POINT, driven through the fake pi.
@@ -108,6 +112,8 @@ function fakeHive(handlers: {
 		calls,
 		posted: () => calls.filter((c) => c.path.endsWith("/events")),
 		attaches: () => calls.filter((c) => c.path.endsWith("/conversation")),
+		worktrees: () => calls.filter((c) => c.path.endsWith("/worktree")),
+		patches: () => calls.filter((c) => c.path.endsWith("/worktree/patch")),
 		/** Every event seq the client actually put on the wire, in order. */
 		seqs: () =>
 			calls
@@ -125,7 +131,8 @@ function deps(cfg: RemoteConfig = config()): RemoteDeps {
 
 /** Get the extension past attach: announce the run id, then run the eager
  *  attach and the first flush tick. */
-async function attachAndSettle(fake: FakePi): Promise<void> {
+async function attachAndSettle(fake: FakePi, ctxOptions: FakeCtxOptions = {}): Promise<void> {
+	await fake.emit({ type: "session_start", reason: "startup" }, ctxOptions);
 	fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: RUN_ID });
 	await vi.advanceTimersByTimeAsync(400); // ATTACH_EAGER_DELAY_MS + slack
 }
@@ -254,9 +261,8 @@ describe("attach", () => {
 		const hive = fakeHive({ commands: [{ id: "compact-1", kind: "compact", payload: "" }] });
 		hiveRemote(fake.api, deps());
 
-		await fake.emit({ type: "session_start", reason: "startup" });
-		await fake.emit({ type: "turn_start" });
 		await attachAndSettle(fake);
+		await fake.emit({ type: "turn_start" });
 		await vi.advanceTimersByTimeAsync(2_200);
 
 		expect(hive.attaches()[0]?.body?.can_compact).toBe(true);
@@ -305,6 +311,87 @@ describe("attach", () => {
 
 		expect(fake.userMessages).toHaveLength(1);
 		expect(fake.userMessages[0]?.options?.expandPromptTemplates).toBe(false);
+	});
+});
+
+describe("worktree identity", () => {
+	it("attaches and reports the live context directory, not the process launch root", async () => {
+		const root = mkdtempSync(join(tmpdir(), "hive-remote-live-cwd-"));
+		try {
+			execFileSync("git", ["-C", root, "init", "-q", "-b", "feature/hiv-3032"]);
+			execFileSync("git", ["-C", root, "config", "user.email", "test@example.com"]);
+			execFileSync("git", ["-C", root, "config", "user.name", "Test"]);
+			writeFileSync(join(root, "tracked.ts"), "const value = 1;\n");
+			execFileSync("git", ["-C", root, "add", "tracked.ts"]);
+			execFileSync("git", ["-C", root, "commit", "-qm", "base"]);
+			writeFileSync(join(root, "tracked.ts"), "const value = 2;\n");
+
+			const hive = fakeHive({});
+			hiveRemote(fake.api, deps(config({ reportWorktree: true })));
+			await attachAndSettle(fake, { cwd: root });
+			await fake.emit(
+				{ type: "tool_execution_end", toolCallId: "c1", toolName: "edit", result: {}, isError: false },
+				{ cwd: root },
+			);
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(hive.attaches()[0]?.body?.worktree).toBe(root);
+			expect(hive.worktrees()).toHaveLength(1);
+			expect(hive.worktrees()[0]?.body?.path).toBe(root);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reads a requested patch from the tree whose accepted report authorized it", async () => {
+		const treeA = mkdtempSync(join(tmpdir(), "hive-remote-tree-a-"));
+		const treeB = mkdtempSync(join(tmpdir(), "hive-remote-tree-b-"));
+		try {
+			for (const [root, before, after] of [
+				[treeA, "const value = 1;\n", "const value = 2;\n"],
+				[treeB, "const value = 10;\n", "const value = 20;\n"],
+			] as const) {
+				execFileSync("git", ["-C", root, "init", "-q", "-b", "feature/hiv-3032"]);
+				execFileSync("git", ["-C", root, "config", "user.email", "test@example.com"]);
+				execFileSync("git", ["-C", root, "config", "user.name", "Test"]);
+				writeFileSync(join(root, "tracked.ts"), before);
+				execFileSync("git", ["-C", root, "add", "tracked.ts"]);
+				execFileSync("git", ["-C", root, "commit", "-qm", "base"]);
+				writeFileSync(join(root, "tracked.ts"), after);
+			}
+
+			const hive = fakeHive({ commands: [{ id: "diff-1", kind: "worktree_diff", payload: "tracked.ts" }] });
+			hiveRemote(fake.api, deps(config({ reportWorktree: true })));
+			await attachAndSettle(fake, { cwd: treeA });
+			await fake.emit(
+				{ type: "tool_execution_end", toolCallId: "c1", toolName: "edit", result: {}, isError: false },
+				{ cwd: treeA },
+			);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(hive.worktrees()[0]?.body?.path).toBe(treeA);
+
+			// Move the live context without publishing another tree. The command must
+			// remain bound to tree A's accepted file list, not re-resolve against B.
+			await fake.emit({ type: "turn_start" }, { cwd: treeB });
+			await vi.advanceTimersByTimeAsync(2_200);
+
+			const patch = String(hive.patches()[0]?.body?.patch ?? "");
+			expect(patch).toContain("+const value = 2;");
+			expect(patch).not.toContain("+const value = 20;");
+		} finally {
+			rmSync(treeA, { recursive: true, force: true });
+			rmSync(treeB, { recursive: true, force: true });
+		}
+	});
+
+	it("answers a diff request explicitly before any worktree report exists", async () => {
+		const hive = fakeHive({ commands: [{ id: "diff-early", kind: "worktree_diff", payload: "tracked.ts" }] });
+		hiveRemote(fake.api, deps(config({ reportWorktree: false })));
+		await attachAndSettle(fake);
+		await vi.advanceTimersByTimeAsync(2_200);
+
+		expect(hive.patches()).toHaveLength(1);
+		expect(hive.patches()[0]?.body?.reason).toBe("no worktree reported yet");
 	});
 });
 
@@ -456,8 +543,7 @@ describe("waking a session that cannot send a request", () => {
 		fakeHive({ commands: [{ id: "tm-1", kind: "team_message", payload: directMessage }] });
 		hiveRemote(fake.api, deps());
 		// Refreshes the extension's retained ctx, which is how it reads the branch.
-		await fake.emit({ type: "session_start" }, { branch });
-		await attachAndSettle(fake);
+		await attachAndSettle(fake, { branch });
 		await vi.advanceTimersByTimeAsync(2_200);
 	}
 

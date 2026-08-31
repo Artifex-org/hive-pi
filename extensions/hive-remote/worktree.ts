@@ -39,6 +39,10 @@ export interface WorktreeFile {
 }
 
 export interface WorktreePayload {
+	/** The absolute directory this exact reading was measured from. It travels
+	 * with the branch and files so a delayed report can never be paired with a
+	 * newer conversation path from a different checkout. */
+	path: string;
 	/**
 	 * The LOCAL branch, from porcelain's own header — not reconstructed from
 	 * `upstream`, which names a different branch until the first push.
@@ -364,6 +368,7 @@ export function collectWorktree(cwd: string): WorktreePayload | null {
 	});
 
 	return {
+		path: cwd,
 		branch: branch.branch,
 		upstream: branch.upstream,
 		ahead: branch.ahead,

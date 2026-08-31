@@ -93,6 +93,7 @@ describe("the two halves, in one process", () => {
 	it("turns a held first turn into a beat on the wire", async () => {
 		brief(fake.api);
 		hiveRemote(fake.api, { loadConfig: config, resolveAuth: () => ({ token: "t", url: URL_BASE, source: "test" }) } as RemoteDeps);
+		await fake.emit({ type: "session_start", reason: "startup" });
 		fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: RUN_ID });
 		await vi.advanceTimersByTimeAsync(400);
 		beats.length = 0;

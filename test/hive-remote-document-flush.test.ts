@@ -110,6 +110,7 @@ const planEntry = (title: string) => ({
  * exactly the shape of the bug this file is here to catch.
  */
 async function attachWith(fake: FakePi, branch: unknown[]): Promise<void> {
+	await fake.emit({ type: "session_start", reason: "startup" }, { branch: branch as never });
 	fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: RUN_ID });
 	await vi.advanceTimersByTimeAsync(400);
 	await fake.emit(

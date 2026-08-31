@@ -318,6 +318,16 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	const remember = (ctx: ExtensionContext) => {
 		latestCtx = ctx;
 	};
+	/** Read the live session directory synchronously. A retained context can go
+	 * stale during resume/fork/reload; absence is not permission to fall back to
+	 * the process launch root, which may be a different checkout entirely. */
+	const liveCwd = (): string | null => {
+		try {
+			return latestCtx?.cwd ?? null;
+		} catch {
+			return null;
+		}
+	};
 
 	/**
 	 * What this machine can actually run, for the workspace's "Custom…" model row
@@ -913,6 +923,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * arbitrary read on the developer's machine.
 	 */
 	let reportedPaths = new Set<string>();
+	/** Directory paired with reportedPaths. A diff request must read from the
+	 * same tree whose file list authorized it, even if the session moved since. */
+	let reportedWorktreePath = "";
 	let sendingWorktree = false;
 
 	/**
@@ -945,10 +958,12 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 */
 	async function flushWorktree(): Promise<void> {
 		if (sendingWorktree || !cfg.reportWorktree || !auth || !sessionID) return;
+		const cwd = liveCwd();
+		if (!cwd) return;
 
 		let next: WorktreePayload | null;
 		try {
-			next = collectWorktree(process.cwd());
+			next = collectWorktree(cwd);
 		} catch {
 			// collectWorktree already swallows git's own failures; this covers the
 			// cwd having been removed underneath us (a torn-down worktree).
@@ -967,6 +982,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			if (res.ok) {
 				lastWorktree = encoded;
 				reportedPaths = new Set(next.files.map((f) => f.path));
+				reportedWorktreePath = next.path;
 			}
 		} catch {
 			/* the next tick re-measures and re-sends */
@@ -1338,12 +1354,17 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				const a2 = auth;
 				const s2 = sessionID;
 				const known = reportedPaths;
+				const worktreePath = reportedWorktreePath;
+				if (!worktreePath) {
+					void postWorktreePatch(a2, s2, { path, patch: "", reason: "no worktree reported yet" });
+					return;
+				}
 				setTimeout(() => {
 					// The known-path check is the boundary: only a file this session
 					// has already REPORTED as changed can be read back. Without it the
 					// request is an arbitrary-file read on the developer's machine,
 					// addressed by a string from a browser.
-					const patch = collectPatch(process.cwd(), path, (p) => known.has(p));
+					const patch = collectPatch(worktreePath, path, (p) => known.has(p));
 					void postWorktreePatch(a2, s2, patch);
 				}, 0);
 				return;
@@ -1555,6 +1576,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 */
 	async function ensureAttached(): Promise<void> {
 		if (sessionID || attaching || !cfg.enabled) return;
+		const cwd = liveCwd();
+		if (!cwd) return;
 		attaching = true;
 		const generation = lifecycle.generation;
 		try {
@@ -1578,7 +1601,6 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				return;
 			}
 
-			const cwd = process.cwd();
 			const project = resolveProject(cwd);
 			// Blocking (a subprocess, for a session nobody launched) — which is
 			// why it is HERE, on the attach timer, and not in a handler.
@@ -1720,9 +1742,10 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			const currentSessionID = sessionID;
 			if (!currentAuth || !currentSessionID || !isCurrentRemoteLifecycle(lifecycle, generation)) return;
 
+			const cwd = liveCwd();
+			if (!cwd) return;
 			void (async () => {
 				try {
-					const cwd = process.cwd();
 					const project = resolveProject(cwd);
 					// Re-resolved rather than captured: a resumed session can be in a
 					// different tmux session than the one it first attached from. Cheap
@@ -1836,6 +1859,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		// suppress the first send and leave the new conversation's panel blank.
 		lastWorktree = null;
 		reportedPaths = new Set();
+		reportedWorktreePath = "";
 	}
 
 	function start(): void {
@@ -2126,7 +2150,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			if (cfg.reportStatus) setTimeout(() => void flushStatus(), 0);
 		});
 
-		pi.on("session_info_changed", () => {
+		pi.on("session_info_changed", (_event, ctx) => {
+			remember(ctx);
 			queueConversationRefresh();
 		});
 

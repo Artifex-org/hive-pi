@@ -1,9 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	classifyStatusCode,
+	collectWorktree,
 	isSandboxMask,
 	parseBranchLine,
 	parseNumstat,
@@ -187,6 +189,26 @@ describe("parseNumstat", () => {
 //   -rw------- 832 .hive-sandbox.json
 //
 // Twelve untracked rows on a session that had changed nothing.
+describe("collectWorktree", () => {
+	const root = mkdtempSync(join(tmpdir(), "hive-worktree-path-"));
+	beforeAll(() => {
+		execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
+		execFileSync("git", ["-C", root, "config", "user.email", "test@example.com"]);
+		execFileSync("git", ["-C", root, "config", "user.name", "Test"]);
+		writeFileSync(join(root, "tracked.ts"), "const value = 1;\n");
+		execFileSync("git", ["-C", root, "add", "tracked.ts"]);
+		execFileSync("git", ["-C", root, "commit", "-qm", "base"]);
+		writeFileSync(join(root, "tracked.ts"), "const value = 2;\n");
+	});
+	afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+	it("pairs the reading with the exact directory it measured", () => {
+		const reading = collectWorktree(root);
+		expect(reading?.path).toBe(root);
+		expect(reading?.files.map((file) => file.path)).toContain("tracked.ts");
+	});
+});
+
 describe("isSandboxMask", () => {
 	const root = mkdtempSync(join(tmpdir(), "hive-mask-"));
 	beforeAll(() => {
