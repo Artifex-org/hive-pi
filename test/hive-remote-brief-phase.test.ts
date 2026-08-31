@@ -91,6 +91,7 @@ afterEach(() => {
 async function attached(): Promise<ReturnType<typeof fakeHive>> {
 	const hive = fakeHive();
 	hiveRemote(fake.api, deps());
+	await fake.emit({ type: "session_start", reason: "startup" });
 	fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: RUN_ID });
 	await vi.advanceTimersByTimeAsync(400);
 	return hive;
