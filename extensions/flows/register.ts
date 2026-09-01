@@ -1,8 +1,11 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Page } from "playwright-core";
 import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { request } from "../hive-common/http.ts";
+import { SessionPublisher } from "../hive-common/session-publisher.ts";
 
 export interface FlowBrowserHost {
   page(): Promise<Page>;
@@ -87,6 +90,42 @@ export function validateMaestroYAML(source: string): string | null {
  */
 export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
   let recording: { origin: string; actions: RecordedAction[] } | null = null;
+  const publisher = new SessionPublisher(pi);
+  let devServer: { baseURL: URL; generation: string; sequence: number; timer: ReturnType<typeof setInterval> } | null = null;
+
+  async function publishDevServer(state: "starting" | "ready" | "ended", health: "unknown" | "healthy" | "unhealthy", error = "") {
+    const reported = devServer;
+    if (!reported) return { ok: true, status: 200 };
+    const binding = await publisher.binding();
+    if (!binding) return { ok: false, status: null, error: "Hive session binding is unavailable" };
+    reported.sequence += 1;
+    const terminal = state === "ended";
+    return request(binding.auth, "PUT", `/agent-sessions/${encodeURIComponent(binding.sessionID)}/resources/dev-server`, {
+      generation: reported.generation,
+      sequence: reported.sequence,
+      state,
+      health,
+      database_name: "",
+      ...(terminal ? {} : {
+        host: reported.baseURL.hostname,
+        port: Number(reported.baseURL.port),
+        connection_url: reported.baseURL.toString(),
+      }),
+      error: error.slice(0, 4000),
+      ttl_seconds: terminal ? 0 : 45,
+    });
+  }
+
+  async function probeDevServer() {
+    const reported = devServer;
+    if (!reported) return;
+    try {
+      const response = await fetch(reported.baseURL, { signal: AbortSignal.timeout(5_000) });
+      await publishDevServer("ready", response.status < 500 ? "healthy" : "unhealthy", response.status < 500 ? "" : `HTTP ${response.status}`);
+    } catch {
+      await publishDevServer("ready", "unhealthy", "loopback health probe failed");
+    }
+  }
 
   function record(action: RecordedAction): void {
     if (!recording) return;
@@ -99,6 +138,44 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
     }
     recording.actions.push(action);
   }
+
+  registerGuardedTool(pi, {
+    capability: FLOW_CAPABILITY,
+    name: "report_dev_server",
+    label: "Flows: report dev server",
+    description: "Report an already-running loopback HTTP dev server as the catalogued dev-server resource. Hive records only provider-reported state; it never starts or probes this process itself.",
+    promptSnippet: "Publish this running loopback dev server as a resource",
+    parameters: Type.Object({
+      base_url: Type.String({ description: "Explicit loopback HTTP URL of the already-running development server, including its port." }),
+    }),
+    async execute(_id, params) {
+      let baseURL: URL;
+      try {
+        baseURL = new URL(params.base_url);
+      } catch {
+        throw new Error("base_url must be a valid HTTP URL");
+      }
+      if (!["http:", "https:"].includes(baseURL.protocol) || !["127.0.0.1", "localhost", "::1"].includes(baseURL.hostname) || !baseURL.port || baseURL.username || baseURL.password) {
+        throw new Error("base_url must be a credential-free loopback HTTP URL with an explicit port");
+      }
+      if (devServer) clearInterval(devServer.timer);
+      devServer = { baseURL, generation: randomUUID(), sequence: -1, timer: setInterval(() => void probeDevServer(), 15_000) };
+      devServer.timer.unref?.();
+      const starting = await publishDevServer("starting", "unknown");
+      if (!starting.ok) {
+        const status = starting.status === 404 ? "This Hive server predates dev-server resource reporting." : (starting.error ?? "resource report failed");
+        clearInterval(devServer.timer);
+        devServer = null;
+        throw new Error(status);
+      }
+      await probeDevServer();
+      return toolText(`Reporting dev-server at ${baseURL.origin} as the catalogued resource name "dev-server".`, {
+        resource: "dev-server",
+        base_url: baseURL.origin,
+        note: "Flows retain only the resource name; runtime connection details stay in this sandbox's resource report.",
+      });
+    },
+  });
 
   registerGuardedTool(pi, {
     capability: FLOW_CAPABILITY,
@@ -178,6 +255,15 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
           : "Stored Maestro flows are not executable in this Linux sandbox. Run them on the Mac lane with Android/iOS tooling.",
       });
     },
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (devServer) {
+      clearInterval(devServer.timer);
+      await publishDevServer("ended", "unknown");
+      devServer = null;
+    }
+    publisher.dispose();
   });
 
   return { record };
