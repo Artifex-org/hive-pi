@@ -18,11 +18,17 @@ import {
 	type OpMode,
 } from "../extensions/opmode/modes.ts";
 import { buildOpModePrompt, OP_MODE_MARKER } from "../extensions/opmode/prompt.ts";
-import { classifyCommand, classifyDiscussionTool, classifyTool } from "../extensions/plan/policy.ts";
+import {
+	classifyCommand,
+	classifyDiscussionTool,
+	classifyOrchestrateCommand,
+	classifyOrchestrateTool,
+	classifyTool,
+} from "../extensions/plan/policy.ts";
 
 describe("the closed set", () => {
-	it("is exactly build, plan, discuss, bugfix", () => {
-		expect([...OP_MODES]).toEqual(["build", "plan", "discuss", "bugfix"]);
+	it("is exactly build, plan, discuss, bugfix, orchestrate", () => {
+		expect([...OP_MODES]).toEqual(["build", "plan", "discuss", "bugfix", "orchestrate"]);
 	});
 
 	// Modes are mutually exclusive, so they cap out at a handful. A set that has
@@ -56,6 +62,7 @@ describe("prompts", () => {
 	it("injects instructions for the modes that need them", () => {
 		expect(buildOpModePrompt("discuss")).toContain(OP_MODE_MARKER);
 		expect(buildOpModePrompt("bugfix")).toContain(OP_MODE_MARKER);
+		expect(buildOpModePrompt("orchestrate")).toContain(OP_MODE_MARKER);
 	});
 
 	// `build` restricts nothing, and `plan` is the plan extension's to describe —
@@ -74,6 +81,14 @@ describe("prompts", () => {
 		const prompt = buildOpModePrompt("bugfix") ?? "";
 		expect(prompt).toMatch(/reproduce/i);
 		expect(prompt).toContain("bugfix_root_cause");
+	});
+
+	it("tells orchestrate mode to delegate, validate, and refill capacity", () => {
+		const prompt = buildOpModePrompt("orchestrate") ?? "";
+		expect(prompt).toMatch(/not an implementer/i);
+		expect(prompt).toContain("Factory run");
+		expect(prompt).toContain("quality gates");
+		expect(prompt).toContain("end_agent_session");
 	});
 });
 
@@ -160,6 +175,59 @@ describe("the discuss gate", () => {
 			expect(classifyDiscussionTool("mcp", { search: "chart" }).allowed).toBe(true);
 		} finally {
 			setHouseProfileForTest(null);
+		}
+	});
+});
+
+/** Orchestrate is read-only locally and admits only reviewed coordination mutations. */
+describe("the orchestrate gate", () => {
+	it("allows inspection, planning, verification, and direct coordination tools", () => {
+		for (const tool of ["read", "grep", "plan_write", "workflow_write", "TaskCreate", "quality_gate", "read_ref", "readiness"]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(true);
+		}
+	});
+
+	it("allows exact Hive coordination operations through MCP", () => {
+		for (const tool of [
+			"hive_create_team",
+			"hive_create_squad",
+			"hive_launch_teammate",
+			"hive_message_teammate",
+			"hive_offload_to_factory",
+			"hive_read_inbox",
+			"hive_end_agent_session",
+			"hive_wait_for_run",
+		]) {
+			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, tool).toBe(true);
+		}
+	});
+
+	it("denies implementation, generic mutation, hidden workers, and auth actions", () => {
+		for (const tool of ["edit", "write", "background_bash", "mcpScript", "subagent", "orchestrate"]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
+		}
+		expect(classifyOrchestrateTool("mcp", { tool: "hive_trigger_run", args: {} }).allowed).toBe(false);
+		expect(classifyOrchestrateTool("mcp", { tool: "linear_create_issue", args: {} }).allowed).toBe(false);
+		expect(classifyOrchestrateTool("mcp", { action: "auth-start", server: "hive" }).allowed).toBe(false);
+	});
+
+	it("keeps shell access on a strict inspection subset", () => {
+		expect(classifyOrchestrateCommand("git diff --stat").allowed).toBe(true);
+		expect(classifyOrchestrateCommand("git status --short | wc -l").allowed).toBe(true);
+		for (const command of [
+			"printf x > src/new.ts",
+			"sed '1w /tmp/pwn' input",
+			`awk 'BEGIN { print "x" > "/tmp/pwn" }'`,
+			"git diff --output=/tmp/pwn",
+			"git branch -f main",
+			"git remote set-url origin https://example.com/x",
+			"git -c core.pager='sh -c touch /tmp/pwn' status",
+			"fd -x touch {}",
+			"yq --inplace '.x = 1' config.yml",
+		]) {
+			const denied = classifyOrchestrateCommand(command);
+			expect(denied.allowed, command).toBe(false);
+			if (!denied.allowed) expect(denied.reason).toContain("Orchestrate mode");
 		}
 	});
 });

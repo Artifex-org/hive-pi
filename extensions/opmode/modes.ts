@@ -36,9 +36,9 @@
  * ───────────────────────────────────────────────────────────────────────────
  */
 
-export type OpMode = "build" | "plan" | "discuss" | "bugfix";
+export type OpMode = "build" | "plan" | "discuss" | "bugfix" | "orchestrate";
 
-export const OP_MODES: readonly OpMode[] = ["build", "plan", "discuss", "bugfix"];
+export const OP_MODES: readonly OpMode[] = ["build", "plan", "discuss", "bugfix", "orchestrate"];
 
 export const DEFAULT_OP_MODE: OpMode = "build";
 
@@ -52,6 +52,7 @@ export const OP_MODE_ENFORCES: Record<OpMode, string> = {
 	plan: "Writes and mutating shell commands denied; produces a plan to approve.",
 	discuss: "Read-only, and no plan or tasks are produced — answer and stop.",
 	bugfix: "File edits denied until a root cause is recorded; investigation tools stay open.",
+	orchestrate: "Implementation denied; only team coordination, Factory dispatch, communication, and verification are allowed.",
 };
 
 /**

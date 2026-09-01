@@ -34,7 +34,7 @@ import {
 } from "../hive-common/channels.ts";
 import { parseResultHeader } from "../background/jobs.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
-import { classifyCommand, classifyDiscussionTool, classifyTool } from "../plan/policy.ts";
+import { classifyCommand, classifyDiscussionTool, classifyOrchestrateCommand, classifyOrchestrateTool } from "../plan/policy.ts";
 import { BUGFIX_WITHHELD_TOOLS, DEFAULT_OP_MODE, isOpMode, OP_MODES, OP_MODE_ENFORCES, type OpMode } from "./modes.ts";
 import { buildOpModePrompt } from "./prompt.ts";
 
@@ -185,6 +185,8 @@ export default function (pi: ExtensionAPI) {
 						`— the shell, tests and scripts are all open — then record what you found with bugfix_root_cause, ` +
 						`which unlocks edits.`,
 				};
+			case "orchestrate":
+				return classifyOrchestrateTool(name, input);
 			case "build":
 			case "plan":
 				return { allowed: true };
@@ -195,12 +197,14 @@ export default function (pi: ExtensionAPI) {
 		const verdict = toolVerdict(event.toolName, event.input);
 		if (!verdict.allowed) return { block: true, reason: verdict.reason };
 
-		// Shell gating for `discuss` only. Bugfix deliberately leaves bash open —
-		// see BUGFIX_WITHHELD_TOOLS for why a fail-open gate is the right call for
-		// a working discipline and the wrong one for a safety boundary.
-		if (mode === "discuss" && event.toolName === "bash") {
+		// Shell gating for the two fail-closed read-only postures. Bugfix
+		// deliberately leaves bash open — see BUGFIX_WITHHELD_TOOLS for why.
+		if ((mode === "discuss" || mode === "orchestrate") && event.toolName === "bash") {
 			const command = (event.input as { command?: unknown } | undefined)?.command;
-			const shell = classifyCommand(typeof command === "string" ? command : "");
+			const raw = typeof command === "string" ? command : "";
+			const shell = mode === "orchestrate"
+				? classifyOrchestrateCommand(raw)
+				: classifyCommand(raw, "Discussion");
 			if (!shell.allowed) return { block: true, reason: shell.reason };
 		}
 	});
@@ -393,7 +397,7 @@ export default function (pi: ExtensionAPI) {
 		// opposite direction: plan → discuss needs plan to have restored its
 		// snapshot BEFORE narrowTools() reads the active set, or we would snapshot
 		// plan's narrowed set and plan would then restore over our narrowing.
-		if (next === "discuss" || next === "bugfix") narrowTools();
+		if (next === "discuss" || next === "bugfix" || next === "orchestrate") narrowTools();
 		else if (next === DEFAULT_OP_MODE) restoreTools();
 		announce();
 		paint();
