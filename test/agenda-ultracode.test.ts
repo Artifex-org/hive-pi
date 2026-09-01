@@ -52,6 +52,8 @@ vi.mock("../extensions/agenda/rpc-worker.ts", async (importOriginal) => {
 					}),
 					alive: () => alive,
 					send: async (message, mode) => { durableHarness.sent.push({ id, message, mode }); },
+					owedTurns: () => 0,
+					stderrTail: () => "",
 					waitForSettle: async () => {},
 					stop: () => {
 						durableHarness.stopped.push(id);

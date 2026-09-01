@@ -1287,11 +1287,23 @@ export default function (pi: ExtensionAPI) {
 								const said = report
 									? ` · says ${report.status}${report.pct !== undefined ? ` ${report.pct}%` : ""}${report.note ? `: ${report.note}` : ""}`
 									: "";
-								// "never started" is its own word: an idle worker with 0 turns
-								// used to read as one waiting for work, when it was one whose
-								// dispatch had been accepted and dropped (see dispatchCommand).
-								const phase = state.busy ? "working" : worker.startFailure?.() ? "never started" : "idle";
-								return `  ${worker.id} (${worker.role})${said} — ${phase}, ${state.turns} turn(s), ${state.tokens} tokens${
+								// "idle, 0 turn(s), 0 tokens" is BOTH a healthy worker that
+								// has just started and one that is owed a turn nobody
+								// delivered. Saying which removes the single most misleading
+								// line this tool prints. Two distinct words for two distinct
+								// faults: "never started" is the watchdog's verdict (the child
+								// accepted a dispatch and took no turn within START_TIMEOUT_MS,
+								// see dispatchCommand); "awaiting N unanswered turn(s)" is a
+								// delivered command still inside the settle window.
+								const owed = worker.owedTurns();
+								const activity = state.busy
+									? "working"
+									: worker.startFailure?.()
+										? "never started"
+										: owed > 0
+											? `awaiting ${owed} unanswered turn(s)`
+											: "idle";
+								return `  ${worker.id} (${worker.role})${said} — ${activity}, ${state.turns} turn(s), ${state.tokens} tokens${
 									formatCost(state.usage.cost) ? `, ${formatCost(state.usage.cost)}` : ""
 								}${state.lastTool ? `, last tool ${state.lastTool}` : ""}`;
 							})
@@ -1300,7 +1312,26 @@ export default function (pi: ExtensionAPI) {
 			if (!params.id) {
 				return { content: [{ type: "text", text: `Live workers:\n${describeLive()}` }], details: { count: live.length } };
 			}
-			const worker = workers.get(params.id);
+			// Accepts the composite id the listing prints, or any unambiguous
+			// segment of it. An exact-only lookup rejected the very id shown one
+			// line above, which leaves a supervisor unable to steer or stop its
+			// own worker.
+			const resolved = workers.resolve(params.id);
+			if (resolved.ambiguous) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `"${params.id}" matches ${resolved.ambiguous.length} live workers — name one exactly:\n${resolved.ambiguous
+								.map((candidate) => `  ${candidate.id}`)
+								.join("\n")}`,
+						},
+					],
+					details: null,
+					isError: true,
+				};
+			}
+			const worker = resolved.worker;
 			// An error, never a silent success. A supervisor that believes it
 			// re-tasked a worker which had already exited waits forever for a
 			// result that is not coming.
