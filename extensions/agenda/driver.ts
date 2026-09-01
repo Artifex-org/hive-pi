@@ -139,7 +139,11 @@ function readSignals(ctx: ExtensionContext): SessionSignals {
 	try {
 		const entries = ctx.sessionManager.getEntries() as readonly unknown[];
 		const branch = ctx.sessionManager.getBranch() as readonly unknown[];
-		return deriveSignals(entries, branch);
+		// Context pressure is a ctx read, not an entry derivation — so it happens
+		// HERE, inside the driver's before-first-await block, and is handed to
+		// `deriveSignals` as data. That keeps signals.ts pure and keeps policies
+		// off `ctx`, which is the whole contract in policy.ts.
+		return deriveSignals(entries, branch, ctx.getContextUsage());
 	} catch {
 		return emptySignals;
 	}

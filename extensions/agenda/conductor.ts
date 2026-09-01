@@ -37,7 +37,7 @@ import {
 	withComplexity,
 	withStage,
 } from "./conductor-state.ts";
-import type { SessionSignals } from "./signals.ts";
+import type { ContextSignal, SessionSignals } from "./signals.ts";
 
 export const FRAME_LEDGER_ID = "conductor:frame";
 export const PLAN_LEDGER_ID = "conductor:plan";
@@ -80,6 +80,51 @@ export const PLAN_INJECTION = [
 	"once before plan_ready — it forwards the whole conversation to a stronger model for review.",
 	"When the plan is decision-complete, call plan_ready to present it for approval.",
 ].join(" ");
+
+/**
+ * Context pressure at which a lifecycle boundary is worth handing off instead
+ * of compacting (HIV-3173).
+ *
+ * A FIXED fraction, not one derived from pi's `reserveTokens`: an extension
+ * cannot read the compaction settings. `CompactionPreparation` carries them,
+ * but it only arrives on `session_before_compact` — after the compaction this
+ * exists to precede. Overridable because the right number is machine-specific:
+ * this node's `reserveTokens: 65536` against a 272k window puts auto-compaction
+ * at ~76%, while a default 16k install compacts at ~94%.
+ *
+ * The selective term is the BOUNDARY, not the threshold. Firing only as the
+ * lifecycle reaches verify/consolidate is what keeps this from nagging, and it
+ * is the design HIV-1231 specified: a clean break at a phase boundary beats
+ * lossy compression mid-phase.
+ */
+export const CONTEXT_PRESSURE_PERCENT = (() => {
+	const raw = Number(process.env.PI_AGENDA_CONTEXT_PRESSURE_PERCENT);
+	return Number.isFinite(raw) && raw > 0 ? raw : 75;
+})();
+
+/** Stages at which a handoff is a clean break rather than an interruption. */
+const HANDOFF_BOUNDARY_STAGES: readonly ConductorItem["stage"][] = ["verify", "consolidate"];
+
+/**
+ * Should the widget suggest a handoff?
+ *
+ * Pure so the decision is testable without a session. Three ways to say no,
+ * each load-bearing:
+ *   - `percent === null` — UNKNOWN, the documented post-compaction state. This
+ *     also stops a suggestion firing in the moment right after the compaction
+ *     that just relieved the pressure.
+ *   - not at a boundary — mid-phase is precisely where a handoff is wrong.
+ *   - under threshold.
+ */
+export function suggestsHandoff(
+	stage: ConductorItem["stage"],
+	context: ContextSignal | null | undefined,
+	threshold = CONTEXT_PRESSURE_PERCENT,
+): boolean {
+	if (!context || context.percent === null) return false;
+	if (!HANDOFF_BOUNDARY_STAGES.includes(stage)) return false;
+	return context.percent >= threshold;
+}
 
 export const ADVISE_LEDGER_ID = "conductor:advise";
 
@@ -425,6 +470,7 @@ export function renderConductorLines(
 	item: ConductorItem | null,
 	goal: GoalItem | null,
 	enabled: boolean,
+	context?: ContextSignal | null,
 ): string[] | null {
 	if (!enabled || !item || item.stage === "idle" || item.stage === "done") return null;
 
@@ -438,6 +484,16 @@ export function renderConductorLines(
 	if (item.stage === "plan") lines.push("  awaiting plan approval — plan_ready / /plan approve");
 	if (item.stage === "verify") lines.push("  running delivery checks (prCheck)");
 	if (item.stage === "consolidate") lines.push("  capturing learnings → memory/ (knowledge_write)");
+	// Operator-facing on purpose. `/handoff` is a registerCommand, not a tool —
+	// the MODEL cannot run it, so instructing the model to would be an order its
+	// recipient has no way to obey. And the widget never writes the seed itself:
+	// `writeHandoff` overwrites, so an automatic write would silently clobber a
+	// pending `.pi/handoff.md` the operator had already reviewed and edited.
+	if (context && suggestsHandoff(item.stage, context)) {
+		lines.push(
+			`  context ${Math.round(context.percent ?? 0)}% — at a phase boundary: \`/handoff\` starts clean instead of compacting`,
+		);
+	}
 	return lines;
 }
 
