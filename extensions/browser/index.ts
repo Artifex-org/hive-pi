@@ -38,6 +38,7 @@ import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { buildLaunchPlan } from "./launch.ts";
 import { BrowserSurfaceBridge } from "./surface.ts";
+import { registerFlowTools } from "../flows/register.ts";
 
 // Every tool here shares one capability shape: the first call spawns the
 // session's headless Chromium (a subprocess), and nothing writes outside the
@@ -104,6 +105,8 @@ export default function (pi: ExtensionAPI) {
 		return state;
 	}
 
+	const flows = registerFlowTools(pi, { page: async () => (await ensurePage()).page });
+
 	async function describePage(page: Page): Promise<{ body: string; truncated: boolean }> {
 		const outline = await page.locator("body").ariaSnapshot();
 		const capped = truncate(outline, SNAPSHOT_MAX_CHARS);
@@ -125,6 +128,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params) {
 			const { page } = await ensurePage();
 			const response = await page.goto(params.url);
+			flows.record({ kind: "navigate", url: params.url });
 			const status = response?.status();
 			const described = await describePage(page);
 			return text(described.body, {
@@ -161,6 +165,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params) {
 			const { page } = await ensurePage();
 			await page.click(params.selector);
+			flows.record({ kind: "click", selector: params.selector });
 			const described = await describePage(page);
 			return text(described.body, { url: page.url(), selector: params.selector });
 		},
@@ -181,6 +186,7 @@ export default function (pi: ExtensionAPI) {
 			const { page } = await ensurePage();
 			await page.fill(params.selector, params.value);
 			if (params.submit) await page.press(params.selector, "Enter");
+			flows.record({ kind: "fill", selector: params.selector, value: params.value, submit: Boolean(params.submit) });
 			const described = await describePage(page);
 			return text(described.body, { url: page.url(), selector: params.selector, submitted: Boolean(params.submit) });
 		},
@@ -271,10 +277,10 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params) {
 			const { page } = await ensurePage();
-			await page.waitForSelector(params.selector, {
-				state: params.state ?? "visible",
-				timeout: params.timeout_ms ?? ACTION_TIMEOUT_MS,
-			});
+			const state = params.state ?? "visible";
+			const timeout = params.timeout_ms ?? ACTION_TIMEOUT_MS;
+			await page.waitForSelector(params.selector, { state, timeout });
+			flows.record({ kind: "wait", selector: params.selector, state, timeoutMS: timeout });
 			const described = await describePage(page);
 			return text(described.body, { url: page.url(), selector: params.selector, state: params.state ?? "visible" });
 		},
