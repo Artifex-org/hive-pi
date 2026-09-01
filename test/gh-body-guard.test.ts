@@ -25,11 +25,43 @@ describe("ghBodyVerdict blocks", () => {
 	it("gh reached through a pipeline or after another command", () => {
 		expect(ghBodyVerdict('git push -u origin b && gh pr create --body "adds `x`"').kind).toBe("block");
 	});
+
+	it("serialized Markdown inline in PR create or edit", () => {
+		const body = `## Summary\\n- preserve separate list items\\n\\n## Verification\\n- tests passed`;
+		for (const command of [
+			`gh pr create --body '${body}'`,
+			`gh pr create -b='${body}'`,
+			`gh pr edit 42 --body="${body}"`,
+			`gh pr edit 42 --repo Artifex-org/hive -b '${body}'`,
+			`gh --hostname github.example pr create --body '${body}'`,
+		]) {
+			const v = ghBodyVerdict(command);
+			expect(v.kind, command).toBe("block");
+			if (v.kind === "block") expect(v.reason).toContain("literal \\n separators");
+		}
+	});
 });
 
 describe("ghBodyVerdict allows", () => {
 	it("a single-quoted body — no expansion happens", () => {
 		expect(ghBodyVerdict("gh pr create --body 'adds `PromptEditor`'").kind).toBe("allow");
+	});
+
+	it("forms that are not serialized Markdown", () => {
+		const serialized = `## Summary\\n- a list item\\n\\n## Verification\\n- test`;
+		const json = JSON.stringify({ summary: serialized });
+		for (const command of [
+			'gh pr create --body-file "/tmp/pr-body.md"',
+			'gh pr create --body "## Summary\r\n- formatted\r\n\r\n## Verification\r\n- pass"',
+			`gh pr create --body '${json}'`,
+			'gh pr create --body \'Call printf("first\\ntwo\\nthree")\'',
+			'gh pr create --body \'## Literal\\\\nnot a Markdown line break\\\\n## Still literal\'',
+			'gh pr create --body \'- literal list one\\n- literal list two\\n- literal list three\'',
+			'gh pr create --body "## Summary\n- physical\\n- literal\n\n## Verification\n- pass"',
+			`gh issue comment 42 --body '${serialized}'`,
+		]) {
+			expect(ghBodyVerdict(command).kind).toBe("allow");
+		}
 	});
 
 	it("--body-file, which is the remediation and must never match --body", () => {
