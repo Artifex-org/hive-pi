@@ -1287,7 +1287,11 @@ export default function (pi: ExtensionAPI) {
 								const said = report
 									? ` · says ${report.status}${report.pct !== undefined ? ` ${report.pct}%` : ""}${report.note ? `: ${report.note}` : ""}`
 									: "";
-								return `  ${worker.id} (${worker.role})${said} — ${state.busy ? "working" : "idle"}, ${state.turns} turn(s), ${state.tokens} tokens${
+								// "never started" is its own word: an idle worker with 0 turns
+								// used to read as one waiting for work, when it was one whose
+								// dispatch had been accepted and dropped (see dispatchCommand).
+								const phase = state.busy ? "working" : worker.startFailure?.() ? "never started" : "idle";
+								return `  ${worker.id} (${worker.role})${said} — ${phase}, ${state.turns} turn(s), ${state.tokens} tokens${
 									formatCost(state.usage.cost) ? `, ${formatCost(state.usage.cost)}` : ""
 								}${state.lastTool ? `, last tool ${state.lastTool}` : ""}`;
 							})
