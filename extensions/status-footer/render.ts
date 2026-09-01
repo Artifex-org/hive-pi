@@ -270,3 +270,39 @@ export function workspaceRow(
 		theme.fg("dim", ` · branch ${branch ?? workspace.branch ?? "—"}`),
 	].join("");
 }
+
+/** Bar width of the context cell. A fixed-width gauge, by construction. */
+export const GAUGE_WIDTH = 10;
+
+/**
+ * The context-pressure cell.
+ *
+ * The GAUGE clamps to the bar's width — ten characters cannot draw 152%. The
+ * NUMBER and the COLOUR deliberately do not (HIV-3173, fixing HIV-2984): a
+ * session ran at 152% of its window while this cell read a flat `100%` next to
+ * an unclamped `283k/272k`, so the two halves of one cell disagreed and the
+ * half worth acting on was the half being hidden.
+ *
+ * `getContextUsage()` is unclamped at the source — `(tokens / window) * 100`,
+ * no ceiling — and pi's own footer prints it raw. The clamp was ours alone.
+ *
+ * `percent === null` renders `ctx ?` rather than `0%`: that is the documented
+ * state right after a compaction, where the tokens are genuinely unknown, and
+ * a confident zero there is worse than an honest question mark.
+ */
+export function contextCell(
+	usage: { tokens: number | null; percent: number | null } | null | undefined,
+	contextWindow: number | undefined,
+	theme: ThemeLike,
+	compact = false,
+): string {
+	if (!usage || usage.percent === null || !contextWindow) return theme.fg("muted", "ctx ?");
+	const percent = usage.percent;
+	const filled = Math.round((Math.max(0, Math.min(100, percent)) / 100) * GAUGE_WIDTH);
+	const gauge = `${"█".repeat(filled)}${"░".repeat(GAUGE_WIDTH - filled)}`;
+	const color = percent >= 80 ? "error" : percent >= 60 ? "warning" : "success";
+	const shown = `${Math.round(percent)}%`;
+	if (compact) return `${theme.fg("muted", "ctx ")}${theme.fg(color, shown)}`;
+	const tokens = usage.tokens === null ? "?" : formatTokens(usage.tokens);
+	return `${theme.fg("muted", "ctx ")}${theme.fg(color, gauge)} ${theme.fg(color, shown)} ${theme.fg("dim", `${tokens}/${formatTokens(contextWindow)}`)}`;
+}

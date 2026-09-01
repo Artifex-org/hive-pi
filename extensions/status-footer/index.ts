@@ -30,6 +30,7 @@ import {
 	type ThemeLike,
 	fitRow,
 	formatCost,
+	contextCell,
 	formatTokens,
 	integrationRow,
 	issueGlyph,
@@ -41,20 +42,10 @@ import { EMPTY_WORKSPACE, type Workspace, projectLabel, resolveWorkspace, sameWo
 const REDRAW_INTERVAL_MS = 2_500;
 /** Re-resolve the workspace on a timer so a PR opened mid-session shows up. */
 const WORKSPACE_INTERVAL_MS = 120_000;
-const GAUGE_WIDTH = 10;
-
+/** The ctx reads; the rendering itself is pure in render.ts so it can be tested. */
 function formatContext(ctx: ExtensionContext, theme: ThemeLike, compact = false): string {
 	const usage = ctx.getContextUsage();
-	const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow;
-	if (!usage || usage.percent === null || !contextWindow) return theme.fg("muted", "ctx ?");
-
-	const percent = Math.max(0, Math.min(100, usage.percent));
-	const filled = Math.round((percent / 100) * GAUGE_WIDTH);
-	const gauge = `${"█".repeat(filled)}${"░".repeat(GAUGE_WIDTH - filled)}`;
-	const color = percent >= 80 ? "error" : percent >= 60 ? "warning" : "success";
-	if (compact) return `${theme.fg("muted", "ctx ")}${theme.fg(color, `${Math.round(percent)}%`)}`;
-	const tokens = usage.tokens === null ? "?" : formatTokens(usage.tokens);
-	return `${theme.fg("muted", "ctx ")}${theme.fg(color, gauge)} ${theme.fg(color, `${Math.round(percent)}%`)} ${theme.fg("dim", `${tokens}/${formatTokens(contextWindow)}`)}`;
+	return contextCell(usage, usage?.contextWindow ?? ctx.model?.contextWindow, theme, compact);
 }
 
 function formatSession(ctx: ExtensionContext, theme: ThemeLike): string {

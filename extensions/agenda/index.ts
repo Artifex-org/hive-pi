@@ -106,7 +106,7 @@ import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "
 import { PlanSchema, type Plan, resolveCaps, validatePlan } from "./plan-schema.ts";
 import { discoverAgents } from "../harness/roles.ts";
 import { diffStamp } from "../harness/verify.ts";
-import { deriveSignals, emptySignals } from "./signals.ts";
+import { type ContextSignal, contextSignalOf, deriveSignals, emptySignals } from "./signals.ts";
 import { shouldAutoShutdown } from "./auto-shutdown.ts";
 import { compactInstructions, fetchRecapPayload, handoffRecapSections } from "./session-recap.ts";
 import { rehydratePlan } from "../plan/state.ts";
@@ -208,6 +208,14 @@ export default function (pi: ExtensionAPI) {
 
 	let conductor: ConductorItem | null = null;
 	let conductorEnabled = true;
+	/**
+	 * The newest context-pressure reading, for the lifecycle widget (HIV-3173).
+	 *
+	 * Held rather than read at paint time because `paintConductor` is a closure
+	 * with no `ctx` — it is called from goal commits, bus syncs and command
+	 * handlers alike. Refreshed on settle, where a live `ctx` exists.
+	 */
+	let latestContext: ContextSignal | null = null;
 
 	/**
 	 * The lifecycle widget. Cosmetic by definition — the deck extension owns
@@ -216,7 +224,7 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const paintConductor = () => {
 		try {
-			const lines = renderConductorLines(conductor, goal, conductorEnabled);
+			const lines = renderConductorLines(conductor, goal, conductorEnabled, latestContext);
 			pi.events.emit(DECK_SECTION_CHANNEL, {
 				section: "conductor",
 				state: lines
@@ -391,6 +399,26 @@ export default function (pi: ExtensionAPI) {
 	const autoShutdownEnabled = process.env.PI_AGENDA_AUTO_SHUTDOWN === "1";
 	const unattendedHiveLaunch = isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID);
 	let autoShutdownScheduled = false;
+	// Context pressure for the lifecycle widget. Its own handler rather than a
+	// branch inside the recap one below, because that handler returns early for
+	// non-interactive modes and for a stale ctx — and this reading is cheap,
+	// independent, and must not inherit either exit.
+	pi.on("agent_settled", (_event, ctx) => {
+		if (IS_WORKER) return;
+		let next: ContextSignal | null = null;
+		try {
+			next = contextSignalOf(ctx.getContextUsage());
+		} catch {
+			// ctx already stale. Keep the previous reading rather than blanking it:
+			// a missing number would silently retract a suggestion that is still
+			// true, and the widget is repainted on the next settle anyway.
+			return;
+		}
+		const changed = next.percent !== latestContext?.percent;
+		latestContext = next;
+		if (changed) paintConductor();
+	});
+
 	pi.on("agent_settled", (_event, ctx) => {
 		if (IS_WORKER) return;
 		let transcript = "";
