@@ -88,6 +88,8 @@ describe("prompts", () => {
 		expect(prompt).toMatch(/not an implementer/i);
 		expect(prompt).toContain("Factory run");
 		expect(prompt).toContain("quality gates");
+		expect(prompt).toContain("shared worktree");
+		expect(prompt).toMatch(/ONE session to own the dev server/i);
 		expect(prompt).toContain("end_agent_session");
 	});
 });
