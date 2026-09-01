@@ -32,7 +32,7 @@ export { frame } from "../harness/framing.ts";
 
 /** Commands we send. A deliberate subset of pi's `RpcCommand` union. */
 export type OutboundCommand =
-	| { id: string; type: "prompt"; message: string }
+	| { id: string; type: "prompt"; message: string; streamingBehavior?: "steer" | "followUp" }
 	| { id: string; type: "steer"; message: string }
 	| { id: string; type: "follow_up"; message: string }
 	| { id: string; type: "abort" }
@@ -41,6 +41,28 @@ export type OutboundCommand =
 	| { type: "extension_ui_response"; id: string; cancelled: true };
 
 export type DeliveryMode = "steer" | "follow_up";
+
+/**
+ * The one command shape that starts a turn in EVERY worker state.
+ *
+ * pi's `steer` and `follow_up` commands are QUEUE operations. On a running
+ * agent they are delivered at the right moment; on an IDLE agent they are
+ * queued and nothing ever drains the queue — the child answers
+ * `{"success":true}`, emits `queue_update`, and sits at 0 turns until the
+ * settle timeout. Measured against pi 0.84.2: `{"type":"follow_up"}` as the
+ * first command to a fresh `--mode rpc` child produced only `queue_update` +
+ * `response`, never `agent_start`; every orchestrate worker in a session read
+ * "idle, 0 turn(s), 0 tokens" for the full 15-minute SETTLE_TIMEOUT_MS, and
+ * the supervisor stopped each one by hand.
+ *
+ * `prompt` starts a turn when the agent is idle and, given `streamingBehavior`,
+ * joins exactly the queue the dedicated command would have joined when the
+ * agent is streaming (pi docs/rpc.md §prompt; measured both ways). So a
+ * dispatch is ALWAYS a `prompt`, and the mode only picks the queue.
+ */
+export function dispatchCommand(id: string, message: string, mode: DeliveryMode): OutboundCommand {
+	return { id, type: "prompt", message, streamingBehavior: mode === "steer" ? "steer" : "followUp" };
+}
 
 /** The tool a worker calls to say something structured mid-run. */
 export const REPORT_TOOL = "report";

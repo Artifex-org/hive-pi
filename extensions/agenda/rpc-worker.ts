@@ -10,8 +10,12 @@
  *
  * A durable worker stays alive and addressable: `send()` re-tasks it, `steer`
  * interrupts, `follow_up` queues. Spike W1 confirmed against the pinned 0.83.0
- * that a `follow_up` on a live session produces a second turn in the same
- * session.
+ * that a `follow_up` on a LIVE session produces a second turn in the same
+ * session. What that spike never exercised is a follow_up on an IDLE session,
+ * which is every first dispatch — and there pi only queues (see
+ * `dispatchCommand` in rpc-protocol.ts). So `send()` never emits the dedicated
+ * steer/follow_up commands; it sends a `prompt` and lets `streamingBehavior`
+ * pick the queue.
  *
  * Everything foldable lives in `rpc-protocol.ts` and is tested with no child
  * process. What is here is exactly the part that cannot be: spawn, framing over
@@ -31,6 +35,7 @@ import { acquireWriterLock, isWriterCapable, noWriterLock } from "../harness/wri
 import { guardWorkerCwd, workerCwdRefusal } from "../guards-common/capability.ts";
 import {
 	type DeliveryMode,
+	dispatchCommand,
 	emptyWorkerState,
 	finalText,
 	foldLine,
@@ -47,6 +52,18 @@ import { discoverAgents } from "../harness/roles.ts";
 export const DURABLE_TIMEOUT_MS = 30 * 60_000;
 /** How long we wait for the child to settle after a send. */
 export const SETTLE_TIMEOUT_MS = 15 * 60_000;
+/**
+ * How long an accepted dispatch may sit without the child STARTING a turn.
+ *
+ * Distinct from the settle timeout, which bounds a turn that is running. This
+ * bounds the case where nothing runs at all: the child said `success:true`
+ * and then never emitted `agent_start`. Before this existed that case was
+ * indistinguishable from a slow turn for the full SETTLE_TIMEOUT_MS, and the
+ * status line called it "idle". Sized for a cold spawn — a worker loads the
+ * full extension set and connects its MCP servers before its first turn,
+ * measured 25-45s cold on this node — with headroom, not for a model call.
+ */
+export const START_TIMEOUT_MS = 120_000;
 
 /** One delivered command adds one turn beyond both completed and already-queued work. */
 export function advanceDesiredTurns(desired: number, completed: number): number {
@@ -87,6 +104,12 @@ export interface WorkerHandle {
 	 * failure the supervisor cannot see is a failure it cannot report.
 	 */
 	stderrTail(): string;
+	/**
+	 * Set when a dispatch was accepted but the child never started a turn
+	 * within START_TIMEOUT_MS. Optional so a test double need not model it;
+	 * a production handle always provides it.
+	 */
+	startFailure?(): string | undefined;
 }
 
 export function durableWorkerID(runId: string, nodeId: string, workId: string): string {
@@ -246,6 +269,8 @@ interface StartOptions {
 	/** The role's persona. Delivered exactly as `runRoleAgent` delivers it. */
 	systemPrompt?: string;
 	env?: Record<string, string>;
+	/** Override for START_TIMEOUT_MS; tests use it, production does not. */
+	startTimeoutMs?: number;
 }
 
 export function startDurableWorker(options: StartOptions): WorkerHandle {
@@ -290,11 +315,39 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 	// resolving on the interrupted turn's settlement.
 	let desiredTurns = 0;
 	const settleWaiters: Array<() => void> = [];
+	// The start watchdog: armed by a send to an idle child, disarmed by the
+	// child's `agent_start`. If it fires, the dispatch was accepted and never
+	// acted on, and every waiter is released with `startFailure` set — a slow
+	// turn keeps the settle timeout; a turn that never began does not get one.
+	let startFailure: string | undefined;
+	let startTimer: ReturnType<typeof setTimeout> | undefined;
+	const startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
 
-	const resolveSettledWaiters = () => {
-		if (!reachedDesiredTurns(state.busy, state.turns, desiredTurns)) return;
+	const releaseAllWaiters = () => {
 		const waiters = settleWaiters.splice(0);
 		for (const resolve of waiters) resolve();
+	};
+	const resolveSettledWaiters = () => {
+		if (!reachedDesiredTurns(state.busy, state.turns, desiredTurns)) return;
+		releaseAllWaiters();
+	};
+	const disarmStartWatch = () => {
+		if (startTimer) clearTimeout(startTimer);
+		startTimer = undefined;
+	};
+	const armStartWatch = () => {
+		disarmStartWatch();
+		const turnsAtSend = state.turns;
+		startTimer = setTimeout(() => {
+			startTimer = undefined;
+			if (exited || state.busy || state.turns > turnsAtSend) return;
+			const within = startTimeoutMs >= 1000 ? `${Math.round(startTimeoutMs / 1000)}s` : `${startTimeoutMs}ms`;
+			startFailure =
+				`worker "${options.id}" accepted a dispatch but never started a turn within ${within} ` +
+				`(${state.turns} turn(s) completed, ${stderr.trim() ? `stderr: ${stderr.trim().slice(-500)}` : "no stderr"})`;
+			releaseAllWaiters();
+		}, startTimeoutMs);
+		startTimer.unref?.();
 	};
 
 	/**
@@ -331,6 +384,7 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 		for (const line of framed.lines) {
 			const before = state.busy;
 			state = foldLine(state, line);
+			if (!before && state.busy) disarmStartWatch();
 
 			// Answer anything the child is blocking on IMMEDIATELY. An unanswered
 			// extension_ui_request hangs the child forever — it is unattended, so
@@ -355,6 +409,7 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 	child.on("close", () => {
 		exited = true;
 		clearTimeout(hardTimeout);
+		disarmStartWatch();
 		cleanupPrompt();
 		state = { ...state, busy: false };
 		const waiters = settleWaiters.splice(0);
@@ -364,6 +419,7 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 	child.on("error", () => {
 		exited = true;
 		clearTimeout(hardTimeout);
+		disarmStartWatch();
 		cleanupPrompt();
 		state = { ...state, busy: false };
 		const waiters = settleWaiters.splice(0);
@@ -385,6 +441,7 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 		if (exited) return;
 		exited = true;
 		clearTimeout(hardTimeout);
+		disarmStartWatch();
 		state = { ...state, busy: false };
 		const waiters = settleWaiters.splice(0);
 		for (const resolve of waiters) resolve();
@@ -397,7 +454,7 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 
 	const waitForSettle = (timeoutMs = SETTLE_TIMEOUT_MS): Promise<void> =>
 		new Promise((resolve) => {
-			if (exited || (reachedDesiredTurns(state.busy, state.turns, desiredTurns) && state.everSettled)) {
+			if (exited || startFailure || (reachedDesiredTurns(state.busy, state.turns, desiredTurns) && state.everSettled)) {
 				resolve();
 				return;
 			}
@@ -428,20 +485,28 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 			if (exited) throw new Error(`worker "${options.id}" has exited`);
 			commandId++;
 			const id = `${options.id}-${commandId}`;
+			// Always a `prompt` — see dispatchCommand for why the dedicated
+			// steer/follow_up commands leave an idle child at 0 turns forever.
+			//
 			// Written BEFORE the watermark moves. The old order raised
 			// `desiredTurns` and then dropped the command on an unwritable stdin,
 			// leaving the worker permanently owing a turn nothing would deliver.
 			// A command that did not land must leave the watermark untouched.
-			if (!write(mode === "steer" ? { id, type: "steer", message } : { id, type: "follow_up", message })) {
+			if (!write(dispatchCommand(id, message, mode))) {
 				const tail = stderr.trim();
 				throw new Error(
 					`worker "${options.id}" did not accept the command (stdin unwritable)${tail ? `: ${tail.slice(-500)}` : ""}`,
 				);
 			}
 			desiredTurns = advanceDesiredTurns(desiredTurns, state.turns);
+			// A send to a RUNNING child joins a queue that the running turn will
+			// drain; only a send to an idle child has to start something, and that
+			// is the one the watchdog covers.
+			if (!state.busy) armStartWatch();
 		},
 		waitForSettle,
 		stop,
+		startFailure: () => startFailure,
 	};
 }
 
@@ -528,6 +593,11 @@ export function makeDurableSpawn(cwd: string, runId: string, registry: WorkerReg
 				await worker.send(prompt, "follow_up");
 				await worker.waitForSettle();
 				if (registry.wasIntentionallyStopped(worker)) return { ok: false, error: "stopped by orchestrator" };
+				// Checked BEFORE the exit/settle verdicts: a child that never began
+				// is alive, unsettled and idle, which every later check reads as
+				// "still working".
+				const neverStarted = worker.startFailure?.();
+				if (neverStarted) return { ok: false, error: neverStarted };
 				const state = worker.state();
 				// The child's own words, when it left any. Every one of these
 				// failures used to be reported with no cause at all, while the

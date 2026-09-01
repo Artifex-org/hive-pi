@@ -1290,9 +1290,19 @@ export default function (pi: ExtensionAPI) {
 								// "idle, 0 turn(s), 0 tokens" is BOTH a healthy worker that
 								// has just started and one that is owed a turn nobody
 								// delivered. Saying which removes the single most misleading
-								// line this tool prints.
+								// line this tool prints. Two distinct words for two distinct
+								// faults: "never started" is the watchdog's verdict (the child
+								// accepted a dispatch and took no turn within START_TIMEOUT_MS,
+								// see dispatchCommand); "awaiting N unanswered turn(s)" is a
+								// delivered command still inside the settle window.
 								const owed = worker.owedTurns();
-								const activity = state.busy ? "working" : owed > 0 ? `awaiting ${owed} unanswered turn(s)` : "idle";
+								const activity = state.busy
+									? "working"
+									: worker.startFailure?.()
+										? "never started"
+										: owed > 0
+											? `awaiting ${owed} unanswered turn(s)`
+											: "idle";
 								return `  ${worker.id} (${worker.role})${said} — ${activity}, ${state.turns} turn(s), ${state.tokens} tokens${
 									formatCost(state.usage.cost) ? `, ${formatCost(state.usage.cost)}` : ""
 								}${state.lastTool ? `, last tool ${state.lastTool}` : ""}`;
