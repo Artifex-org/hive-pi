@@ -10,8 +10,12 @@
  *
  * A durable worker stays alive and addressable: `send()` re-tasks it, `steer`
  * interrupts, `follow_up` queues. Spike W1 confirmed against the pinned 0.83.0
- * that a `follow_up` on a live session produces a second turn in the same
- * session.
+ * that a `follow_up` on a LIVE session produces a second turn in the same
+ * session. What that spike never exercised is a follow_up on an IDLE session,
+ * which is every first dispatch — and there pi only queues (see
+ * `dispatchCommand` in rpc-protocol.ts). So `send()` never emits the dedicated
+ * steer/follow_up commands; it sends a `prompt` and lets `streamingBehavior`
+ * pick the queue.
  *
  * Everything foldable lives in `rpc-protocol.ts` and is tested with no child
  * process. What is here is exactly the part that cannot be: spawn, framing over

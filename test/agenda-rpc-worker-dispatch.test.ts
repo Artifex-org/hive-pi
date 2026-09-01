@@ -90,3 +90,38 @@ describe("durable worker against pi 0.84 queue semantics", () => {
 		expect(worker.startFailure?.()).toContain('received {"id":"dispatch-2-1","type":"prompt"');
 	});
 });
+
+/**
+ * The same dispatch against the REAL binary. Opt-in like orchestrator-live:
+ *
+ *   PI_HOUSE_LIVE=1 PI_HOUSE_PI_BIN=~/.hive/harness/bin/pi \
+ *     PI_HOUSE_LIVE_MODEL=openai-codex/gpt-5.6-luna \
+ *     npx vitest run --pool=forks test/agenda-rpc-worker-dispatch.test.ts
+ *
+ * The fake above encodes what pi did on the day this was fixed; this is the
+ * check that pi still does it, which is the only thing that can make the fake
+ * lie.
+ */
+const LIVE = process.env.PI_HOUSE_LIVE === "1";
+const LIVE_MODEL = process.env.PI_HOUSE_LIVE_MODEL ?? "openrouter/deepseek/deepseek-v4-flash";
+
+describe.skipIf(!LIVE)("durable worker against the real pi", () => {
+	it("completes one turn from a follow_up dispatch on a fresh worker", async () => {
+		const worker = startDurableWorker({
+			id: "live-dispatch",
+			role: "research",
+			cwd: process.cwd(),
+			model: LIVE_MODEL,
+			tools: ["read"],
+		});
+		try {
+			await worker.send("Reply with the single word OK and nothing else.", "follow_up");
+			await worker.waitForSettle(120_000);
+			expect(worker.startFailure?.()).toBeUndefined();
+			expect(worker.state().turns).toBeGreaterThanOrEqual(1);
+			expect(finalText(worker.state())).toMatch(/OK/);
+		} finally {
+			worker.stop();
+		}
+	}, 150_000);
+});
