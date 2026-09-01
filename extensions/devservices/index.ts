@@ -1,11 +1,11 @@
 /**
  * Disposable PostgreSQL for coding sessions.
  *
- * Standalone pi keeps the direct dev_db_start/stop tools. A Hive-launched
- * session deliberately does not: Hive owns desired state through the durable
- * request_resource rail, and this extension is the authenticated in-sandbox
- * claimant. The split preserves private-netns reachability without letting a
- * second local tool bypass the lifecycle row the details panel displays.
+ * Standalone pi keeps the direct dev_db_start/stop tools. In a Hive launch they
+ * are a rollout bridge only: an old server (resource route = 404) still works,
+ * while a server with the managed API redirects starts/stops to request_resource.
+ * This preserves private-netns reachability without letting a second local tool
+ * bypass the lifecycle row once the control plane supports it.
  */
 
 import fs from "node:fs";
@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { SessionPublisher, type HiveSessionBinding } from "../hive-common/session-publisher.ts";
+import { request } from "../hive-common/http.ts";
 import { Type } from "typebox";
 import {
 	databaseUrl,
@@ -307,6 +308,27 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function managedPosture(): Promise<"local" | "managed" | "legacy" | "unavailable"> {
+		if (!managed) return "local";
+		const binding = await publisher?.binding();
+		if (!binding) return "unavailable";
+		const result = await request(
+			binding.auth,
+			"GET",
+			`/agent-sessions/${encodeURIComponent(binding.sessionID)}/resources`,
+		);
+		if (result.ok) return "managed";
+		if (result.status === 404) return "legacy";
+		return "unavailable";
+	}
+
+	function managedToolReply(action: "start" | "stop") {
+		return text(
+			`Hive manages this session's Postgres. Use request_resource with resource \"postgres\" and action \"${action}\"; poll the same call_id until it finishes.`,
+			{ managed: true, resource: "postgres", action },
+		);
+	}
+
 	function registerLocalTools(): void {
 		registerGuardedTool(pi, {
 			capability: DB_CAPABILITY,
@@ -319,6 +341,11 @@ export default function (pi: ExtensionAPI) {
 			}),
 			async execute(_id, params) {
 				const database = params.database ?? "app";
+				const posture = await managedPosture();
+				if (posture === "managed") return managedToolReply("start");
+				if (posture === "unavailable") {
+					throw new Error("Hive resource control is temporarily unavailable; retry instead of starting an untracked database.");
+				}
 				const server = await ensureServer();
 				await ensureDatabase(server, database);
 				const url = databaseUrl(server.port, database);
@@ -344,23 +371,31 @@ export default function (pi: ExtensionAPI) {
 			promptSnippet: "Stop the per-session Postgres",
 			parameters: Type.Object({}),
 			async execute() {
+				// A local process always remains stoppable, even during an API outage.
+				if (!state) {
+					const posture = await managedPosture();
+					if (posture === "managed") return managedToolReply("stop");
+					if (posture === "unavailable") {
+						throw new Error("Hive resource control is temporarily unavailable; retry the managed stop request.");
+					}
+				}
 				const stopped = await stopServer();
 				return text(stopped ? "Stopped." : "Nothing was running.", { stopped });
 			},
 		});
 	}
 
-	if (!managed) registerLocalTools();
+	registerLocalTools();
 
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
 		if (requestTimer) clearInterval(requestTimer);
 		if (healthTimer) clearInterval(healthTimer);
-		const binding = await publisher?.binding();
-		if (binding && generation && state) {
-			await publish(binding, nextReport("stopping", "unknown", managedDatabase));
-		}
+		const shouldReportEnded = Boolean(generation && state);
+		// Cleanup is the lifecycle guarantee. Never put a network lookup or report
+		// in front of it: Hive may be unavailable precisely while the session dies.
 		await stopServer();
+		const binding = shouldReportEnded ? await publisher?.binding() : null;
 		if (binding && generation) {
 			await publish(binding, nextReport("ended", "unknown", managedDatabase));
 		}

@@ -48,6 +48,7 @@ describe.skipIf(!enabled)("managed devservices integration", () => {
 		let claimed = false;
 		let completed = false;
 		let refusedReadyOnce = false;
+		let rejectShutdownReports = false;
 		const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (url.endsWith("/agent-sessions/by-run/run-managed-it")) return response({ id: "session-managed-it" });
@@ -72,6 +73,9 @@ describe.skipIf(!enabled)("managed devservices integration", () => {
 			if (url.endsWith("/resources/postgres") && init?.method === "PUT") {
 				const report = JSON.parse(String(init.body)) as ResourceReport;
 				reports.push(report);
+				if (rejectShutdownReports && (report.state === "stopping" || report.state === "ended")) {
+					return response({ detail: "Hive unavailable during shutdown" }, 503);
+				}
 				if (report.state === "ready" && !refusedReadyOnce) {
 					refusedReadyOnce = true;
 					return response({ detail: "temporary outage" }, 503);
@@ -105,6 +109,7 @@ describe.skipIf(!enabled)("managed devservices integration", () => {
 			const dataDir = args[args.indexOf("-D") + 1];
 			expect(fs.existsSync(dataDir)).toBe(true);
 
+			rejectShutdownReports = true;
 			await fake.emit({ type: "session_shutdown", reason: "quit" });
 			expect(reports.at(-1)?.state).toBe("ended");
 			expect(processExists(pid as number)).toBe(false);
