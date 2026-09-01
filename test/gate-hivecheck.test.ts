@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
 	deckLines,
 	deckSummary,
+	deferReasonOf,
 	fold,
 	type HiveSubstep,
 	type HiveTask,
 	hiveCheckArgs,
 	isTerminalRun,
 	parseRunRef,
+	queuedReasonLine,
 	renderReport,
 	stepsFrom,
 } from "../extensions/gate/hivecheck.ts";
@@ -193,6 +195,68 @@ describe("fold", () => {
 		const p = fold({ ...base, run: { state: "running" }, tasks: [task("loc", "ready")], substeps: [] });
 		expect(deckSummary(p)).toContain("queued");
 		expect(renderReport(p)).toContain("QUEUED");
+	});
+
+	// A queue wait an agent cannot ATTRIBUTE is the wait it re-dispatches into.
+	// HIV-3167 measured the loop on pyERP 2026-09-01: 68 queued runs, 60 of them
+	// agents' own checks, 58 with nothing started, duplicate dispatches four
+	// seconds apart — with the fleet at 30% utilisation, so none of it capacity.
+	it("names the scheduler's reason for the wait, and says a re-run cannot help", () => {
+		const p = fold({
+			...base,
+			run: { state: "running" },
+			tasks: [task("lint", "ready", { defer_reason: "run_wip" })],
+			substeps: [],
+		});
+		expect(p.defer_reason).toBe("run_wip");
+		const report = renderReport(p);
+		expect(report).toContain("QUEUED");
+		expect(report).toContain("run_wip");
+		// The load-bearing half: the intuitive response to a stalled check is to
+		// run it again, and for run_wip that is actively worse.
+		expect(report).toContain("does NOT jump the queue");
+		expect(report).toContain("supersedes the one you are waiting on");
+	});
+
+	it("says nothing about a reason when the scheduler gives none", () => {
+		const p = fold({ ...base, run: { state: "running" }, tasks: [task("lint", "ready")], substeps: [] });
+		expect(p.defer_reason).toBeUndefined();
+		expect(renderReport(p)).not.toContain("reason:");
+	});
+
+	// The reason must describe the wait that is HAPPENING. A task that already
+	// dispatched can still carry the reason it was deferred beforehand, and
+	// reporting that would explain a wait that is over.
+	it("ignores the defer reason of a task that has already started", () => {
+		const p = fold({
+			...base,
+			run: { state: "running" },
+			tasks: [
+				task("lint", "running", { defer_reason: "no_capacity", started_at: "2026-09-01T00:00:00Z" }),
+				task("test", "ready", { defer_reason: "run_wip" }),
+			],
+			substeps: [],
+		});
+		expect(p.defer_reason).toBe("run_wip");
+	});
+
+	it("picks the most common reason across an unstarted fan-out", () => {
+		expect(
+			deferReasonOf([
+				task("a", "ready", { defer_reason: "no_capacity" }),
+				task("b", "ready", { defer_reason: "run_wip" }),
+				task("c", "ready", { defer_reason: "run_wip" }),
+			]),
+		).toBe("run_wip");
+		expect(deferReasonOf([task("a", "ready", { defer_reason: "  " })])).toBeUndefined();
+		expect(deferReasonOf([])).toBeUndefined();
+	});
+
+	// A reason this build has never heard of is still the most specific fact the
+	// reader has. Passing it through beats hiding it behind silence.
+	it("passes an unknown reason through verbatim rather than swallowing it", () => {
+		expect(queuedReasonLine("some_future_reason")).toBe("reason: some_future_reason");
+		expect(queuedReasonLine("release_serialized")).toContain("a deploy holds this pipeline");
 	});
 
 	it("stops saying queued the moment a step is on a node", () => {
