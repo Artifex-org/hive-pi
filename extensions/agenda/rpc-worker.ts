@@ -166,6 +166,32 @@ export class WorkerRegistry {
 		return worker;
 	}
 
+	/**
+	 * Find a worker by its full id OR by an unambiguous segment of it.
+	 *
+	 * The listing prints `run-<uuid>:<node>:<work>`, and an exact-only lookup
+	 * then refuses the very id it just showed. Observed verbatim, the refusal
+	 * printed directly above a listing containing the id it refused:
+	 *
+	 *   No live worker "96fac376567e9ec8".
+	 *   Live workers:
+	 *     run-38c9a8e7-…:tes8841:96fac376567e9ec8 (retriever) — idle, …
+	 *
+	 * A supervisor that cannot name its own worker cannot steer or stop it, so
+	 * the wave runs on unsupervised. Ambiguity is an ERROR rather than a guess:
+	 * steering the wrong worker is worse than being asked to be specific.
+	 */
+	resolve(id: string): { worker?: WorkerHandle; ambiguous?: WorkerHandle[] } {
+		const exact = this.get(id);
+		if (exact) return { worker: exact };
+		const matches = this.list().filter(
+			(worker) => worker.id.endsWith(`:${id}`) || worker.id.split(":").includes(id),
+		);
+		if (matches.length === 1) return { worker: matches[0] };
+		if (matches.length > 1) return { ambiguous: matches };
+		return {};
+	}
+
 	list(): WorkerHandle[] {
 		for (const [id, worker] of this.workers) {
 			if (!worker.alive()) this.remove(id, worker);
@@ -304,12 +330,27 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 		startTimer.unref?.();
 	};
 
-	const write = (command: OutboundCommand) => {
-		if (exited || !child.stdin?.writable) return;
+	/**
+	 * Returns whether the command actually reached the child.
+	 *
+	 * It used to return void on every path, so an undeliverable command was
+	 * indistinguishable from a delivered one — and `send()` advances the turn
+	 * watermark on the assumption that it was delivered. The start watchdog now
+	 * bounds the resulting wait, but it bounds it at two minutes and reports
+	 * "never started", which describes a child that did not run rather than a
+	 * command that never left this process. `send()` states the rule three lines
+	 * above its own call — "An error, never a silent drop" — and this is where it
+	 * was being broken.
+	 */
+	const write = (command: OutboundCommand): boolean => {
+		if (exited || !child.stdin?.writable) return false;
 		try {
 			child.stdin.write(`${JSON.stringify(command)}\n`);
+			return true;
 		} catch {
-			/* the child went away between the check and the write */
+			// The child went away between the check and the write. Not an
+			// exception to swallow: the caller must learn the command is lost.
+			return false;
 		}
 	};
 
@@ -421,11 +462,20 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 			// not coming — and "delivered" is the one thing it cannot verify later.
 			if (exited) throw new Error(`worker "${options.id}" has exited`);
 			commandId++;
-			desiredTurns = advanceDesiredTurns(desiredTurns, state.turns);
 			const id = `${options.id}-${commandId}`;
 			// Always a `prompt` — see dispatchCommand for why the dedicated
 			// steer/follow_up commands leave an idle child at 0 turns forever.
-			write(dispatchCommand(id, message, mode));
+			//
+			// The watermark moves only AFTER the command lands. Advancing it first
+			// records a turn the worker owes even when nothing was written, which
+			// is a debt no child can ever pay off.
+			if (!write(dispatchCommand(id, message, mode))) {
+				const tail = stderr.trim();
+				throw new Error(
+					`worker "${options.id}" did not accept the command (stdin unwritable)${tail ? `: ${tail.slice(-500)}` : ""}`,
+				);
+			}
+			desiredTurns = advanceDesiredTurns(desiredTurns, state.turns);
 			// A send to a RUNNING child joins a queue that the running turn will
 			// drain; only a send to an idle child has to start something, and that
 			// is the one the watchdog covers.

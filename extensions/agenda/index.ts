@@ -1300,7 +1300,25 @@ export default function (pi: ExtensionAPI) {
 			if (!params.id) {
 				return { content: [{ type: "text", text: `Live workers:\n${describeLive()}` }], details: { count: live.length } };
 			}
-			const worker = workers.get(params.id);
+			// Accepts the composite id the listing prints, or any unambiguous
+			// segment of it. An exact-only lookup rejected the very id shown one
+			// line above, leaving a supervisor unable to steer or stop its worker.
+			const resolved = workers.resolve(params.id);
+			if (resolved.ambiguous) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `"${params.id}" matches ${resolved.ambiguous.length} live workers — name one exactly:\n${resolved.ambiguous
+								.map((candidate) => `  ${candidate.id}`)
+								.join("\n")}`,
+						},
+					],
+					details: null,
+					isError: true,
+				};
+			}
+			const worker = resolved.worker;
 			// An error, never a silent success. A supervisor that believes it
 			// re-tasked a worker which had already exited waits forever for a
 			// result that is not coming.
