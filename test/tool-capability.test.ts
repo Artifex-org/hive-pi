@@ -77,6 +77,7 @@ const READ_ONLY: Record<string, string> = {
 	read_symbol: "parses a file it reads",
 	render_chart: "renders to the terminal",
 	report: "worker→parent message; no-op locally",
+	session_grep: "lists and reads past session JSONL under the session dir; writes nothing, spawns nothing",
 	TaskCreate: "session-entry state",
 	TaskGet: "session-entry state",
 	TaskList: "session-entry state",
