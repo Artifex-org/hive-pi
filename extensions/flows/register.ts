@@ -179,6 +179,38 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
 
   registerGuardedTool(pi, {
     capability: FLOW_CAPABILITY,
+    name: "run_saved_agent_flow",
+    label: "Flows: request saved run",
+    description: "Request a saved Hive flow run and poll the same call ID. The current runtime-owner sandbox claims the request; Hive and hive-agent never execute source. Older Hive servers return a clear unsupported result.",
+    promptSnippet: "Run a saved agent flow against its team dev server",
+    parameters: Type.Object({
+      flow_id: Type.String({ description: "Saved Hive flow UUID." }),
+      call_id: Type.String({ description: "Stable idempotency key; repeat this exact call to poll." }),
+    }),
+    async execute(_id, params) {
+      const binding = await publisher.binding();
+      if (!binding) throw new Error("Hive session binding is unavailable; saved flows require a Hive-launched session.");
+      const result = await request<{ run?: { state?: string } }>(
+        binding.auth,
+        "POST",
+        `/agent-sessions/${encodeURIComponent(binding.sessionID)}/flows/${encodeURIComponent(params.flow_id)}/runs`,
+        { call_id: params.call_id },
+      );
+      if (!result.ok) {
+        if (result.status === 404) {
+          return toolText("This Hive server does not support saved flow runs yet. You can still record or author source locally and save it after the server upgrades.", { supported: false });
+        }
+        throw new Error(result.error ?? "requesting saved flow run failed");
+      }
+      return toolText(`Saved flow run is ${result.body?.run?.state ?? "pending"}. Repeat this exact call_id to poll; it never waits for browser execution.`, {
+        supported: true,
+        run: result.body?.run,
+      });
+    },
+  });
+
+  registerGuardedTool(pi, {
+    capability: FLOW_CAPABILITY,
     name: "record_playwright_flow",
     label: "Flows: record Playwright",
     description: "Start or stop recording browser navigation, click, type, and wait tools into relative Playwright source. Save the returned source with Hive's save_agent_flow tool.",
