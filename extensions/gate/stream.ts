@@ -88,6 +88,19 @@ export interface GateProgress {
 	 * frozen pane behind it and no way to tell the two apart.
 	 */
 	queued_secs?: number;
+	/**
+	 * WHY the run is still waiting, in the scheduler's own vocabulary
+	 * (`run_wip`, `no_capacity`, `release_serialized`, …).
+	 *
+	 * `queued_secs` made the wait legible; this makes it ATTRIBUTABLE, which is
+	 * the half that changes what an agent does next. A wait with no cause reads
+	 * as a hang, and the response to a hang is to run it again — measured on
+	 * pyERP 2026-09-01 (HIV-3167): 68 queued runs, 60 of them agents' own local
+	 * checks, 58 with zero tasks started, duplicate dispatches four seconds
+	 * apart. `run_wip` in particular means a re-run cannot help, because the cap
+	 * is per (project, pipeline) and the queue is what the new run joins.
+	 */
+	defer_reason?: string;
 }
 
 export function emptyProgress(mode: string, scope: string): GateProgress {

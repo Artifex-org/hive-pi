@@ -240,6 +240,16 @@ export interface HiveTask {
 	error?: string | null;
 	started_at?: string | null;
 	finished_at?: string | null;
+	/**
+	 * The scheduler's own account of why this task has not dispatched
+	 * (`run_wip`, `no_capacity`, `release_serialized`, …).
+	 *
+	 * On the wire from `GET /api/v1/runs/{id}` — hive's `hiveclient.Task` carries
+	 * `defer_reason` and its client_test asserts the `run_wip` value off that
+	 * exact endpoint. Read here because a queue wait an agent cannot attribute is
+	 * the wait it re-dispatches into (HIV-3167).
+	 */
+	defer_reason?: string | null;
 }
 
 /** The subset of `GET /runs/{id}/substeps` this reads. */
@@ -318,6 +328,8 @@ export function fold(input: FoldInput): GateProgress {
 		Number.isFinite(createdMs) && input.nowMs !== undefined
 			? Math.max(0, Math.round((input.nowMs - createdMs) / 1000))
 			: undefined;
+
+	const deferReason = deferReasonOf(tasks);
 
 	const byTask = new Map<string, HiveSubstep[]>();
 	for (const ss of substeps) {
@@ -400,7 +412,41 @@ export function fold(input: FoldInput): GateProgress {
 		// and uploads a snapshot first, so the two differ by however long that
 		// took, and the run's clock is the one Hive's own queue stats use.
 		...(queuedSecs !== undefined ? { queued_secs: queuedSecs } : {}),
+		...(deferReason !== undefined ? { defer_reason: deferReason } : {}),
 	};
+}
+
+/**
+ * The scheduler's reason the run is still waiting, taken from the tasks that
+ * have NOT started.
+ *
+ * Only unstarted tasks are asked. A task that already dispatched may still
+ * carry the reason it was deferred BEFORE it ran, and reporting that as the
+ * current cause would explain a wait that is over — the same
+ * stale-fact-drawn-as-live mistake `queued_secs` is scoped against.
+ *
+ * The most common reason wins, and ties break toward the first in task order so
+ * the answer is deterministic for a given run rather than depending on map
+ * iteration. One word is the right output: the caller is deciding whether to
+ * keep waiting, and a list of every reason across a fan-out does not help that.
+ */
+export function deferReasonOf(tasks: HiveTask[]): string | undefined {
+	const counts = new Map<string, number>();
+	for (const t of tasks) {
+		if (t.started_at) continue;
+		const reason = (t.defer_reason ?? "").trim();
+		if (reason === "") continue;
+		counts.set(reason, (counts.get(reason) ?? 0) + 1);
+	}
+	let best: string | undefined;
+	let bestCount = 0;
+	for (const [reason, n] of counts) {
+		if (n > bestCount) {
+			best = reason;
+			bestCount = n;
+		}
+	}
+	return best;
 }
 
 /**
@@ -418,6 +464,36 @@ export function fold(input: FoldInput): GateProgress {
  */
 export function isQueued(p: GateProgress): boolean {
 	return p.status === "running" && p.run_state !== undefined && p.done === 0 && p.running.length === 0;
+}
+
+/**
+ * One line naming why a queued run is waiting, and what that implies.
+ *
+ * Only reasons whose implication is NOT obvious get prose. `no_capacity` means
+ * what it says and the answer is to wait, so it is reported bare; inventing
+ * advice for it would dilute the one case where the intuitive move is wrong.
+ *
+ * Unknown reasons are passed through verbatim rather than swallowed or
+ * paraphrased. The scheduler's vocabulary grows, and a reason this function has
+ * never heard of is still the most specific fact available to the reader —
+ * hiding it because there is no canned sentence for it would be strictly worse
+ * than saying it plainly. Same rule the toolhints table states for itself:
+ * silence when unsure, never a guess.
+ */
+export function queuedReasonLine(reason: string): string {
+	switch (reason) {
+		case "run_wip":
+			return (
+				"reason: run_wip — this pipeline's in-flight cap is full, and the cap is per " +
+				"(project, pipeline). Re-running does NOT jump the queue: a new dispatch joins " +
+				"the back of it, and an identical request supersedes the one you are waiting on, " +
+				"so you lose that result and keep the same position. Wait, or follow the run later."
+			);
+		case "release_serialized":
+			return "reason: release_serialized — a deploy holds this pipeline; it will start when the release finishes.";
+		default:
+			return `reason: ${reason}`;
+	}
 }
 
 /** A wait, as a person reads one: `42s`, `4m12s`, `27m`. */
@@ -493,6 +569,22 @@ export function renderReport(p: GateProgress, opts: { logs?: { task: string; tai
 		// on — see GateProgress.queued_secs.
 		const waited = p.queued_secs !== undefined ? ` for ${humanSecs(p.queued_secs)}` : "";
 		out.push(`QUEUED${waited} — the run has not started yet (waiting for a fleet slot)${secs}`);
+		// THE CAUSE, AND WHAT NOT TO DO ABOUT IT.
+		//
+		// The line above says the wait is real; on its own it does not say
+		// whether waiting will end it, and an agent that cannot tell dispatches
+		// again. That is the loop HIV-3167 measured on pyERP 2026-09-01: 68
+		// queued runs, 60 of them agents' own checks, 58 with nothing started,
+		// duplicate dispatches four seconds apart and one branch queued five
+		// times — while the fleet sat at 30% utilisation, so none of it was
+		// capacity.
+		//
+		// `run_wip` is the reason worth spelling out, because the intuitive
+		// response is exactly the wrong one: the cap is per (project, pipeline),
+		// so a second dispatch joins the same queue rather than jumping it, and
+		// an identical request additionally SUPERSEDES the first — the agent
+		// loses the run it was waiting on and keeps its place at the back.
+		if (p.defer_reason) out.push(queuedReasonLine(p.defer_reason));
 	} else out.push(`STILL RUNNING — ${p.done}/${p.total ?? "?"} step(s) done${secs}`);
 
 	// Capped, and the cap is REPORTED. One red step blocks every downstream one,
