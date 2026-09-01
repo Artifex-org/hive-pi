@@ -38,6 +38,7 @@ const ALLOW: GhBodyVerdict = { kind: "allow" };
  * this comparison is case-SENSITIVE). `--notes` is the release equivalent.
  */
 const BODY_FLAGS = ["--body", "--notes", "-b", "-n"];
+const PR_BODY_FLAGS = ["--body", "-b"];
 
 /**
  * Does this command invoke `gh` at all?
@@ -50,6 +51,22 @@ function invokesGh(command: string): boolean {
 	return /(^|[;&|(]|\s)gh(\s|$)/.test(command);
 }
 
+function invokesGhPRCreateOrEdit(command: string): boolean {
+	return /(^|[;&|(]|\s)gh(?:\s+--(?:repo|hostname)(?:=|\s+)\S+)*\s+pr\s+(?:create|edit)(?=\s|$)/.test(command);
+}
+
+function isSerializedMarkdownBody(body: string): boolean {
+	if (/[\r\n]/.test(body) || (body.match(/\\n/g)?.length ?? 0) < 2) return false;
+	try {
+		JSON.parse(body);
+		return false;
+	} catch {
+		// A non-JSON body can still be a serialized Markdown document.
+	}
+	const normalized = body.replaceAll("\\r\\n", "\n").replaceAll("\\n", "\n");
+	return normalized.split("\n").filter((line) => /^#{1,6}\s/.test(line.trim())).length >= 2;
+}
+
 /**
  * The double-quoted value that follows a body flag, or null.
  *
@@ -57,10 +74,10 @@ function invokesGh(command: string): boolean {
  * caller decides what counts as dangerous. Scanning stops at the first
  * unescaped closing quote, which is where the shell stops too.
  */
-export function doubleQuotedBodies(command: string): string[] {
+function quotedBodies(command: string, flags: string[], quotes: string): string[] {
 	const out: string[] = [];
 	for (let i = 0; i < command.length; i++) {
-		const flag = BODY_FLAGS.find(
+		const flag = flags.find(
 			(f) =>
 				command.startsWith(f, i) &&
 				(i === 0 || /\s/.test(command[i - 1])) &&
@@ -71,23 +88,32 @@ export function doubleQuotedBodies(command: string): string[] {
 		let j = i + flag.length;
 		if (command[j] === "=") j++;
 		while (j < command.length && /\s/.test(command[j])) j++;
-		if (command[j] !== '"') continue;
+		const quote = command[j];
+		if (!quote || !quotes.includes(quote)) continue;
 		j++;
 		let value = "";
 		for (; j < command.length; j++) {
 			const ch = command[j];
-			if (ch === "\\") {
+			if (quote === '"' && ch === "\\") {
 				value += ch + (command[j + 1] ?? "");
 				j++;
 				continue;
 			}
-			if (ch === '"') break;
+			if (ch === quote) break;
 			value += ch;
 		}
 		out.push(value);
 		i = j;
 	}
 	return out;
+}
+
+export function doubleQuotedBodies(command: string): string[] {
+	return quotedBodies(command, BODY_FLAGS, '"');
+}
+
+function quotedPRBodies(command: string): string[] {
+	return quotedBodies(command, PR_BODY_FLAGS, "\"'");
 }
 
 /** Remove balanced `$( … )` spans — a substitution the author asked for. */
@@ -132,8 +158,24 @@ export function hasLiveBacktick(value: string): boolean {
 export function ghBodyVerdict(command: string | undefined): GhBodyVerdict {
 	if (!command || !invokesGh(command)) return ALLOW;
 	const offending = doubleQuotedBodies(command).find(hasLiveBacktick);
-	if (offending === undefined) return ALLOW;
+	if (offending !== undefined) {
+		return blockedBodyReason(
+			command,
+			"a markdown backtick inside DOUBLE quotes",
+			"The shell runs backticked text as a command and splices the output into the body before gh sees it",
+		);
+	}
+	if (invokesGhPRCreateOrEdit(command) && quotedPRBodies(command).some(isSerializedMarkdownBody)) {
+		return blockedBodyReason(
+			command,
+			"literal \\n separators instead of Markdown line breaks",
+			"The shell preserves those two characters, so GitHub stores one long line instead of the Markdown document you wrote",
+		);
+	}
+	return ALLOW;
+}
 
+function blockedBodyReason(command: string, problem: string, consequence: string): GhBodyVerdict {
 	// A COMPOUND command is refused whole, and the caller has to be told that.
 	//
 	// The first agent to hit this guard (2026-08-18, 25 minutes after it shipped)
@@ -147,11 +189,9 @@ export function ghBodyVerdict(command: string | undefined): GhBodyVerdict {
 	return {
 		kind: "block",
 		reason: [
-			"BLOCKED: this `gh … --body \"…\"` contains a markdown backtick inside DOUBLE quotes.",
+			`BLOCKED: this gh PR inline body contains ${problem}.`,
 			"",
-			"The shell runs backticked text as a command and splices the output into the body",
-			"BEFORE gh sees it, so the code span disappears (or becomes a `command not found`)",
-			"and gh still exits 0 with a url. Nothing reports the loss.",
+			`${consequence}. GitHub still exits 0, so the damage is otherwise silent.`,
 			"",
 			"Write the body to a file and pass it instead — the body then reaches GitHub byte",
 			"for byte, and it is the only form that survives a body of any length:",
