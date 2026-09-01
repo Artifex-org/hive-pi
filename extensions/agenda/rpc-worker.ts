@@ -68,6 +68,25 @@ export interface WorkerHandle {
 	send(message: string, mode: DeliveryMode): Promise<void>;
 	waitForSettle(timeoutMs?: number): Promise<void>;
 	stop(): void;
+	/**
+	 * Turns this worker OWES: commands accepted minus turns completed.
+	 *
+	 * Without it a worker that never received its first prompt renders exactly
+	 * like a healthy one that has just started — "idle, 0 turn(s), 0 tokens" is
+	 * both. That ambiguity is what made a stalled fleet unreadable: measured on
+	 * this workstation, 43 of 43 worker readings across five sessions were that
+	 * one string, and nothing in the listing said whether any of them was owed a
+	 * turn nobody had delivered.
+	 */
+	owedTurns(): number;
+	/**
+	 * The child's stderr tail, or "" when it has said nothing.
+	 *
+	 * It was already captured and bounded here — and then read by nobody, so
+	 * every reason a worker failed to start was collected and discarded. A
+	 * failure the supervisor cannot see is a failure it cannot report.
+	 */
+	stderrTail(): string;
 }
 
 export function durableWorkerID(runId: string, nodeId: string, workId: string): string {
@@ -141,6 +160,33 @@ export class WorkerRegistry {
 			return undefined;
 		}
 		return worker;
+	}
+
+	/**
+	 * Find a worker by the full id OR by a trailing segment of it.
+	 *
+	 * The listing prints `run-<uuid>:<node>:<work>` and an exact-only lookup
+	 * then refuses the very id it just showed — observed verbatim in one
+	 * session, the refusal printed directly above a listing containing that
+	 * id:
+	 *
+	 *   No live worker "96fac376567e9ec8".
+	 *   Live workers:
+	 *     run-38c9a8e7-…:tes8841:96fac376567e9ec8 (retriever) — idle, …
+	 *
+	 * A supervisor that cannot address its own worker cannot steer or stop it.
+	 * Ambiguity is an ERROR rather than a guess: steering the wrong worker is
+	 * worse than being told to be specific.
+	 */
+	resolve(id: string): { worker?: WorkerHandle; ambiguous?: WorkerHandle[] } {
+		const exact = this.get(id);
+		if (exact) return { worker: exact };
+		const matches = this.list().filter(
+			(worker) => worker.id.endsWith(`:${id}`) || worker.id.split(":").includes(id),
+		);
+		if (matches.length === 1) return { worker: matches[0] };
+		if (matches.length > 1) return { ambiguous: matches };
+		return {};
 	}
 
 	list(): WorkerHandle[] {
@@ -251,12 +297,27 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 		for (const resolve of waiters) resolve();
 	};
 
-	const write = (command: OutboundCommand) => {
-		if (exited || !child.stdin?.writable) return;
+	/**
+	 * Returns whether the command actually reached the child.
+	 *
+	 * It used to return void on every path, which made an undeliverable command
+	 * indistinguishable from a delivered one. `send()` had ALREADY advanced
+	 * `desiredTurns` by then, so the worker was recorded as owing a turn that
+	 * nothing would ever produce: `reachedDesiredTurns` stayed false, the
+	 * dispatch waited out the full 15-minute settle timeout, and the listing
+	 * showed a serene "idle, 0 turn(s), 0 tokens" throughout. `send()`'s own
+	 * contract — "An error, never a silent drop" — was being broken one function
+	 * down from where it is written.
+	 */
+	const write = (command: OutboundCommand): boolean => {
+		if (exited || !child.stdin?.writable) return false;
 		try {
 			child.stdin.write(`${JSON.stringify(command)}\n`);
+			return true;
 		} catch {
-			/* the child went away between the check and the write */
+			// The child went away between the check and the write. Not an
+			// exception to swallow: the caller must learn the command is lost.
+			return false;
 		}
 	};
 
@@ -358,15 +419,26 @@ export function startDurableWorker(options: StartOptions): WorkerHandle {
 		cwd: options.cwd,
 		state: () => state,
 		alive: () => !exited,
+		owedTurns: () => Math.max(0, desiredTurns - state.turns),
+		stderrTail: () => stderr,
 		async send(message: string, mode: DeliveryMode) {
 			// An error, never a silent drop. A supervisor that believes it re-tasked
 			// a worker which had already exited waits forever for a result that is
 			// not coming — and "delivered" is the one thing it cannot verify later.
 			if (exited) throw new Error(`worker "${options.id}" has exited`);
 			commandId++;
-			desiredTurns = advanceDesiredTurns(desiredTurns, state.turns);
 			const id = `${options.id}-${commandId}`;
-			write(mode === "steer" ? { id, type: "steer", message } : { id, type: "follow_up", message });
+			// Written BEFORE the watermark moves. The old order raised
+			// `desiredTurns` and then dropped the command on an unwritable stdin,
+			// leaving the worker permanently owing a turn nothing would deliver.
+			// A command that did not land must leave the watermark untouched.
+			if (!write(mode === "steer" ? { id, type: "steer", message } : { id, type: "follow_up", message })) {
+				const tail = stderr.trim();
+				throw new Error(
+					`worker "${options.id}" did not accept the command (stdin unwritable)${tail ? `: ${tail.slice(-500)}` : ""}`,
+				);
+			}
+			desiredTurns = advanceDesiredTurns(desiredTurns, state.turns);
 		},
 		waitForSettle,
 		stop,
@@ -457,11 +529,26 @@ export function makeDurableSpawn(cwd: string, runId: string, registry: WorkerReg
 				await worker.waitForSettle();
 				if (registry.wasIntentionallyStopped(worker)) return { ok: false, error: "stopped by orchestrator" };
 				const state = worker.state();
-				if (!worker.alive() && !state.everSettled) return { ok: false, error: "worker exited before settling" };
+				// The child's own words, when it left any. Every one of these
+				// failures used to be reported with no cause at all, while the
+				// stderr that explains it sat captured and unread in the handle.
+				const tail = worker.stderrTail().trim();
+				const because = tail ? `: ${tail.slice(-500)}` : "";
+				if (!worker.alive() && !state.everSettled) return { ok: false, error: `worker exited before settling${because}` };
+				// Alive, owes a turn, and never produced one: it did not answer
+				// within the settle timeout. Distinct from "answered with nothing",
+				// and the distinction is the whole diagnosis — one is a stuck
+				// child, the other is a bad answer.
+				if (worker.alive() && worker.owedTurns() > 0 && !state.everSettled) {
+					return {
+						ok: false,
+						error: `worker never took its first turn — ${worker.owedTurns()} command(s) delivered, none answered within the settle timeout${because}`,
+					};
+				}
 				const text = finalText(state);
 				// An exit-0 worker that said NOTHING is a failure, not an empty
 				// success — the same rule worker.ts enforces, and for the same reason.
-				if (!text) return { ok: false, error: "worker produced no output" };
+				if (!text) return { ok: false, error: `worker produced no output${because}` };
 				return { ok: true, text };
 			});
 

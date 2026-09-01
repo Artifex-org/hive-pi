@@ -1287,7 +1287,13 @@ export default function (pi: ExtensionAPI) {
 								const said = report
 									? ` · says ${report.status}${report.pct !== undefined ? ` ${report.pct}%` : ""}${report.note ? `: ${report.note}` : ""}`
 									: "";
-								return `  ${worker.id} (${worker.role})${said} — ${state.busy ? "working" : "idle"}, ${state.turns} turn(s), ${state.tokens} tokens${
+								// "idle, 0 turn(s), 0 tokens" is BOTH a healthy worker that
+								// has just started and one that is owed a turn nobody
+								// delivered. Saying which removes the single most misleading
+								// line this tool prints.
+								const owed = worker.owedTurns();
+								const activity = state.busy ? "working" : owed > 0 ? `awaiting ${owed} unanswered turn(s)` : "idle";
+								return `  ${worker.id} (${worker.role})${said} — ${activity}, ${state.turns} turn(s), ${state.tokens} tokens${
 									formatCost(state.usage.cost) ? `, ${formatCost(state.usage.cost)}` : ""
 								}${state.lastTool ? `, last tool ${state.lastTool}` : ""}`;
 							})
@@ -1296,7 +1302,26 @@ export default function (pi: ExtensionAPI) {
 			if (!params.id) {
 				return { content: [{ type: "text", text: `Live workers:\n${describeLive()}` }], details: { count: live.length } };
 			}
-			const worker = workers.get(params.id);
+			// Accepts the composite id the listing prints, or any unambiguous
+			// segment of it. An exact-only lookup rejected the very id shown one
+			// line above, which leaves a supervisor unable to steer or stop its
+			// own worker.
+			const resolved = workers.resolve(params.id);
+			if (resolved.ambiguous) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `"${params.id}" matches ${resolved.ambiguous.length} live workers — name one exactly:\n${resolved.ambiguous
+								.map((candidate) => `  ${candidate.id}`)
+								.join("\n")}`,
+						},
+					],
+					details: null,
+					isError: true,
+				};
+			}
+			const worker = resolved.worker;
 			// An error, never a silent success. A supervisor that believes it
 			// re-tasked a worker which had already exited waits forever for a
 			// result that is not coming.
