@@ -55,16 +55,40 @@ function invokesGhPRCreateOrEdit(command: string): boolean {
 	return /(^|[;&|(]|\s)gh(?:\s+--(?:repo|hostname)(?:=|\s+)\S+)*\s+pr\s+(?:create|edit)(?=\s|$)/.test(command);
 }
 
+function decodedSerializedMarkdown(body: string): { text: string; newlineCount: number } {
+	let text = "";
+	let newlineCount = 0;
+	for (let i = 0; i < body.length; i++) {
+		if (body[i] !== "\\") {
+			text += body[i];
+			continue;
+		}
+		let slashCount = 1;
+		while (body[i + slashCount] === "\\") slashCount++;
+		const next = body[i + slashCount];
+		const following = body.slice(i + slashCount);
+		if (slashCount % 2 === 1 && (next === "n" || following.startsWith("r\\n"))) {
+			text += "\\".repeat((slashCount - 1) / 2) + "\n";
+			newlineCount++;
+			i += slashCount + (next === "n" ? 0 : 2);
+			continue;
+		}
+		text += body.slice(i, i + slashCount);
+		i += slashCount - 1;
+	}
+	return { text, newlineCount };
+}
+
 function isSerializedMarkdownBody(body: string): boolean {
-	if (/[\r\n]/.test(body) || (body.match(/\\n/g)?.length ?? 0) < 2) return false;
+	if (/[\r\n]/.test(body)) return false;
 	try {
 		JSON.parse(body);
 		return false;
 	} catch {
 		// A non-JSON body can still be a serialized Markdown document.
 	}
-	const normalized = body.replaceAll("\\r\\n", "\n").replaceAll("\\n", "\n");
-	return normalized.split("\n").filter((line) => /^#{1,6}\s/.test(line.trim())).length >= 2;
+	const decoded = decodedSerializedMarkdown(body);
+	return decoded.newlineCount >= 2 && decoded.text.split("\n").filter((line) => /^#{1,6}\s/.test(line.trim())).length >= 2;
 }
 
 /**

@@ -30,8 +30,10 @@ describe("ghBodyVerdict blocks", () => {
 		const body = `## Summary\\n- preserve separate list items\\n\\n## Verification\\n- tests passed`;
 		for (const command of [
 			`gh pr create --body '${body}'`,
-			`gh pr edit 42 --body "${body}"`,
-			`gh --repo Artifex-org/hive pr create --body '${body}'`,
+			`gh pr create -b='${body}'`,
+			`gh pr edit 42 --body="${body}"`,
+			`gh pr edit 42 --repo Artifex-org/hive -b '${body}'`,
+			`gh --hostname github.example pr create --body '${body}'`,
 		]) {
 			const v = ghBodyVerdict(command);
 			expect(v.kind, command).toBe("block");
@@ -53,6 +55,7 @@ describe("ghBodyVerdict allows", () => {
 			'gh pr create --body "## Summary\r\n- formatted\r\n\r\n## Verification\r\n- pass"',
 			`gh pr create --body '${json}'`,
 			'gh pr create --body \'Call printf("first\\ntwo\\nthree")\'',
+			'gh pr create --body \'## Literal\\\\nnot a Markdown line break\\\\n## Still literal\'',
 			'gh pr create --body \'- literal list one\\n- literal list two\\n- literal list three\'',
 			'gh pr create --body "## Summary\n- physical\\n- literal\n\n## Verification\n- pass"',
 			`gh issue comment 42 --body '${serialized}'`,
