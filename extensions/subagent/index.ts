@@ -647,6 +647,23 @@ async function runSingleAgent(
 		}
 	}
 
+	// Orchestrators must be visible, durable Hive sessions. A hidden in-process
+	// child cannot receive team/Factory doorbells or own the long-running reap
+	// loop, even though the opmode extension could mechanically gate its tools.
+	if (agent.opMode === "orchestrate") {
+		return {
+			agent: agentName,
+			agentSource: agent.source,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: "The orchestrate operating mode is not available to in-process subagents; launch a visible Hive teammate instead.",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model,
+			step,
+		};
+	}
+
 	// One writer per worktree, on the SAME lock agenda's workers take — see
 	// harness/writer.ts. `null` when the role cannot write, so a read-only
 	// subagent never contends for the slot.

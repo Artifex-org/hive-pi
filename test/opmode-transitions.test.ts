@@ -28,7 +28,19 @@ import planExtension from "../extensions/plan/index.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 
 /** The tools whose presence the assertions turn on, plus a couple of readers. */
-const TOOLS = ["edit", "write", "read", "grep", "bash", "mcp", "mcpScript", "render_chart"];
+const TOOLS = [
+	"edit",
+	"write",
+	"read",
+	"grep",
+	"bash",
+	"mcp",
+	"mcpScript",
+	"render_chart",
+	"quality_gate",
+	"subagent",
+	"orchestrate",
+];
 
 async function boot(): Promise<FakePi> {
 	const pi = createFakePi();
@@ -109,6 +121,30 @@ describe("tool-set ownership across mode transitions", () => {
 
 		await pi.runCommand("mode", "build");
 		expect(active(pi).has("edit")).toBe(true);
+	});
+
+	it("narrows orchestrate to coordination and restores build", async () => {
+		const pi = await boot();
+
+		await pi.runCommand("mode", "orchestrate");
+		expect(active(pi).has("read")).toBe(true);
+		expect(active(pi).has("quality_gate")).toBe(true);
+		expect(active(pi).has("mcp")).toBe(true);
+		expect(active(pi).has("edit")).toBe(false);
+		expect(active(pi).has("mcpScript")).toBe(false);
+		expect(active(pi).has("subagent")).toBe(false);
+		expect(active(pi).has("orchestrate")).toBe(false);
+
+		const blocked = await pi.emit({
+			type: "tool_call",
+			toolName: "bash",
+			input: { command: "printf x > src/new.ts" },
+		});
+		expect(blocked.some((result) => (result as { block?: boolean } | undefined)?.block)).toBe(true);
+
+		await pi.runCommand("mode", "build");
+		expect(active(pi).has("edit")).toBe(true);
+		expect(active(pi).has("subagent")).toBe(true);
 	});
 
 	it("keeps the read-only MCP card gateway visible in discussion mode", async () => {

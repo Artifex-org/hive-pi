@@ -177,6 +177,129 @@ export function classifyDiscussionTool(name: string, input: unknown): PlanToolVe
 		: { allowed: false, reason: "Discussion mode permits only MCP discovery or reviewed read-only cards." };
 }
 
+/** Direct tools whose whole contract is coordination or verification. */
+const ORCHESTRATE_TOOLS = new Set([
+	"TaskCreate",
+	"TaskUpdate",
+	"goal_set",
+	"hive_watch_run",
+	"knowledge_collections",
+	"knowledge_get",
+	"knowledge_grep",
+	"knowledge_multi_get",
+	"knowledge_search",
+	"list_symbols",
+	"list_workspace_catalog",
+	"papercut",
+	"quality_gate",
+	"read_ref",
+	"read_symbol",
+	"readiness",
+	"render_chart",
+	"request_workspace",
+	"session_grep",
+	"workflow_write",
+]);
+
+/**
+ * MCP operations reviewed as orchestration, never implementation.
+ *
+ * Exact adapter paths rather than a `hive_` prefix: Hive also exposes generic
+ * trigger, deploy and secret mutations. A newly added MCP tool stays denied
+ * until somebody reads its contract and adds it here deliberately.
+ */
+const ORCHESTRATE_MCP_TOOLS = new Set([
+	"hive_add_teammate",
+	"hive_approve_plan",
+	"hive_assign_teammate_squad",
+	"hive_cancel_agent_launch",
+	"hive_cancel_run",
+	"hive_claim_ticket",
+	"hive_comment_ticket",
+	"hive_create_squad",
+	"hive_create_team",
+	"hive_delete_squad",
+	"hive_diagnose_agent_session",
+	"hive_end_agent_session",
+	"hive_explain_failure",
+	"hive_find_related_work",
+	"hive_force_kill_agent_session",
+	"hive_get_board",
+	"hive_get_occupancy",
+	"hive_get_pull",
+	"hive_get_run",
+	"hive_get_task_logs",
+	"hive_get_ticket",
+	"hive_launch_teammate",
+	"hive_list_agent_launches",
+	"hive_list_agent_sessions",
+	"hive_list_run_completions",
+	"hive_list_teams",
+	"hive_list_teammates",
+	"hive_message_teammate",
+	"hive_move_ticket_state",
+	"hive_offload_to_factory",
+	"hive_post_team_note",
+	"hive_read_inbox",
+	"hive_read_team_notes",
+	"hive_recap_session",
+	"hive_remove_teammate",
+	"hive_rename_squad",
+	"hive_retry_run",
+	"hive_steer_agent",
+	"hive_wait_for_run",
+	"hive_whoami",
+]);
+
+/**
+ * What a coordination-only lead may call.
+ *
+ * The read-only base remains available for inspecting work. Mutations are an
+ * exact list of team, Factory, ticket-state and verification operations. The
+ * generic MCP script, generic run trigger and child-agent tools are absent on
+ * purpose: each can perform implementation outside the reviewed team topology.
+ */
+export function classifyOrchestrateTool(name: string, input: unknown): PlanToolVerdict {
+	if (["background_bash", "mcpScript", "orchestrate", "orchestrate_result", "subagent", "worker_send"].includes(name)) {
+		return {
+			allowed: false,
+			reason: `\`${name}\` can execute hidden implementation work. Orchestrate mode requires visible Hive teammates or Factory runs.`,
+		};
+	}
+	if (name === "mcp") {
+		if (!input || typeof input !== "object" || Array.isArray(input)) {
+			return { allowed: false, reason: "Orchestrate mode requires a structured MCP request." };
+		}
+		const params = input as { tool?: unknown; action?: unknown };
+		if (params.action !== undefined) {
+			return params.action === "ui-messages"
+				? { allowed: true }
+				: { allowed: false, reason: "Orchestrate mode permits MCP discovery and UI messages, not authentication actions." };
+		}
+		if (typeof params.tool === "string") {
+			return ORCHESTRATE_MCP_TOOLS.has(params.tool) || discussionReadOnlyMcpTools().has(params.tool)
+				? { allowed: true }
+				: {
+						allowed: false,
+						reason: `Orchestrate mode does not permit MCP tool \`${params.tool}\`; delegate implementation to a teammate or Factory run.`,
+					};
+		}
+		const keys = Object.keys(params);
+		return keys.every((key) => MCP_DISCOVERY_KEYS.has(key))
+			? { allowed: true }
+			: { allowed: false, reason: "Orchestrate mode permits only MCP discovery or reviewed coordination tools." };
+	}
+
+	const base = classifyDiscussionTool(name, input);
+	if (base.allowed || ORCHESTRATE_TOOLS.has(name)) return { allowed: true };
+	return {
+		allowed: false,
+		reason:
+			`\`${name}\` is not on orchestrate mode's coordination allowlist. ` +
+			"Delegate implementation to a Hive teammate or Factory run instead.",
+	};
+}
+
 /* -------------------------------------------------------------------------- */
 /* Shell classification                                                        */
 /* -------------------------------------------------------------------------- */
@@ -241,15 +364,69 @@ export function findBlockedSegment(command: string): string | undefined {
 	return segments.find((segment) => !isSafeSegment(segment));
 }
 
-export function classifyCommand(command: string): PlanToolVerdict {
+export function classifyCommand(command: string, posture = "Plan"): PlanToolVerdict {
 	const blocked = findBlockedSegment(command);
 	if (blocked === undefined) return { allowed: true };
 	return {
 		allowed: false,
 		reason:
-			`Plan mode allows only read-only shell commands, and this one is not on the list:\n  ${blocked}\n` +
+			`${posture} mode allows only read-only shell commands, and this one is not on the list:\n  ${blocked}\n` +
 			`Redirects, subshells, backgrounding, command substitution and variable assignment are refused outright.`,
 	};
+}
+
+// Orchestrate promises more than plan/discuss: the lead must NEVER implement.
+// Keep its shell subset intentionally small. In particular, sed/awk programs
+// can write from inside a quoted script (`sed 'w file'`, awk `> file`), which a
+// token-level redirect check cannot see; git's branch/remote/config verbs and
+// `--output` flags mutate despite looking like readers.
+const ORCHESTRATE_SHELL_READERS = new Set([
+	"basename", "bat", "cat", "column", "comm", "cut", "date", "df", "diff",
+	"dirname", "du", "echo", "eza", "file", "find", "grep", "head", "id",
+	"jq", "join", "ls", "nl", "printenv", "printf", "ps", "pwd", "readlink", "realpath",
+	"rg", "seq", "stat", "tail", "true", "type", "uname", "uniq", "uptime",
+	"wc", "which", "whoami",
+]);
+
+const ORCHESTRATE_GIT_READERS = new Set([
+	"blame", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
+	"rev-parse", "shortlog", "show", "status",
+]);
+
+export function classifyOrchestrateCommand(command: string): PlanToolVerdict {
+	const base = classifyCommand(command, "Orchestrate");
+	if (!base.allowed) return base;
+	const segments = splitSegments(command);
+	if (!segments) return { allowed: false, reason: "Orchestrate mode could not prove that shell command read-only." };
+	for (const segment of segments) {
+		const tokens = shellWords(segment);
+		if (!tokens || tokens.length === 0) return { allowed: false, reason: "Orchestrate mode could not parse the shell command." };
+		const executable = tokens[0].toLowerCase();
+		const args = tokens.slice(1);
+		if (ORCHESTRATE_SHELL_READERS.has(executable)) continue;
+		if (executable === "git") {
+			let i = 0;
+			let safeGlobals = true;
+			while (i < args.length && args[i].startsWith("-")) {
+				if (args[i] === "-C" && args[i + 1]) i += 2;
+				else if (args[i] === "--no-pager") i++;
+				else { safeGlobals = false; break; }
+			}
+			const verb = args[i];
+			const unsafeGitFlag = args.slice(i + 1).some((arg) =>
+				arg === "-o" || arg.startsWith("--output") || arg === "--ext-diff" || arg === "--textconv",
+			);
+			if (safeGlobals && verb && ORCHESTRATE_GIT_READERS.has(verb) && !unsafeGitFlag) continue;
+		}
+		if (executable === "gh" || executable === "hive") {
+			if (isSafeStructured(executable, args)) continue;
+		}
+		return {
+			allowed: false,
+			reason: `Orchestrate mode permits only its strict inspection shell subset; delegate this command:\n  ${segment}`,
+		};
+	}
+	return { allowed: true };
 }
 
 /**

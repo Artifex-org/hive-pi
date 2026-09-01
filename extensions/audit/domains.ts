@@ -8,7 +8,7 @@
  *
  * ───────────────────────────────────────────────────────────────────────────
  * THESE ARE DOMAINS, NOT MODES. The word "mode" is taken: it means the session
- * POSTURE the harness enforces (build/plan/discuss/bugfix — see
+ * POSTURE the harness enforces (build/plan/discuss/bugfix/orchestrate — see
  * extensions/opmode/modes.ts), and a mode must be domain-free by that rule.
  * An audit domain is the opposite — it is nothing BUT domain content, which is
  * exactly why it is a skill parameter and not a posture. Keeping the two words
