@@ -30,7 +30,17 @@ function loadTools(): { tools: Map<string, RegisteredTool>; shutdown: () => void
 			if (event === "session_shutdown") onShutdown = handler;
 		},
 	};
-	(devservicesExtension as unknown as (pi: typeof fakePi) => void)(fakePi);
+	// This suite exercises the standalone/local tool surface even when the test
+	// runner itself is a Hive-launched session. Managed mode has its own real-PG
+	// integration suite and intentionally registers no dev_db_* bypass tools.
+	const launchID = process.env.HIVE_LAUNCH_ID;
+	delete process.env.HIVE_LAUNCH_ID;
+	try {
+		(devservicesExtension as unknown as (pi: typeof fakePi) => void)(fakePi);
+	} finally {
+		if (launchID === undefined) delete process.env.HIVE_LAUNCH_ID;
+		else process.env.HIVE_LAUNCH_ID = launchID;
+	}
 	return { tools, shutdown: () => onShutdown?.() };
 }
 
