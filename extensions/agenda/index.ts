@@ -108,7 +108,8 @@ import { discoverAgents } from "../harness/roles.ts";
 import { diffStamp } from "../harness/verify.ts";
 import { deriveSignals, emptySignals } from "./signals.ts";
 import { shouldAutoShutdown } from "./auto-shutdown.ts";
-import { compactInstructions } from "./session-recap.ts";
+import { compactInstructions, fetchRecapPayload, handoffRecapSections } from "./session-recap.ts";
+import { rehydratePlan } from "../plan/state.ts";
 import { isUnattendedHiveLaunch } from "../hive-common/launch.ts";
 import { makeSpawn } from "./worker.ts";
 import { makeDurableSpawn, WorkerRegistry } from "./rpc-worker.ts";
@@ -1082,6 +1083,34 @@ export default function (pi: ExtensionAPI) {
 				/* unreadable session — the seed still carries goal/conductor/git state */
 			}
 			const cwd = ctx.cwd;
+
+			// The open work items live only on this machine — Hive parses the plan
+			// document for {phase, done, total} and stores no todos at all.
+			//
+			// From the ACTIVE BRANCH, not the whole file (HIV-1972): a session is a
+			// tree, `/tree` moves the leaf, and the newest plan snapshot in the file
+			// may belong to a branch the operator abandoned. Seeding the successor
+			// from that is failure (a) of test/branch-scoped-state.test.ts, with the
+			// abandoned work carried into a fresh session that cannot tell.
+			let plan = null;
+			try {
+				plan = rehydratePlan(branchEntries(ctx));
+			} catch {
+				/* an unreadable plan degrades to the counts, not to a failed handoff */
+			}
+
+			// A command handler is the sanctioned place for this: `resolveAuth` does
+			// blocking I/O and must never run inside an event handler, where pi
+			// awaits serially. `null` means ABSENT — the seed says so rather than
+			// letting the successor read silence as "no PR, no ticket, no team".
+			let recap: ReturnType<typeof handoffRecapSections> | null = null;
+			try {
+				const payload = await fetchRecapPayload();
+				if (payload !== null) recap = handoffRecapSections(payload);
+			} catch {
+				/* unreachable Hive is a thinner seed, never a failed handoff */
+			}
+
 			const seed = buildHandoffSeed({
 				objective: args.trim(),
 				goal,
@@ -1089,6 +1118,8 @@ export default function (pi: ExtensionAPI) {
 				signals,
 				gitStatus: await diffStamp(cwd),
 				cwd,
+				plan,
+				recap,
 			});
 			try {
 				const path = writeHandoff(cwd, seed);

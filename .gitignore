@@ -13,3 +13,10 @@ node_modules/
 auth.json
 .npmrc
 credentials.json
+
+# Handoff seeds (`/handoff`, HIV-1231). Consumed seeds are RENAMED rather than
+# deleted so lineage stays on disk, which leaves them untracked in the worktree
+# where a later `git add -A` would commit them. A seed carries branch names,
+# PR/ticket ids, knowledge paths and open work items — internal state that must
+# not reach a public repo by accident.
+.pi/handoff*
