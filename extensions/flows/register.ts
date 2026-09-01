@@ -127,6 +127,71 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
     }
   }
 
+  let flowPoll: ReturnType<typeof setInterval> | null = null;
+  let flowPollBusy = false;
+  let flowRunsSupported = true;
+
+  async function runSource(source: string, baseURL: string): Promise<string> {
+    const sourceError = validatePlaywrightSource(source);
+    if (sourceError) throw new Error(sourceError);
+    const resolved = new URL(baseURL);
+    if (!["http:", "https:"].includes(resolved.protocol) || !["127.0.0.1", "localhost", "::1"].includes(resolved.hostname)) {
+      throw new Error("runtime flow base URL must be an HTTP(S) loopback address");
+    }
+    const page = await host.page();
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (page: Page, baseURL: string) => Promise<void>;
+    const run = new AsyncFunction("page", "baseURL", `"use strict";\n${source}`);
+    await run(page, resolved.toString());
+    return page.url();
+  }
+
+  async function completeClaim(runID: string, state: "succeeded" | "failed" | "deferred", summary: string, error = "", evidence: Record<string, string> = {}) {
+    const binding = await publisher.binding();
+    if (!binding) return;
+    await request(binding.auth, "POST", `/agent-sessions/${encodeURIComponent(binding.sessionID)}/flow-runs/${encodeURIComponent(runID)}/complete`, {
+      state,
+      summary: summary.slice(0, 8000),
+      error: error.slice(0, 4000),
+      evidence,
+    });
+  }
+
+  async function pollSavedFlowRuns() {
+    if (!flowRunsSupported || flowPollBusy || !process.env.HIVE_LAUNCH_ID) return;
+    flowPollBusy = true;
+    try {
+      const binding = await publisher.binding();
+      if (!binding) return;
+      const claimed = await request<{ items?: Array<{ run?: { id?: string; format?: string; source?: string }; connection_url?: string }> }>(
+        binding.auth,
+        "POST",
+        `/agent-sessions/${encodeURIComponent(binding.sessionID)}/flow-runs/claim`,
+      );
+      if (claimed.status === 404) {
+        flowRunsSupported = false;
+        return;
+      }
+      if (!claimed.ok) return;
+      for (const claim of claimed.body?.items ?? []) {
+        const run = claim.run;
+        if (!run?.id || !run.format || !run.source) continue;
+        if (run.format === "maestro" && process.platform !== "darwin") {
+          await completeClaim(run.id, "deferred", "Maestro execution is deferred to the Mac lane.");
+          continue;
+        }
+        try {
+          const url = await runSource(run.source, claim.connection_url ?? "");
+          await completeClaim(run.id, "succeeded", "Playwright flow completed.", "", { url });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "flow execution failed";
+          await completeClaim(run.id, "failed", "Playwright flow failed.", message);
+        }
+      }
+    } finally {
+      flowPollBusy = false;
+    }
+  }
+
   function record(action: RecordedAction): void {
     if (!recording) return;
     if (action.kind === "navigate" && recording.origin === "null") {
@@ -248,18 +313,8 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
       base_url: Type.String({ description: "Resolved loopback base URL from this runtime owner's named dev-server resource." }),
     }),
     async execute(_id, params) {
-      const sourceError = validatePlaywrightSource(params.source);
-      if (sourceError) throw new Error(sourceError);
-      const baseURL = new URL(params.base_url);
-      if (baseURL.protocol !== "http:" && baseURL.protocol !== "https:") throw new Error("base_url must be HTTP(S)");
-      if (!["127.0.0.1", "localhost", "::1"].includes(baseURL.hostname)) {
-        throw new Error("base_url must resolve to the runtime owner's loopback dev server");
-      }
-      const page = await host.page();
-      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (page: Page, baseURL: string) => Promise<void>;
-      const run = new AsyncFunction("page", "baseURL", `"use strict";\n${params.source}`);
-      await run(page, baseURL.toString());
-      return toolText(`Flow completed at ${page.url()}`, { ok: true, url: page.url() });
+      const url = await runSource(params.source, params.base_url);
+      return toolText(`Flow completed at ${url}`, { ok: true, url });
     },
   });
 
@@ -289,7 +344,16 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
     },
   });
 
+  pi.on("session_start", () => {
+    if (process.env.HIVE_LAUNCH_ID) {
+      flowPoll = setInterval(() => void pollSavedFlowRuns(), 2_000);
+      flowPoll.unref?.();
+      void pollSavedFlowRuns();
+    }
+  });
+
   pi.on("session_shutdown", async () => {
+    if (flowPoll) clearInterval(flowPoll);
     if (devServer) {
       clearInterval(devServer.timer);
       await publishDevServer("ended", "unknown");
