@@ -4,11 +4,14 @@ import { mcpLaunchers, projectFor } from "../profile-common/profile.ts";
  * MCP readiness helpers: which configured servers belong to THIS session,
  * and whether a stdio server can actually be spawned.
  *
- * The adapter's config is GLOBAL (`~/.pi/agent/mcp.json`). That is a real
- * choice — a ticket tracker or an error reporter is useful from any checkout —
- * but some entries are a *product*: they talk to ONE project's backend, and a
- * session in a different checkout that reports "mcp <other-product> · 353
- * tools" is describing another project's cache, not itself. HIV-2639.
+ * The adapter's config is normally GLOBAL (`~/.pi/agent/mcp.json`). That is a
+ * real choice — a ticket tracker or an error reporter is useful from any
+ * checkout — but a Hive launch replaces it with
+ * `PI_CODING_AGENT_DIR/mcp.json`, its filtered per-session registry. Readiness
+ * must resolve that same root. Some entries in the interactive registry are a
+ * *product*: they talk to ONE project's backend, and a session in a different
+ * checkout that reports "mcp <other-product> · 353 tools" is describing
+ * another project's cache, not itself. HIV-2639.
  *
  * WHICH servers those are is not knowable here. It comes from the house
  * profile (`profile-common/profile.ts`); with no profile nothing is a product
