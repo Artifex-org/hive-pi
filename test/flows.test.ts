@@ -1,5 +1,6 @@
+import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
-import { nextDevServerReport, sourceFor, validateMaestroYAML, validatePlaywrightSource } from "../extensions/flows/register.ts";
+import { nextDevServerReport, probeLoopbackStatus, sourceFor, validateMaestroYAML, validatePlaywrightSource } from "../extensions/flows/register.ts";
 
 describe("agent flows", () => {
   it("rewrites recorded navigation to the runtime-resolved base URL", () => {
@@ -27,6 +28,30 @@ describe("agent flows", () => {
       generation: prior.generation,
       sequence: prior.sequence,
     });
+  });
+
+  it("probes the reported loopback server directly, never through the egress proxy", async () => {
+    // A node that allowlists 127.0.0.1 drops loopback from NO_PROXY (HIV-3157);
+    // a fetch-based probe then hits the host's loopback via the mux and reports
+    // its 502. Point the proxy env at a port nothing listens on: a probe that
+    // consulted it would fail, a direct socket reaches the server.
+    const server = createServer((_req, res) => { res.statusCode = 204; res.end(); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+    const saved = { HTTP_PROXY: process.env.HTTP_PROXY, http_proxy: process.env.http_proxy, NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
+    process.env.HTTP_PROXY = process.env.http_proxy = "http://127.0.0.1:9";
+    process.env.NO_PROXY = process.env.no_proxy = "169.254.0.0/16";
+    try {
+      expect(await probeLoopbackStatus(new URL(`http://127.0.0.1:${address.port}/`))).toBe(204);
+      await expect(probeLoopbackStatus(new URL("http://127.0.0.1:9/"), 500)).rejects.toThrow();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("validates bounded flow formats before they are stored", () => {
