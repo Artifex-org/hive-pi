@@ -46,9 +46,10 @@ export interface McpConfigDoc {
 export const PREWARMING_LIFECYCLES: readonly string[] = ["eager", "keep-alive"];
 
 /**
- * Where the adapter looks, mirrored exactly: `--mcp-config <path>` on the
- * command line, else the agent dir. `PI_MCP_CONFIG` is OURS — a test and
- * escape seam, checked last so it can never mask what the adapter would use.
+ * The CLI/environment lookup this helper models: `--mcp-config <path>` on the
+ * command line, else `PI_CODING_AGENT_DIR/mcp.json`. `PI_MCP_CONFIG` is OURS
+ * — a test and escape seam, checked last so it can never mask what the adapter
+ * would use.
  */
 export function mcpConfigPath(
 	env: Record<string, string | undefined> = process.env,
@@ -58,7 +59,16 @@ export function mcpConfigPath(
 	const idx = argv.indexOf("--mcp-config");
 	if (idx >= 0 && idx + 1 < argv.length) return argv[idx + 1];
 	if (env.PI_MCP_CONFIG) return env.PI_MCP_CONFIG;
-	return path.join(home, ".pi", "agent", "mcp.json");
+	return path.join(mcpAgentDir(env, home), "mcp.json");
+}
+
+/** The adapter's session-specific config root, with its `~` expansion rules. */
+function mcpAgentDir(env: Record<string, string | undefined>, home: string): string {
+	const configured = env.PI_CODING_AGENT_DIR?.trim();
+	if (!configured) return path.join(home, ".pi", "agent");
+	if (configured === "~") return home;
+	if (configured.startsWith("~/")) return path.resolve(home, configured.slice(2));
+	return path.resolve(configured);
 }
 
 /**
@@ -73,7 +83,7 @@ export function mcpCachePath(
 	env: Record<string, string | undefined> = process.env,
 ): string {
 	if (env.PI_MCP_CACHE) return env.PI_MCP_CACHE;
-	return path.join(home, ".pi", "agent", "mcp-cache.json");
+	return path.join(mcpAgentDir(env, home), "mcp-cache.json");
 }
 
 /**

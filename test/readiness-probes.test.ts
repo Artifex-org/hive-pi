@@ -100,6 +100,26 @@ describe("mcp probes", () => {
 		expect(mcpServerProbes(base).map((p) => p.id)).toEqual(["mcp.hive", "mcp.linear", "mcp.sentry"]);
 	});
 
+	it("reads a launched agent's filtered registry rather than the machine registry", () => {
+		// Hive materializes PI_CODING_AGENT_DIR/mcp.json per launch to remove
+		// ambient servers such as homectl. Readiness must describe that same file:
+		// a row for the machine-wide entry claims an unavailable capability.
+		const launchRoot = "/tmp/hive-launch-pi-filtered";
+		const launched = deps({
+			env: { PI_CODING_AGENT_DIR: launchRoot },
+			readJson: ((file: string) => {
+				if (file === `${launchRoot}/mcp.json`) {
+					return { mcpServers: { hive: { lifecycle: "eager" }, linear: {} } };
+				}
+				if (file === `${launchRoot}/mcp-cache.json`) return cache;
+				return { mcpServers: { hive: { lifecycle: "eager" }, homectl: {} } };
+			}) as never,
+			toolNames: () => ["mcp"],
+		});
+
+		expect(mcpServerProbes(launched).map((p) => p.id)).toEqual(["mcp.hive", "mcp.linear"]);
+	});
+
 	it("reports an eager server as ready, counting the cached tool list", async () => {
 		const [hive] = mcpServerProbes(base);
 		const out = await hive.probe(base);

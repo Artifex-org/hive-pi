@@ -42,14 +42,23 @@ describe("mcpConfigPath", () => {
 		expect(mcpConfigPath({}, ["pi"], "/home/x")).toBe("/home/x/.pi/agent/mcp.json");
 	});
 
+	it("uses the adapter's session-specific agent root", () => {
+		const env = { PI_CODING_AGENT_DIR: "/tmp/hive-launch-pi-123" };
+		expect(mcpConfigPath(env, ["pi"], "/home/x")).toBe("/tmp/hive-launch-pi-123/mcp.json");
+		expect(mcpCachePath("/home/x", env)).toBe("/tmp/hive-launch-pi-123/mcp-cache.json");
+		expect(mcpConfigPath({ PI_CODING_AGENT_DIR: "~/launch" }, ["pi"], "/home/x")).toBe("/home/x/launch/mcp.json");
+	});
+
 	it("checks our own env escape LAST, so it can never mask the adapter's choice", () => {
 		const argv = ["pi", "--mcp-config", "/from/argv.json"];
-		expect(mcpConfigPath({ PI_MCP_CONFIG: "/from/env.json" }, argv, "/home/x")).toBe("/from/argv.json");
-		expect(mcpConfigPath({ PI_MCP_CONFIG: "/from/env.json" }, ["pi"], "/home/x")).toBe("/from/env.json");
+		const env = { PI_CODING_AGENT_DIR: "/tmp/launch", PI_MCP_CONFIG: "/from/env.json" };
+		expect(mcpConfigPath(env, argv, "/home/x")).toBe("/from/argv.json");
+		expect(mcpConfigPath(env, ["pi"], "/home/x")).toBe("/from/env.json");
 	});
 
 	it("locates the adapter's tool cache", () => {
-		expect(mcpCachePath("/home/x")).toBe("/home/x/.pi/agent/mcp-cache.json");
+		expect(mcpCachePath("/home/x", {})).toBe("/home/x/.pi/agent/mcp-cache.json");
+		expect(mcpCachePath("/home/x", { PI_MCP_CACHE: "/tmp/cache.json" })).toBe("/tmp/cache.json");
 	});
 });
 
