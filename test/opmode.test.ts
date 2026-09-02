@@ -88,6 +88,11 @@ describe("prompts", () => {
 		expect(prompt).toMatch(/not an implementer/i);
 		expect(prompt).toContain("Factory run");
 		expect(prompt).toContain("quality gates");
+		expect(prompt).toContain("shared worktree");
+		expect(prompt).toContain("root team lead");
+		expect(prompt).toContain("squads group peers");
+		expect(prompt).toContain("exactly ONE runtime-owner session");
+		expect(prompt).toContain("explicit persisted opt-out reason");
 		expect(prompt).toContain("end_agent_session");
 	});
 });
