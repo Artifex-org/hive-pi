@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { Agent as HttpAgent, request as httpRequest } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Page } from "playwright-core";
 import { Type } from "typebox";
@@ -116,9 +116,16 @@ export function nextDevServerReport(previous: DevServerReport | null, baseURL: U
  * demo, 2026-09-02). A raw `node:http` request never consults the proxy.
  */
 export function probeLoopbackStatus(baseURL: URL, timeoutMs = 5_000): Promise<number> {
-  const client = baseURL.protocol === "https:" ? httpsRequest : httpRequest;
+  const https = baseURL.protocol === "https:";
+  const client = https ? httpsRequest : httpRequest;
+  // A PRIVATE agent, not the global one: under Node 24's NODE_USE_ENV_PROXY
+  // (set inside the srt sandbox) the global agent itself honours HTTP_PROXY, so
+  // a plain http.request is proxied exactly like fetch — measured 2026-09-02:
+  // `node -e http.get(127.0.0.1:3000)` → 502 while `curl --noproxy` → 200. An
+  // agent constructed without proxyEnv always dials the socket directly.
+  const agent = https ? new HttpsAgent({ rejectUnauthorized: false }) : new HttpAgent();
   return new Promise((resolve, reject) => {
-    const req = client(baseURL, { method: "GET", timeout: timeoutMs, ...(baseURL.protocol === "https:" ? { rejectUnauthorized: false } : {}) }, (res) => {
+    const req = client(baseURL, { method: "GET", timeout: timeoutMs, agent }, (res) => {
       res.resume();
       resolve(res.statusCode ?? 0);
     });
