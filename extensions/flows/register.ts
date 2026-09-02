@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Page } from "playwright-core";
 import { Type } from "typebox";
@@ -105,6 +107,27 @@ export function nextDevServerReport(previous: DevServerReport | null, baseURL: U
  * intentionally imported by the browser extension rather than registered as a
  * second entrypoint: only that extension owns the in-memory Page.
  */
+/**
+ * HEAD-free status probe over a DIRECT socket. The reported dev server lives on
+ * the sandbox's own loopback; `fetch` honours the egress proxy environment, and
+ * on a node whose allowlist names 127.0.0.1 (HIV-3157) loopback is deliberately
+ * removed from NO_PROXY — so a proxied probe reaches the HOST's loopback and
+ * reports the mux's 502 while the agent's own Vite answers 200 (second pyERP
+ * demo, 2026-09-02). A raw `node:http` request never consults the proxy.
+ */
+export function probeLoopbackStatus(baseURL: URL, timeoutMs = 5_000): Promise<number> {
+  const client = baseURL.protocol === "https:" ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    const req = client(baseURL, { method: "GET", timeout: timeoutMs, ...(baseURL.protocol === "https:" ? { rejectUnauthorized: false } : {}) }, (res) => {
+      res.resume();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("timeout", () => req.destroy(new Error("probe timed out")));
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
   let recording: { origin: string; actions: RecordedAction[] } | null = null;
   const publisher = new SessionPublisher(pi);
@@ -137,8 +160,8 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
     const reported = devServer;
     if (!reported) return { ok: true, status: 200 };
     try {
-      const response = await fetch(reported.baseURL, { signal: AbortSignal.timeout(5_000) });
-      return publishDevServer("ready", response.status < 500 ? "healthy" : "unhealthy", response.status < 500 ? "" : `HTTP ${response.status}`);
+      const status = await probeLoopbackStatus(reported.baseURL);
+      return publishDevServer("ready", status < 500 ? "healthy" : "unhealthy", status < 500 ? "" : `HTTP ${status}`);
     } catch {
       return publishDevServer("ready", "unhealthy", "loopback health probe failed");
     }
