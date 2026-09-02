@@ -146,6 +146,21 @@ export const HINTS: readonly ToolHint[] = [
 			"session efb2830c (Aurora, 2026-08-16): searched the Hive MCP twice for a create-PR tool, then ran `hive --help`, then stopped — its credential was valid, the sandbox could reach api.github.com (curl 200), and the real fault was the mise shim (HIV-1979)",
 	},
 	{
+		id: "gh-attach-flag-unsupported",
+		tools: ["bash", "background_bash"],
+		// gh prints this when a flag the running version does not know is passed;
+		// the `#alt` attach syntax is a 2.99 feature, and this node pins 2.98.
+		match: /unknown flag: --attach/i,
+		hint:
+			"The `gh` running here is too old for `--attach` — that flag arrived in gh 2.99.0, and this node's " +
+			"mise pins 2.98. `/usr/bin/gh` may be newer, so retry the exact command with `/usr/bin/gh` first " +
+			"(`/usr/bin/gh --version` to check). If it is still below 2.99.0, do NOT keep retrying: post the PR or " +
+			"issue WITHOUT images (drop the `--attach` flags, keep `--body-file`) and list the screenshot paths in " +
+			"your final message so a human can attach them. The images are a nicety; a green PR is the goal.",
+		evidence:
+			"HIV-3240: `gh … --attach '<file>#<alt>'` is a gh 2.99.0 feature; this workstation's mise pins gh 2.98.0, so an agent that follows the pr-attachments nudge on the shim binary hits `unknown flag: --attach`",
+	},
+	{
 		id: "mise-shim-readonly",
 		tools: ["bash", "background_bash"],
 		match: /mise ERROR Failed to install .*Read-only file system/i,

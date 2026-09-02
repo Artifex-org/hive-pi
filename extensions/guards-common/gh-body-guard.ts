@@ -25,6 +25,13 @@
  *   - `--body "$(cat file)"` and quoted heredocs: `$( … )` spans are removed
  *     before the check, so a substitution the author clearly meant is left alone
  *   - a backslash-escaped `\`` inside the quotes: already literal
+ *
+ * THE SAME TRAP, ON `--attach` (HIV-3240). gh 2.99's `--attach '<file>#<alt>'`
+ * carries free-text alt after the `#`, and that alt is prose exactly like a
+ * body — a double-quoted backtick in it is run by the shell before gh sees it.
+ * `--attach` is in `BODY_FLAGS` for the backtick check for that reason. It is
+ * NOT added to the serialized-Markdown check: an attach value is a path plus a
+ * short caption, never a multi-heading document.
  */
 
 export type GhBodyVerdict = { kind: "allow" } | { kind: "block"; reason: string };
@@ -37,7 +44,7 @@ const ALLOW: GhBodyVerdict = { kind: "allow" };
  * `-b` is `gh pr create`'s short `--body` (its `-B` is `--base`, which is why
  * this comparison is case-SENSITIVE). `--notes` is the release equivalent.
  */
-const BODY_FLAGS = ["--body", "--notes", "-b", "-n"];
+const BODY_FLAGS = ["--body", "--notes", "--attach", "-b", "-n"];
 const PR_BODY_FLAGS = ["--body", "-b"];
 
 /**

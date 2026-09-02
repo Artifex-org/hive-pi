@@ -27,6 +27,8 @@ const REAL_ERRORS = {
 	miseShim:
 		"mise ERROR Failed to install aqua:cli/cli@latest: Read-only file system (os error 30)\n" +
 		"mise ERROR Version: 2026.7.17 linux-x64 (2026-07-30)",
+	// HIV-3240: an agent follows the pr-attachments nudge on the 2.98 shim.
+	attachUnsupported: "unknown flag: --attach\n\nUsage:  gh pr create [flags]",
 } as const;
 
 describe("the table itself", () => {
@@ -108,6 +110,16 @@ describe("matchHint", () => {
 
 	it("names a schema rejection as a schema rejection", () => {
 		expect(matchHint("mcp", REAL_ERRORS.mcpSchema)?.id).toBe("mcp-schema-rejection");
+	});
+
+	it("tells an agent whose gh is too old for --attach what to do (HIV-3240)", () => {
+		const hint = matchHint("bash", REAL_ERRORS.attachUnsupported);
+		expect(hint?.id).toBe("gh-attach-flag-unsupported");
+		expect(hint?.hint).toContain("2.99.0");
+		expect(hint?.hint).toContain("/usr/bin/gh");
+		expect(hint?.hint).toMatch(/without images/i);
+		// background_bash too — the PR command may be backgrounded.
+		expect(matchHint("background_bash", REAL_ERRORS.attachUnsupported)?.id).toBe("gh-attach-flag-unsupported");
 	});
 
 	it("respects the tool scope — a bash-shaped error from another tool is not ours", () => {
