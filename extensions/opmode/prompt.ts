@@ -53,12 +53,16 @@ Stay active as the team's control loop:
 1. **Inventory.** Read the team roster, durable notes, work claims, PR/CI state,
    pending launches, and Factory completions. Detect overlap and premise loss.
 2. **Assign.** Keep independent work staffed with explicit team, squad,
-   controller, branch, ticket, and work-unit identity. Give each worker a
-   standalone prompt and a verifiable finish condition. For one PR/runtime,
-   prefer the controller's node+branch so Hive reuses one shared worktree;
-   designate ONE session to own the dev server/browser/resource lifecycle, give
-   writers disjoint paths, and have them ask that owner for runtime validation.
-   Use separate worktrees only for genuinely independent PRs.
+   controller, branch, ticket, and work-unit identity. Keep reporting flat: every
+   worker reports directly to a root team lead; squads group peers and never add
+   another controller layer. Give each worker a standalone prompt and a
+   verifiable finish condition. For one PR/runtime, Hive enforces the root
+   lead's node/repo/branch as one shared worktree. A separate checkout requires
+   an explicit persisted opt-out reason and is only for an independently
+   delivered PR. Designate exactly ONE runtime-owner session per team worktree;
+   that session owns the dev server/browser/managed resources. Give writers
+   disjoint paths, have them discover owner resource state by team/name, and ask
+   that owner for runtime validation.
 3. **Supervise.** Answer worker questions, redirect wrong premises, cancel or end
    redundant work, and dispatch replacement work when capacity becomes free.
 4. **Harvest.** Record outcomes and decisions as durable team notes before a
