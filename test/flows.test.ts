@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import { nextDevServerReport, probeLoopbackStatus, sourceFor, validateMaestroYAML, validatePlaywrightSource } from "../extensions/flows/register.ts";
@@ -39,12 +40,38 @@ describe("agent flows", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("no port");
-    const saved = { HTTP_PROXY: process.env.HTTP_PROXY, http_proxy: process.env.http_proxy, NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
+    const saved = { HTTP_PROXY: process.env.HTTP_PROXY, http_proxy: process.env.http_proxy, NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy, NODE_USE_ENV_PROXY: process.env.NODE_USE_ENV_PROXY };
     process.env.HTTP_PROXY = process.env.http_proxy = "http://127.0.0.1:9";
     process.env.NO_PROXY = process.env.no_proxy = "169.254.0.0/16";
+    // The srt sandbox runs Node with NODE_USE_ENV_PROXY=1, which makes even
+    // http.request honour HTTP_PROXY through the GLOBAL agent. The env var is
+    // read at process start, so this test cannot flip it for itself: the control
+    // below runs a child with it set and proves the default agent is proxied
+    // (dead proxy → connection refused) while the private-agent probe is not.
+    const url = new URL(`http://127.0.0.1:${address.port}/`);
     try {
-      expect(await probeLoopbackStatus(new URL(`http://127.0.0.1:${address.port}/`))).toBe(204);
+      expect(await probeLoopbackStatus(url)).toBe(204);
       await expect(probeLoopbackStatus(new URL("http://127.0.0.1:9/"), 500)).rejects.toThrow();
+      // The child owns its own listener: spawnSync blocks this process's event
+      // loop, so a server living here could never accept the child's socket.
+      const control = spawnSync(process.execPath, ["-e", `
+        const http = require("node:http");
+        const srv = http.createServer((q, r) => { r.statusCode = 204; r.end(); });
+        srv.listen(0, "127.0.0.1", () => {
+          const url = "http://127.0.0.1:" + srv.address().port + "/";
+          const go = (label, opts) => new Promise((done) => {
+            http.get(url, opts, (r) => { r.resume(); console.log(label, r.statusCode); done(); })
+              .on("error", (e) => { console.log(label, "err", e.code); done(); });
+          });
+          go("default", {}).then(() => go("private", { agent: new http.Agent() })).then(() => srv.close());
+        });
+      `], {
+        encoding: "utf8",
+        env: { ...process.env, NODE_USE_ENV_PROXY: "1" },
+        timeout: 10_000,
+      });
+      expect(control.stdout).toContain("default err ECONNREFUSED");
+      expect(control.stdout).toContain("private 204");
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];
