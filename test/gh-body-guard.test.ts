@@ -42,6 +42,26 @@ describe("ghBodyVerdict blocks", () => {
 	});
 });
 
+// HIV-3240: gh 2.99's `--attach '<file>#<alt>'` carries free-text alt after the
+// `#`, and a double-quoted backtick in that alt is the same command-substitution
+// bug as in a body. The pr-attachments nudge deliberately suggests SINGLE
+// quotes; this guard catches an agent that reaches for double quotes anyway.
+describe("ghBodyVerdict blocks a double-quoted --attach alt with a live backtick", () => {
+	it("catches the backtick in a double-quoted --attach value", () => {
+		const v = ghBodyVerdict('gh pr create --attach "shot.png#the `Save` button"');
+		expect(v.kind).toBe("block");
+		if (v.kind === "block") expect(v.reason).toContain("--body-file");
+	});
+
+	it("leaves a single-quoted --attach alone — the recommended form", () => {
+		expect(ghBodyVerdict("gh pr create --attach 'shot.png#the `Save` button'").kind).toBe("allow");
+	});
+
+	it("leaves a double-quoted --attach with no backtick alone", () => {
+		expect(ghBodyVerdict('gh pr create --attach "shot.png#before: the dashboard"').kind).toBe("allow");
+	});
+});
+
 describe("ghBodyVerdict allows", () => {
 	it("a single-quoted body — no expansion happens", () => {
 		expect(ghBodyVerdict("gh pr create --body 'adds `PromptEditor`'").kind).toBe("allow");

@@ -39,6 +39,8 @@ import { registerGuardedTool } from "../guards-common/capability.ts";
 import { buildLaunchPlan } from "./launch.ts";
 import { BrowserSurfaceBridge } from "./surface.ts";
 import { registerFlowTools } from "../flows/register.ts";
+import { ScreenshotLedger } from "../pr-attachments/manifest.ts";
+import { CAPTURABLE_CHANNEL } from "../pr-attachments/logic.ts";
 
 // Every tool here shares one capability shape: the first call spawns the
 // session's headless Chromium (a subprocess), and nothing writes outside the
@@ -76,6 +78,10 @@ function truncate(s: string, max: number): { text: string; truncated: boolean } 
 
 export default function (pi: ExtensionAPI) {
 	let state: BrowserState | null = null;
+	// Backed by the on-disk pr-attachments.json manifest, so the record survives
+	// compaction and is visible to extensions/pr-attachments — a separate
+	// entrypoint with its own module cache. See ../pr-attachments/manifest.ts.
+	const ledger = new ScreenshotLedger();
 
 	async function ensurePage(): Promise<BrowserState> {
 		if (state && state.browser.isConnected()) return state;
@@ -129,6 +135,9 @@ export default function (pi: ExtensionAPI) {
 			const { page } = await ensurePage();
 			const response = await page.goto(params.url);
 			flows.record({ kind: "navigate", url: params.url });
+			// A page is open, so a `before` screenshot is now possible — let
+			// pr-attachments upgrade its BEFORE reminder to a just-in-time block.
+			pi.events.emit(CAPTURABLE_CHANNEL, { source: "browser_navigate", url: params.url });
 			const status = response?.status();
 			const described = await describePage(page);
 			return text(described.body, {
@@ -200,6 +209,13 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Screenshot the browser page",
 		parameters: Type.Object({
 			full_page: Type.Optional(Type.Boolean({ description: "Capture the full scroll height (default viewport only)." })),
+			label: Type.Optional(
+				Type.String({
+					description:
+						"Free-text label recorded with the shot. Convention: `before` for the state before a UI change " +
+						"and `after` for the state after it, so a PR can attach both. Recorded in pr-attachments.json.",
+				}),
+			),
 		}),
 		async execute(_id, params) {
 			const { page } = await ensurePage();
@@ -209,12 +225,28 @@ export default function (pi: ExtensionAPI) {
 			fs.mkdirSync(dir, { recursive: true });
 			const file = path.join(dir, `shot-${Date.now()}.png`);
 			const buf = await page.screenshot({ fullPage: Boolean(params.full_page), path: file });
+			const url = page.url();
+			const label = params.label ?? "";
+			// Best-effort: a manifest write that fails must never fail the screenshot.
+			let recorded;
+			try {
+				recorded = ledger.record({ path: file, label, url });
+			} catch {
+				recorded = undefined;
+			}
+			const labelNote = label ? ` [${label}]` : "";
 			return {
 				content: [
 					{ type: "image" as const, data: buf.toString("base64"), mimeType: "image/png" },
-					{ type: "text" as const, text: `Saved to ${file} (${page.url()})` },
+					{ type: "text" as const, text: `Saved to ${file}${labelNote} (${url})` },
 				],
-				details: { path: file, url: page.url(), full_page: Boolean(params.full_page) },
+				details: {
+					path: file,
+					url,
+					full_page: Boolean(params.full_page),
+					...(label ? { label } : {}),
+					...(recorded ? { taken_at: recorded.taken_at } : {}),
+				},
 			};
 		},
 	});

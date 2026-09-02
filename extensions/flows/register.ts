@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Page } from "playwright-core";
 import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { CAPTURABLE_CHANNEL } from "../pr-attachments/logic.ts";
 import { request } from "../hive-common/http.ts";
 import { SessionPublisher } from "../hive-common/session-publisher.ts";
 
@@ -289,6 +290,9 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
       }
       const ready = await probeDevServer();
       if (!ready.ok) throw new Error(ready.error ?? "resource report failed");
+      // A dev server is now reachable, so a `before` screenshot is possible —
+      // let pr-attachments upgrade its BEFORE reminder to a just-in-time block.
+      pi.events.emit(CAPTURABLE_CHANNEL, { source: "report_dev_server", baseURL: baseURL.origin });
       return toolText(`${previous ? "Re-reporting" : "Reporting"} dev-server at ${baseURL.origin} as the catalogued resource name "dev-server".`, {
         resource: "dev-server",
         base_url: baseURL.origin,

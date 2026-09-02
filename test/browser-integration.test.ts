@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import browserExtension from "../extensions/browser/index.ts";
 
@@ -83,6 +85,18 @@ describe.skipIf(!enabled)("extensions/browser integration", () => {
 		const out = await harness.tools.get("browser_screenshot")!.execute("t4", {});
 		expect(out.content[0]?.type).toBe("image");
 		expect((out.content[0]?.data ?? "").length).toBeGreaterThan(1000);
+	}, 30_000);
+
+	it("records the label and writes the pr-attachments manifest (HIV-3240)", async () => {
+		const out = await harness.tools.get("browser_screenshot")!.execute("t4b", { label: "before" });
+		const details = out.details as { path: string; label?: string; url: string; taken_at?: string };
+		expect(details.label).toBe("before");
+		expect(details.taken_at).toBeTruthy();
+		// The manifest sits next to the shot (no $HIVE_PR_ATTACHMENTS_DIR here) and
+		// carries this record.
+		const dir = path.dirname(details.path);
+		const manifest = JSON.parse(fs.readFileSync(path.join(dir, "pr-attachments.json"), "utf8"));
+		expect(manifest.some((r: { path: string; label: string }) => r.path === details.path && r.label === "before")).toBe(true);
 	}, 30_000);
 
 	it("evaluates JS in the page", async () => {
