@@ -145,10 +145,11 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
     return page.url();
   }
 
-  async function completeClaim(runID: string, state: "succeeded" | "failed" | "deferred", summary: string, error = "", evidence: Record<string, string> = {}) {
+  async function completeClaim(runID: string, claimToken: string, state: "succeeded" | "failed" | "deferred", summary: string, error = "", evidence: Record<string, string> = {}) {
     const binding = await publisher.binding();
     if (!binding) return;
     await request(binding.auth, "POST", `/agent-sessions/${encodeURIComponent(binding.sessionID)}/flow-runs/${encodeURIComponent(runID)}/complete`, {
+      claim_token: claimToken,
       state,
       summary: summary.slice(0, 8000),
       error: error.slice(0, 4000),
@@ -162,7 +163,7 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
     try {
       const binding = await publisher.binding();
       if (!binding) return;
-      const claimed = await request<{ items?: Array<{ run?: { id?: string; format?: string; source?: string }; connection_url?: string }> }>(
+      const claimed = await request<{ items?: Array<{ run?: { id?: string; format?: string; source?: string }; claim_token?: string; connection_url?: string }> }>(
         binding.auth,
         "POST",
         `/agent-sessions/${encodeURIComponent(binding.sessionID)}/flow-runs/claim`,
@@ -174,17 +175,17 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
       if (!claimed.ok) return;
       for (const claim of claimed.body?.items ?? []) {
         const run = claim.run;
-        if (!run?.id || !run.format || !run.source) continue;
+        if (!run?.id || !run.format || !run.source || !claim.claim_token) continue;
         if (run.format === "maestro" && process.platform !== "darwin") {
-          await completeClaim(run.id, "deferred", "Maestro execution is deferred to the Mac lane.");
+          await completeClaim(run.id, claim.claim_token, "deferred", "Maestro execution is deferred to the Mac lane.");
           continue;
         }
         try {
           const url = await runSource(run.source, claim.connection_url ?? "");
-          await completeClaim(run.id, "succeeded", "Playwright flow completed.", "", { url });
+          await completeClaim(run.id, claim.claim_token, "succeeded", "Playwright flow completed.", "", { url });
         } catch (error) {
           const message = error instanceof Error ? error.message : "flow execution failed";
-          await completeClaim(run.id, "failed", "Playwright flow failed.", message);
+          await completeClaim(run.id, claim.claim_token, "failed", "Playwright flow failed.", message);
         }
       }
     } finally {
