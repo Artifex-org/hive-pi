@@ -4,6 +4,7 @@ import {
 	MIN_ATTACH_VERSION,
 	UI_GLOBS,
 	attachArg,
+	beforeBlockMessage,
 	beforeNudge,
 	commandShapeKey,
 	ghAttachlessSegment,
@@ -155,10 +156,16 @@ describe("the nudge text", () => {
 		{ path: "/tmp/pi-browser-1/shot-2.png", label: "after", url: "http://127.0.0.1:3000/", taken_at: "t2" },
 	];
 
-	it("before nudge says take `before` now and cannot be taken later", () => {
+	it("before BLOCK message says take the shot now and re-run the edit", () => {
+		const m = beforeBlockMessage();
+		expect(m).toContain("browser_screenshot label:before");
+		expect(m).toContain("re-run this edit");
+		expect(m).toMatch(/only once/i);
+	});
+
+	it("before HINT (no dev server) still names label `before`", () => {
 		const n = beforeNudge();
 		expect(n).toContain("before");
-		expect(n).toMatch(/cannot be captured|before the edit lands/i);
 	});
 
 	it("attachArg is single-quoted and strips backticks from the label", () => {

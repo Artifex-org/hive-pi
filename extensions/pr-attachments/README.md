@@ -4,26 +4,39 @@ Nudge agents that change UI to capture **before** and **after** screenshots and
 attach them to their pull request, using GitHub CLI 2.99's repeatable
 `--attach '<file>#<alt text>'` flag.
 
-Two non-blocking hints, a gh version gate, and one on-disk manifest that a
-hive-side Go consumer reads. Nothing here blocks a command — see
+A gh version gate, one on-disk manifest that a hive-side Go consumer reads, and
+two reminders — a PR-time **hint** and one just-in-time **block**. The block is
+the single deliberate exception to the hint-not-guard rule (see
 [`logic.ts`](./logic.ts)'s header and
-[`../guards-common/gh-body-guard.ts`](../guards-common/gh-body-guard.ts) for why
-a nicety must never be a gate.
+[`../guards-common/gh-body-guard.ts`](../guards-common/gh-body-guard.ts)):
+blocking a PR for lacking `--attach` would be harmful, but the `before`
+screenshot is physically impossible after the edit lands, so that one moment is
+worth a one-time block.
 
-## The nudges
+## The reminders
 
-- **BEFORE nudge** — on the first `edit`/`write` of a session that touches a
+- **BEFORE block** — on the first `edit`/`write` of a session that touches a
   UI-visible file (globs: `web/**`, `frontend/**`, `mobile/**`, `apps/**`,
   `**/*.tsx`, `**/*.jsx`, `**/*.vue`, `**/*.svelte`, `**/*.css`, `**/*.scss`,
-  `**/templates/**/*.html`, `**/*.stories.*`), when no screenshot has been
-  taken yet: reminds the agent to take a `browser_screenshot` with label
-  `before` **now**, because the before-state cannot be captured after the edit
-  lands. Fires at most once per session.
-- **PR nudge** — on a `bash`/`background_bash` running `gh (pr|issue)
+  `**/templates/**/*.html`, `**/*.stories.*`), when no screenshot has been taken
+  yet **and a screenshot is possible** (a dev server has been reported, or a
+  browser page has been opened this session): the `tool_call` is **blocked once**
+  with *“take browser_screenshot label:before now, then re-run this edit”*. It
+  must be a block, not a hint: a hint fires on the `tool_result`, i.e. after the
+  edit has landed and Vite HMR has repainted the dev server, at which point the
+  before-state is gone. The block fires at most once per session; the next edit
+  runs normally. When **nothing is capturable** (no dev server, no page opened),
+  there is nothing to screenshot, so it degrades to a non-blocking hint on the
+  result instead.
+
+  The "capturable" state lives in another extension's closure, so the browser
+  (`browser_navigate`) and flows (`report_dev_server`) extensions raise it on
+  pi's shared event bus (`pr-attachments.capturable`); this extension listens.
+- **PR nudge (hint)** — on a `bash`/`background_bash` running `gh (pr|issue)
   (create|edit|comment)` **without** `--attach`, when the session has
   screenshots: injects the exact single-quoted `--attach '<file>#<alt>'` lines
   and suggests `--body-file` for the body. Fires once per command shape (a retry
-  does not repeat it).
+  does not repeat it). Never blocks.
 
 ## The gh version gate
 

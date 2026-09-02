@@ -40,6 +40,7 @@ import { buildLaunchPlan } from "./launch.ts";
 import { BrowserSurfaceBridge } from "./surface.ts";
 import { registerFlowTools } from "../flows/register.ts";
 import { ScreenshotLedger } from "../pr-attachments/manifest.ts";
+import { CAPTURABLE_CHANNEL } from "../pr-attachments/logic.ts";
 
 // Every tool here shares one capability shape: the first call spawns the
 // session's headless Chromium (a subprocess), and nothing writes outside the
@@ -134,6 +135,9 @@ export default function (pi: ExtensionAPI) {
 			const { page } = await ensurePage();
 			const response = await page.goto(params.url);
 			flows.record({ kind: "navigate", url: params.url });
+			// A page is open, so a `before` screenshot is now possible — let
+			// pr-attachments upgrade its BEFORE reminder to a just-in-time block.
+			pi.events.emit(CAPTURABLE_CHANNEL, { source: "browser_navigate", url: params.url });
 			const status = response?.status();
 			const described = await describePage(page);
 			return text(described.body, {

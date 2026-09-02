@@ -2,18 +2,21 @@
  * pr-attachments (HIV-3240) — nudge agents to capture BEFORE/AFTER screenshots
  * and attach them to their PR with gh 2.99's `--attach` flag.
  *
- * Two nudges, both NON-BLOCKING (see logic.ts's header for why hints, not a
- * guard):
+ * Two reminders:
  *
- *   a. BEFORE nudge — on the first `edit`/`write` of a session that touches a
- *      UI-visible file, when no screenshot has been taken yet, remind the agent
- *      to take the `before` shot now, because it cannot be taken after the edit
- *      lands. Fires at most once per session.
+ *   a. BEFORE reminder — on the first `edit`/`write` of a session that touches a
+ *      UI-visible file, when no screenshot has been taken yet. If a screenshot
+ *      is possible NOW (a dev server was reported or a page was opened — raised
+ *      on the shared event bus by the browser/flows extensions), the tool_call
+ *      is BLOCKED once: a `before` shot cannot be taken after the edit lands and
+ *      HMR repaints, so this is the one place a block is warranted (see
+ *      logic.ts's beforeBlockMessage). If nothing is capturable, it degrades to
+ *      a non-blocking hint. Fires at most once per session either way.
  *
- *   b. PR nudge — on a `bash`/`background_bash` running `gh pr|issue
- *      create|edit|comment` WITHOUT `--attach`, when the session has
- *      screenshots, inject the exact `--attach '<file>#<alt>'` lines. Fires once
- *      per command shape, so a retry does not repeat it.
+ *   b. PR nudge — a HINT, never a block — on a `bash`/`background_bash` running
+ *      `gh pr|issue create|edit|comment` WITHOUT `--attach`, when the session
+ *      has screenshots, inject the exact `--attach '<file>#<alt>'` lines. Fires
+ *      once per command shape, so a retry does not repeat it.
  *
  * A gh version gate probes `gh --version` once per session (`/usr/bin/gh` first,
  * then `gh` — the mise shim is dead read-only in the sandbox, per the
@@ -29,7 +32,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { appendHint } from "../toolhints/index.ts";
 import { ScreenshotLedger } from "./manifest.ts";
 import {
+	CAPTURABLE_CHANNEL,
 	type GhVersion,
+	beforeBlockMessage,
 	beforeNudge,
 	commandShapeKey,
 	ghAttachlessSegment,
@@ -82,7 +87,12 @@ export default function (pi: ExtensionAPI, options: WiringOptions = {}) {
 	const ledger = options.ledger ?? new ScreenshotLedger();
 	const probe = options.probe ?? realVersionProbe;
 
-	let beforeNudged = false;
+	let beforeFired = false;
+	// Raised on the shared event bus by the browser/flows side when there is
+	// something to screenshot this session (a dev server reported, or a page
+	// opened). Its presence is what turns the BEFORE reminder from a too-late
+	// hint into a just-in-time block.
+	let capturable = false;
 	// gh version is probed lazily on the first PR-shaped command and cached for
 	// the session \u2014 one spawn, and only if a PR is actually being opened.
 	let ghVersion: GhVersion | null = null;
@@ -94,9 +104,14 @@ export default function (pi: ExtensionAPI, options: WiringOptions = {}) {
 	// only place to say it is after.
 	let pending: string | null = null;
 
+	pi.events.on(CAPTURABLE_CHANNEL, () => {
+		capturable = true;
+	});
+
 	pi.on("session_start", (event) => {
 		if (event.reason === "startup" || event.reason === "new") {
-			beforeNudged = false;
+			beforeFired = false;
+			capturable = false;
 			ghProbed = false;
 			ghVersion = null;
 			nudgedShapes.clear();
@@ -105,12 +120,21 @@ export default function (pi: ExtensionAPI, options: WiringOptions = {}) {
 
 	pi.on("tool_call", (event) => {
 		if (event.toolName === "edit" || event.toolName === "write") {
-			if (beforeNudged) return;
+			if (beforeFired) return;
 			const input = event.input as { path?: string; file_path?: string };
 			const target = input.path ?? input.file_path;
 			if (!isUIVisiblePath(target)) return;
 			if (ledger.all().length > 0) return; // a shot already exists \u2014 too late to nudge
-			beforeNudged = true;
+			beforeFired = true;
+			if (capturable) {
+				// A screenshot is possible RIGHT NOW and this edit would repaint the
+				// dev server before it could be taken \u2014 block once so the `before`
+				// shot happens first. The agent's next turn is the screenshot + the
+				// re-run, not an abandoned task, so this is a plain block (no terminate).
+				return { block: true, reason: `[harness \u00b7 pr-attachments] ${beforeBlockMessage()}` };
+			}
+			// Nothing to screenshot yet (no dev server, no page opened): a block
+			// would ask for the impossible, so fall back to a hint on the result.
 			pending = beforeNudge();
 			return;
 		}

@@ -224,15 +224,47 @@ function safeAlt(text: string): string {
 }
 
 /**
- * The BEFORE nudge, injected on the first UI-file edit/write when no screenshot
- * has been taken yet.
+ * The event-bus channel the browser/flows side raises when there is something to
+ * screenshot this session \u2014 a dev server has been reported (the flows
+ * extension's resource) or a browser page has been opened (browser_navigate,
+ * the fallback the supervisor named). pi's event bus is shared across every
+ * extension, so this is how the separate pr-attachments entrypoint learns a
+ * state that lives in another extension's private closure.
+ */
+export const CAPTURABLE_CHANNEL = "pr-attachments.capturable";
+
+/**
+ * The one-time BLOCK on the first UI-file edit/write, when a screenshot is
+ * possible and none has been taken yet.
+ *
+ * This is a BLOCK, not a hint, for a timing reason the supervisor caught: a
+ * hint fires on the tool_RESULT, i.e. after the edit has already landed and
+ * Vite HMR has repainted the dev server \u2014 at which point the `before` state is
+ * gone. The only moment a `before` shot is still possible is BEFORE the edit
+ * runs, which is exactly what a tool_call block preserves. Fired at most once
+ * per session; the next edit runs normally.
+ */
+export function beforeBlockMessage(): string {
+	return (
+		"take browser_screenshot label:before now, then re-run this edit. " +
+		"This edit touches a UI-visible file and would repaint the dev server (HMR) before you could capture the " +
+		"before-state \u2014 so the `before` shot must be taken first. This block fires only once: after it, edits run " +
+		"normally. Take the matching `after` shot once the change is up, then attach both to the PR. If this change " +
+		"is not visible (types, logic, config), just re-run the edit \u2014 no screenshot needed."
+	);
+}
+
+/**
+ * The BEFORE HINT, used only when nothing is capturable (no dev server, no
+ * page opened) \u2014 there is nothing to block for, but the reminder still helps.
+ * Injected on the tool_result.
  */
 export function beforeNudge(): string {
 	return (
 		"This edit touches a UI-visible file and no screenshot has been taken yet this session. " +
-		"If the change is visible, take a `browser_screenshot` with label `before` NOW, against the dev server \u2014 " +
-		"the before-state cannot be captured once the edit lands. Take the matching `after` shot once the change " +
-		"is up, then attach both to the PR. If this change is not visible (types, logic, config), ignore this."
+		"If the change is visible, stand up the dev server, take a `browser_screenshot` with label `before` and a " +
+		"matching `after` once the change is up, and attach both to the PR. If this change is not visible (types, " +
+		"logic, config), ignore this."
 	);
 }
 

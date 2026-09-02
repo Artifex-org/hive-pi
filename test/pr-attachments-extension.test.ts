@@ -48,6 +48,20 @@ async function fire(
 	return patch?.content?.[0]?.text ?? "ok";
 }
 
+/** The tool_call verdict for one call — a block `{block, reason}` or undefined. */
+async function callVerdict(
+	pi: ReturnType<typeof createFakePi>,
+	call: { toolName: string; input: Record<string, unknown> },
+): Promise<{ block?: boolean; reason?: string } | undefined> {
+	const [verdict] = (await pi.emit({ type: "tool_call", ...call })) as ({ block?: boolean; reason?: string } | undefined)[];
+	return verdict;
+}
+
+/** Signal that a screenshot is possible this session (dev server / page open). */
+function makeCapturable(pi: ReturnType<typeof createFakePi>) {
+	pi.api.events.emit("pr-attachments.capturable", { source: "test" });
+}
+
 describe("the off switch", () => {
 	it("registers nothing when PI_PR_ATTACHMENTS=0", () => {
 		const pi = load({ env: { PI_PR_ATTACHMENTS: "0" } });
@@ -55,12 +69,54 @@ describe("the off switch", () => {
 	});
 });
 
-describe("the BEFORE nudge", () => {
-	it("fires on the first UI-visible edit when no screenshot exists", async () => {
+// The supervisor's correction (PR #45): a hint fires on the tool_RESULT, after
+// the edit landed and HMR repainted — too late for a `before` shot. With a live
+// dev server the first UI edit must BLOCK on the tool_CALL instead, once.
+describe("the BEFORE block (dev server live)", () => {
+	it("blocks the first UI-visible edit with the take-a-screenshot message", async () => {
 		const pi = load();
-		const text = await fire(pi, { toolName: "edit", input: { path: "web/App.tsx" } });
-		expect(text).toContain("[harness · pr-attachments]");
-		expect(text).toMatch(/label `before`/);
+		makeCapturable(pi);
+		const verdict = await callVerdict(pi, { toolName: "edit", input: { path: "web/App.tsx" } });
+		expect(verdict?.block).toBe(true);
+		expect(verdict?.reason).toContain("browser_screenshot label:before");
+		expect(verdict?.reason).toContain("re-run this edit");
+	});
+
+	it("allows the SECOND call — the block fires only once per session", async () => {
+		const pi = load();
+		makeCapturable(pi);
+		expect((await callVerdict(pi, { toolName: "edit", input: { path: "web/A.tsx" } }))?.block).toBe(true);
+		expect(await callVerdict(pi, { toolName: "edit", input: { path: "web/B.tsx" } })).toBeUndefined();
+	});
+
+	it("does not block a non-UI edit even with a dev server", async () => {
+		const pi = load();
+		makeCapturable(pi);
+		expect(await callVerdict(pi, { toolName: "edit", input: { path: "server/db.ts" } })).toBeUndefined();
+	});
+
+	it("does not block when a screenshot already exists", async () => {
+		const pi = load({ withShot: true });
+		makeCapturable(pi);
+		expect(await callVerdict(pi, { toolName: "write", input: { path: "web/App.tsx" } })).toBeUndefined();
+	});
+});
+
+describe("the BEFORE hint (no dev server — nothing to screenshot)", () => {
+	it("does NOT block, and hints on the result instead", async () => {
+		const pi = load();
+		// no makeCapturable(): nothing is open to screenshot
+		const verdict = await callVerdict(pi, { toolName: "edit", input: { path: "web/App.tsx" } });
+		expect(verdict).toBeUndefined();
+	});
+
+	it("fires the hint on the first UI edit and never again", async () => {
+		const pi = load();
+		const first = await fire(pi, { toolName: "edit", input: { path: "web/A.tsx" } });
+		expect(first).toContain("[harness · pr-attachments]");
+		expect(first).toMatch(/label `before`/);
+		const second = await fire(pi, { toolName: "edit", input: { path: "web/B.tsx" } });
+		expect(second).toBe("ok");
 	});
 
 	it("does not fire on a non-UI edit", async () => {
@@ -71,14 +127,6 @@ describe("the BEFORE nudge", () => {
 	it("does not fire when a screenshot already exists", async () => {
 		const pi = load({ withShot: true });
 		expect(await fire(pi, { toolName: "write", input: { path: "web/App.tsx" } })).toBe("ok");
-	});
-
-	it("fires at most once per session", async () => {
-		const pi = load();
-		const first = await fire(pi, { toolName: "edit", input: { path: "web/A.tsx" } });
-		expect(first).toContain("pr-attachments");
-		const second = await fire(pi, { toolName: "edit", input: { path: "web/B.tsx" } });
-		expect(second).toBe("ok");
 	});
 });
 
