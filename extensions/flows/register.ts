@@ -11,6 +11,12 @@ export interface FlowBrowserHost {
   page(): Promise<Page>;
 }
 
+export interface DevServerReport {
+  baseURL: URL;
+  generation: string;
+  sequence: number;
+}
+
 export type RecordedAction =
   | { kind: "navigate"; url: string }
   | { kind: "click"; selector: string }
@@ -82,6 +88,17 @@ export function validateMaestroYAML(source: string): string | null {
   return null;
 }
 
+// A resource generation fences a single provider lifetime. Re-reporting a
+// warmed dev server is still that lifetime: resetting its generation would be
+// refused while the prior heartbeat is live and would strand its run queue.
+export function nextDevServerReport(previous: DevServerReport | null, baseURL: URL): DevServerReport {
+  return {
+    baseURL,
+    generation: previous?.generation ?? randomUUID(),
+    sequence: previous?.sequence ?? -1,
+  };
+}
+
 /**
  * Register flow authoring/replay tools inside extensions/browser's own module
  * graph. Pi loads extension entrypoints with isolated caches, so this module is
@@ -91,7 +108,7 @@ export function validateMaestroYAML(source: string): string | null {
 export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
   let recording: { origin: string; actions: RecordedAction[] } | null = null;
   const publisher = new SessionPublisher(pi);
-  let devServer: { baseURL: URL; generation: string; sequence: number; timer: ReturnType<typeof setInterval> } | null = null;
+  let devServer: (DevServerReport & { timer: ReturnType<typeof setInterval> }) | null = null;
 
   async function publishDevServer(state: "starting" | "ready" | "ended", health: "unknown" | "healthy" | "unhealthy", error = "") {
     const reported = devServer;
@@ -118,12 +135,12 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
 
   async function probeDevServer() {
     const reported = devServer;
-    if (!reported) return;
+    if (!reported) return { ok: true, status: 200 };
     try {
       const response = await fetch(reported.baseURL, { signal: AbortSignal.timeout(5_000) });
-      await publishDevServer("ready", response.status < 500 ? "healthy" : "unhealthy", response.status < 500 ? "" : `HTTP ${response.status}`);
+      return publishDevServer("ready", response.status < 500 ? "healthy" : "unhealthy", response.status < 500 ? "" : `HTTP ${response.status}`);
     } catch {
-      await publishDevServer("ready", "unhealthy", "loopback health probe failed");
+      return publishDevServer("ready", "unhealthy", "loopback health probe failed");
     }
   }
 
@@ -224,18 +241,25 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
       if (!["http:", "https:"].includes(baseURL.protocol) || !["127.0.0.1", "localhost", "::1"].includes(baseURL.hostname) || !baseURL.port || baseURL.username || baseURL.password) {
         throw new Error("base_url must be a credential-free loopback HTTP URL with an explicit port");
       }
-      if (devServer) clearInterval(devServer.timer);
-      devServer = { baseURL, generation: randomUUID(), sequence: -1, timer: setInterval(() => void probeDevServer(), 15_000) };
+      const previous = devServer;
+      if (previous) clearInterval(previous.timer);
+      devServer = {
+        ...nextDevServerReport(previous, baseURL),
+        timer: setInterval(() => void probeDevServer(), 15_000),
+      };
       devServer.timer.unref?.();
-      const starting = await publishDevServer("starting", "unknown");
-      if (!starting.ok) {
-        const status = starting.status === 404 ? "This Hive server predates dev-server resource reporting." : (starting.error ?? "resource report failed");
-        clearInterval(devServer.timer);
-        devServer = null;
-        throw new Error(status);
+      if (!previous) {
+        const starting = await publishDevServer("starting", "unknown");
+        if (!starting.ok) {
+          const status = starting.status === 404 ? "This Hive server predates dev-server resource reporting." : (starting.error ?? "resource report failed");
+          clearInterval(devServer.timer);
+          devServer = null;
+          throw new Error(status);
+        }
       }
-      await probeDevServer();
-      return toolText(`Reporting dev-server at ${baseURL.origin} as the catalogued resource name "dev-server".`, {
+      const ready = await probeDevServer();
+      if (!ready.ok) throw new Error(ready.error ?? "resource report failed");
+      return toolText(`${previous ? "Re-reporting" : "Reporting"} dev-server at ${baseURL.origin} as the catalogued resource name "dev-server".`, {
         resource: "dev-server",
         base_url: baseURL.origin,
         note: "Flows retain only the resource name; runtime connection details stay in this sandbox's resource report.",
@@ -247,7 +271,7 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
     capability: FLOW_CAPABILITY,
     name: "run_saved_agent_flow",
     label: "Flows: request saved run",
-    description: "Request a saved Hive flow run and poll the same call ID. The current runtime-owner sandbox claims the request; Hive and hive-agent never execute source. Older Hive servers return a clear unsupported result.",
+    description: "Request a saved Hive flow run and poll the same call ID. The designated runtime-owner sandbox automatically attempts to claim eligible runs every two seconds while its named resource is ready and healthy; Hive and hive-agent never execute source. Older Hive servers return a clear unsupported result.",
     promptSnippet: "Run a saved agent flow against its team dev server",
     parameters: Type.Object({
       flow_id: Type.String({ description: "Saved Hive flow UUID." }),
@@ -268,7 +292,7 @@ export function registerFlowTools(pi: ExtensionAPI, host: FlowBrowserHost) {
         }
         throw new Error(result.error ?? "requesting saved flow run failed");
       }
-      return toolText(`Saved flow run is ${result.body?.run?.state ?? "pending"}. Repeat this exact call_id to poll; it never waits for browser execution.`, {
+      return toolText(`Saved flow run is ${result.body?.run?.state ?? "pending"}. The designated runtime-owner sandbox automatically claims eligible runs every two seconds; repeat this exact call_id to poll and do not wait for browser execution.`, {
         supported: true,
         run: result.body?.run,
       });

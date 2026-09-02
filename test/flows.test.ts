@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sourceFor, validateMaestroYAML, validatePlaywrightSource } from "../extensions/flows/register.ts";
+import { nextDevServerReport, sourceFor, validateMaestroYAML, validatePlaywrightSource } from "../extensions/flows/register.ts";
 
 describe("agent flows", () => {
   it("rewrites recorded navigation to the runtime-resolved base URL", () => {
@@ -18,6 +18,15 @@ describe("agent flows", () => {
   it("does not preserve navigation to another origin", () => {
     const source = sourceFor([{ kind: "navigate", url: "https://example.com/" }], "http://127.0.0.1:5173");
     expect(source).not.toContain("example.com");
+  });
+
+  it("keeps the active resource generation and sequence when re-reporting a warmed server", () => {
+    const prior = { baseURL: new URL("http://127.0.0.1:5173"), generation: "e9ef8518-d2d3-4fe2-81a7-5a6a1d22dd4c", sequence: 4 };
+    expect(nextDevServerReport(prior, new URL("http://127.0.0.1:3000"))).toEqual({
+      baseURL: new URL("http://127.0.0.1:3000"),
+      generation: prior.generation,
+      sequence: prior.sequence,
+    });
   });
 
   it("validates bounded flow formats before they are stored", () => {
