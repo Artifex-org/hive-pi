@@ -21,6 +21,8 @@ function handle(id: string): WorkerHandle & { aliveValue: { value: boolean } } {
 		send: vi.fn(async () => {}),
 		waitForSettle: vi.fn(async () => {}),
 		stop: vi.fn(() => { aliveValue.value = false; }),
+		owedTurns: () => 0,
+		stderrTail: () => "",
 		aliveValue,
 	};
 }
@@ -127,9 +129,10 @@ describe("WorkerRegistry", () => {
 //   Live workers:
 //     run-38c9a8e7-…:tes8841:96fac376567e9ec8 (retriever) — idle, …
 //
-// A supervisor that cannot name its own worker cannot steer or stop it.
+// A supervisor that cannot name its own worker cannot steer or stop it, so the
+// wave runs on unsupervised until its timeout.
 describe("WorkerRegistry.resolve", () => {
-	it("accepts the trailing work id and the node id the listing prints", () => {
+	it("accepts the trailing work id the listing prints", () => {
 		const registry = new WorkerRegistry();
 		const worker = handle("run-38c9a8e7:tes8841:96fac376567e9ec8");
 		registry.register(worker);
