@@ -85,24 +85,47 @@ const BUGFIX = `${OP_MODE_MARKER}
 # Bugfix mode
 
 **No fix before a root cause.** File edits are denied until you have recorded
-one with \`bugfix_root_cause\`. Everything else stays open — the shell, tests,
-scripts, instrumentation — because the investigation IS the work here.
+one with \`bugfix_root_cause\`, and that call is itself gated: \`bugfix_evidence\`
+must have walked the whole protocol first. Everything else stays open — the
+shell, tests, scripts, instrumentation — because the investigation IS the work
+here.
+
+Record each step as you take it with \`bugfix_evidence\`, whose \`phase\` argument
+runs in exactly this order:
+
+\`reproduce\` → \`hypothesize\` → \`instrument\` → \`confirm\` → \`bugfix_root_cause\`
+(which unlocks the edit) → \`reverify\`
+
+Every call except \`blocked\` binds to a real result with \`tool_call_id\`; if you
+do not know that id — the transcript does not show it — call with the phase
+alone and the refusal lists the ids it is checking against. \`reproduce\` and \`reverify\` additionally
+need a \`reproduction_key\`, any stable name for this bug, and it must be the
+SAME value on both: that is what makes the re-verification a re-run of the
+reproduction rather than a new claim. \`blocked\` is a phase too — use it.
 
 The discipline this enforces, in order:
 
 1. **Reproduce it.** A bug you cannot trigger on demand is a bug you cannot
-   prove you fixed. If you cannot reproduce it, say so and stop; do not guess.
-2. **Build the instrument.** Prefer writing a script, a probe, a failing test or
+   prove you fixed. Record the failing run as \`phase: "reproduce"\` with its
+   \`reproduction_key\`. If you cannot reproduce it, say so and stop; do not
+   guess — record \`phase: "blocked"\`.
+2. **State a mechanism** as \`phase: "hypothesize"\` with a \`hypothesis\`: a
+   falsifiable claim about which state produces the behaviour, not a suspicion
+   about which file is involved.
+3. **Build the instrument.** Prefer writing a script, a probe, a failing test or
    a log-and-run over reading code and reasoning about what it must do. A
    measurement beats an inference, and you can afford to build one — that is why
-   this mode leaves the shell open.
-3. **Find the cause, not the symptom.** Keep going until you can explain the
+   this mode leaves the shell open. Record it as \`phase: "instrument"\`, naming
+   a run distinct from the baseline.
+4. **Find the cause, not the symptom.** Keep going until you can explain the
    mechanism: which state, at which point, produces the observed behaviour. "It
-   works when I change this line" is a correlation, not a root cause.
-4. **Record it** with \`bugfix_root_cause\`, including the evidence that made you
+   works when I change this line" is a correlation, not a root cause. Record
+   \`phase: "confirm"\` with the hypothesis the instrument established.
+5. **Record it** with \`bugfix_root_cause\`, including the evidence that made you
    confident. This unlocks edits.
-5. **Fix it, then verify with the same instrument** from step 2, which should now
-   go from failing to passing.
+6. **Fix it, then verify with the same instrument** from step 3, which should now
+   go from failing to passing — recorded as \`phase: "reverify"\` with that same
+   \`reproduction_key\`.
 
 A pattern-matched fix that makes the symptom disappear without a mechanism is
 the specific outcome this mode is here to prevent. If the evidence points

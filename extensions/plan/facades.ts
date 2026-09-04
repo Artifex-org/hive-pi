@@ -132,11 +132,65 @@ export function todoWritesToOps(doc: PlanDoc, writes: readonly TaskWrite[]): Pla
 /* workflow_write                                                              */
 /* -------------------------------------------------------------------------- */
 
-/** One `workflow_write` op, as the prompts already send them. */
+/**
+ * Every verb this tool answers to, which is also every verb its schema offers.
+ *
+ * ONE list, used for the `op` enum AND for the complaint on the default branch,
+ * because the set a caller is told about and the set that actually works cannot
+ * be allowed to drift — the schema saying one thing while the switch does
+ * another is precisely the defect the last two entries exist to fix.
+ *
+ * `lane` and `item` are ALIASES of `stage` and `step`, not new behaviour. They
+ * are here because this tool's own description calls them lanes, and because
+ * `plan_write` — the same document, the other vocabulary — spells the ops
+ * `lane` and `item`. A model that reads either of those and writes `op:"lane"`
+ * is not guessing. Before the alias that op fell to the default branch and was
+ * dropped, and the `step` that followed AUTO-CREATED the lane it named: the
+ * batch half-applied into a lane whose title nobody chose.
+ *
+ * They are in the enum rather than merely tolerated by the switch because a
+ * provider doing constrained sampling emits only what the enum lists, so a verb
+ * absent from it is a verb the model cannot reach even when the handler is
+ * there.
+ */
+export const WORKFLOW_OPS = [
+	"meta",
+	"stage",
+	"set_stage",
+	"step",
+	"set_step",
+	"loop",
+	"loop_tick",
+	"template",
+	"delivery",
+	"moveStage",
+	"moveStep",
+	"removeStage",
+	"removeStep",
+	"lane",
+	"item",
+] as const;
+
+/**
+ * One `workflow_write` op, as the prompts already send them.
+ *
+ * `op` stays a plain `string` rather than narrowing to `WORKFLOW_OPS`: the
+ * mapper is exported and pure and direct callers reach it without going near
+ * the schema at all. No schema validator was found in pi's tool-call path
+ * either (grepped at 0.84.2), so the default branch below is live and must stay
+ * reachable by the type as well as at runtime — the enum narrows what a MODEL
+ * is offered, never what this function is handed.
+ */
 export type WorkflowToolOp = {
 	op: string;
 	id?: string;
 	stageId?: string;
+	/** How `plan_write` names the lane a step belongs to. Read as `stageId`. */
+	lane?: string;
+	/** `plan_write` nests a lane's items. This vocabulary does not — see below. */
+	items?: unknown;
+	/** `plan_write` nests the item body. This vocabulary does not — see below. */
+	item?: unknown;
 	stage?: string;
 	title?: string;
 	goal?: string;
@@ -171,10 +225,20 @@ export type WorkflowToolOp = {
  *   - **`before` on a moveStage.** The plan's block ops address by `after`, and
  *     converting requires the document; `moveStage` therefore resolves to the
  *     block move with the preceding sibling, computed here.
+ *
+ * The two arrays come back SEPARATE on purpose. `notes` is what was applied and
+ * changed on the way; `dropped` is what produced no op at all. Folding them into
+ * one list and printing it under "Not applied" told a caller its lane had not
+ * landed when the lane was written and only its status refused — a report that
+ * is worse than silence, because it invites the caller to write it all again.
  */
-export function workflowOpsToPlanOps(doc: PlanDoc, ops: readonly WorkflowToolOp[]): { ops: PlanOp[]; notes: string[] } {
+export function workflowOpsToPlanOps(
+	doc: PlanDoc,
+	ops: readonly WorkflowToolOp[],
+): { ops: PlanOp[]; notes: string[]; dropped: string[] } {
 	const out: PlanOp[] = [];
 	const notes: string[] = [];
+	const dropped: string[] = [];
 	// `step` without a `stageId` means "the lane this batch last touched" — the
 	// affordance the workflow tool documented, kept because the prompts use it.
 	let lastLane: string | undefined;
@@ -186,10 +250,25 @@ export function workflowOpsToPlanOps(doc: PlanDoc, ops: readonly WorkflowToolOp[
 				break;
 
 			case "stage":
-			case "set_stage": {
+			case "set_stage":
+			// `plan_write`'s spelling. See WORKFLOW_OPS.
+			case "lane": {
 				if (op.status !== undefined) {
 					notes.push(
 						`a lane's status is derived from its items now, so "${op.status}" on ${op.id ?? op.kind ?? "that lane"} was not stored — set the items instead`,
+					);
+				}
+				// THE KNOWN EDGE OF ACCEPTING THE ALIAS, said out loud rather than
+				// swallowed. `plan_write`'s `lane` op nests its work as
+				// `{op:"lane", items:[...]}`; this vocabulary has always sent the
+				// items afterwards as separate `step` ops, and the schema stays
+				// open (see the `additionalProperties` note in index.ts), so a
+				// nested `items` array would validate and then evaporate. A caller
+				// half-way between the two spellings is the likeliest way to reach
+				// this op, so it is the likeliest place to lose a whole checklist.
+				if (Array.isArray(op.items) && op.items.length > 0) {
+					notes.push(
+						`the ${op.items.length} nested items on ${op.id ?? op.kind ?? "that lane"} were not stored — the lane was written; send its items as separate step ops`,
 					);
 				}
 				const laneId = op.id ?? op.kind;
@@ -205,9 +284,24 @@ export function workflowOpsToPlanOps(doc: PlanDoc, ops: readonly WorkflowToolOp[
 			}
 
 			case "step":
-			case "set_step": {
-				const lane = op.stageId ?? lastLane;
-				if (op.stageId !== undefined) lastLane = op.stageId;
+			case "set_step":
+			// `plan_write`'s spelling. See WORKFLOW_OPS.
+			case "item": {
+				// `lane` is how `plan_write` names the same field, and it arrives
+				// on the same op that made the alias worth having.
+				const named = op.stageId ?? op.lane;
+				const lane = named ?? lastLane;
+				if (named !== undefined) lastLane = named;
+				// The other half of the alias's payload mismatch: `plan_write`
+				// nests the body as `{op:"item", lane, item:{title, …}}` while
+				// this vocabulary carries those fields flat on the op. A nested
+				// body would leave every field below undefined, which for a NEW
+				// item means a titleless one — so say what was not read.
+				if (op.item !== null && typeof op.item === "object") {
+					notes.push(
+						`a nested "item" object is not read here — this tool carries title, status and detail flat on the op itself`,
+					);
+				}
 				out.push({
 					op: "item",
 					...(lane !== undefined ? { lane } : {}),
@@ -278,10 +372,34 @@ export function workflowOpsToPlanOps(doc: PlanDoc, ops: readonly WorkflowToolOp[
 				break;
 
 			default:
-				notes.push(`unknown workflow op "${op.op}" was ignored`);
+				// Naming the ACCEPTED set, not only the rejected word. A caller
+				// that guessed a verb already knows the word it sent; what it
+				// cannot know is which word it should have sent, and a batch that
+				// half-applied is one the model has to finish on the next turn.
+				dropped.push(`unknown workflow op "${op.op}" was ignored — this tool accepts ${WORKFLOW_OPS.join(", ")}`);
 		}
 	}
-	return { ops: out, notes };
+	return { ops: out, notes, dropped };
+}
+
+/**
+ * The text `workflow_write` returns, split by what actually happened.
+ *
+ * Pure and exported so the split is testable without a pi host — the same
+ * reason the mappers are, and for the same reason it matters: getting this
+ * wrong does not throw, it just tells the model something untrue about its own
+ * document. `notes` describes ops that WERE applied and lost something on the
+ * way; `dropped` and the document's own refusals are ops that produced nothing.
+ */
+export function renderWorkflowReply(
+	summary: string,
+	notes: readonly string[],
+	notApplied: readonly string[],
+): string {
+	const lines = [summary];
+	if (notes.length > 0) lines.push("", "Applied, with changes:", ...notes.map((note) => `  - ${note}`));
+	if (notApplied.length > 0) lines.push("", "Not applied:", ...notApplied.map((problem) => `  - ${problem}`));
+	return lines.join("\n");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -514,29 +632,79 @@ export function registerFacadeTools(
 		].join(" "),
 		promptSnippet: "Build the shape of the work — stages, dependencies, and orchestration waves",
 		parameters: Type.Object({
-			ops: Type.Array(Type.Object({}, { additionalProperties: true }), {
-				minItems: 1,
-				description: "Operations, applied in order.",
-			}),
+			// THE OP VOCABULARY IS DECLARED, not left to `additionalProperties`.
+			//
+			// This was `Type.Object({}, {additionalProperties: true})`: anything
+			// validated, and the switch then discarded every verb it did not know
+			// — including `lane`, the word this tool's own description above uses
+			// and `plan_write` spells its op. A schema that accepts everything
+			// teaches nothing, so the model learned the vocabulary by trial, and
+			// its failed guesses came back as a batch that had half-applied.
+			//
+			// `additionalProperties` is still NOT set to false, for the reason
+			// index.ts records at `BlockSchema`: pi forwards the schema to the
+			// provider unmodified and constrained sampling has its own
+			// requirements. The fields below are therefore a description of the
+			// shape, not a fence around it — which is why the two nested-payload
+			// mismatches the aliases invite are reported by the mapper at runtime
+			// rather than being left to the schema to refuse.
+			ops: Type.Array(
+				Type.Object({
+					op: StringEnum(WORKFLOW_OPS, {
+						description: "What to do. `lane` and `item` are accepted as synonyms of `stage` and `step`.",
+					}),
+					id: Type.Optional(Type.String({ description: "Id of the stage or step this op addresses." })),
+					stageId: Type.Optional(Type.String({ description: "The lane a step belongs to. Omit to reuse the last one." })),
+					lane: Type.Optional(Type.String({ description: "How `plan_write` names `stageId`. Read as the same field." })),
+					stage: Type.Optional(Type.String({ description: "The lane a loop runs in." })),
+					title: Type.Optional(Type.String()),
+					goal: Type.Optional(Type.String()),
+					kind: Type.Optional(
+						Type.String({ description: "A lane's phase (frame, research, execute, …), or a step's delivery kind." }),
+					),
+					status: Type.Optional(Type.String({ description: "Step status. Refused on a lane, which derives its own." })),
+					before: Type.Optional(Type.String({ description: "Move the target so it precedes this id." })),
+					detail: Type.Optional(Type.String()),
+					files: Type.Optional(Type.Array(Type.String())),
+					note: Type.Optional(Type.String()),
+					linearKey: Type.Optional(Type.String()),
+					dependsOn: Type.Optional(Type.Array(Type.String())),
+					parentId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+					steps: Type.Optional(Type.Array(Type.String(), { description: "Step ids a loop repeats." })),
+					until: Type.Optional(Type.String({ description: "The condition that ends a loop." })),
+					active: Type.Optional(Type.Boolean()),
+					name: Type.Optional(Type.String({ description: "Template name, for op `template`." })),
+				}),
+				{
+					minItems: 1,
+					description: "Operations, applied in order.",
+				},
+			),
 		}),
 		execute: async (_id: string, params: { ops?: WorkflowToolOp[] }) => {
 			const before = host.doc();
 			const mapped = workflowOpsToPlanOps(before, params.ops ?? []);
 			const result = host.apply(mapped.ops);
-			const problems = [...mapped.notes, ...result.problems];
+			// What was written and lost something on the way is reported apart
+			// from what was not written at all. `result.problems` joins the second
+			// group because the document's refusals are refusals; that they also
+			// mix "the op was refused" with "the op landed, the field was refused"
+			// is state.ts's own reporting shape and is not repaired here.
+			const notApplied = [...mapped.dropped, ...result.problems];
+			const problems = [...mapped.notes, ...notApplied];
 			const rows = taskRowsOf(result.doc);
 			const summary = `${rows.length} item(s) in the current lane`;
 			return {
-				content: [
-					{
-						type: "text" as const,
-						text:
-							problems.length > 0
-								? `${summary}\n\nNot applied:\n${problems.map((problem) => `  - ${problem}`).join("\n")}`
-								: summary,
-					},
-				],
-				details: { tasks: rows, ...(problems.length > 0 ? { problems } : {}) },
+				content: [{ type: "text" as const, text: renderWorkflowReply(summary, mapped.notes, notApplied) }],
+				// `problems` stays the union under its original key: Hive's widget
+				// and any transcript reader key on it, and a rename would be a
+				// silent loss of its own. The split is added beside it.
+				details: {
+					tasks: rows,
+					...(problems.length > 0 ? { problems } : {}),
+					...(mapped.notes.length > 0 ? { notes: mapped.notes } : {}),
+					...(notApplied.length > 0 ? { notApplied } : {}),
+				},
 			};
 		},
 	});

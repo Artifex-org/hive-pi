@@ -413,6 +413,98 @@ describe("applyOps — re-stating a steps block preserves progress", () => {
 		);
 		expect(stepsOf(result.doc)[0].status).toBe("blocked");
 	});
+
+	it("resolves the status synonyms its own schema advertises rather than dropping the step", () => {
+		// THE DATA LOSS THIS PREVENTS, and it is the whole step, not the field.
+		//
+		// `plan_write`'s `StepStatusSchema` advertises `completed` and `running`
+		// as accepted synonyms — with a description saying so — and `prompt.ts`
+		// teaches the steps block as THE way to write the checklist. The block
+		// path used to test membership of a list that had neither word and then
+		// RETURN, skipping the `steps.push`. Measured at HEAD: three steps in,
+		// ONE stored, and the two that vanished were the ones reporting progress.
+		//
+		// The same statuses through `op:"lane"` stored fine, because that path
+		// normalizes. Same tool, same schema, two handlers, opposite behaviour.
+		const result = applyOps(
+			emptyPlan(NOW),
+			[
+				{
+					op: "upsert",
+					block: {
+						type: "steps",
+						steps: [
+							{ id: "a", title: "alpha", status: "completed" as never },
+							{ id: "b", title: "bravo", status: "running" as never },
+							{ id: "c", title: "charlie", status: "done" },
+						],
+					},
+				},
+			],
+			NOW,
+		);
+		const steps = stepsOf(result.doc);
+		expect(steps.map((step) => step.id)).toEqual(["a", "b", "c"]);
+		expect(steps.map((step) => step.status)).toEqual(["done", "in_progress", "done"]);
+		expect(result.problems).toEqual([]);
+	});
+
+	it("keeps a step whose status it genuinely cannot read, and complains about the field", () => {
+		// The house rule the rest of this file already follows: keep the work,
+		// refuse the field. A word nothing can map is still a step somebody meant
+		// to write down, so it lands `pending` and the caller is told which one.
+		const result = applyOps(
+			emptyPlan(NOW),
+			[
+				{
+					op: "upsert",
+					block: {
+						type: "steps",
+						steps: [
+							{ id: "a", title: "alpha", status: "finished" as never },
+							{ id: "b", title: "bravo" },
+						],
+					},
+				},
+			],
+			NOW,
+		);
+		const steps = stepsOf(result.doc);
+		expect(steps.map((step) => step.id)).toEqual(["a", "b"]);
+		expect(steps[0].status).toBe("pending");
+		expect(result.problems.join()).toContain('step #1 has unknown status "finished"');
+		expect(result.problems.join()).toContain("kept at pending");
+	});
+
+	it("does not spend earned progress on an unreadable status in a re-stated block", () => {
+		// `pending` is `mergeSteps`'s "no opinion" marker, so refusing the field
+		// by landing there is not a reset: a step that was `done` stays `done`
+		// across the re-state. Refusing the field must not cost the progress the
+		// step already reported.
+		//
+		// The REWORD is what makes this a control rather than a coincidence. At
+		// HEAD the bad status emptied the block, `normalizeBlock` returned
+		// undefined, and the whole upsert was refused — which left a `done` step
+		// standing and would have read as a pass. Asserting the new title proves
+		// the block was actually re-stated and the status survived THAT.
+		const base = applyOps(withSteps("wire the gate"), [{ op: "set_step", id: "1", status: "done" }], NOW).doc;
+		const result = applyOps(
+			base,
+			[
+				{
+					op: "upsert",
+					id: "1",
+					block: { type: "steps", steps: [{ id: "1", title: "wire the gate properly", status: "finished" as never }] },
+				},
+			],
+			LATER,
+		);
+		const steps = stepsOf(result.doc);
+		expect(steps).toHaveLength(1);
+		expect(steps[0].title).toBe("wire the gate properly");
+		expect(steps[0].status).toBe("done");
+		expect(result.problems.join()).toContain('unknown status "finished"');
+	});
 });
 
 describe("queries", () => {

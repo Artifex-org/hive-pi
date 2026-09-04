@@ -55,6 +55,101 @@ describe("diagnose — the measured failure classes", () => {
 		expect(explain(result, "x.ts")).toContain("lines 2, 6");
 	});
 
+	it("counts a raw duplicate AND its fold-only twin, rather than the smaller raw set", () => {
+		// The diagnosis is appended DIRECTLY BELOW pi's own "Found N occurrences"
+		// line, so a smaller N is worse than none: it contradicts the message it
+		// annotates, and the site it drops is precisely the invisible one the
+		// model needs named. Two byte-identical copies plus an NBSP twin — pi
+		// folds and sees three; a raw-first count sees two and hides line 5.
+		const file = ["a = 1", "b = 2", "a = 1", "b = 2", "a = 1", "b\u00a0= 2", ""].join("\n");
+		const result = diagnose(file, "a = 1\nb = 2");
+		expect(result.kind).toBe("duplicate");
+		if (result.kind !== "duplicate") return;
+		expect(result.occurrences).toBe(3);
+		expect(result.lines).toEqual([1, 3, 5]);
+	});
+
+	// The four cases below are the SAME failure class as the one above, but
+	// wearing the disguise that made this module go silent on it. pi counts
+	// occurrences in its fuzzy fold (`normalizeForFuzzyMatch`: NFKC, per-line
+	// trimEnd, smart quotes, dashes, special spaces) and refuses at 2 — so a
+	// second site that is byte-different but fold-identical is a duplicate to pi
+	// and, before this fix, exactly ONE raw hit here. `diagnose` returned `ok`,
+	// `explain` returned null, and the model got pi's bare "provide more context"
+	// with nothing appended. Each of these four fails without the fold-space
+	// count: verified by reverting it, all four report kind "ok".
+	//
+	// Line numbers are asserted, not just the kind, because a `duplicate` with an
+	// empty `lines` is the same round trip as no diagnosis at all — `explain`
+	// renders no `where` clause for it.
+	it("catches the papercut's own shape: parallel blocks split by ONE trailing space", () => {
+		// Two identical `except` bodies; the second carries a trailing space on an
+		// interior anchor line. Reproduced against pi directly: pi counts 2.
+		const file = [
+			"try:",
+			"    risky()",
+			"except ValueError:",
+			"    log.warning('bad')",
+			"    return None",
+			"except KeyError:",
+			"    log.warning('bad') ",
+			"    return None",
+			"",
+		].join("\n");
+		const result = diagnose(file, "    log.warning('bad')\n    return None");
+		expect(result.kind).toBe("duplicate");
+		if (result.kind !== "duplicate") return;
+		expect(result.occurrences).toBe(2);
+		expect(result.lines).toEqual([4, 7]);
+		expect(explain(result, "handler.py")).toContain("lines 4, 7");
+	});
+
+	it("catches an NBSP twin, which no amount of staring at the file reveals", () => {
+		// U+00A0 where the eye sees a space. This one is worth its own case: the
+		// model cannot see it, so "provide more context" reads as pi being wrong.
+		const file = "a = 1\nb = 2\na = 1\nb = 2\n";
+		const result = diagnose(file, "a = 1\nb = 2");
+		expect(result.kind).toBe("duplicate");
+		if (result.kind !== "duplicate") return;
+		expect(result.lines).toEqual([1, 3]);
+	});
+
+	it("catches an em-dash twin", () => {
+		const file = "total = x - 1\ntotal = x — 1\n";
+		const result = diagnose(file, "total = x - 1");
+		expect(result.kind).toBe("duplicate");
+		if (result.kind !== "duplicate") return;
+		expect(result.lines).toEqual([1, 2]);
+	});
+
+	it("catches an NFKC twin, where the fold CHANGES LENGTH and the lines still hold", () => {
+		// U+FB01 (ﬁ) expands to two characters under NFKC, so every index after it
+		// shifts. Line numbers are unaffected because nothing in the fold touches a
+		// newline — this case exists to pin that property, not just the count.
+		const file = "x = 1\nﬁle = 1\ny = 2\nfile = 1\n";
+		const result = diagnose(file, "file = 1");
+		expect(result.kind).toBe("duplicate");
+		if (result.kind !== "duplicate") return;
+		expect(result.occurrences).toBe(2);
+		expect(result.lines).toEqual([2, 4]);
+	});
+
+	it("does NOT invent a duplicate pi never saw, out of interior whitespace", () => {
+		// The counterweight to the four above, and the reason the old
+		// `squash`-based fuzzy branch was DELETED rather than kept alongside the
+		// new one: `squash` collapses INTERIOR runs of spaces and tabs, which pi
+		// does not. This anchor is indented with two tabs and matches nothing in
+		// the file, so pi finds it ZERO times and says "could not find". The old
+		// branch squashed all three to "return 1;\n}" and answered "it occurs 2
+		// times, add context" — sending the model to disambiguate an ambiguity pi
+		// never reported, and doing so with `lines: []`, so not even a wrong line
+		// number to check the claim against. A near miss is the honest verdict:
+		// the indentation IS the difference, and quoting the region shows it.
+		const file = ["if (a) {", "\treturn 1;", "}", "", "if (b) {", "    return 1;", "}", ""].join("\n");
+		const result = diagnose(file, "\t\treturn 1;\n}");
+		expect(result.kind).toBe("near-miss");
+	});
+
 	it("says 'not there' rather than offering an unrelated region", () => {
 		// The 9% class: the anchor bore little relation to the file. A confident
 		// "closest match" here sends the model to edit the wrong place, which is

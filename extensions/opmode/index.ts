@@ -68,7 +68,148 @@ export function refusalWithCandidates(results: Map<string, ObservedResult>, requ
 	const rows = recent.map(
 		([id, r]) => `  ${id}  ${r.name}${r.failed ? "  (failed)" : ""}  ${r.text.replace(/\s+/g, " ").slice(0, 70)}`,
 	);
-	return `${head} Recent completed results, newest first — pass one of these ids as tool_call_id:\n${rows.join("\n")}`;
+	// Name `reproduction_key` HERE, in the message read immediately before the
+	// retry. It is `Type.Optional` in the schema and mandatory for the first
+	// phase, so a caller that answered this refusal perfectly — a listed id, a
+	// failing one — was refused AGAIN on the next call, for a field this message
+	// had never mentioned. Two refusals for one call is the dead end the
+	// candidate list was supposed to end; listing ids only moved it one call
+	// later. The example points at the newest FAILING result because `reproduce`
+	// rejects a passing one, and handing over an id that the next line rejects
+	// is the same failure wearing a different sentence.
+	const example = recent.find(([, r]) => r.failed)?.[0] ?? recent[0]![0];
+	return (
+		`${head} Recent completed results, newest first — pass one of these ids as tool_call_id:\n${rows.join("\n")}\n` +
+		`Phase "reproduce" also needs a reproduction_key — any stable name for this bug, repeated on the later "reverify" call: ` +
+		`{"phase": "reproduce", "tool_call_id": "${example}", "reproduction_key": "targeted-test"}`
+	);
+}
+
+/** The states the evidence protocol moves through; `phase` below holds one. */
+type ProtocolState = "reproduce" | "hypothesize" | "instrument" | "confirm" | "fix" | "done" | "blocked";
+
+/**
+ * The `bugfix_evidence` phase argument each state is waiting for.
+ *
+ * Deliberately not the identity map, which is exactly why the caller could not
+ * infer it: after `confirm` the machine sits at `fix` — the state where
+ * `bugfix_root_cause` unlocks the editors — and the evidence call it wants next
+ * is `reverify`. There is no `fix` phase argument to pass, and nothing the agent
+ * could see said so.
+ */
+const EXPECTED_CALL: Record<ProtocolState, string | null> = {
+	reproduce: "reproduce",
+	hypothesize: "hypothesize",
+	instrument: "instrument",
+	confirm: "confirm",
+	fix: "reverify",
+	done: null,
+	blocked: null,
+};
+
+/** The order, spelled the way the `phase` argument is spelled. */
+const PHASE_ORDER = `reproduce → hypothesize → instrument → confirm → (bugfix_root_cause, then the edit) → reverify`;
+
+/**
+ * The refusal for a `reproduce` call that named a real result but cannot bind.
+ *
+ * The old wording — "needs an actual failing result and a stable reproduction
+ * key" — fired for either half and named neither, so an agent that had just
+ * been handed a failing id by refusalWithCandidates read it as a second verdict
+ * on the id: the one thing that was right. It then went back to hunting ids.
+ * Say which half is missing, and show the call that would have worked.
+ */
+function reproduceRefusal(id: string, observed: ObservedResult, key: string | undefined): string {
+	const faults: string[] = [];
+	if (observed.failed !== true) {
+		faults.push(`${id} (${observed.name}) completed without failing, so it is not a reproduction — bind the run that shows the bug`);
+	}
+	if (!key) {
+		faults.push(
+			`reproduction_key is missing: any stable name for this bug will do. It is optional in the schema because the later ` +
+				`phases do not all take it, but this phase requires it, and "reverify" must repeat the same value`,
+		);
+	}
+	// The example may only echo the id back when the id was the good half. When
+	// the run PASSED, printing it as the example would recommend the call that
+	// just failed — the same self-contradiction, one refusal further on, that
+	// this whole change exists to remove.
+	const exampleID = observed.failed === true ? id : "<id of the failing run>";
+	return (
+		`Read as phase "reproduce", the failing baseline. ${faults.join(". ")}. ` +
+		`Example: {"phase": "reproduce", "tool_call_id": "${exampleID}", "reproduction_key": "targeted-test"}`
+	);
+}
+
+/**
+ * The refusal for everything that is not a first-phase bind, split by WHICH
+ * ordering went wrong.
+ *
+ * One sentence used to cover four distinct faults ("out of order, lacks a
+ * hypothesis, or is not a distinct passing run of the same reproduction key and
+ * tool"), leaving the caller to guess which had happened and to re-derive the
+ * order by trial — on a protocol that is mandatory and documented nowhere it
+ * can read. The machine holds both halves, the phase it read and the phase it
+ * wants; only the message collapsed them.
+ */
+function orderingRefusal(requested: string, state: ProtocolState, detail: string | null): string {
+	if (detail === null) {
+		const expected = EXPECTED_CALL[state];
+		const wants = expected
+			? `it is waiting for phase "${expected}"`
+			: state === "done"
+				? "this reproduction is already re-verified — there is nothing further to record"
+				: "the investigation is marked blocked";
+		return `Read as phase "${requested}", but ${wants}. Order: ${PHASE_ORDER}.`;
+	}
+	return `Phase "${requested}" is the right next step, but ${detail}. Order: ${PHASE_ORDER}.`;
+}
+
+/** A reproduction: one model-supplied key bound to one observed failing run. */
+type Reproduction = { key: string; failingCallID: string; toolName: string };
+
+/**
+ * Why a call whose phase WAS the expected one still could not be recorded.
+ *
+ * Each phase has exactly one further requirement, and `reverify` has four at
+ * once — so that one is enumerated rather than summarised. An agent told "not a
+ * distinct passing run of the same reproduction key and tool" has to test four
+ * hypotheses against a gate that answers one bit per call; told which of the
+ * four missed, it fixes the call.
+ */
+function payloadFault(
+	p: { phase?: string; tool_call_id?: string; reproduction_key?: string; hypothesis?: string },
+	observed: ObservedResult,
+	reproduction: Reproduction | null,
+): string {
+	if (p.phase === "hypothesize" || p.phase === "confirm") {
+		return "it carries no hypothesis — put the falsifiable mechanism in the `hypothesis` field";
+	}
+	if (p.phase === "instrument") {
+		return (
+			`tool_call_id is the failing baseline ${reproduction?.failingCallID} again — the instrument has to be a ` +
+			`distinct run from the reproduction, or it measures nothing new`
+		);
+	}
+	if (!reproduction) return `no reproduction is bound — start again at phase "reproduce"`;
+	const faults: string[] = [];
+	if (p.reproduction_key !== reproduction.key) {
+		faults.push(
+			`reproduction_key is ${p.reproduction_key ? `"${p.reproduction_key}"` : "missing"}, and the bound reproduction is "${reproduction.key}"`,
+		);
+	}
+	if (p.tool_call_id === reproduction.failingCallID) {
+		faults.push(`tool_call_id is the failing baseline ${reproduction.failingCallID} again — re-verification needs a distinct run`);
+	}
+	if (observed.name !== reproduction.toolName) {
+		faults.push(`the result came from ${observed.name}, not ${reproduction.toolName} — rerun the tool that reproduced it`);
+	}
+	if (observed.failed) faults.push("that run still failed");
+	// Unreachable while this list and the bind condition stay in step. Kept
+	// because a drifting pair should degrade to the old vague sentence, not to
+	// "…, but . Order: …" — a refusal with a hole in it reads as a harness bug
+	// and sends the agent looking in the wrong place entirely.
+	return faults.length > 0 ? faults.join("; ") : "it does not satisfy re-verification";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -87,8 +228,8 @@ export default function (pi: ExtensionAPI) {
 	// A reproduction is a stable, model-supplied descriptor bound to two distinct
 	// observed runs: the failing baseline and its passing re-verification. Tool
 	// call IDs identify one immutable invocation, so they cannot serve as both.
-	let reproduction: { key: string; failingCallID: string; toolName: string } | null = null;
-	let phase: "reproduce" | "hypothesize" | "instrument" | "confirm" | "fix" | "done" | "blocked" = "reproduce";
+	let reproduction: Reproduction | null = null;
+	let phase: ProtocolState = "reproduce";
 	/** Tool names captured before a mode narrowed them, so a switch back restores. */
 	let toolsBeforeMode: string[] | null = null;
 	let heldCtx: ExtensionContext | null = null;
@@ -178,12 +319,17 @@ export default function (pi: ExtensionAPI) {
 				return classifyDiscussionTool(name, input);
 			case "bugfix":
 				if (rootCause || !BUGFIX_WITHHELD_TOOLS.has(name)) return { allowed: true };
+				// This is the FIRST thing an agent in bugfix mode reads, and it used
+				// to send them straight at `bugfix_root_cause` — which then refuses
+				// until bugfix_evidence has walked every phase. The deny that opens
+				// the investigation cannot prescribe the call that closes it, or the
+				// agent's first two moves are both refusals.
 				return {
 					allowed: false,
 					reason:
 						`Bugfix mode: no fix before a root cause. Reproduce the bug and build something that measures it ` +
-						`— the shell, tests and scripts are all open — then record what you found with bugfix_root_cause, ` +
-						`which unlocks edits.`,
+						`— the shell, tests and scripts are all open — recording each step with bugfix_evidence, in order: ` +
+						`${PHASE_ORDER}. Once "confirm" is recorded, bugfix_root_cause accepts the mechanism and unlocks edits.`,
 				};
 			case "orchestrate":
 				return classifyOrchestrateTool(name, input);
@@ -251,11 +397,15 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "bugfix_evidence",
 		label: "Record bugfix evidence",
-		description: "Bind a bugfix phase to a completed tool result. The tool-call id must name an actual result from this session; a stable reproduction key binds its failing baseline to a distinct passing re-verification. If you do not know the id, call with the phase alone — the refusal lists the recent result ids to pass.",
+		description: `Bind a bugfix phase to a completed tool result. The phases run in one order: ${PHASE_ORDER}. The tool-call id must name an actual result from this session; reproduction_key is required by the reproduce and reverify phases, the same value on both, which is what binds one failing baseline to a distinct passing re-verification. If you do not know the id, call with the phase alone — the refusal lists the recent result ids to pass.`,
 		parameters: Type.Object({
 			phase: Type.Union([Type.Literal("reproduce"), Type.Literal("hypothesize"), Type.Literal("instrument"), Type.Literal("confirm"), Type.Literal("reverify"), Type.Literal("blocked")]),
 			tool_call_id: Type.Optional(Type.String()),
-			reproduction_key: Type.Optional(Type.String({ description: "Stable identifier for this reproduction; use the same value for the failing baseline and passing re-verification." })),
+			// Optional in the SCHEMA and mandatory in the reproduce and reverify
+			// phases, because the phases between them do not take it. That gap is
+			// only survivable if the description says so: a caller who reads
+			// `Type.Optional` and omits it hits a refusal it could not predict.
+			reproduction_key: Type.Optional(Type.String({ description: "Stable identifier for this reproduction. REQUIRED by the reproduce and reverify phases — optional only because the phases between them do not take it — and the same value must be used for both." })),
 			hypothesis: Type.Optional(Type.String()),
 		}),
 		execute: async (_id, params) => {
@@ -271,7 +421,7 @@ export default function (pi: ExtensionAPI) {
 			if (!observed) return text(refusalWithCandidates(results, p.tool_call_id));
 			if (p.phase === "reproduce") {
 				const key = p.reproduction_key?.trim();
-				if (observed.failed !== true || !key) return text("Reproduction evidence needs an actual failing result and a stable reproduction key.");
+				if (observed.failed !== true || !key) return text(reproduceRefusal(p.tool_call_id!, observed, key));
 				reproduction = { key, failingCallID: p.tool_call_id!, toolName: observed.name }; phase = "hypothesize";
 				return protocolResult("hypothesize", `Reproduction failed via ${observed.name}; state a falsifiable mechanism.`);
 			}
@@ -279,7 +429,19 @@ export default function (pi: ExtensionAPI) {
 			if (p.phase === "instrument" && phase === "instrument" && p.tool_call_id !== reproduction?.failingCallID) { phase = "confirm"; return protocolResult("confirm", "Instrumentation recorded; confirm the mechanism it established."); }
 			if (p.phase === "confirm" && phase === "confirm" && p.hypothesis?.trim()) { phase = "fix"; return protocolResult("fix", "Hypothesis confirmed; record the root cause, fix it, then rerun the same reproduction."); }
 			if (p.phase === "reverify" && phase === "fix" && reproduction && p.reproduction_key === reproduction.key && p.tool_call_id !== reproduction.failingCallID && observed.name === reproduction.toolName && !observed.failed) { phase = "done"; return protocolResult("done", "The same reproduction now passes."); }
-			return text("That evidence is out of order, lacks a hypothesis, or is not a distinct passing run of the same reproduction key and tool.");
+			// Two questions, answered separately: was this the wrong PHASE, or the
+			// right phase with the wrong payload? The machine has always known
+			// both — `phase` is the state and `p.phase` is what was asked for —
+			// and answering only the union of them is what made every wrong
+			// ordering look identical from the outside.
+			// `?? "(none)"` rather than `!`: phase is required by the schema, but
+			// this string is what a caller reads when something upstream did not
+			// send it, and `Read as phase "undefined"` would send them hunting a
+			// bug in their own arguments instead of an absent one.
+			const requested = p.phase ?? "(none)";
+			const expected = EXPECTED_CALL[phase];
+			if (p.phase !== expected) return text(orderingRefusal(requested, phase, null));
+			return text(orderingRefusal(requested, phase, payloadFault(p, observed, reproduction)));
 		},
 	});
 
@@ -291,7 +453,8 @@ export default function (pi: ExtensionAPI) {
 			"In bugfix mode this unlocks file edits. Call it when you can explain the MECHANISM — which state, " +
 			"at which point, produces the observed behaviour — not when you have found a line that changes the symptom.",
 		promptSnippet:
-			"Bugfix: record the mechanism with bugfix_root_cause (evidence, not inference) before editing any file.",
+			"Bugfix: walk the phases with bugfix_evidence (reproduce → hypothesize → instrument → confirm), then record " +
+			"the mechanism with bugfix_root_cause (evidence, not inference) — that is what unlocks editing a file.",
 		parameters: Type.Object({
 			summary: Type.String({
 				description: "The mechanism, in one or two sentences: what state, at what point, produces the behaviour.",
