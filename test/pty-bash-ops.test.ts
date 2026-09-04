@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -307,9 +307,10 @@ describe.runIf(canRunPty)("a command running on a real pty", () => {
 	 * `quality-gate --changed` was still alive twelve minutes later, holding the
 	 * worktree's `index.lock` and failing every retry.
 	 *
-	 * `bash -c` explicitly, not a bare subshell: the shell under the pty is
-	 * `$SHELL`, which on a workstation is as likely to be zsh, and `$$` inside an
-	 * explicitly spawned bash is that bash's own pid whatever the outer shell is.
+	 * `bash -c` explicitly, not a bare subshell: this test predates HIV-3086, when
+	 * the shell under the pty was still `$SHELL` and so as likely to be zsh as
+	 * anything else. `$$` inside an explicitly spawned bash is that bash's own pid
+	 * whatever the outer shell is, so the check does not rest on the HIV-3086 fix.
 	 */
 	it("kills a child that ignores HUP and TERM", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pty-orphan-"));
@@ -343,6 +344,114 @@ describe.runIf(canRunPty)("a command running on a real pty", () => {
 		const psLine = model.split("\n").find((l) => l.includes("script")) ?? "";
 		expect(psLine).not.toContain(marker);
 	});
+});
+
+/**
+ * THE TOOL IS CALLED `bash`, SO IT HAS TO SPEAK BASH. (HIV-3086)
+ *
+ * util-linux `script` runs its `-c` string through `$SHELL`, and the spawn used
+ * to hand `$SHELL` straight through — its `"/bin/bash"` default was unreachable,
+ * because no caller passes `shellPath` and the env is a spread of `process.env`.
+ * So on a workstation whose login shell is zsh — which is every workstation in
+ * this fleet — every foreground `bash` tool call was parsed by zsh. 63 distinct
+ * agent sessions in seven days paid for that, the largest single pi-harness
+ * cause in the papercut corpus.
+ *
+ * Each row below is one of the divergences the corpus actually recorded, and
+ * each fails loudly under zsh: `status` is read-only there (the `(eval):N:`
+ * fingerprint, counted 19 times), arrays index from 1, `mapfile` does not
+ * exist, and an unmatched glob aborts the whole line instead of passing
+ * through. Verified as a negative control by reverting the `SHELL:` line to
+ * `opts.shellPath ?? env?.SHELL ?? "/bin/bash"`: all five rows failed.
+ *
+ * `SHELL` is pointed at zsh THROUGH THE ENV `exec` RECEIVES, which is where the
+ * real value came from. The suite does not need zsh to be installed: after the
+ * fix nothing consults the variable, so a host without zsh runs the same
+ * assertions and gets the same answers.
+ *
+ * `ZDOTDIR` is aimed at an empty directory on purpose. This machine's own
+ * `~/.zshenv` runs `unsetopt nomatch`, and zsh sources `$ZDOTDIR/.zshenv` even
+ * for `-c` — so without the isolation the glob row would have PASSED under zsh
+ * here and the negative control would have been one assertion weaker than it
+ * looked, for reasons that live in a dotfile rather than in this repo.
+ */
+describe.runIf(canRunPty)("the command language when the login shell is zsh", () => {
+	let zdotdir: string;
+
+	beforeEach(() => {
+		resetPtyAvailability();
+		process.env.PI_PTY_BASH = "1";
+		zdotdir = mkdtempSync(join(tmpdir(), "pty-zdotdir-"));
+	});
+	afterEach(() => {
+		delete process.env.PI_PTY_BASH;
+		resetPtyAvailability();
+		rmSync(zdotdir, { recursive: true, force: true });
+	});
+
+	/** The environment a workstation launch really hands `exec`. */
+	const zshEnv = (): NodeJS.ProcessEnv => ({
+		...process.env,
+		SHELL: "/usr/bin/zsh",
+		ZDOTDIR: zdotdir,
+	});
+
+	it.each([
+		{
+			name: "assigns to $status, which zsh makes read-only",
+			command: "true; status=$?; echo status=$status",
+			expected: "status=0",
+		},
+		{
+			name: "indexes an array from zero, not from one",
+			command: "arr=(x y z); echo sub=${arr[1]}",
+			expected: "sub=y",
+		},
+		{
+			name: "has mapfile",
+			command: "type mapfile",
+			expected: "mapfile is a shell builtin",
+		},
+		{
+			name: "leaves an unmatched glob alone instead of aborting the line",
+			command: "echo /nonexistent-hiv3086-*; echo REACHED_END",
+			expected: "REACHED_END",
+		},
+		{
+			name: "identifies itself as bash",
+			command: "echo BASH_VERSION=${BASH_VERSION:-none}",
+			expected: /BASH_VERSION=\d/,
+		},
+	])("$name", async ({ command, expected }) => {
+		const { model, exitCode } = await run(command, { env: zshEnv() });
+		expect(model).toMatch(expected);
+		// zsh does not merely answer differently — it aborts the line, so the
+		// exit status is half the evidence.
+		expect(exitCode).toBe(0);
+	}, 25_000);
+
+	/**
+	 * The escape hatch survives the fix. pty mode exists so a person can attach
+	 * to the pane, and someone who sets `shellPath` has said which shell they
+	 * want to sit in front of; the resolution order must not overrule them.
+	 *
+	 * The stand-in shell is the trick `test/bash-shim.ts` already uses: `script`
+	 * invokes `$SHELL -c <bootstrap>`, so the bootstrap is `$2`.
+	 */
+	it("still lets opts.shellPath overrule the resolution", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pty-shellpath-"));
+		const shell = join(dir, "marker-shell");
+		try {
+			writeFileSync(shell, '#!/bin/sh\necho SHELLPATH_HONORED\nexec /bin/sh -c "$2"\n');
+			chmodSync(shell, 0o755);
+			const { model, exitCode } = await run("echo BODY_RAN", { shellPath: shell, env: zshEnv() });
+			expect(model).toContain("SHELLPATH_HONORED");
+			expect(model).toContain("BODY_RAN");
+			expect(exitCode).toBe(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 25_000);
 });
 
 /**

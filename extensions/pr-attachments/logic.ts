@@ -15,6 +15,7 @@
  * messages the agent is free to ignore.
  */
 
+import { splitCommands } from "../guards-common/shell-split.ts";
 import type { ScreenshotRecord } from "./manifest.ts";
 
 /**
@@ -92,58 +93,16 @@ export function isUIVisiblePath(p: string | undefined): boolean {
 }
 
 /**
- * Split a compound shell command into its top-level segments.
+ * `splitCommands` used to be defined here. It now lives in
+ * `guards-common/shell-split.ts`, because `gh-body-guard.ts` needs the same
+ * segmentation to attribute a `--body` to the command that actually owns it,
+ * and guards-common is the directory both sides may import from.
  *
- * `&&`, `||`, `;`, and `|` separate segments; quotes and `$( … )` are respected
- * so a separator inside a body value does not split. Good enough to decide
- * which segment is the `gh` invocation — the guard does the same kind of scan.
+ * It is re-exported under its original name so `index.ts` and
+ * `test/pr-attachments-logic.test.ts` — which pin the splitter's behaviour —
+ * keep importing it from here.
  */
-export function splitCommands(command: string): string[] {
-	const segments: string[] = [];
-	let current = "";
-	let quote: '"' | "'" | null = null;
-	let depth = 0; // $( ) nesting
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-		const next = command[i + 1];
-		if (quote) {
-			current += ch;
-			if (ch === quote) quote = null;
-			continue;
-		}
-		if (ch === '"' || ch === "'") {
-			quote = ch;
-			current += ch;
-			continue;
-		}
-		if (ch === "$" && next === "(") {
-			depth++;
-			current += ch;
-			continue;
-		}
-		if (ch === ")" && depth > 0) {
-			depth--;
-			current += ch;
-			continue;
-		}
-		if (depth === 0) {
-			if ((ch === "&" && next === "&") || (ch === "|" && next === "|")) {
-				segments.push(current);
-				current = "";
-				i++;
-				continue;
-			}
-			if (ch === ";" || ch === "|" || ch === "&") {
-				segments.push(current);
-				current = "";
-				continue;
-			}
-		}
-		current += ch;
-	}
-	if (current.trim()) segments.push(current);
-	return segments;
-}
+export { splitCommands };
 
 /**
  * `gh (pr|issue) (create|edit|comment)` in a single segment, with optional

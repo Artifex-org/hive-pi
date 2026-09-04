@@ -34,6 +34,8 @@
  * short caption, never a multi-heading document.
  */
 
+import { splitCommands } from "./shell-split.ts";
+
 export type GhBodyVerdict = { kind: "allow" } | { kind: "block"; reason: string };
 
 const ALLOW: GhBodyVerdict = { kind: "allow" };
@@ -44,7 +46,20 @@ const ALLOW: GhBodyVerdict = { kind: "allow" };
  * `-b` is `gh pr create`'s short `--body` (its `-B` is `--base`, which is why
  * this comparison is case-SENSITIVE). `--notes` is the release equivalent.
  */
-const BODY_FLAGS = ["--body", "--notes", "--attach", "-b", "-n"];
+const BODY_FLAGS = ["--body", "--notes", "--attach", "-b"];
+
+/**
+ * `-n` is `gh release create`'s short `--notes`, and NOTHING else in gh.
+ *
+ * It used to sit in `BODY_FLAGS` unconditionally, which made it the single
+ * greediest token here: `-n` is `grep`'s line numbers, `head`/`tail`'s count,
+ * `sed`'s quiet, `xargs`'s batch size. Per-segment attribution fixes the common
+ * case (`gh pr list && grep -n "…"` is now two segments and only the first is
+ * gh's), but a `$( … )` is deliberately NOT split, so a foreign `-n` inside a
+ * substitution still sits in the gh segment. Scoping the flag to the one verb
+ * that owns it removes that whole class rather than one instance of it.
+ */
+const RELEASE_NOTE_FLAGS = ["-n"];
 const PR_BODY_FLAGS = ["--body", "-b"];
 
 /**
@@ -58,8 +73,22 @@ function invokesGh(command: string): boolean {
 	return /(^|[;&|(]|\s)gh(\s|$)/.test(command);
 }
 
+// The global flags gh accepts BEFORE its verb, in both spellings. `-R` is here
+// and not only `--repo` because dropping it is a silent hole rather than a
+// cosmetic gap: these detectors decide whether a segment's `--body`/`-n` is
+// scanned at all, so a form they fail to recognise is one this guard ALLOWS.
+// `gh -R owner/repo release create v1 -n "notes `date`"` is a real command —
+// gh parses `-R` there — and without this alternative its notes would reach the
+// shell unexamined.
+const GH_GLOBAL_FLAG = String.raw`(?:\s+(?:--(?:repo|hostname)|-R)(?:=|\s+)\S+)*`;
+
 function invokesGhPRCreateOrEdit(command: string): boolean {
-	return /(^|[;&|(]|\s)gh(?:\s+--(?:repo|hostname)(?:=|\s+)\S+)*\s+pr\s+(?:create|edit)(?=\s|$)/.test(command);
+	return new RegExp(String.raw`(^|[;&|(]|\s)gh${GH_GLOBAL_FLAG}\s+pr\s+(?:create|edit)(?=\s|$)`).test(command);
+}
+
+/** `gh release create|edit` — the only gh verb whose `-n` means `--notes`. */
+function invokesGhReleaseCreateOrEdit(command: string): boolean {
+	return new RegExp(String.raw`(^|[;&|(]|\s)gh${GH_GLOBAL_FLAG}\s+release\s+(?:create|edit)(?=\s|$)`).test(command);
 }
 
 function decodedSerializedMarkdown(body: string): { text: string; newlineCount: number } {
@@ -139,8 +168,16 @@ function quotedBodies(command: string, flags: string[], quotes: string): string[
 	return out;
 }
 
-export function doubleQuotedBodies(command: string): string[] {
-	return quotedBodies(command, BODY_FLAGS, '"');
+/**
+ * Every double-quoted body value in ONE command segment.
+ *
+ * Takes a segment rather than a whole chain — see `ghBodyVerdict`. It still
+ * behaves identically on a single, uncompounded command, which is what its
+ * tests pin.
+ */
+export function doubleQuotedBodies(segment: string): string[] {
+	const flags = invokesGhReleaseCreateOrEdit(segment) ? [...BODY_FLAGS, ...RELEASE_NOTE_FLAGS] : BODY_FLAGS;
+	return quotedBodies(segment, flags, '"');
 }
 
 function quotedPRBodies(command: string): string[] {
@@ -185,18 +222,50 @@ export function hasLiveBacktick(value: string): boolean {
  * Fails OPEN on everything it does not recognise, like every other guard here:
  * its job is one known-bad shape, and a guard that blocks when unsure makes the
  * shell unusable.
+ *
+ * PER-SEGMENT ATTRIBUTION, WHOLE-COMMAND REFUSAL. Those are two different
+ * questions and they had been answered by the same string. The refusal is and
+ * stays whole-command — the tool runs ONE shell string, so a guard genuinely
+ * cannot run two thirds of a chain, and `blockedBodyReason` says so. But
+ * deciding WHOSE body this is has to be per-segment, and it was not: `invokesGh`
+ * only needed the token `gh` somewhere in the chain, and the body scan then swept
+ * the entire string. So a body belonging to a different command in the chain was
+ * refused and reported as "this gh PR inline body" —
+ *
+ *   gh pr view 5 && ./notify.sh --body "see `x`"    → notify.sh's body, not gh's
+ *   gh pr list && grep -n "`date`" file             → grep's -n read as --notes
+ *
+ * — and the agent, told its PR body was wrong, went looking at a PR body that
+ * was never in the command. ~28 agent sessions in 7 days hit this shape.
+ *
+ * DIRECTION OF RISK, stated because narrowing a guard always has one. Scanning
+ * less can only turn blocks into ALLOWS: no command that works today starts
+ * being refused. The residual is the reverse — a genuine gh body can now sit in
+ * a segment this scan skips, wherever `splitCommands` breaks the string where
+ * the shell would not. The concrete one: it treats a lone `&` as a separator,
+ * so a redirect splits a segment, and `gh pr create 2>&1 --body "…`x`…"` leaves
+ * the body in a segment with no `gh` token. Rare — a redirect after the body is
+ * the normal ordering — and not fixed here, because the splitter is shared with
+ * pr-attachments and changing its separators is a different change with its own
+ * tests. It is the same fail-open posture declared at the top of this comment,
+ * and it is the right way round: this guard exists to save a PR description,
+ * and it must never cost a push.
  */
 export function ghBodyVerdict(command: string | undefined): GhBodyVerdict {
 	if (!command || !invokesGh(command)) return ALLOW;
-	const offending = doubleQuotedBodies(command).find(hasLiveBacktick);
-	if (offending !== undefined) {
+	const segments = splitCommands(command);
+	if (segments.filter(invokesGh).some((segment) => doubleQuotedBodies(segment).some(hasLiveBacktick))) {
 		return blockedBodyReason(
 			command,
 			"a markdown backtick inside DOUBLE quotes",
 			"The shell runs backticked text as a command and splices the output into the body before gh sees it",
 		);
 	}
-	if (invokesGhPRCreateOrEdit(command) && quotedPRBodies(command).some(isSerializedMarkdownBody)) {
+	if (
+		segments
+			.filter(invokesGhPRCreateOrEdit)
+			.some((segment) => quotedPRBodies(segment).some(isSerializedMarkdownBody))
+	) {
 		return blockedBodyReason(
 			command,
 			"literal \\n separators instead of Markdown line breaks",

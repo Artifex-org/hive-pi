@@ -138,6 +138,66 @@ function onPath(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
+ * Which shell interprets the agent's command line. (HIV-3086)
+ *
+ * WHY THIS IS NOT `$SHELL`. util-linux `script` hands its `-c` string to
+ * whatever `$SHELL` names, so the tool the model knows as `bash` was parsed and
+ * run by the operator's LOGIN shell — zsh on every workstation in this fleet.
+ * The spawn below did already carry a `"/bin/bash"` default, but it was dead
+ * code twice over: no caller passes `shellPath` (see `extensions/pretty-tools.ts`),
+ * and the env handed to `exec` is a spread of `process.env`, so `env.SHELL` was
+ * always set and always won.
+ *
+ * That is not a dialect quibble. The tool is NAMED bash and prompted as bash,
+ * so the model writes bash at it, and the papercut corpus counted 63 distinct
+ * agent sessions in seven days losing turns to the divergence — the largest
+ * single pi-harness cause in it. Reproduced with this exact spawn shape,
+ * varying only `SHELL`: `SHELL=/usr/bin/zsh` gave
+ * `(eval):1: read-only variable: status`, exit 1, and nothing after the
+ * assignment ran; `SHELL=/bin/bash` gave the whole line and exit 0. What breaks:
+ *
+ *   - `status=$?` — `status` is READ-ONLY in zsh, so the assignment aborts the
+ *     line. That `(eval):N:` prefix is the fingerprint, counted 19 times.
+ *   - a lowercase `path=` assignment — zsh TIES `path`/`cdpath`/`fpath` to
+ *     `PATH`, so one ordinary variable name silently WIPES PATH and every later
+ *     command dies `command not found` naming a binary that is not the problem.
+ *   - `mapfile`, `PIPESTATUS` and `<( )` are missing or spelled differently.
+ *   - an unmatched glob aborts the whole line instead of passing through.
+ *   - `$VAR` is not word-split, so `cmd $FLAGS` passes ONE argument.
+ *
+ * The order deliberately mirrors pi's own `getShellConfig()` — explicit path,
+ * then `/bin/bash`, then bash on PATH, then a POSIX last resort — because pty
+ * mode is a REPLACEMENT for pi's local backend, not an addition to it. If the
+ * two resolved differently the same command would speak a different language
+ * depending on whether a terminal surface happened to be published, which is a
+ * worse bug than the one being fixed: it would be intermittent.
+ *
+ * MEASURED (util-linux 2.42.2): `script` execs the shell with `execvp`, so the
+ * bare `"bash"` branch really does get a PATH search —
+ * `PATH=/usr/bin SHELL=bash script -qec 'echo $0; echo hi' /dev/null` printed
+ * `bash` then `hi`, exit 0, with no directory named. It stays the THIRD choice
+ * all the same: an absolute path cannot be shadowed by a PATH entry.
+ *
+ * THE ACCEPTED COST, stated plainly. `$SHELL` is inherited by everything the
+ * command starts, so a TUI that shells out — an editor's `:!`, a pager's shell
+ * escape — now gets bash instead of the operator's zsh. That is the trade we
+ * are making: the agent's own commands are the contract this tool advertises,
+ * an interactive detour taken by a program the agent launched is not.
+ * `opts.shellPath` is left as the escape hatch for anyone who wants the
+ * human-attach pane to keep their own shell.
+ */
+function bashShell(env: NodeJS.ProcessEnv | undefined, shellPath?: string): string {
+	if (shellPath) return shellPath;
+	if (existsSync("/bin/bash")) return "/bin/bash";
+	if (onPath("bash", env ?? process.env)) return "bash";
+	// No bash anywhere — pi lands on a bare `sh` here. Prefer a shell the
+	// environment actually names, because with no bash present there is no
+	// longer a stock backend to stay consistent WITH, and `$SHELL` at least
+	// names something known to exist on this host.
+	return env?.SHELL ?? "/bin/sh";
+}
+
+/**
  * Latched off for the session once a spawn fails, so one broken environment
  * costs one command rather than every command.
  */
@@ -266,9 +326,11 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 					stdio: ["pipe", "pipe", "pipe"],
 					env: {
 						...(env ?? process.env),
-						// `script` runs its command through $SHELL and assumes the Bourne
-						// shell when it is unset — a silent behaviour change from today.
-						SHELL: opts.shellPath ?? env?.SHELL ?? "/bin/bash",
+						// `script` runs its command through $SHELL, so this single line
+						// decides which LANGUAGE the tool named `bash` actually speaks.
+						// It is resolved, never inherited — see `bashShell` above for the
+						// 63 sessions that paid for the difference.
+						SHELL: bashShell(env, opts.shellPath),
 						// A terminal with no TERM is half a terminal: `tput` fails
 						// outright ("No value for $TERM and no -T specified"), and
 						// less/vim/curses degrade. Nothing needed one before, because
