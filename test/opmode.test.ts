@@ -255,6 +255,36 @@ describe("the orchestrate gate", () => {
 		expect(noVar.reason).not.toContain("printenv");
 	});
 
+	it("permits every coordination verb through BOTH calling conventions", () => {
+		// An MCP tool reaches the model wrapped (`mcp {tool}`) and DIRECT (promoted
+		// under its own name). Measured 2026-09-04 on the first orchestrator
+		// launched after the posture went live: every one of these was refused
+		// direct and allowed wrapped, so the mode denied the coordination verbs it
+		// exists to permit and the lead fell back to notes nobody reads.
+		for (const tool of [
+			"hive_message_teammate",
+			"hive_steer_agent",
+			"hive_read_inbox",
+			"hive_launch_teammate",
+			"hive_post_team_note",
+			"hive_end_agent_session",
+			"hive_list_teammates",
+			"hive_get_ticket",
+			"hive_search_tickets",
+		]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} direct`).toBe(true);
+			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, `${tool} wrapped`).toBe(true);
+		}
+	});
+
+	it("denies an implementation tool under BOTH conventions too", () => {
+		// The envelope must not become a bypass in the other direction either.
+		for (const tool of ["hive_trigger_run", "linear_create_issue"]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} direct`).toBe(false);
+			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, `${tool} wrapped`).toBe(false);
+		}
+	});
+
 	it("denies implementation, generic mutation, hidden workers, and auth actions", () => {
 		for (const tool of ["edit", "write", "background_bash", "mcpScript", "subagent", "orchestrate"]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);

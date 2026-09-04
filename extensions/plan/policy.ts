@@ -145,6 +145,9 @@ export function classifyTool(name: string): PlanToolVerdict {
 export function classifyDiscussionTool(name: string, input: unknown): PlanToolVerdict {
 	const base = classifyTool(name);
 	if (base.allowed || DISCUSSION_READ_ONLY_TOOLS.has(name)) return { allowed: true };
+	// Same both-envelopes rule as orchestrate below: a promoted MCP tool arrives
+	// under its own name, and a read-only card is read-only either way round.
+	if (discussionReadOnlyMcpTools().has(name)) return { allowed: true };
 	if (name !== "mcp") return base;
 	if (!input || typeof input !== "object" || Array.isArray(input)) {
 		return { allowed: false, reason: "Discussion mode requires a structured MCP request." };
@@ -284,6 +287,25 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 			reason: `\`${name}\` can execute hidden implementation work. Orchestrate mode requires visible Hive teammates or Factory runs.`,
 		};
 	}
+	// The SAME allowlist answers both calling conventions.
+	//
+	// An MCP tool reaches the model two ways: wrapped, as `mcp {tool: "x"}`, and
+	// DIRECT, as a tool literally named `x` — the adapter promotes them, so both
+	// are live in one session. Consulting ORCHESTRATE_MCP_TOOLS only inside the
+	// `mcp` branch made the wrapper the sole permitted route, which is a
+	// distinction the allowlist never meant to draw: it is a list of OPERATIONS,
+	// not of envelopes.
+	//
+	// Measured 2026-09-04 on the first orchestrator launched after the posture
+	// went live (session cb62a18c): `hive_message_teammate`, `hive_steer_agent`,
+	// `hive_read_inbox`, `hive_launch_teammate`, `hive_post_team_note`,
+	// `hive_end_agent_session` and `hive_list_teammates` were ALL refused
+	// direct — every coordination verb the mode exists to permit — while each
+	// was allowed through the wrapper. The lead filed it as
+	// "refuses native `hive_message_teammate` ... while operating contract
+	// requires messaging supervised workers" and fell back to durable notes,
+	// which reach nobody until someone reads them.
+	if (ORCHESTRATE_MCP_TOOLS.has(name)) return { allowed: true };
 	if (name === "mcp") {
 		if (!input || typeof input !== "object" || Array.isArray(input)) {
 			return { allowed: false, reason: "Orchestrate mode requires a structured MCP request." };
