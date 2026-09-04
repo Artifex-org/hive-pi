@@ -40,6 +40,17 @@ export function describeLifecycleEvent(event: Record<string, unknown>): string |
 			return typeof event.toolName === "string" ? `finished ${event.toolName}` : "finished tool";
 		case "agent_end":
 			return "finalizing result";
+		// pi retries a RETRYABLE provider error itself (429 and friends), with
+		// exponential backoff and no other signal. Unmapped, those seconds read as
+		// a frozen worker — and the caller is later told only that it "failed".
+		case "auto_retry_start": {
+			const attempt = typeof event.attempt === "number" ? event.attempt : 0;
+			const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : 0;
+			const delayMs = typeof event.delayMs === "number" ? event.delayMs : 0;
+			return `retrying (${attempt}/${maxAttempts}) in ${delayMs}ms`;
+		}
+		case "auto_retry_end":
+			return event.success === true ? "retry succeeded" : "retries exhausted";
 		default:
 			return undefined;
 	}

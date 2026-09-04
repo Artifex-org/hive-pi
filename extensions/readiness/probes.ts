@@ -530,7 +530,22 @@ export const ghProbe: Probe = async (deps) => {
 export const postgresProbe: Probe = async (deps) => {
 	const paths = pgPaths(deps.env, deps.home);
 	if (deps.exists(paths.bin)) {
-		return { id: "devservices.postgres", label: "dev postgres", status: "ready", tool: "dev_db_start" };
+		return {
+			id: "devservices.postgres",
+			label: "dev postgres",
+			status: "ready",
+			// `detail`, not `hint`: both renderers drop `hint` on a ready row
+			// (`state.ts`), so a qualifier put there is invisible. Without one this
+			// row renders as the bare `✓ dev postgres` and nothing else — and what the
+			// probe measured is that the SERVER BINARIES are on disk, which agents
+			// read as "there is a database listening on the port my repo is
+			// configured for" and then spend a turn discovering there is not.
+			detail:
+				"server binaries installed; a database exists only once `dev_db_start` creates one and prints its " +
+				"DATABASE_URL (a fresh loopback port, not your repo's configured one) — in a Hive-managed session " +
+				'it hands you to the hive MCP tool `request_resource` ({resource:"postgres", action:"start"})',
+			tool: "dev_db_start",
+		};
 	}
 	return {
 		id: "devservices.postgres",

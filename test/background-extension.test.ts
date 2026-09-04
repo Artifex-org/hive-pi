@@ -289,6 +289,70 @@ describe.runIf(realBashAvailable())("reaping on shutdown", () => {
 	});
 });
 
+describe.runIf(realBashAvailable())("a command whose output outlives it", () => {
+	it("settles on the exit code rather than a `close` that never comes", async () => {
+		// The measured defect: `close` fires only once the shell has exited AND
+		// its pipes have reached EOF, and every descendant inherits fd 1 and 2. A
+		// wrapper that starts a worker and returns — a quality gate leaving a
+		// `basedpyright` behind is the reported case — holds those pipes open, so
+		// `close` never arrives. Wired to `close` alone the record stays
+		// `running` with node already holding the exit code, no completion
+		// message is pushed, and the wall clock eventually reports `timeout`: the
+		// one status that says nothing about the command's own verdict.
+		//
+		// `timeout_seconds` is 4 so the unfixed behaviour is that misreport
+		// within the test rather than a thirty-minute hang — the assertion below
+		// then reads `timeout` where the command plainly exited 0.
+		const pidFile = join(tmpdir(), `hive-pi-bg-held-${process.pid}-${Date.now()}.pid`);
+		rmSync(pidFile, { force: true });
+
+		const pi = boot();
+		await pi.emit({ type: "session_start" }, { mode: "tui" });
+		await call(pi, "background_bash", {
+			command: `sleep 30 & echo $! > ${pidFile}; echo gate-done; exit 0`,
+			what: "a gate that leaves a worker behind",
+			timeout_seconds: 4,
+		});
+
+		await until(() => existsSync(pidFile));
+		const survivorPid = Number(readFileSync(pidFile, "utf8").trim());
+		expect(Number.isFinite(survivorPid)).toBe(true);
+		// It must be holding the pipes open BEFORE we assert anything, or the
+		// test is not standing in front of the defect at all.
+		expect(() => process.kill(survivorPid, 0)).not.toThrow();
+
+		// The PUSH is the half that was actually broken. The model is told not to
+		// poll and to wait for this message; the defect withholds it for the
+		// whole window and then lies about why.
+		await until(() => pi.messages.length > 0, 8_000);
+		expect((pi.messages[0].details as { status?: string })?.status).toBe("done");
+
+		const out = await call(pi, "background_result", { id: "bg-1" });
+		expect(parseResultHeader(out)).toEqual({ id: "bg-1", status: "done" });
+		expect(out).toContain("exit 0");
+		// The grace before settling is what keeps this: `data` can still be
+		// delivered after `exit`, and settling synchronously would drop the tail.
+		expect(out).toContain("gate-done");
+		expect(out).toContain("still held its output streams");
+
+		// Settling releases the process handle, after which the survivor is
+		// unreachable by `killTree` and by the `session_shutdown` reaper — so the
+		// exit path has to take it on the way out. 1.5s sits below the SIGKILL
+		// sweep at KILL_GRACE_MS, so only the SIGTERM sent here can satisfy this.
+		await until(() => {
+			try {
+				process.kill(survivorPid, 0);
+				return false; // still alive
+			} catch {
+				return true; // gone
+			}
+		}, 1_500);
+
+		await pi.emit({ type: "session_shutdown" }, { mode: "tui" });
+		rmSync(pidFile, { force: true });
+	}, 20_000);
+});
+
 describe.runIf(realBashAvailable())("limits", () => {
 	it("refuses past the concurrency cap rather than forking without bound", async () => {
 		const pi = boot();

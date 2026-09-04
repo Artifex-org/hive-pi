@@ -510,6 +510,17 @@ describe("devservices postgres", () => {
 		expect(out.tool).toBe("dev_db_start");
 	});
 
+	// The ready row used to be `✓ dev postgres` and nothing else, which reads as
+	// "a database is up". The qualifier has to live in `detail`: `renderLines`
+	// and `snapshotBlock` both drop `hint` on a ready row, so the same words in
+	// `hint` would ship invisible.
+	it("says what it measured — binaries, not a live database — in `detail`, the only field a ready row renders", async () => {
+		const out = await postgresProbe(deps({ exists: (p) => p.includes(".hive/tools/postgres") }));
+		expect(out.detail).toContain("binaries installed");
+		expect(out.detail).toContain("dev_db_start");
+		expect(out.detail).toContain("request_resource");
+	});
+
 	it("is absent with the host install command — the HIV-1966 papercut, pre-empted", async () => {
 		const out = await postgresProbe(deps());
 		expect(out.status).toBe("absent");

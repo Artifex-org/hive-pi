@@ -65,6 +65,7 @@ import {
 	type BackgroundJobEvent,
 } from "./channel.ts";
 import {
+	EXIT_SETTLE_GRACE_MS,
 	MAX_CONCURRENT,
 	appendOutput,
 	createJob,
@@ -438,7 +439,56 @@ export default function background(pi: ExtensionAPI) {
 			if (job) jobs.set(id, appendOutput(job, `\n${err.message}\n`));
 			settle(id, "failed", 1);
 		});
-		proc.on("close", (code) => settle(id, statusForExit(code), code ?? undefined));
+		// The fast path, and the one that keeps the whole tail: `close` fires once
+		// the shell has exited AND its pipes have reached EOF, so nothing more can
+		// arrive. Cancelling the grace timer here keeps a normal job from waking a
+		// handler two seconds after it is already over.
+		let exitGrace: NodeJS.Timeout | undefined;
+		proc.on("close", (code) => {
+			if (exitGrace) clearTimeout(exitGrace);
+			settle(id, statusForExit(code), code ?? undefined);
+		});
+
+		/**
+		 * The slow path, for a job whose output outlives it.
+		 *
+		 * `close` waits for stdio EOF as well as exit, and the pipes are inherited
+		 * by every descendant: a wrapper that spawns a worker and returns — a
+		 * quality gate starting a `basedpyright`, say — leaves that worker holding
+		 * fd 1 and 2 open with nothing to write to them. `close` then never comes,
+		 * the record stays `running` long after node knows the exit code, and the
+		 * wall clock eventually reports the job as `timeout` — the one status that
+		 * explicitly says nothing about the command's own verdict (see
+		 * `jobs.ts`). The completion message the model was told to wait for
+		 * instead of polling is silent for that entire window.
+		 *
+		 * So the verdict comes from `exit`, after EXIT_SETTLE_GRACE_MS for the
+		 * tail. `settle` refuses a job that is no longer running, so `close`,
+		 * a cancel or a timeout winning this race makes the timer a no-op.
+		 */
+		proc.on("exit", (code) => {
+			exitGrace = setTimeout(() => {
+				const job = jobs.get(id);
+				if (!job || job.status !== "running") return;
+				jobs.set(
+					id,
+					appendOutput(
+						job,
+						"\n[the command finished; a surviving child process still held its output streams " +
+							"open, and was stopped]\n",
+					),
+				);
+				// BEFORE `settle`, which releases the process handle: after that the
+				// survivor is unreachable by `killTree` and by the `session_shutdown`
+				// reaper, and we would be leaving exactly the orphan this feature is
+				// written not to industrialise (see the header, and `killTree`).
+				killTree(id);
+				settle(id, statusForExit(code), code ?? undefined);
+			}, EXIT_SETTLE_GRACE_MS);
+			// Unref'd for the same reason as the timeout below: a pending grace must
+			// never be the reason node stays alive.
+			exitGrace.unref();
+		});
 
 		const timer = setTimeout(() => {
 			killTree(id);

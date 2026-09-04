@@ -144,3 +144,39 @@ describe("framing, end to end", () => {
 		expect(framed.rest).toBe('{"type":"message_end","mess');
 	});
 });
+
+describe("pi's own retry accounting", () => {
+	/** Shaped like the real events (`agent-session.js` `_prepareRetry`). */
+	const retryStart = (attempt: number, delayMs: number, maxAttempts = 3) =>
+		JSON.stringify({ type: "auto_retry_start", attempt, maxAttempts, delayMs, errorMessage: "429" });
+	const retryEnd = (success: boolean, attempt: number) =>
+		JSON.stringify({ type: "auto_retry_end", success, attempt });
+
+	it("keeps the attempts and the TOTAL backoff a spent budget cost", () => {
+		// The friction this removes: the caller was told only "failed", so it
+		// re-issued immediately into a limit three attempts had already met.
+		const state = feed([retryStart(1, 2000), retryStart(2, 4000), retryStart(3, 8000), retryEnd(false, 3)]);
+		expect(state.retries).toEqual({ attempts: 3, maxAttempts: 3, waitedMs: 14_000, succeeded: false });
+	});
+
+	it("restarts the accumulator when pi starts a SECOND sequence", () => {
+		// pi zeroes its counter after a retry lands, so attempt 1 means a new
+		// sequence — summing the two would report a wait that never happened.
+		const state = feed([retryStart(1, 2000), retryEnd(true, 1), retryStart(1, 2000)]);
+		expect(state.retries).toEqual({ attempts: 1, maxAttempts: 3, waitedMs: 2000, succeeded: undefined });
+	});
+
+	it("leaves a run that never retried with no accounting to cite", () => {
+		// A non-retryable 403 fails on the first attempt; claiming "3/3" there
+		// would be the same wrong instruction in the other direction.
+		expect(feed([assistant("a")]).retries).toBeUndefined();
+		const start = emptyJsonRunState();
+		expect(foldJsonLine(start, retryEnd(false, 1))).toBe(start);
+	});
+
+	it("does not disturb the message fold", () => {
+		const state = feed([retryStart(1, 2000), assistant("done")]);
+		expect(state.turns).toBe(1);
+		expect(state.retries?.attempts).toBe(1);
+	});
+});

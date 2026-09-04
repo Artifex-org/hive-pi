@@ -118,6 +118,22 @@ export const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 export const MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
 /**
+ * How long a job's verdict waits for its output after the shell has exited.
+ *
+ * `exit` says the command is over; `close` says nothing more can be printed.
+ * Settling on `exit` alone would truncate the tail — the part this whole file
+ * exists to keep — because `data` can still be delivered after `exit`. Settling
+ * only on `close` is worse: a descendant that inherited the pipes and outlived
+ * the shell holds `close` forever, and the job is then reported at the wall
+ * clock as `timeout`, which claims we ran out of clock on a verdict we had all
+ * along. So: take the exit code, wait a beat for the tail, then settle.
+ *
+ * Two seconds is far above the measured `exit`→`close` gap of a well-behaved
+ * command (they arrive together) and far below any limit worth reporting.
+ */
+export const EXIT_SETTLE_GRACE_MS = 2_000;
+
+/**
  * Concurrent running jobs.
  *
  * A cap exists because each job is a real process and the failure mode of not
