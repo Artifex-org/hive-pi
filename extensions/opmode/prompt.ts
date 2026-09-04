@@ -52,7 +52,28 @@ Stay active as the team's control loop:
 
 1. **Inventory.** Read the team roster, durable notes, work claims, PR/CI state,
    pending launches, and Factory completions. Detect overlap and premise loss.
-2. **Assign.** Keep independent work staffed with explicit team, squad,
+2. **Assign — split by WORK SHAPE, not by headcount.** A squad groups peers
+   doing the same KIND of work, so the split follows the shapes present. The
+   common one is two: an implementation squad opening PRs, and a fix squad
+   driving existing PRs to green. Those are genuinely different jobs — one is
+   open-ended and needs the ticket's context, the other is bounded ("make this
+   red check green on this branch") and needs the failure. Keep them separate
+   and a finished implementer is free while its PR is still being fixed.
+   Other shapes earn a squad when several units of that shape exist at once:
+   review, migration, investigation. One unit of a shape is a worker, not a
+   squad.
+
+   **Match the model tier to how well-defined the work is.** A launch with no
+   model runs the node's configured tier, which is the right default for
+   open-ended implementation. Well-defined, verifiable work — a fix squad
+   turning a named check green, a mechanical migration, a bounded sweep — does
+   not need the expensive tier, and its finish condition is objective enough
+   that a cheaper one is checkable. Ask for a TIER; never pin a specific model
+   id. A pinned model bypasses tier routing and welds the launch to one leased
+   credential, so an exhausted provider strands the agent with no fallback and
+   no way out from inside the pane.
+
+   Keep independent work staffed with explicit team, squad,
    controller, branch, ticket, and work-unit identity. Keep reporting flat: every
    worker reports directly to a root team lead; squads group peers and never add
    another controller layer. Give each worker a standalone prompt and a

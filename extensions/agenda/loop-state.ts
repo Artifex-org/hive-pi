@@ -141,6 +141,38 @@ export function recordFire(loop: LoopItem, now: number): LoopItem {
 }
 
 /**
+ * The shortest delay a loop may take after `n` consecutive nothing-changed
+ * iterations.
+ *
+ * `MAX_NOOP_STREAK` already advises the model to stop after three quiet
+ * iterations, but advice is not pacing: a self-paced loop that keeps asking for
+ * the 60s minimum while reporting `noop:true` polls at the floor forever, and
+ * every one of those wakes is a billed turn over a full context. The streak is
+ * the only evidence available that the thing being watched changes more slowly
+ * than the loop is looking.
+ *
+ * So the streak raises a FLOOR rather than replacing the model's choice: a loop
+ * that asks for longer still gets longer, and one that asks for the minimum on
+ * its fourth consecutive quiet tick is held back to 8 minutes instead. Doubling
+ * from the minimum reaches `MAX_DELAY_MS` in about six quiet iterations, which
+ * is the same shape `expiryCheck` already bounds from the other end.
+ *
+ * A single non-noop wake resets the streak in `applyWake`, so any real news
+ * restores full responsiveness immediately — the cost of guessing wrong is one
+ * slow iteration, not a slow loop.
+ *
+ * Capped at `MAX_DELAY_MS` so the floor can never demand a delay `clampDelay`
+ * would reject: two bounds disagreeing about the same number is a bug that only
+ * shows up on the sixth quiet iteration of a long-running loop.
+ */
+export function noopDelayFloor(noopStreak: number): number {
+	if (noopStreak <= 1) return MIN_DELAY_MS;
+	const doublings = Math.min(noopStreak - 1, 30);
+	const floor = MIN_DELAY_MS * 2 ** doublings;
+	return Math.min(floor, MAX_DELAY_MS);
+}
+
+/**
  * Fold an `agenda_wake` call from the model.
  *
  * Clearing `keepaliveArmed` is the point: a turn that re-armed is alive, so its
@@ -150,12 +182,13 @@ export function applyWake(
 	loop: LoopItem,
 	request: { delaySeconds?: number; reason?: string; stop?: boolean; noop?: boolean },
 	now: number,
-): { loop: LoopItem; clamped: boolean; advisedStop: boolean } {
+): { loop: LoopItem; clamped: boolean; advisedStop: boolean; backedOff: boolean } {
 	if (request.stop) {
 		return {
 			loop: { ...loop, state: "stopped", nextAt: null, keepaliveArmed: false, updatedAt: now },
 			clamped: false,
 			advisedStop: false,
+			backedOff: false,
 		};
 	}
 
@@ -163,7 +196,15 @@ export function applyWake(
 	const advisedStop = noopStreak >= MAX_NOOP_STREAK;
 
 	const requested = (request.delaySeconds ?? MIN_DELAY_MS / 1000) * 1000;
-	const { ms, clamped } = clampDelay(requested);
+	// Clamp FIRST, then floor. Both raise the delay, so the order is invisible in
+	// the result — but not in the reporting: clamping answers "was your number out
+	// of range" and must stay answerable on its own. Flooring first silently
+	// swallows an out-of-range request (5s becomes the 60s floor, which is in
+	// range, so `clamped` would read false and the model would never learn its
+	// number was rejected).
+	const { ms: clampedMs, clamped } = clampDelay(requested);
+	const ms = Math.max(clampedMs, noopDelayFloor(noopStreak));
+	const backedOff = ms > clampedMs;
 
 	const next: LoopItem = {
 		...loop,
@@ -179,6 +220,7 @@ export function applyWake(
 		loop: terminal ? { ...next, state: terminal, nextAt: null } : next,
 		clamped,
 		advisedStop,
+		backedOff,
 	};
 }
 

@@ -72,6 +72,7 @@ import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
 import { attach, buildCatalog, claimCommands, fetchCommandAttachment, postActivity, postDelta, postPlan, postEvents, postPull, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
 import { ARGS_BUDGET, budgeted } from "./budget.ts";
+import { readAnnouncedModes } from "./opmodes.ts";
 import {
 	HEARTBEAT_MS,
 	buildPayload,
@@ -460,6 +461,15 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * postures can give.
 	 */
 	let opMode: string | undefined;
+	/**
+	 * The postures this build can enforce, as announced by `opmode`.
+	 *
+	 * Undefined until the enforcer speaks, and NEVER defaulted to a guess: an
+	 * empty set would read as "enforces nothing", and a hardcoded list would go
+	 * stale the moment a mode is added — which is the exact failure this exists
+	 * to stop the server making.
+	 */
+	let opModes: readonly string[] | undefined;
 
 	/**
 	 * Whether anything in this process actually enforces postures.
@@ -539,7 +549,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	};
 
 	pi.events.on(OP_MODE_STATE_CHANNEL, (data: unknown) => {
-		const next = (data as OpModeStateEvent | undefined)?.mode;
+		const event = data as OpModeStateEvent | undefined;
+		// Captured BEFORE the unchanged-mode early return. The set is a property of
+		// the BUILD, not of the current posture, so an announce that only repeats
+		// the mode still carries it — and an enforcer that reports the same mode
+		// twice must not leave the server guessing which postures exist.
+		const announced = readAnnouncedModes(event);
+		if (announced) opModes = announced;
+		const next = event?.mode;
 		if (typeof next !== "string" || next === opMode) return;
 		const first = opMode === undefined;
 		opMode = next;
@@ -1642,6 +1659,11 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// feature can produce, and the reason the capability is gated on the
 				// enforcer rather than on the permission.
 				can_set_op_mode: cfg.allowSetOpMode && opModeLoaded(),
+				// SPREAD ONLY when the enforcer has actually reported its set — same
+				// HIV-1163 rule as `can_add_workspace`. Sending an empty array would
+				// be worse than sending nothing: the server would read it as "this
+				// client enforces no postures at all".
+				...(opModes && opModes.length > 0 ? { op_modes: opModes } : {}),
 				// Team messages enter the context like a steer does, so they ride the
 				// same consent rather than growing a separate flag.
 				can_message: cfg.allowSteer,
@@ -1796,6 +1818,11 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// the selector would vanish from the workspace seconds after the
 						// session appeared.
 						can_set_op_mode: cfg.allowSetOpMode && opModeLoaded(),
+						// SPREAD ONLY when the enforcer has actually reported its set — same
+						// HIV-1163 rule as `can_add_workspace`. Sending an empty array would
+						// be worse than sending nothing: the server would read it as "this
+						// client enforces no postures at all".
+						...(opModes && opModes.length > 0 ? { op_modes: opModes } : {}),
 						// Same whole-record-PUT rule as the terminal above: omitting
 						// can_message here would erase it on the first title refresh.
 						can_message: cfg.allowSteer,

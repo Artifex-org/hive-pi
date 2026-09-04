@@ -207,6 +207,14 @@ describe("the orchestrate gate", () => {
 		}
 	});
 
+	it("allows every Hive tool the lead prompt tells it to call", () => {
+		// A mode that denies a tool its own instructions order is a trap: the lead
+		// reads "check `list_pulls` before spawning", calls it, and is refused with
+		// "delegate implementation instead" — which is not what went wrong.
+		// team-lead.md:89 names list_pulls as part of the collision check.
+		expect(classifyOrchestrateTool("mcp", { tool: "hive_list_pulls", args: {} }).allowed).toBe(true);
+	});
+
 	it("denies implementation, generic mutation, hidden workers, and auth actions", () => {
 		for (const tool of ["edit", "write", "background_bash", "mcpScript", "subagent", "orchestrate"]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
