@@ -256,16 +256,143 @@ describe("runPlan — retries", () => {
 	});
 });
 
+describe("runPlan — a retry is spend, and both caps must see it", () => {
+	// A retried dispatch spawns up to four REAL workers and used to report the
+	// last one's tokens and a single admission. Measured: four spawns at 5000
+	// tokens each surfaced as `agentsSpawned: 1, spentTokens: 5000` — so a node
+	// with `retries: 3` could burn 4x its accounted spend while the hard caps in
+	// `nextBatch` saw nothing.
+	const retrier = (retries: number): PlanNode =>
+		({ id: "a", kind: "agent", role: "research", prompt: "x", retries }) as PlanNode;
+
+	const burn = (tokens: number, cost: number): WorkerResult => ({ ok: false, value: null, tokens, cost, error: "nope" });
+
+	it("sums the tokens and cost of every attempt, not just the last", async () => {
+		const spawn: Spawn = async () => burn(5_000, 0.5);
+		const summary = await runPlan({ plan: plan([retrier(3)]), spawn });
+
+		expect(summary.spentTokens).toBe(20_000);
+		expect(summary.spentCost).toBeCloseTo(2);
+	});
+
+	it("counts the discarded attempts of a node that eventually SUCCEEDS", async () => {
+		let calls = 0;
+		const events: Array<{ ev: string; attempts?: number }> = [];
+		const spawn: Spawn = async () => {
+			calls++;
+			return calls === 3 ? ok("recovered", 100) : burn(1_000, 0);
+		};
+		const summary = await runPlan({ plan: plan([retrier(3)]), spawn, journal: (event) => events.push(event) });
+
+		expect(summary.results.a).toBe("recovered");
+		expect(summary.spentTokens).toBe(2_100);
+		expect(summary.agentsSpawned).toBe(3);
+		// A node that succeeded on its third worker is not a one-worker node, and
+		// the journal is the only place that difference is visible per node.
+		expect(events.find((event) => event.ev === "node_finished")?.attempts).toBe(3);
+	});
+
+	it("admits each attempt against maxAgents, so the agent cap cannot be run past", async () => {
+		const spawn: Spawn = async () => burn(10, 0);
+		const summary = await runPlan({
+			plan: plan([retrier(3), agentNode("b")], { maxAgents: 3, maxConcurrent: 1 }),
+			spawn,
+		});
+
+		expect(summary.agentsSpawned).toBe(4); // one dispatch, four workers
+		expect(summary.halted).toBe("agents");
+	});
+
+	it("lets the token budget see the retried spend", async () => {
+		const spawn: Spawn = async () => burn(5_000, 0);
+		const summary = await runPlan({
+			plan: plan([retrier(3), agentNode("b")], { budgetTokens: 10_000 }),
+			spawn,
+		});
+
+		expect(summary.spentTokens).toBe(20_000);
+		expect(summary.halted).toBe("budget");
+	});
+
+	it("records the attempt count on the journal event, so retry spend is legible", async () => {
+		const events: Array<{ ev: string; attempts?: number }> = [];
+		const spawn: Spawn = async () => burn(1, 0);
+		await runPlan({ plan: plan([retrier(2)]), spawn, journal: (event) => events.push(event) });
+
+		expect(events.find((event) => event.ev === "node_failed")?.attempts).toBe(3);
+	});
+});
+
+describe("runPlan — nodes the scheduler never ran", () => {
+	// `repeat` is in the plan schema and has no branch in `nextBatch`. The loop
+	// then breaks out with those nodes statusless and returned a CLEAN success:
+	// no halt, no failure, no mention. Validation now refuses `repeat` up front,
+	// but the reporting hole is the general one — any node the scheduler
+	// produces no work for must be named, not dropped.
+	const repeatNode = {
+		id: "loop",
+		kind: "repeat",
+		needs: ["seed"],
+		body: [{ id: "inner", kind: "agent", role: "research", prompt: "again" }],
+		maxRounds: 2,
+		until: { kind: "empty", of: "seed" },
+	} as unknown as PlanNode;
+
+	it("names them instead of reporting a successful run", async () => {
+		const join = { id: "join", kind: "barrier", needs: ["loop"] } as PlanNode;
+		const spawn: Spawn = async () => ok("seeded");
+		const summary = await runPlan({ plan: plan([agentNode("seed"), repeatNode, join]), spawn });
+
+		expect(summary.neverRan).toEqual(["loop", "join"]);
+		expect(summary.state.status.loop).toBe("skipped");
+		expect(summary.state.status.join).toBe("skipped");
+		// Surfaced through the failure channel because that is what the tool's
+		// summary text prints; a run that silently drops a third of its plan is
+		// not a run that succeeded.
+		expect(summary.failures.map((failure) => failure.nodeId)).toEqual(["loop", "join"]);
+		expect(summary.failures[0].error).toContain("never ran");
+	});
+
+	it("stays silent on a healthy run", async () => {
+		const spawn: Spawn = async () => ok("x");
+		const summary = await runPlan({ plan: plan([agentNode("a"), agentNode("b", ["a"])]), spawn });
+
+		expect(summary.neverRan).toBeUndefined();
+		expect(summary.failures).toEqual([]);
+	});
+
+	it("does not re-report as failures the nodes a HALT already explains", async () => {
+		// The halt line names the reason and the cap. Adding a failure per unrun
+		// node there would bury the one line that explains the whole run.
+		const nodes = Array.from({ length: 4 }, (_, index) => agentNode(`n${index}`));
+		const spawn: Spawn = async () => ok("x", 500);
+		const summary = await runPlan({ plan: plan(nodes, { budgetTokens: 600, maxConcurrent: 1 }), spawn });
+
+		expect(summary.halted).toBe("budget");
+		expect(summary.failures).toEqual([]);
+		expect(summary.neverRan?.length).toBeGreaterThan(0);
+	});
+});
+
 describe("runPlan — the identical-failure collapse", () => {
 	it("halts once several nodes fail the same way", async () => {
 		// Three nodes failing identically is one problem discovered in parallel,
 		// not three. Continuing spends the rest of the fan-out rediscovering it.
 		const nodes = Array.from({ length: 12 }, (_, i) => agentNode(`n${i}`));
-		const spawn: Spawn = async () => fail("TypeError: cannot read 'x' of undefined at line 42");
+		const touched = new Set<string>();
+		const spawn: Spawn = async (dispatch) => {
+			touched.add(dispatch.nodeId);
+			return fail("TypeError: cannot read 'x' of undefined at line 42");
+		};
 
 		const summary = await runPlan({ plan: plan(nodes, { maxConcurrent: 8 }), spawn });
 		expect(summary.halted).toBeDefined();
-		expect(summary.agentsSpawned).toBeLessThan(nodes.length);
+		// Counts DISTINCT nodes reached, not `agentsSpawned`. Those were the same
+		// number only while a retried dispatch was miscounted as one admission;
+		// now that every attempt is admitted, `agentsSpawned` legitimately exceeds
+		// the node count (8 dispatches x 3 attempts) and the old assertion was
+		// measuring the accounting bug rather than the collapse.
+		expect(touched.size).toBeLessThan(nodes.length);
 	});
 
 	it("does NOT collapse distinct failures", async () => {

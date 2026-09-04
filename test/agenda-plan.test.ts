@@ -157,6 +157,78 @@ describe("validatePlan — structure", () => {
 	});
 });
 
+describe("validatePlan — shapes the SCHEDULER cannot run", () => {
+	// These two are declared in the schema and read by nobody. A plan using
+	// either validated CLEAN, ran, and reported success — measured: a three-node
+	// plan (agent → repeat → barrier) finished `halted: undefined, failures: []`
+	// with the repeat and its downstream barrier never instantiated and never
+	// mentioned. Refusing at plan time is the honest version of a drop we cannot
+	// otherwise perform correctly.
+
+	const repeatNode = {
+		id: "loop",
+		kind: "repeat",
+		needs: ["a"],
+		body: [{ id: "inner", kind: "agent", role: "research", prompt: "again" }],
+		maxRounds: 3,
+		until: { kind: "empty", of: "a" },
+	} as unknown as PlanNode;
+
+	it("rejects a repeat node rather than dropping it silently at schedule time", () => {
+		const issues = validatePlan(plan([agentNode("a"), repeatNode]), ROLES);
+		expect(issues).toHaveLength(1);
+		expect(issues[0].nodeId).toBe("loop");
+		expect(issues[0].message).toContain("repeat");
+		expect(issues[0].message).toContain("unroll");
+	});
+
+	it("rejects worktree isolation on an agent, which would run in the CONTROLLER's checkout", () => {
+		const node = {
+			id: "a",
+			kind: "agent",
+			role: "research",
+			prompt: "write the fix",
+			isolation: "worktree",
+		} as PlanNode;
+		const issues = validatePlan(plan([node]), ROLES);
+		expect(issues).toHaveLength(1);
+		expect(issues[0].nodeId).toBe("a");
+		expect(issues[0].message).toContain("worktree isolation is not implemented");
+	});
+
+	it("rejects worktree isolation on a fanout", () => {
+		const node = {
+			id: "f",
+			kind: "fanout",
+			over: "a",
+			role: "research",
+			prompt: "fix {item}",
+			isolation: "worktree",
+		} as PlanNode;
+		const issues = validatePlan(plan([agentNode("a"), node]), ROLES);
+		expect(issues.some((issue) => issue.nodeId === "f" && issue.message.includes("worktree"))).toBe(true);
+	});
+
+	it("names the offending STAGE when a pipeline stage asks for worktree isolation", () => {
+		const node = {
+			id: "p",
+			kind: "pipeline",
+			over: "a",
+			stages: [
+				{ role: "research", prompt: "{item}" },
+				{ role: "research", prompt: "{item}", isolation: "worktree" },
+			],
+		} as unknown as PlanNode;
+		const issues = validatePlan(plan([agentNode("a"), node]), ROLES);
+		expect(issues.some((issue) => issue.message.startsWith("stage 2 worktree isolation"))).toBe(true);
+	});
+
+	it('leaves isolation:"none" alone — it is the behaviour that actually ships', () => {
+		const node = { id: "a", kind: "agent", role: "research", prompt: "x", isolation: "none" } as PlanNode;
+		expect(validatePlan(plan([node]), ROLES)).toEqual([]);
+	});
+});
+
 describe("workId — content-derived identity", () => {
 	it("is stable across whitespace and formatting", () => {
 		const a = { id: "x", kind: "agent", role: "research", prompt: "do   the\n thing" } as PlanNode;

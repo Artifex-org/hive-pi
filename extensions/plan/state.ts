@@ -1899,10 +1899,35 @@ function normalizeBlock(input: BlockInput | undefined, problems: string[], label
 					problems.push(`${label}: step #${i + 1} needs a title`);
 					return;
 				}
+				// THE STATUS IS READ THROUGH `normalizeStatus`, NOT AGAINST THE RAW LIST.
+				//
+				// This path used to test membership of `VALID_STEP_STATUSES` and then
+				// RETURN, which skipped the `steps.push` below — so an unreadable status
+				// cost the whole STEP, not the field. That mattered because the schema
+				// this block is validated against ADVERTISES two words the raw list does
+				// not have: `StepStatusSchema` accepts `completed` and `running` as
+				// synonyms, and says so in its own description. Measured: a steps block
+				// carrying completed/running/done stored ONE of its three steps, and the
+				// two it dropped were the ones reporting progress. The same statuses via
+				// `op:"lane"` stored fine, because that path goes through `normalizeItem`
+				// → `normalizeStatus`. Same tool, same schema, two handlers.
+				//
+				// So the synonyms resolve HERE the way they resolve for an item, rather
+				// than being appended to `VALID_STEP_STATUSES` — that list is the set of
+				// statuses a step may HOLD, the synonyms are spellings a caller may SEND,
+				// and collapsing the two would put `completed` into the stored vocabulary
+				// every renderer and counter switches on.
+				//
+				// A word nothing can map still keeps its step, at `pending`, with the
+				// field refused out loud — the rule `applyItem` already follows above.
+				// `pending` is `mergeSteps`'s "no opinion" marker, so a re-stated step
+				// that had earned `done` keeps it: refusing the field costs no progress.
 				const status = (entry as { status?: unknown }).status;
-				if (status !== undefined && !VALID_STEP_STATUSES.includes(status as StepStatus)) {
-					problems.push(`${label}: step #${i + 1} has unknown status "${String(status)}"`);
-					return;
+				const resolved = normalizeStatus(status);
+				if (status !== undefined && resolved === undefined) {
+					problems.push(
+						`${label}: step #${i + 1} has unknown status "${String(status)}"; the step was kept at pending`,
+					);
 				}
 				steps.push({
 					// Step ids are LOCAL and author-supplied, unlike block ids. A model
@@ -1911,7 +1936,7 @@ function normalizeBlock(input: BlockInput | undefined, problems: string[], label
 					id: cleanString((entry as { id?: unknown }).id) ?? String(i + 1),
 					title: stepTitle,
 					detail: cleanString((entry as { detail?: unknown }).detail),
-					status: (status as StepStatus | undefined) ?? "pending",
+					status: resolved ?? "pending",
 					files: cleanStringList((entry as { files?: unknown }).files),
 					blockedBy: cleanStringList((entry as { blockedBy?: unknown }).blockedBy),
 				});

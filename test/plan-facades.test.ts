@@ -10,8 +10,15 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { taskRowsOf, todoWritesToOps, workflowOpsToPlanOps } from "../extensions/plan/facades.ts";
-import { applyOps, emptyPlan, type LaneBlock, type PlanDoc } from "../extensions/plan/state.ts";
+import {
+	registerFacadeTools,
+	renderWorkflowReply,
+	taskRowsOf,
+	todoWritesToOps,
+	workflowOpsToPlanOps,
+	type WorkflowToolOp,
+} from "../extensions/plan/facades.ts";
+import { applyOps, emptyPlan, type LaneBlock, type PlanDoc, type PlanOp } from "../extensions/plan/state.ts";
 
 const NOW = 1_700_000_000_000;
 const LATER = NOW + 60_000;
@@ -27,7 +34,7 @@ const todo = (doc: PlanDoc, writes: Parameters<typeof todoWritesToOps>[1]): Plan
 /** Run a workflow_write batch the way the tool will. */
 const wf = (doc: PlanDoc, ops: Parameters<typeof workflowOpsToPlanOps>[1]) => {
 	const mapped = workflowOpsToPlanOps(doc, ops);
-	return { ...applyOps(doc, mapped.ops, LATER), notes: mapped.notes };
+	return { ...applyOps(doc, mapped.ops, LATER), notes: mapped.notes, dropped: mapped.dropped };
 };
 
 describe("TodoWrite writes into a lane", () => {
@@ -256,9 +263,120 @@ describe("workflow_write maps onto the same document", () => {
 		expect(lane(result.doc, "d")!.steps[0].status).toBe("pending");
 	});
 
-	it("reports an op it does not know rather than dropping it", () => {
+	it("reports an op it does not know rather than dropping it, and names what it would accept", () => {
 		const result = wf(emptyPlan(NOW), [{ op: "teleport", id: "x" }]);
-		expect(result.notes.join()).toContain('unknown workflow op "teleport"');
+		expect(result.dropped.join()).toContain('unknown workflow op "teleport"');
+		// Naming only the rejected word tells a caller nothing it did not already
+		// know. The accepted set is what lets it fix the call on the next turn.
+		expect(result.dropped.join()).toContain("stage");
+	});
+
+	it("accepts `lane` and `item`, the words its own description and `plan_write` use", () => {
+		// THE HALF-APPLIED BATCH THIS PREVENTS. Measured before the alias:
+		// `{op:"lane", kind:"execute", title:"Implement"}` fell to the default
+		// branch and was dropped, and the `step` that followed then AUTO-CREATED
+		// the lane — so the work landed in a lane titled "Execute", a title the
+		// model never chose, with the one it did choose gone. The tool's own
+		// description says "lanes" and `plan_write` spells the op `lane`, so this
+		// is the word a model reaches for, not a mistake.
+		const result = wf(emptyPlan(NOW), [
+			{ op: "lane", kind: "execute", title: "Implement" },
+			{ op: "item", stageId: "execute", id: "s1", title: "wire it" },
+		]);
+		expect(result.dropped).toEqual([]);
+		const impl = lane(result.doc, "execute")!;
+		expect(impl.title).toBe("Implement");
+		expect(impl.steps.map((i) => i.id)).toEqual(["s1"]);
+	});
+
+	it("reads `lane` as the lane a step names, which is how plan_write spells it", () => {
+		const result = wf(emptyPlan(NOW), [
+			{ op: "stage", id: "impl", kind: "execute", title: "Implement" },
+			{ op: "stage", id: "ver", kind: "verify", title: "Verify" },
+			{ op: "step", lane: "impl", id: "s1", title: "wire it" },
+		]);
+		expect(lane(result.doc, "impl")!.steps.map((i) => i.id)).toEqual(["s1"]);
+		expect(lane(result.doc, "ver")!.steps).toHaveLength(0);
+	});
+
+	it("says so when a lane op carries `items`, rather than dropping the work silently", () => {
+		// `plan_write`'s `lane` op nests its items; this vocabulary's does not,
+		// and the schema deliberately stays open, so an `items` array would
+		// validate and then evaporate. The known edge of accepting the alias.
+		const result = wf(emptyPlan(NOW), [
+			{ op: "lane", kind: "execute", title: "Implement", items: [{ id: "s1", title: "wire it" }] },
+		]);
+		expect(result.notes.join()).toContain("items");
+		expect(lane(result.doc, "execute")!.steps).toHaveLength(0);
+	});
+
+	it("says so when a step op nests its body, the other half of the same mismatch", () => {
+		// `plan_write` sends `{op:"item", lane, item:{title, …}}`; this tool
+		// carries those fields flat. A nested body leaves every field undefined,
+		// which for a new item means a titleless one — so the caller is told what
+		// was not read instead of finding a blank row.
+		const result = wf(emptyPlan(NOW), [
+			{ op: "stage", id: "impl", kind: "execute", title: "Implement" },
+			{ op: "item", lane: "impl", item: { title: "wire it" } },
+		]);
+		expect(result.notes.join()).toContain('nested "item" object is not read');
+	});
+
+	it("tells the caller what applied separately from what did not", () => {
+		// A lane status is mapped-but-lossy: the lane WAS written. Filing that
+		// under "Not applied" beside a verb that produced nothing at all reads as
+		// "your lane never landed", which is the opposite of what happened.
+		const text = renderWorkflowReply("1 item(s) in the current lane", ["a lane's status is derived"], [
+			'unknown workflow op "teleport" was ignored',
+		]);
+		expect(text).toContain("Applied, with changes:");
+		expect(text).toContain("Not applied:");
+		expect(text.indexOf("Applied, with changes:")).toBeLessThan(text.indexOf("Not applied:"));
+		expect(text.slice(text.indexOf("Not applied:"))).not.toContain("derived");
+	});
+
+	it("reports that split from the tool itself, not only from the helper", async () => {
+		// The helper being right proves nothing if `execute` still renders the old
+		// single list, and nothing else in this file goes through the registered
+		// tool. This is the only test that reads what a caller actually receives.
+		let doc = emptyPlan(NOW);
+		const host = {
+			doc: () => doc,
+			apply: (ops: readonly PlanOp[]) => {
+				const applied = applyOps(doc, ops, LATER);
+				doc = applied.doc;
+				return applied;
+			},
+		};
+		const tools = new Map<string, Record<string, unknown>>();
+		registerFacadeTools({ registerTool: (definition) => tools.set(definition.name as string, definition) }, host);
+		const workflowWrite = tools.get("workflow_write")!.execute as (
+			id: string,
+			params: { ops: WorkflowToolOp[] },
+		) => Promise<{
+			content: { text: string }[];
+			details: { problems?: string[]; notes?: string[]; notApplied?: string[] };
+		}>;
+
+		const result = await workflowWrite("t", {
+			// One op that landed and lost a field, one that landed nowhere.
+			ops: [{ op: "stage", id: "impl", kind: "execute", status: "done" }, { op: "teleport" }],
+		});
+		const text = result.content[0].text;
+		// Assert both headings EXIST before comparing their positions: a missing
+		// one gives `indexOf` -1, and -1 is less than any real index, so ordering
+		// alone reads as a pass when the section is not there at all. Measured —
+		// reverting `execute` to the single-list rendering passed this test until
+		// the two `toContain`s were added.
+		expect(text).toContain("Applied, with changes:");
+		expect(text).toContain("Not applied:");
+		expect(text.indexOf("Applied, with changes:")).toBeLessThan(text.indexOf("Not applied:"));
+		expect(text.slice(text.indexOf("Not applied:"))).not.toContain("derived from its items");
+		expect(result.details.notes!.join()).toContain("derived from its items");
+		expect(result.details.notApplied!.join()).toContain("teleport");
+		// The union key survives under its original name: Hive's tasks widget and
+		// every transcript reader key on it, so the split is added, not swapped.
+		expect(result.details.problems).toHaveLength(2);
 	});
 });
 

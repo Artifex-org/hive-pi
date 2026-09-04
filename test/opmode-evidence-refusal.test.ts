@@ -35,6 +35,31 @@ describe("refusalWithCandidates", () => {
 		expect(out).toContain("tool_call_id");
 	});
 
+	/**
+	 * Answering this refusal correctly still hit a wall: `reproduction_key` is
+	 * `Type.Optional` in the schema but mandatory for the first phase, and this
+	 * message — the one an agent reads immediately before its next attempt —
+	 * asked only for a `tool_call_id`. So the corrected call was refused again,
+	 * on a different ground, and the two-call dead end was manufactured by the
+	 * tool's own wording. The example is built from the newest FAILING result
+	 * because that is the one the reproduce phase will accept.
+	 */
+	it("asks for the reproduction_key the next call will also need", () => {
+		const out = refusalWithCandidates(
+			mapOf([
+				["call_a", { name: "bash", failed: true, text: "AssertionError: expected 3" }],
+				["call_b", { name: "bash", failed: false, text: "3 passed" }],
+			]),
+			undefined,
+		);
+		expect(out).toContain("reproduction_key");
+		// The example must name a result that actually failed — pointing at the
+		// passing one would be a second refusal in waiting.
+		const example = out.split("\n").find((l) => l.includes("reproduction_key"));
+		expect(example).toContain("call_a");
+		expect(example).not.toContain("call_b");
+	});
+
 	it("names an unknown requested id instead of implying none was given", () => {
 		const out = refusalWithCandidates(mapOf([["call_a", { name: "bash", failed: false, text: "ok" }]]), "call_zz");
 		expect(out).toContain("call_zz was not observed");

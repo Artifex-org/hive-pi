@@ -80,13 +80,72 @@ function toLF(text: string): string {
 }
 
 /**
- * pi falls back to a whitespace-insensitive match before reporting a miss, so
- * anything that survives to here already differs by more than spacing. Mirrored
- * (not imported) — `fuzzyFindText` lives at a non-root subpath of pi, and
- * `test/pi-api-surface.test.ts` forbids reaching in there for good reason.
+ * A deliberately LOOSER fold than pi's, and used only for SIMILARITY SCORING.
+ *
+ * Collapsing interior runs of spaces and tabs is what lets a re-indented block
+ * still score as a near miss, and that is the whole point of the near-miss
+ * class: the model's idea of the file is slightly wrong and we want to show it
+ * the region it meant. For scoring, being generous is free — the score is
+ * advisory and NEAR_MISS_FLOOR still has to be cleared before anything is said.
+ *
+ * It must NEVER be used to count duplicates, and until `normalizeLikePi` below
+ * existed it was. pi does not collapse interior whitespace, so two blocks
+ * differing only in indentation are two different strings to pi's matcher.
+ * Reporting them as "that text occurs 2 times" tells the model to add
+ * disambiguating context for an ambiguity pi never saw, when pi's real
+ * complaint was that it could not find the text at all — a confidently wrong
+ * instruction, which is worse for the reader than the silence it replaced.
  */
 function squash(text: string): string {
 	return toLF(text).replace(/[ \t]+/g, " ").trim();
+}
+
+/**
+ * pi's OWN fuzzy fold, mirrored from `normalizeForFuzzyMatch`
+ * (pi-coding-agent, `core/tools/edit-diff.js`): NFKC, then a per-line trimEnd,
+ * then smart quotes, the seven dash codepoints and the special spaces folded to
+ * their ASCII equivalents.
+ *
+ * This is the fold pi COUNTS OCCURRENCES IN. Its `countOccurrences` normalizes
+ * both sides before splitting — unconditionally, even when the raw text matched
+ * exactly — so "Found 2 occurrences … Please provide more context" fires on
+ * pairs that are not byte-identical anywhere in the file. This module used to
+ * count raw exact hits only, so the commonest real shape of that failure (the
+ * papercut's own "parallel except blocks": two identical bodies, the second
+ * carrying a trailing space, an NBSP, an em-dash or an NFKC twin) scanned as
+ * exactly ONE hit, returned `ok`, `explain` returned null, and NOTHING was
+ * appended. The model then received pi's bare "provide more context" with not
+ * one line number in it — precisely the round trip this module exists to save.
+ *
+ * Mirrored rather than imported: `normalizeForFuzzyMatch` lives at a non-root
+ * subpath of pi and `test/pi-api-surface.test.ts` forbids reaching in there,
+ * for the reason the file states. The cost of a copy is that a pi release could
+ * change the fold under us; the failure mode of that drift is a diagnosis that
+ * goes quiet, never one that lies about a file, which is the trade this module
+ * already makes everywhere else.
+ *
+ * The ORDER is pi's, not a tidier one. NFKC runs first, so an NBSP is already a
+ * plain space by the time the per-line trimEnd sees it, and a compatibility
+ * ligature has already expanded before anything is measured against it.
+ */
+function normalizeLikePi(text: string): string {
+	return toLF(text)
+		.normalize("NFKC")
+		.split("\n")
+		.map((line) => line.trimEnd())
+		.join("\n")
+		// Escapes rather than the literal glyphs, and pi's own inventory comments
+		// kept with them: every codepoint below is invisible or near-invisible in
+		// an editor, and this file is read and edited by the same models whose
+		// confusion between those glyphs it exists to explain.
+		.replace(/[‘’‚‛]/g, "'")
+		.replace(/[“”„‟]/g, '"')
+		// U+2010 hyphen, U+2011 non-breaking hyphen, U+2012 figure dash,
+		// U+2013 en-dash, U+2014 em-dash, U+2015 horizontal bar, U+2212 minus.
+		.replace(/[‐‑‒–—―−]/g, "-")
+		// U+00A0 NBSP, U+2002-U+200A the en/em/thin family, U+202F narrow NBSP,
+		// U+205F medium math space, U+3000 ideographic space.
+		.replace(/[  -   　]/g, " ");
 }
 
 /** Character-bigram Dice coefficient: cheap, order-aware enough, no dependency. */
@@ -134,6 +193,21 @@ function lineOf(content: string, index: number): number {
 	return line;
 }
 
+/**
+ * The duplicate verdict with its sites named, built the same way whichever scan
+ * found them. Both callers pass the string they searched, so `lineOf` counts
+ * newlines in the same coordinates the indices came from.
+ */
+function duplicateAt(searched: string, at: number[]): EditDiagnosis {
+	const lines = at.map((index) => lineOf(searched, index));
+	return {
+		kind: "duplicate",
+		occurrences: at.length,
+		lines: lines.slice(0, MAX_DUPLICATES),
+		moreLines: Math.max(0, lines.length - MAX_DUPLICATES),
+	};
+}
+
 function candidateAt(lines: string[], start: number, count: number, score: number): NearMiss {
 	const shown = Math.min(count, MAX_CANDIDATE_LINES);
 	const slice = lines.slice(start, start + shown);
@@ -149,10 +223,14 @@ function candidateAt(lines: string[], start: number, count: number, score: numbe
 /**
  * What is really the matter with this anchor.
  *
- * `ok` means the anchor is present exactly once — the edit failed for some
- * other reason (overlap, an unreadable file, a guard) and this module has
- * nothing useful to add. Saying nothing is the right output then; a diagnosis
- * that always speaks is one the reader learns to skip.
+ * `ok` means the anchor is present exactly once IN PI'S TERMS as well as in the
+ * file's raw bytes — the edit failed for some other reason (overlap, an
+ * unreadable file, a guard) and this module has nothing useful to add. Saying
+ * nothing is the right output then; a diagnosis that always speaks is one the
+ * reader learns to skip. Getting the "in pi's terms" qualifier wrong is not a
+ * quiet imprecision, it is the whole failure: an `ok` on a duplicate pi did see
+ * suppresses the diagnosis entirely, which is a silence indistinguishable from
+ * this module not being installed.
  */
 export function diagnose(content: string, anchor: string): EditDiagnosis {
 	const text = toLF(content);
@@ -160,25 +238,50 @@ export function diagnose(content: string, anchor: string): EditDiagnosis {
 	if (!needle) return { kind: "absent" };
 
 	const exact = occurrences(text, needle);
-	if (exact.length === 1) return { kind: "ok" };
-	if (exact.length > 1) {
-		const lines = exact.map((at) => lineOf(text, at));
-		return {
-			kind: "duplicate",
-			occurrences: exact.length,
-			lines: lines.slice(0, MAX_DUPLICATES),
-			moreLines: Math.max(0, lines.length - MAX_DUPLICATES),
-		};
-	}
 
-	// Whitespace-insensitive duplicates: pi matches this way too, so N>1 here is
-	// the same failure wearing different spacing.
-	const squashedText = squash(text);
-	const squashedNeedle = squash(needle);
-	const fuzzy = squashedNeedle ? occurrences(squashedText, squashedNeedle) : [];
-	if (fuzzy.length > 1) {
-		return { kind: "duplicate", occurrences: fuzzy.length, lines: [], moreLines: 0 };
-	}
+	// pi's fold is counted FIRST, and the raw scan below is only its fallback.
+	//
+	// The order is the correction. Counting raw first looks harmless — a raw
+	// duplicate is a real duplicate — but it answers with a SMALLER set than the
+	// error it is appended to. A file holding two byte-identical copies plus a
+	// third that differs only by an NBSP makes pi say "Found 3 occurrences"
+	// while a raw-first diagnosis says "occurs 2 times … at lines 1, 3": it
+	// contradicts the message printed directly above it, and it omits line 5 —
+	// the one site the model cannot see and the only reason this module exists.
+	// Reported as a defect against the first version of this fix, reproduced
+	// through diagnoseFailedEdit before it was changed.
+	//
+	// Reordering rather than deleting the raw branch is also deliberate. It is
+	// tempting to argue the fold can only ever find MORE sites, so raw is
+	// redundant — but NFKC composes, and a base character followed by a
+	// combining mark can fold into a single codepoint across the needle's end
+	// boundary, so a raw hit is not guaranteed to survive into fold space.
+	// Keeping raw as the fallback costs one comparison and needs no such
+	// assumption.
+	//
+	// Counted on 0 exact hits AND on 1: one exact hit is NOT yet "fine".
+	//
+	// One exact hit is NOT yet "fine", which is the correction this branch is.
+	// pi's `countOccurrences` folds both sides unconditionally, so a second site
+	// that differs from the first only by a trailing space, an NBSP, an em-dash
+	// or an NFKC twin is a duplicate to pi while being invisible to the raw scan
+	// above. That combination — raw count 1, pi count 2 — was the exact shape the
+	// papercut kept hitting, and it used to leave here as `ok`: pi refused the
+	// edit, `explain` returned null, and the model was handed "Found 2
+	// occurrences … Please provide more context" with nothing appended to it.
+	//
+	// The line numbers survive the fold. Every rule in it is either a per-line
+	// trimEnd or a 1:1 character substitution, and none of them emits or eats a
+	// newline — NFKC maps nothing to U+000A — so the folded string carries the
+	// same lines in the same order, and `lineOf` over it is the file's own
+	// numbering. That is why this can name lines rather than say "somewhere".
+	const folded = normalizeLikePi(text);
+	const foldedNeedle = normalizeLikePi(needle);
+	const fuzzy = foldedNeedle ? occurrences(folded, foldedNeedle) : [];
+	if (fuzzy.length > 1) return duplicateAt(folded, fuzzy);
+	if (exact.length > 1) return duplicateAt(text, exact);
+
+	if (exact.length === 1) return { kind: "ok" };
 
 	const lines = text.split("\n");
 	if (lines.length > MAX_SCANNED_LINES) return { kind: "absent" };

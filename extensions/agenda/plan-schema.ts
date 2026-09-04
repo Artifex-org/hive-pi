@@ -74,6 +74,9 @@ const AgentSpecSchema = Type.Object({
 	model: Type.Optional(Type.String()),
 	retries: Type.Optional(Type.Integer({ minimum: 0, maximum: 3 })),
 	outputSchema: Type.Optional(Type.Unknown({ description: "JSON Schema the worker's result must satisfy." })),
+	// "worktree" is REJECTED by `validatePlan` — no spawner reads this field, so
+	// declaring it buys nothing and promises everything. Kept in the schema so an
+	// author's intent is still expressible the day a spawner honours it.
 	isolation: Type.Optional(Type.Union([Type.Literal("none"), Type.Literal("worktree")])),
 });
 
@@ -97,6 +100,9 @@ export const NodeSchema = Type.Union([
 	}),
 	Type.Object({ ...Base, kind: Type.Literal("barrier"), needs: Type.Array(RefSchema, { minItems: 1 }) }),
 	Type.Object({ ...Base, kind: Type.Literal("transform"), over: RefSchema, op: TransformOpSchema }),
+	// REJECTED by `validatePlan` until `nextBatch` grows a branch for it: the
+	// scheduler cannot instantiate a round, so a repeat node — and everything
+	// downstream of it — was silently dropped from an otherwise successful run.
 	Type.Object({
 		...Base,
 		kind: Type.Literal("repeat"),
@@ -174,6 +180,11 @@ export function isAgentBearing(node: PlanNode): boolean {
  * node and, for a bad role, enumerate the real ones — a model that guessed
  * "researcher" needs to see "research" rather than "unknown agent".
  *
+ * It is also where DECLARED-BUT-UNIMPLEMENTED shapes are refused — `repeat`
+ * nodes and `isolation:"worktree"`. Both type-check, and the runtime then drops
+ * the first silently and ignores the second dangerously. A validator is the one
+ * place that can say so before a worker is paid for.
+ *
  * NOTE, and this reverses the written plan: a node's `outputSchema` setting
  * `additionalProperties:false` is NOT rejected. That instruction was imported
  * from Claude Code's `Workflow agent({schema})` validator, which has the
@@ -211,16 +222,50 @@ export function validatePlan(plan: Plan, knownRoles: readonly string[]): Validat
 		if (problem) issues.push({ nodeId, message: `${where} outputSchema is unusable: ${problem}` });
 	};
 
+	// `isolation: "worktree"` is declared here, carried all the way onto the
+	// emitted `Dispatch`, and read by NOBODY: both spawners hand every worker the
+	// controller's own `cwd`. A plan that asked for it therefore ran — and
+	// COMMITTED — in the controller's checkout, which is the one outcome the
+	// setting exists to prevent. Until a spawner honours it, saying no is the
+	// only answer that does not quietly do the dangerous thing.
+	const checkIsolation = (nodeId: string, isolation: string | undefined, where: string) => {
+		if (isolation !== "worktree") return;
+		issues.push({
+			nodeId,
+			message:
+				`${where}worktree isolation is not implemented; this worker would run in the controller's checkout. ` +
+				'Drop it (or set isolation:"none") and give the worker a cwd-safe task.',
+		});
+	};
+
 	for (const node of plan.nodes) {
 		if (node.kind === "agent" || node.kind === "fanout") {
 			checkRole(node.id, node.role);
 			checkSchema(node.id, node.outputSchema, "");
+			checkIsolation(node.id, node.isolation, "");
 		}
 		if (node.kind === "pipeline") {
 			for (const [index, stage] of node.stages.entries()) {
 				checkRole(node.id, stage.role);
 				checkSchema(node.id, stage.outputSchema, `stage ${index + 1}`);
+				checkIsolation(node.id, stage.isolation, `stage ${index + 1} `);
 			}
+		}
+		if (node.kind === "repeat") {
+			// The scheduler has no branch for `repeat`. A plan containing one
+			// validated clean, ran its other nodes, and finished `halted:
+			// undefined, failures: []` — the repeat AND everything downstream of it
+			// were never instantiated, never marked skipped, never mentioned. A
+			// rejection the author can read beats a success that silently omitted
+			// a third of their plan. Implementing it is a real piece of work
+			// (rounds, per-round node identity, `until` evaluation against a
+			// budget) and belongs in a ticket, not in a validator.
+			issues.push({
+				nodeId: node.id,
+				message:
+					"`repeat` is declared in the schema but not implemented by the scheduler; unroll it into explicit nodes " +
+					`(up to ${node.maxRounds} copies) or drive the rounds from successive orchestrate calls.`,
+			});
 		}
 		if (node.kind === "fanout" && !node.prompt.includes("{item}")) {
 			// A fanout whose prompt ignores the item runs N identical agents —

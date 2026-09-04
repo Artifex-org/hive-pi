@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
+import { dirname, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	createBashTool,
@@ -138,6 +139,162 @@ export function explainRegexFailure(err: unknown): string | null {
 		"`Foo(ctx`, or a path with `{}` in it — pass `literal: true`, which searches for the " +
 		"string exactly. If you did mean a regex, escape the unbalanced `(`, `)`, `{` or `}`."
 	);
+}
+
+/**
+ * Make every path grep PRINTS resolvable by `read`, handed over unchanged.
+ *
+ * `grep` formats its output paths relative to ITS OWN `path` argument; `read`
+ * resolves relative to the SESSION CWD (`read.js:161` → `path-utils.js:42-44`,
+ * cwd = `process.cwd()`, wired below). Two different bases, and neither is
+ * named anywhere the model can see: grep's description (`grep.js:81`) says
+ * nothing about a base at all, while `find`'s (`find.js:81`) DOES say
+ * "relative to the search directory" — so the one tool that silently strips is
+ * the busiest one. 22 distinct sessions copied a path out of grep and got an
+ * ENOENT from read.
+ *
+ * `formatPath` (`grep.js:116-124`) is `path.relative(searchPath, filePath)`
+ * when the search path is a DIRECTORY, and falls back to
+ * `path.basename(filePath)` when it is a FILE. Both, reproduced end-to-end
+ * against the pinned pi (0.84.2) from this repo's root:
+ *
+ *   grep {pattern:"describeMissingFile", path:"extensions"}
+ *     → `lens/locate.ts:66: …`   read {path:"lens/locate.ts"} → ENOENT
+ *   grep {pattern:"describeMissingFile", path:"extensions/lens/locate.ts"}
+ *     → `locate.ts:66: …`        read {path:"locate.ts"}      → ENOENT
+ *
+ * The second is the reported "bare file.py:510": a single-file search emits a
+ * basename that is unresolvable from the cwd BY CONSTRUCTION.
+ *
+ * This is fixed at the SEMANTICS rather than by explaining the failure
+ * afterwards, because the failure path cannot answer it. `explainPathFailure`
+ * above is already wired into both tools, and it fires — but
+ * `describeMissingFile` does ONE directory read, no recursion and no basename
+ * search elsewhere in the tree (`lens/locate.ts:82-99`), so on `lens/locate.ts`
+ * it lists the repo ROOT's 22 top-level entries and closes with "grep for the
+ * symbol rather than guessing another path" — advising the exact tool that
+ * produced the unusable path. The diagnostic fires, costs a directory listing,
+ * and answers the wrong question.
+ *
+ * What this deliberately does NOT do:
+ *
+ *   - Nothing at all when the search base is already the cwd (`prefix` empty).
+ *     That is the already-correct case, and the result is returned untouched,
+ *     byte-identical, with no footer.
+ *   - Nothing to any line but the two shapes grep emits: `<p>:<n>: ` for a
+ *     match (`grep.js:192`, `:253`) and `<p>-<n>- ` for a context line
+ *     (`grep.js:193`). The trailing notice block — "100 matches limit reached"
+ *     and friends — must never come back wearing a directory prefix, because
+ *     that would be a fabricated path. It is split off by the exact
+ *     construction that produced it (`"\n\n" + "[" + notices + "]"`,
+ *     `grep.js:279-280`) rather than by skipping lines that begin with `[`:
+ *     a PATH token can begin with one too — `[id].tsx:5: …` in a
+ *     Next.js-shaped tree — and skipping those would leave exactly the class
+ *     of path this exists to fix still unresolvable. The split is safe in both
+ *     directions: no match or context line is ever empty (`<p>-<n>- ` keeps
+ *     its trailing space), so `"\n\n"` occurs nowhere in the body, and a final
+ *     match line that merely ENDS in `]` (`arr[0]`) has no `"\n\n"` in front
+ *     of it to find.
+ *   - The path token is at the start of the line, so prefixing the whole line
+ *     is the same edit as rewriting the token, and it sidesteps
+ *     `String.replace`'s `$` expansion mangling a prefix that contains one.
+ *   - Never runs on the FAILURE path. The caller invokes it OUTSIDE the
+ *     wrapper's `try`, so a `stat` of its own can never be mistaken for the
+ *     grep's own ENOENT and turn a successful search into a diagnosed failure.
+ *   - Never drops or truncates anything. Every line grep emitted is still
+ *     there; the only edits are the prefix and one appended footer line.
+ *
+ * The footer is belt and braces, two lines of it. `formatPath` is private and
+ * may change; a rewrite built on a base that had quietly stopped applying
+ * would be silently WRONG rather than loudly broken, and naming the base in
+ * the output is what lets a reader notice. It is also why the unresolvable-base
+ * branch says so out loud instead of returning the stripped paths in silence —
+ * that branch is only reachable when our `resolve()` and pi's `resolveToCwd()`
+ * disagree (a `~`-prefixed `path`, say) or the tree changed under us, and a
+ * quiet return there would hand back exactly the paths this exists to fix.
+ */
+const GREP_PATH_LINE = /^(.*?)([:-])(\d+)\2 /;
+
+type GrepResultShape = { content: unknown; details?: unknown };
+
+/** True when the result carries at least one of grep's two path-line shapes. */
+function hasPathLine(content: unknown): boolean {
+	const parts = Array.isArray(content) ? content : [];
+	return parts.some((part) => {
+		const text = (part as { text?: unknown } | null)?.text;
+		return typeof text === "string" && text.split("\n").some((line) => GREP_PATH_LINE.test(line));
+	});
+}
+
+export async function cwdRelativeGrepResult<T extends GrepResultShape>(
+	result: T,
+	rawPath: unknown,
+	cwd: string,
+): Promise<T> {
+	const searched = typeof rawPath === "string" && rawPath ? rawPath : ".";
+	const target = resolve(cwd, searched);
+
+	let dir: string;
+	try {
+		dir = (await stat(target)).isDirectory() ? target : dirname(target);
+	} catch {
+		// Say it out loud rather than silently handing back the stripped paths —
+		// but only when there ARE paths. A `No matches found` (`grep.js:238`)
+		// carries none, and a warning about path bases on it is pure noise.
+		if (!hasPathLine(result.content)) return result;
+		return {
+			...result,
+			content: appendHint(
+				result.content,
+				`\n\n[harness] could not resolve \`${searched}\` from the session cwd, so the paths above are ` +
+					"EXACTLY as grep printed them — relative to that search path, not to the cwd `read` resolves " +
+					"from. Prefix them yourself before passing them to `read`.",
+			),
+		} as T;
+	}
+
+	const prefix = relative(cwd, dir).replace(/\\/g, "/");
+	if (!prefix) return result;
+
+	let rewritten = 0;
+	const rewrite = (text: string): string => {
+		// Split the notice block off by the construction that produced it, not by
+		// a leading `[` — see the header: `[id].tsx:5: …` is a path line.
+		const cut = text.endsWith("]") ? text.lastIndexOf("\n\n[") : -1;
+		const body = cut >= 0 ? text.slice(0, cut) : text;
+		const tail = cut >= 0 ? text.slice(cut) : "";
+		const prefixed = body
+			.split("\n")
+			.map((line) => {
+				if (!GREP_PATH_LINE.test(line)) return line;
+				rewritten++;
+				return `${prefix}/${line}`;
+			})
+			.join("\n");
+		return prefixed + tail;
+	};
+
+	const parts = Array.isArray(result.content) ? result.content : [];
+	const rewrittenParts = parts.map((part) => {
+		const text = (part as { type?: unknown; text?: unknown } | null)?.type === "text"
+			? (part as { text?: unknown }).text
+			: undefined;
+		return typeof text === "string" ? { ...(part as object), text: rewrite(text) } : part;
+	});
+
+	// No path lines means no rewrite happened: "No matches found" (`grep.js:238`)
+	// is the common case, and a footer about path bases on it is pure noise.
+	if (rewritten === 0) return result;
+
+	return {
+		...result,
+		content: appendHint(
+			rewrittenParts,
+			`\n\n[harness] grep prints paths relative to its own \`path\` (\`${searched}\`); the ${rewritten} ` +
+				`path${rewritten === 1 ? "" : "s"} above have been rewritten under \`${prefix}/\` so they resolve ` +
+				"from the session cwd — pass them to `read` exactly as shown.",
+		),
+	} as T;
 }
 
 /**
@@ -507,8 +664,9 @@ export default function prettyTools(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "grep", label: "Grep", description: grep.description, parameters: grep.parameters,
 		execute: async (id, params, signal, onUpdate) => {
+			let result: Awaited<ReturnType<typeof grep.execute>>;
 			try {
-				return await grep.execute(id, params, signal, onUpdate);
+				result = await grep.execute(id, params, signal, onUpdate);
 			} catch (err) {
 				// Two different mistakes reach here wearing similar errors: a path
 				// that is not there (or is a glob in the wrong parameter), and a
@@ -519,6 +677,10 @@ export default function prettyTools(pi: ExtensionAPI) {
 				if (!detail) throw err;
 				throw new Error(`${err instanceof Error ? err.message : String(err)}\n\n${detail}`);
 			}
+			// Deliberately OUTSIDE the catch: this is a success-path rewrite, and an
+			// ENOENT from its own stat must never be handed to explainPathFailure and
+			// turned into a diagnosed failure of a search that actually worked.
+			return await cwdRelativeGrepResult(result, (params as { path?: string }).path, cwd);
 		},
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "⌕ grep")} ${theme.fg("toolTitle", `/${args.pattern}/`)}${theme.fg("dim", ` in ${args.path ?? "."}`)}`, 0, 0),
 		renderResult: (result, { expanded, isPartial }, theme) => isPartial ? new Text(theme.fg("warning", "searching…"), 0, 0) : output(textContent(result), expanded, theme),
