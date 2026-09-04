@@ -208,6 +208,20 @@ const ORCHESTRATE_TOOLS = new Set([
  * trigger, deploy and secret mutations. A newly added MCP tool stays denied
  * until somebody reads its contract and adds it here deliberately.
  */
+// Alphabetical, and it includes the READ-ONLY ticket tools on purpose.
+//
+// The list permits reading one ticket (get_ticket, get_board) and even WRITING
+// them (claim_ticket, comment_ticket, move_ticket_state), but until this fix it
+// omitted search/preflight — so an orchestrator could CLAIM a ticket it had no
+// sanctioned way to find, or to check was not already somebody else's. That is
+// backwards for a mode whose entire job is vetting work before delegating it,
+// and it cost one session three refusals inside sixty seconds: "Orchestrate
+// mode refuses read-only hive_search_tickets ... backlog discovery is needed to
+// assign workers", and "also refuses hive_get_work_context (read-only
+// ticket/claim preflight), blocking full ticket vetting before delegation".
+//
+// The rule applied is "every READ-ONLY ticket tool is permitted", not "anything
+// ticket-shaped": watch_ticket registers a subscription, so it stays out.
 const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_add_teammate",
 	"hive_approve_plan",
@@ -230,6 +244,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_get_run",
 	"hive_get_task_logs",
 	"hive_get_ticket",
+	"hive_get_work_context",
 	"hive_launch_teammate",
 	"hive_list_agent_launches",
 	"hive_list_agent_sessions",
@@ -238,6 +253,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_list_teams",
 	"hive_list_teammates",
 	"hive_message_teammate",
+	"hive_my_tickets",
 	"hive_move_ticket_state",
 	"hive_offload_to_factory",
 	"hive_post_team_note",
@@ -247,6 +263,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_remove_teammate",
 	"hive_rename_squad",
 	"hive_retry_run",
+	"hive_search_tickets",
 	"hive_steer_agent",
 	"hive_wait_for_run",
 	"hive_whoami",
@@ -365,6 +382,27 @@ export function findBlockedSegment(command: string): string | undefined {
 	return segments.find((segment) => !isSafeSegment(segment));
 }
 
+/**
+ * The one refusal that has a sanctioned alternative, named on the refusal.
+ *
+ * `$VAR` is refused wholesale and correctly: the classifier cannot see through
+ * an expansion, so `$X` may be any command at all. But reading an environment
+ * variable is a legitimate, read-only thing an agent needs — the launch id in
+ * particular, which the startup guidance tells it to look up — and the refusal
+ * said only that expansions are refused, leaving the reader to conclude there
+ * is no way to read one. There is: `printenv` is already on every posture's
+ * reader allowlist and needs no expansion to do the job.
+ *
+ * Measured 2026-09-04, an orchestrator refused on
+ * `printf '%s\n' "$HIVE_LAUNCH_ID"` and filed it as blocking "the documented
+ * whoami launch_id lookup". `printenv HIVE_LAUNCH_ID` was allowed the whole
+ * time.
+ */
+function envReadHint(blocked: string): string {
+	const name = /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/.exec(blocked)?.[1];
+	return name ? `\nTo read one variable without an expansion, use:  printenv ${name}` : "";
+}
+
 export function classifyCommand(command: string, posture = "Plan"): PlanToolVerdict {
 	const blocked = findBlockedSegment(command);
 	if (blocked === undefined) return { allowed: true };
@@ -372,7 +410,8 @@ export function classifyCommand(command: string, posture = "Plan"): PlanToolVerd
 		allowed: false,
 		reason:
 			`${posture} mode allows only read-only shell commands, and this one is not on the list:\n  ${blocked}\n` +
-			`Redirects, subshells, backgrounding, command substitution and variable assignment are refused outright.`,
+			`Redirects, subshells, backgrounding, command substitution and variable assignment are refused outright.` +
+			envReadHint(blocked),
 	};
 }
 
