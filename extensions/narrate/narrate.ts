@@ -87,14 +87,23 @@ export const SILENT_TOOL_CALLS = 5;
  * own behaviour acts on it more reliably than one told to be better.
  *
  * It restates the RULE, briefly, rather than pointing at AGENTS.md — the whole
- * premise is that the far-away instruction is the thing being missed.
+ * premise is that the far-away instruction is the thing being missed. Which is
+ * also why the wording tracks AGENTS.md's "Say what you are doing" section
+ * verbatim in spirit: a reminder that asked for something different from the
+ * rule it stands in for would be teaching two rules, the same trap
+ * `SILENT_TOOL_CALLS` avoids on the numeric side.
+ *
+ * "What you are doing and why" was the old wording, and the `why` was doing real
+ * damage: measured over 39,816 preambles, the median ran to 202 characters —
+ * longer than the median END-OF-TURN report on the same fleet. A preamble is a
+ * label for someone glancing at a pane, so it asks for what and where only.
  */
 export function reminderText(silentToolCalls: number): string {
 	return (
 		`<system-reminder>You have run ${silentToolCalls} tool calls without saying anything. ` +
 		`Someone is watching this session and cannot tell working from stuck. ` +
-		`Before the next batch, write ONE short line: what you are doing and why, or what you just found. ` +
-		`Not a report, not a list of the calls — a status line. Then carry on.</system-reminder>`
+		`Before the next batch, write ONE short line naming what you are doing and where — or what you just found. ` +
+		`Under ~80 characters, no reasoning, no list of the calls. A label, not a report. Then carry on.</system-reminder>`
 	);
 }
 
@@ -206,7 +215,7 @@ export function slowWaitText(waitedMs: number): string {
 	return (
 		`<system-reminder>That tool call has been running for ${seconds}s with nothing on screen explaining it. ` +
 		`Someone watching cannot tell a slow command from a hung one. ` +
-		`Before starting anything you expect to be slow, write ONE short line saying what you are running and ` +
+		`Before starting anything you expect to be slow, write ONE short line naming what you are running and ` +
 		`what you will do while it runs. If it is genuinely long, start it with background_bash — or subagent ` +
 		`with background:true — and carry on instead of waiting.</system-reminder>`
 	);

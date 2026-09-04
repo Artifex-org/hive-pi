@@ -25,7 +25,7 @@
  * are treated as running to end-of-text, which is the conservative reading: the
  * trailing content is code, so it cannot be a question.
  */
-function stripCode(text: string): string {
+export function stripCode(text: string): string {
 	const withoutFences = text.replace(/```[\s\S]*?(?:```|$)/g, " ");
 	return withoutFences.replace(/`[^`\n]*`/g, " ");
 }

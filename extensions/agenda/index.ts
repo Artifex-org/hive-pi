@@ -44,6 +44,7 @@ import {
 	withState,
 } from "./goal-state.ts";
 import { branchEntries } from "../session-branch/branch.ts";
+import { createAskPolicy } from "./ask.ts";
 import { createGoalPolicy } from "./goal.ts";
 import { count } from "./ledger.ts";
 import {
@@ -84,11 +85,13 @@ import {
 	PLAN_APPROVED_CHANNEL,
 	PLAN_CONTROL_CHANNEL,
 	PLAN_GRILL_CHANNEL,
+	QUESTION_REMOTE_CHANNEL,
 	type AgentStatusEvent,
 	type ConductorStageEvent,
 	type PlanApprovedEvent,
 	type PlanControlEvent,
 	type PlanGrillEvent,
+	type QuestionRemoteEvent,
 } from "../hive-common/channels.ts";
 import { buildGrillKick } from "../plan/prompt.ts";
 import {
@@ -313,14 +316,40 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Chain order is load-bearing: build health first (gate), then the drift
-	// probe, then the passive advisor — both must sit BEFORE the goal policy,
+	// Can a human answer a question right now?
+	//
+	// Two independent ways to be attended, and both are needed. A TUI session has
+	// a person at the terminal and `ask_user_question` renders its overlay there,
+	// with no Hive involved at all. An rpc session is only answerable when a
+	// browser is attached, which hive-remote announces on QUESTION_REMOTE_CHANNEL
+	// — the same premise `plan_ask` waits on.
+	//
+	// Defaults to FALSE for rpc: an unattended worker asking a blocking question
+	// is the 68-minute stall of HIV-1449, and a wrong "attended" is far more
+	// expensive than a missed nudge.
+	let remoteAnswerable = false;
+	try {
+		pi.events.on(QUESTION_REMOTE_CHANNEL, (data: unknown) => {
+			remoteAnswerable = (data as QuestionRemoteEvent | undefined)?.available === true;
+		});
+	} catch {
+		/* no bus — TUI attendance still stands on its own */
+	}
+	const askPolicy = createAskPolicy({
+		attended: () => heldCtx?.mode === "tui" || remoteAnswerable,
+	});
+
+	// Chain order is load-bearing: build health first (gate), then the prose
+	// decision nudge — it must precede the goal policy, or the goal's continuation
+	// fires first and answers the operator's question on their behalf, which is
+	// the exact failure question-guard.ts exists to prevent — then the drift
+	// probe, then the passive advisor — both must also sit BEFORE the goal policy,
 	// whose per-settle continue injection would starve everything behind it —
 	// then the goal verdict (the conductor's execute→verify transition keys off
 	// it), then the conductor, then the timer loop. Pinned by
 	// test/agenda-conductor.test.ts.
 	const driver = installDriver(pi, {
-		policies: [gatePolicy, driftPolicy, advisorWatchPolicy, goalPolicy, conductorPolicy, loopPolicy],
+		policies: [gatePolicy, askPolicy, driftPolicy, advisorWatchPolicy, goalPolicy, conductorPolicy, loopPolicy],
 		isWorker: IS_WORKER,
 	});
 
