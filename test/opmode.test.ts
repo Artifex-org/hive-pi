@@ -215,6 +215,46 @@ describe("the orchestrate gate", () => {
 		expect(classifyOrchestrateTool("mcp", { tool: "hive_list_pulls", args: {} }).allowed).toBe(true);
 	});
 
+	it("lets the lead FIND a ticket it is already allowed to claim", () => {
+		// The same trap as above, in its sharpest form: the mode permitted
+		// claim_ticket / comment_ticket / move_ticket_state — WRITES — while
+		// refusing the read-only search and preflight that decide whether a claim
+		// is appropriate at all. So a lead could claim a ticket it had no
+		// sanctioned way to find, or to check was not already somebody else's.
+		//
+		// Measured 2026-09-04: one orchestrator hit two of these inside sixty
+		// seconds and filed both as blocking its ticket vetting.
+		for (const tool of ["hive_search_tickets", "hive_get_work_context", "hive_my_tickets"]) {
+			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, tool).toBe(true);
+		}
+		// The rule is "every READ-ONLY ticket tool", not "anything ticket-shaped".
+		// watch_ticket registers a subscription, so it stays denied.
+		expect(classifyOrchestrateTool("mcp", { tool: "hive_watch_ticket", args: {} }).allowed).toBe(false);
+	});
+
+	it("names printenv when it refuses a command only for its $VAR", () => {
+		// `$VAR` is refused wholesale and rightly — the classifier cannot see
+		// through an expansion, so `$X` may be any command. But reading an env var
+		// is legitimate and read-only, and the refusal named no way to do it, so a
+		// lead concluded there was none. `printenv` was on the reader allowlist the
+		// whole time. Measured: an orchestrator blocked on
+		// `printf '%s\n' "$HIVE_LAUNCH_ID"` doing the documented launch-id lookup.
+		const refused = classifyOrchestrateCommand(`printf '%s\\n' "$HIVE_LAUNCH_ID"`);
+		expect(refused.allowed).toBe(false);
+		if (refused.allowed) return;
+		expect(refused.reason).toContain("printenv HIVE_LAUNCH_ID");
+
+		// The sanctioned form really is allowed — otherwise the hint sends the
+		// reader into a second refusal.
+		expect(classifyOrchestrateCommand("printenv HIVE_LAUNCH_ID").allowed).toBe(true);
+
+		// And a refusal with no expansion in it must not grow a spurious hint.
+		const noVar = classifyOrchestrateCommand("rm -rf /tmp/x");
+		expect(noVar.allowed).toBe(false);
+		if (noVar.allowed) return;
+		expect(noVar.reason).not.toContain("printenv");
+	});
+
 	it("denies implementation, generic mutation, hidden workers, and auth actions", () => {
 		for (const tool of ["edit", "write", "background_bash", "mcpScript", "subagent", "orchestrate"]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
