@@ -23,6 +23,7 @@ import {
 	MAX_LIFETIME_MS,
 	MAX_NOOP_STREAK,
 	MIN_DELAY_MS,
+	noopDelayFloor,
 	recordFire,
 	rehydrateLoop,
 	stopLoop,
@@ -163,6 +164,65 @@ describe("applyWake", () => {
 	it("defaults to the minimum delay when the model omits one", () => {
 		const { loop } = applyWake(paced(), {}, T0);
 		expect(loop.nextAt).toBe(T0 + MIN_DELAY_MS);
+	});
+
+	it("lengthens the delay when the model keeps asking for the floor on quiet ticks", () => {
+		// The failure this prevents: a self-paced loop reporting `noop:true` while
+		// asking for 60s every time polls at the minimum forever, and each wake is
+		// a billed turn over a full context.
+		let current = paced();
+		const delays: number[] = [];
+		for (let i = 0; i < 4; i++) {
+			const result = applyWake(current, { noop: true, delaySeconds: 60 }, T0);
+			current = result.loop;
+			delays.push((current.nextAt ?? T0) - T0);
+		}
+		expect(delays).toEqual([MIN_DELAY_MS, MIN_DELAY_MS * 2, MIN_DELAY_MS * 4, MIN_DELAY_MS * 8]);
+	});
+
+	it("reports the hold as `backedOff`, distinct from an out-of-range `clamped`", () => {
+		let current = applyWake(paced(), { noop: true, delaySeconds: 60 }, T0).loop;
+		const result = applyWake(current, { noop: true, delaySeconds: 60 }, T0);
+		expect(result.backedOff).toBe(true);
+		expect(result.clamped).toBe(false);
+	});
+
+	it("honours a longer delay than the floor, and does not call that a backoff", () => {
+		// The floor raises a minimum; it never overrides a model asking for more.
+		let current = applyWake(paced(), { noop: true, delaySeconds: 60 }, T0).loop;
+		const result = applyWake(current, { noop: true, delaySeconds: 600 }, T0);
+		expect((result.loop.nextAt ?? T0) - T0).toBe(600_000);
+		expect(result.backedOff).toBe(false);
+	});
+
+	it("restores full responsiveness the moment something actually happens", () => {
+		// Cost of guessing wrong is one slow iteration, not a slow loop.
+		let current = paced();
+		for (let i = 0; i < 5; i++) {
+			current = applyWake(current, { noop: true, delaySeconds: 60 }, T0).loop;
+		}
+		const result = applyWake(current, { delaySeconds: 60 }, T0);
+		expect((result.loop.nextAt ?? T0) - T0).toBe(MIN_DELAY_MS);
+		expect(result.backedOff).toBe(false);
+	});
+});
+
+describe("noopDelayFloor", () => {
+	it("leaves the first quiet tick at the minimum", () => {
+		expect(noopDelayFloor(0)).toBe(MIN_DELAY_MS);
+		expect(noopDelayFloor(1)).toBe(MIN_DELAY_MS);
+	});
+
+	it("doubles per consecutive quiet tick", () => {
+		expect(noopDelayFloor(2)).toBe(MIN_DELAY_MS * 2);
+		expect(noopDelayFloor(3)).toBe(MIN_DELAY_MS * 4);
+	});
+
+	it("never exceeds the range the model is allowed to ask for", () => {
+		// Otherwise the floor could demand a delay clampDelay would then reject,
+		// and the two bounds would disagree about the same number.
+		expect(noopDelayFloor(50)).toBe(MAX_DELAY_MS);
+		expect(noopDelayFloor(Number.MAX_SAFE_INTEGER)).toBe(MAX_DELAY_MS);
 	});
 });
 

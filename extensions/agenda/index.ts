@@ -795,7 +795,7 @@ export default function (pi: ExtensionAPI) {
 			if (!loop || loop.state !== "active") {
 				return { content: [{ type: "text", text: "No loop is running." }], details: null };
 			}
-			const { loop: next, clamped, advisedStop } = applyWake(loop, params, Date.now());
+			const { loop: next, clamped, advisedStop, backedOff } = applyWake(loop, params, Date.now());
 			persistLoop(next);
 			syncWakeTool();
 
@@ -805,6 +805,11 @@ export default function (pi: ExtensionAPI) {
 			const seconds = Math.round(((next.nextAt ?? Date.now()) - Date.now()) / 1000);
 			const notes = [`Next iteration in ~${seconds}s.`];
 			if (clamped) notes.push("(delay was clamped to the 60s–3600s range)");
+			if (backedOff) {
+				notes.push(
+					"(held back: nothing has changed for several iterations, so the delay was lengthened — ask for a longer one yourself and it is honoured)",
+				);
+			}
 			if (advisedStop) {
 				notes.push(
 					"This loop has reported nothing new several times running — consider calling agenda_wake with stop:true.",

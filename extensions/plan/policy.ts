@@ -233,6 +233,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_launch_teammate",
 	"hive_list_agent_launches",
 	"hive_list_agent_sessions",
+	"hive_list_pulls",
 	"hive_list_run_completions",
 	"hive_list_teams",
 	"hive_list_teammates",
