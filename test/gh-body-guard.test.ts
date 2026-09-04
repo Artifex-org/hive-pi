@@ -151,3 +151,62 @@ describe("a compound command", () => {
 		expect(v.reason).not.toContain("WHOLE command");
 	});
 });
+
+// The refusal is whole-command; the ATTRIBUTION is per-segment. Until the split
+// went in, both were the same string: `invokesGh` needed only the token `gh`
+// somewhere in the chain, and the body scan then swept the whole thing — so a
+// body belonging to a different command in the chain was refused and reported
+// as "this gh PR inline body". ~28 agent sessions in 7 days landed on this.
+//
+// Every case in the first block below BLOCKED before the change.
+describe("a body that belongs to another command in the chain", () => {
+	it("leaves a non-gh segment's double-quoted body alone", () => {
+		expect(ghBodyVerdict('gh pr view 5 && ./notify.sh --body "see `x`"').kind).toBe("allow");
+	});
+
+	it("does not read grep's `-n` as `gh release create`'s --notes", () => {
+		expect(ghBodyVerdict('gh pr list && grep -n "`date`" file').kind).toBe("allow");
+	});
+
+	it("does not read a `-n` inside a $( ) as --notes either", () => {
+		// `splitCommands` deliberately keeps a substitution whole, so this `-n`
+		// stays in the gh segment; only scoping the flag to `release create|edit`
+		// gets it right.
+		expect(
+			ghBodyVerdict('gh pr create --body-file /tmp/b.md --title "$(grep -n "`date`" NOTES.md)"').kind,
+		).toBe("allow");
+	});
+
+	it("leaves another command's serialized-Markdown body alone", () => {
+		const body = `## Summary\\n- one\\n\\n## Verification\\n- two`;
+		expect(ghBodyVerdict(`gh pr create --body-file /tmp/b.md && ./post.sh --body '${body}'`).kind).toBe("allow");
+	});
+});
+
+// The narrowing above can only turn blocks into allows, so these pin the cases
+// that must STILL block — including the compound wording, which is what makes
+// the whole-command refusal legible rather than a trap.
+describe("the segment that really is gh's", () => {
+	it("still blocks a real gh body later in a chain, and still says the chain was refused", () => {
+		const v = ghBodyVerdict('git push && gh pr create --body "adds `x`"');
+		expect(v.kind).toBe("block");
+		if (v.kind !== "block") return;
+		expect(v.reason).toContain("WHOLE command");
+		expect(v.reason).toContain("Nothing in it ran");
+	});
+
+	it("still blocks `gh release create -n`, the one gh verb whose -n is --notes", () => {
+		expect(ghBodyVerdict('gh release create v1.0 -n "notes about `x`"').kind).toBe("block");
+	});
+
+	// Scoping `-n` to release create|edit made the VERB DETECTORS load-bearing:
+	// a form they do not recognise is now a form this guard allows. They read
+	// gh's pre-verb global flags, and `-R` is as ordinary as `--repo` — gh
+	// parses both — so leaving it out was a silent hole rather than a cosmetic
+	// gap. These pin both spellings, on both scanned verbs.
+	it("reads gh's pre-verb globals in the short spelling too", () => {
+		expect(ghBodyVerdict('gh -R owner/repo release create v1.0 -n "notes `x`"').kind).toBe("block");
+		expect(ghBodyVerdict('gh --repo owner/repo release create v1.0 -n "notes `x`"').kind).toBe("block");
+		expect(ghBodyVerdict('gh -R owner/repo pr create --body "adds `x`"').kind).toBe("block");
+	});
+});
