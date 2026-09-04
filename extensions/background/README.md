@@ -74,6 +74,14 @@ The test guarding that was vacuous twice over, and both are worth remembering:
 
 It passed with `process.kill(-pid)` sabotaged to `process.kill(pid)`. It now uses a fresh path per run, asserts the grandchild is **alive before** reaping, and has a 1.5s deadline that sits below the SIGKILL sweep — measured ~200ms with the group kill, still alive past 3.2s without.
 
+## `exit` is the verdict; `close` is only the fast path
+
+A job settles on **`exit`** after a two-second grace, not on `close` alone. `close` waits for stdio EOF as well as exit, and the pipes are inherited by every descendant: a wrapper that starts a worker and returns — a quality gate leaving a `basedpyright` behind — keeps fd 1 and 2 open with nothing to write to them, and `close` never comes. Wired to `close` alone the record stayed `running` with node already holding the exit code, the completion message the model was told to wait for instead of polling never arrived, and thirty minutes later the wall clock reported `timeout` — the one status that explicitly says nothing about the command's own verdict.
+
+The grace is load-bearing in the other direction: `data` can still be delivered after `exit`, so settling synchronously would drop the tail this file exists to keep. `settle` refuses a job that is no longer running, so `close`, a cancel or a timeout winning the race makes the grace timer a no-op.
+
+Settling **kills the surviving descendant first**, deliberately: `settle` releases the process handle, and after that the survivor is unreachable by `killTree` and by the `session_shutdown` reaper. Leaving it alive would trade a wrong verdict for exactly the orphan this feature is written not to industrialise.
+
 ## The seam to `subagent`
 
 pi builds a fresh jiti instance per extension with `moduleCache: false`, so two extensions importing one registry module get two registries and the second silently never sees the first's jobs. `channel.ts` is therefore a **bus** (`pi.events`), the established cross-extension seam here.

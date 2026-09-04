@@ -84,9 +84,10 @@ import {
 	structuredInstruction,
 	structuredRetryTask,
 } from "../harness/structured.ts";
-import { emptyJsonRunState, foldJsonLine } from "../harness/json-protocol.ts";
+import { emptyJsonRunState, foldJsonLine, type WorkerRetries } from "../harness/json-protocol.ts";
 import { frame } from "../harness/framing.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { isQuotaExhaustedText } from "../hive-common/quota.ts";
 import { HIVE_METRIC_CHANNEL, type HiveMetricEvent } from "../hive-telemetry/types.ts";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -226,6 +227,8 @@ export interface SingleResult {
 	structured?: unknown;
 	/** Why the schema did not validate, after the retry budget was spent. */
 	structuredError?: string;
+	/** What pi already spent retrying a retryable provider error, if anything. */
+	retries?: WorkerRetries;
 }
 
 export interface SubagentUsageByModel {
@@ -379,19 +382,103 @@ function getResultOutput(result: SingleResult): string {
 }
 
 /**
+ * A rate limit, anchored the way `quota.ts` anchors its patterns: on the status
+ * code or the two-word phrase, never on a bare "limit", which every quota,
+ * budget and context message also contains.
+ */
+const RATE_LIMITED = /\b429\b|\brate.?limit/i;
+
+/**
+ * Which provider refusal this is, and therefore whether retrying is worth
+ * anything — the half of a delegation failure the caller cannot see.
+ *
+ * pi classifies these two as OPPOSITES and hive-pi rendered them identically.
+ * A 429 is retryable, so pi already burned its whole budget with exponential
+ * backoff before the string surfaced; a 403 "out of credits" is not, so it
+ * failed on the first attempt. Both arrived as `Agent error: <raw string>` with
+ * a `worker-error` class, which is also what a segfaulted worker gets — so the
+ * caller re-issued into a drained account, or gave up on one that just needed a
+ * minute.
+ *
+ * The account matters as much as the class: the worker runs on
+ * `subagentDefaultModel`, a DIFFERENT account from this session's model and
+ * from the balance `readiness` reports, which is why "$7.11 left but 403" keeps
+ * reading as a bug.
+ *
+ * Exported for its own test: this is the load-bearing pure piece, and an
+ * over-match here tells an agent "retrying will not help" when it would have.
+ */
+export function providerLimitGuidance(
+	errorMessage: string | undefined,
+	model: string | undefined,
+	retries: WorkerRetries | undefined,
+): string | undefined {
+	if (!errorMessage) return undefined;
+	const account = model ? `\`${model}\`` : "the worker's default model";
+
+	// Exhaustion is tested FIRST because it is the more specific pattern, and
+	// because the two mistakes are not symmetric: telling an agent to wait on a
+	// drained account costs it the whole budget over again.
+	if (isQuotaExhaustedText(errorMessage)) {
+		return `provider allowance exhausted on ${account}. That is the WORKER's account — not this session's, and not the balance \`readiness\` reports. Waiting will not help; re-run with a role/model on another account, or do the work inline.`;
+	}
+	if (!RATE_LIMITED.test(errorMessage)) return undefined;
+
+	// PAST HERE THE TEXT SAYS 429, AND THAT IS NOT THE SAME AS KNOWING IT IS A
+	// THROTTLE. `isQuotaExhaustedText` returning false is not evidence of
+	// anything: QUOTA_PATTERNS is deliberately narrow, calibrated for a
+	// different decision (should the SESSION fail over) where a miss costs a
+	// missed failover an operator can still fix by hand. Here a miss is not
+	// cheap — it would emit the opposite instruction, telling someone whose
+	// account is drained to wait. Providers do ship exhaustion under a 429
+	// (OpenAI's "exceeded your current quota" is a 429), so an unmatched 429 is
+	// AMBIGUOUS, and the honest answer depends on what else we know.
+	//
+	// Retry accounting is that evidence, used for CONFIDENCE and never as the
+	// class on its own. A sequence that ran out means pi judged this refusal
+	// retryable and actually spent backoff on it — positive evidence of a real
+	// throttle, so the confident remedy is earned. Silence is NOT the opposite
+	// evidence: pi may have declined to retry (which would point at exhaustion),
+	// or retries may simply be disabled in this session's settings, and the two
+	// are indistinguishable from here. So say so, and name the check that
+	// settles it, rather than picking the branch that reads better.
+	//
+	// A sequence that LANDED describes an earlier, recovered turn — the fold's
+	// `errorMessage` is latest-wins and never cleared, so a stale 429 outlives
+	// its own successful retry.
+	if (retries && retries.succeeded === true) {
+		return `a 429 on ${account}, but the worker's last retry sequence SUCCEEDED (${retries.attempts}/${retries.maxAttempts} over ~${Math.round(retries.waitedMs / 1000)}s), so this failure is a different one — treat the 429 text as stale and read the worker's own output for the real cause.`;
+	}
+	if (retries) {
+		return `throttled on ${account}. The worker already retried ${retries.attempts}/${retries.maxAttempts} times over ~${Math.round(retries.waitedMs / 1000)}s before failing. Waiting ~60s or dispatching fewer workers at once is the remedy; an immediate re-issue on the same account will likely fail the same way.`;
+	}
+	return `a 429 on ${account}, and this one CANNOT be classified from here. No retry accounting came back, which means either pi declined to retry it — pointing at an exhausted allowance, where waiting is useless — or retries are disabled in this session. Check that account's balance before assuming a wait will clear it; if it has headroom, treat it as a throttle and dispatch fewer workers at once.`;
+}
+
+/**
  * A distilled retry note for a failed delegation (HIV-1232, the
  * Parallel-Distill-Refine result). The orchestrator writes retry prompts from
  * this tool result, so a compact what-was-tried/how-it-failed note here is
  * exactly what conditions the next attempt.
+ *
+ * The provider-limit line is appended rather than folded into `output`:
+ * `distillFailure` truncates, and the one sentence that says whether to retry
+ * must not be the one that falls off the end.
+ *
+ * Exported so the append itself is tested. `isQuotaExhaustedText` was correct
+ * and tested and had NO production caller for a whole ticket's worth of time —
+ * a classifier nobody calls is indistinguishable from one that does not exist.
  */
-function retryNote(result: SingleResult): string {
-	return distillFailure({
+export function retryNote(result: SingleResult): string {
+	const note = distillFailure({
 		attempted: result.task,
 		output: [result.errorMessage, result.stderr, getFinalOutput(result.messages)]
 			.filter(Boolean)
 			.join("\n"),
 		stopReason: result.stopReason,
 	});
+	const guidance = providerLimitGuidance(result.errorMessage, result.model, result.retries);
+	return guidance ? `${note}\nprovider limit: ${guidance}` : note;
 }
 
 function truncateParallelOutput(output: string): string {
@@ -814,6 +901,7 @@ async function runSingleAgent(
 				currentResult.model = runState.model ?? currentResult.model;
 				currentResult.stopReason = runState.stopReason ?? currentResult.stopReason;
 				currentResult.errorMessage = runState.errorMessage ?? currentResult.errorMessage;
+				currentResult.retries = runState.retries ?? currentResult.retries;
 				emitUpdate();
 			};
 

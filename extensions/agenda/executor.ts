@@ -20,7 +20,7 @@ import {
 	type RunState,
 	skippableAfterFailure,
 } from "./plan-graph.ts";
-import { type Plan, resolveCaps } from "./plan-schema.ts";
+import { type Plan, resolveCaps, type ResolvedCaps } from "./plan-schema.ts";
 
 export interface WorkerResult {
 	ok: boolean;
@@ -69,16 +69,34 @@ export interface RunSummary {
 	/** Dollars for the whole run. */
 	spentCost: number;
 	/**
-	 * Nodes the run finished without ever scheduling, in plan order.
+	 * Nodes the scheduler produced NO work for, in plan order.
 	 *
-	 * Absent — like `halted` — on the healthy run, so its presence is the signal.
-	 * Under a halt these are the nodes the halt cut off; with no halt they are a
-	 * DEFECT: the scheduler had no work to produce for a node the validator let
-	 * through. Those also appear in `failures`, because that is what the tool's
-	 * summary text prints and a silently omitted node is the failure mode this
-	 * field exists to end.
+	 * Narrower than "everything that never ran": a node skipped because something
+	 * it needed failed, or because a halt cut the run short, is explained by that
+	 * failure or that halt and is NOT here. What is here is the unexplained case —
+	 * the scheduler had no work to produce for a node the validator let through,
+	 * which is a DEFECT. Absent on the healthy run, so its presence is the signal.
+	 * These also appear in `failures`, because that is what the tool's summary text
+	 * prints and a silently omitted node is the failure mode this field exists to
+	 * end. (Under a halt they are folded into `haltDetail`'s cut-off list instead,
+	 * which counts EVERY node that never ran, however it came to be skipped.)
 	 */
 	neverRan?: string[];
+	/**
+	 * One line saying WHAT the halt cost and WHAT it cut off — present exactly when
+	 * `halted` is.
+	 *
+	 * `halted: "budget"` on its own is anonymous, and anonymous is how these runs
+	 * read to the agent that ordered them: a run that "finished", a reason with no
+	 * numbers attached, and no sign that four workers and the reconciler were never
+	 * launched. The spend and the cut-off nodes were both already computed and then
+	 * thrown away at the only surface anybody reads. This is that data, phrased.
+	 *
+	 * It reports spend per node rather than blaming one: the budget is checked
+	 * BETWEEN workers, so which worker happened to tip the total past the cap is an
+	 * artifact of admission order, not a finding.
+	 */
+	haltDetail?: string;
 }
 
 /**
@@ -107,6 +125,17 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 	const failures: Array<{ nodeId: string; error: string }> = [];
 	const failureSignatures = new Map<string, number>();
 	let halted: RunSummary["halted"];
+	// Set only where the halt has a reason beyond its own name — today that is the
+	// identical-failure collapse, which halts as "agents" WITHOUT the agent cap
+	// being anywhere near reached. The reason was already computed for the journal
+	// and then dropped; carrying it here is what keeps `haltDetail` from reporting
+	// an inexplicable stop.
+	let haltReason: string | undefined;
+	// Tokens per node for the WHOLE run, retries and fanout items summed. Not "the
+	// batch that crossed the line": the budget is checked between workers, so the
+	// worker that tipped the total past the cap is whoever happened to be admitted
+	// last, which is a fact about ordering rather than about spending.
+	const nodeSpend = new Map<string, number>();
 
 	// Resume: anything already finished is folded in before the first batch, so
 	// `nextBatch` simply never proposes it again.
@@ -165,6 +194,10 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 		);
 
 		for (const { dispatch, result } of settled) {
+			nodeSpend.set(dispatch.nodeId, (nodeSpend.get(dispatch.nodeId) ?? 0) + result.tokens);
+		}
+
+		for (const { dispatch, result } of settled) {
 			state.running.delete(dispatch.workId);
 			// ADMISSIONS, not dispatches. `maxAgents` is a cap on workers spawned,
 			// and a retried dispatch spawns up to four of them; counting it once
@@ -210,7 +243,12 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 				failureSignatures.set(signature, count);
 				if (count >= IDENTICAL_FAILURE_THRESHOLD) {
 					halted = "agents";
-					journal({ at: now(), ev: "halted", reason: `identical failure x${count}: ${signature}` });
+					// The SAME string to both channels. This used to go only to the
+					// journal, so the agent-visible detail said "15 of 40 worker(s)
+					// admitted" — a halt well short of the cap, with no cause given
+					// and nothing to act on.
+					haltReason = `identical failure x${count}: ${signature}`;
+					journal({ at: now(), ev: "halted", reason: haltReason });
 				}
 			}
 		}
@@ -232,14 +270,28 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 	// (`repeat`), but the hole is general: any future kind the scheduler cannot
 	// schedule would vanish the same way, which is exactly the class of bug that
 	// stays hidden the longest.
+	// EVERY node that never ran, however it came to be left out — for the halt
+	// line only.
+	//
+	// `neverRan` just below is deliberately narrower (no status at all), because
+	// each of those also becomes its own `failures` entry. But the halt line
+	// claims to name every node the halt cut off, and on a failure cascade the
+	// two kinds interleave: `skippableAfterFailure` pre-marks the DIRECT
+	// dependents of a failed node as skipped, while a TRANSITIVE dependent still
+	// has no status when we get here. Counting only the second reported "3
+	// node(s) never ran" for four, and split two nodes of the same kind on
+	// nothing more meaningful than their distance from the failure.
+	const neverStarted = options.plan.nodes
+		.filter((node) => state.status[node.id] === undefined || state.status[node.id] === "skipped")
+		.map((node) => node.id);
 	const neverRan = options.plan.nodes.filter((node) => state.status[node.id] === undefined).map((node) => node.id);
 	for (const nodeId of neverRan) state.status[nodeId] = "skipped";
 
-	// Under a halt this is expected and already explained — the summary prints
-	// the halt reason and its caps, and adding a failure line per unrun node
-	// would bury it. With NO halt there is nothing else to read: the run ended
-	// believing it was finished, so the failure channel is the only surface that
-	// makes the drop visible where a reader is already looking.
+	// Under a halt these nodes belong to `haltDetail` below, not here: one line
+	// naming the cause and everything it cut off reads, and a failure line per
+	// unrun node buries it. With NO halt there is nothing else to read: the run
+	// ended believing it was finished, so the failure channel is the only surface
+	// that makes the drop visible where a reader is already looking.
 	if (!halted && neverRan.length > 0) {
 		for (const nodeId of neverRan) {
 			failures.push({
@@ -250,6 +302,8 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 			});
 		}
 	}
+
+	const haltDetail = halted ? describeHalt(halted, caps, state, nodeSpend, neverStarted, haltReason) : undefined;
 
 	journal({ at: now(), ev: "run_finished", tokens: state.spentTokens, cost: state.spentCost });
 
@@ -262,7 +316,65 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 		spentTokens: state.spentTokens,
 		spentCost: state.spentCost,
 		...(neverRan.length > 0 ? { neverRan } : {}),
+		...(haltDetail ? { haltDetail } : {}),
 	};
+}
+
+/** At most this many node ids are named inline; the rest are counted. */
+const HALT_DETAIL_NODE_LIMIT = 10;
+
+/**
+ * Name the halt.
+ *
+ * A budget halt fires on ALREADY-SPENT tokens at the top of a scheduling
+ * iteration, so the worker responsible has always finished — unbounded, because
+ * nothing hands a worker an allowance and a model turn cannot be preempted at an
+ * exact token. Reporting only `halted: "budget"` therefore hides both facts the
+ * reader needs: which node spent the money, and which nodes paid for it by never
+ * being launched.
+ */
+function describeHalt(
+	halted: NonNullable<RunSummary["halted"]>,
+	caps: ResolvedCaps,
+	state: RunState,
+	nodeSpend: Map<string, number>,
+	neverStarted: string[],
+	haltReason: string | undefined,
+): string {
+	const parts: string[] = [];
+
+	if (halted === "budget") {
+		parts.push(`budget: spent ${state.spentTokens} of ${caps.budgetTokens}`);
+		// THE BIGGEST SPENDER OVER THE WHOLE RUN, and named as nothing more than
+		// that.
+		//
+		// This used to name whichever node settled last and call it the one that
+		// "alone spent" the overage. That is a claim the data does not support:
+		// the budget is checked BETWEEN workers, so the last to settle is simply
+		// whoever was admitted last. A node legally admitted at 900 of 1000 that
+		// then spends 200 was reported as the cause of an overshoot it did not
+		// cause. Ordering is not fault, so the line now reports a measurement —
+		// the largest total — and leaves the inference to the reader.
+		let worst: { nodeId: string; tokens: number } | undefined;
+		for (const [nodeId, tokens] of nodeSpend) {
+			if (worst === undefined || tokens > worst.tokens) worst = { nodeId, tokens };
+		}
+		if (worst) parts.push(`most of it on node "${worst.nodeId}" (${worst.tokens}), which is not preempted mid-turn`);
+	} else if (halted === "agents") {
+		// Also the identical-failure collapse's halt, where the cap is NOT reached.
+		// "admitted of" is true either way; "cap reached" would not be.
+		parts.push(`agents: ${state.agentsSpawned} of ${caps.maxAgents} worker(s) admitted`);
+		if (haltReason) parts.push(haltReason);
+	} else {
+		parts.push("aborted: the run was canceled before it finished");
+	}
+
+	const cause = parts.join(" — ");
+	if (neverStarted.length === 0) return cause;
+
+	const named = neverStarted.slice(0, HALT_DETAIL_NODE_LIMIT).join(", ");
+	const rest = neverStarted.length - HALT_DETAIL_NODE_LIMIT;
+	return `${cause}; ${neverStarted.length} node(s) never ran: ${named}${rest > 0 ? ` (+${rest} more)` : ""}`;
 }
 
 /** Transforms are computed here rather than in the scheduler, which stays pure. */

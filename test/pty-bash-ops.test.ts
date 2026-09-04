@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
+import { gitDirOf } from "../extensions/background/indexlock.ts";
 import { ptyAvailable, ptyBashOperations, resetPtyAvailability } from "../extensions/pty-exec/ops.ts";
 import { gitAvailable, realBashAvailable } from "./require-tools.ts";
 import { ensureBash } from "./bash-shim.ts";
@@ -531,4 +532,71 @@ describe.runIf(canRunPty && gitAvailable())("git output under a pty", () => {
 		});
 		expect(model).toContain("PAGER=more GIT_PAGER=delta");
 	}, 25_000);
+});
+
+/**
+ * WHAT THE KILL LEFT BEHIND, AND WHERE.
+ *
+ * The post-mortem above names the processes that were still running. It said
+ * nothing about the `index.lock` a killed `git commit` strands, and the static
+ * `bash-foreground-timeout` hint only warns that one "may remain" — no path. So
+ * the agent guesses: on 2026-09-02 it guessed `<cwd>/.git/index.lock`, which in
+ * a WORKTREE is a file pointing elsewhere and so never exists — a path that can
+ * only ever answer "no lock here", whatever the truth is.
+ *
+ * Hence the linked worktree here rather than a plain `git init`: in a plain repo
+ * the wrong path and the right one are the same string, and a test built on one
+ * could not tell them apart.
+ */
+describe.runIf(canRunPty && gitAvailable())("a killed command that stranded a git index lock", () => {
+	let main: string;
+	let worktree: string;
+
+	beforeEach(() => {
+		resetPtyAvailability();
+		process.env.PI_PTY_BASH = "1";
+		main = mkdtempSync(join(tmpdir(), "pty-lock-"));
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: main, stdio: "ignore" });
+		git("init", "-q");
+		git("config", "user.email", "test@example.invalid");
+		git("config", "user.name", "Test");
+		writeFileSync(join(main, "f.txt"), "one\n");
+		git("add", "f.txt");
+		git("commit", "-qm", "one");
+		worktree = join(mkdtempSync(join(tmpdir(), "pty-lock-wt-")), "feature");
+		git("worktree", "add", "-q", worktree, "-b", "feature");
+	});
+
+	afterEach(() => {
+		delete process.env.PI_PTY_BASH;
+		resetPtyAvailability();
+		rmSync(main, { recursive: true, force: true });
+		rmSync(join(worktree, ".."), { recursive: true, force: true });
+	});
+
+	it("names the real lock path when a timeout kills the command", async () => {
+		const gitDir = gitDirOf(worktree)!;
+		// The whole point: a linked worktree's index lives under the COMMON dir.
+		expect(gitDir).toContain("worktrees");
+		const lock = join(gitDir, "index.lock");
+		writeFileSync(lock, "");
+
+		const { error, model } = await runExpectingFailure("sleep 30", { cwd: worktree, timeout: 2 });
+		// The sentinel is the built-in control, as in the post-mortem tests: the
+		// note must not have arrived by breaking pi's error-formatting protocol.
+		expect(error?.message).toBe("timeout:2");
+		expect(model).toContain(lock);
+		// A held lock is doing its job; the note has to say so, or it trades a
+		// failed command for a corrupted index.
+		expect(model).toContain("leave it alone");
+	}, 30_000);
+
+	// The common case, and the reason this is probed at `close` and not at the
+	// kill: nearly every killed command leaves no lock at all, and a note that
+	// fired anyway would be noise on every timeout.
+	it("says nothing when the kill stranded no lock", async () => {
+		const { error, model } = await runExpectingFailure("sleep 30", { cwd: worktree, timeout: 2 });
+		expect(error?.message).toBe("timeout:2");
+		expect(model).not.toContain("index.lock");
+	}, 30_000);
 });

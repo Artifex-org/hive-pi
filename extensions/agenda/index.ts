@@ -1498,7 +1498,16 @@ export default function (pi: ExtensionAPI) {
 						formatCost(summary.spentCost) ? `, ${formatCost(summary.spentCost)}` : ""
 					}.`,
 				];
-				if (summary.halted) lines.push(`HALTED: ${summary.halted} (cap ${caps.maxAgents} agents / ${caps.budgetTokens ?? "no"} token budget).`);
+				// `summary.haltDetail` names the node that caused the halt and every
+				// node the halt cut off. Without it appended HERE the executor's work
+				// lands only in `details` and this line — the one an agent actually
+				// reads — stays anonymous, which is the whole papercut.
+				if (summary.halted) {
+					lines.push(
+						`HALTED: ${summary.halted} (cap ${caps.maxAgents} agents / ${caps.budgetTokens ?? "no"} token budget).` +
+							(summary.haltDetail ? ` ${summary.haltDetail}.` : ""),
+					);
+				}
 				if (summary.failures.length > 0) {
 					lines.push(`${summary.failures.length} node(s) failed:`);
 					for (const failure of summary.failures.slice(0, 10)) lines.push(`  ${failure.nodeId}: ${failure.error}`);

@@ -374,6 +374,84 @@ describe("runPlan — nodes the scheduler never ran", () => {
 	});
 });
 
+describe("runPlan — attributing the halt", () => {
+	// The four measured papercuts are all one shape: a budget set, one worker
+	// finishing 2-6x past it, and every other node plus the reconciler never
+	// launched. What the agent got back was `HALTED: budget` with no node named
+	// and no list of what was dropped — a run that "finished" and explained
+	// nothing. `budgetTokens` bounds nothing that spends, so the least this can
+	// do is say who spent it and who paid.
+	it("names where the budget went and every node it cut off", async () => {
+		const nodes = [agentNode("heavy"), ...Array.from({ length: 4 }, (_, index) => agentNode(`w${index}`))];
+		// One worker, 2600 tokens, against a 1000 cap: nothing preempted it and
+		// nothing could — the check only runs once it has already finished.
+		const spawn: Spawn = async () => ok("x", 2_600);
+		const summary = await runPlan({ plan: plan(nodes, { budgetTokens: 1_000 }), spawn });
+
+		expect(summary.halted).toBe("budget");
+		const detail = summary.haltDetail ?? "";
+		expect(detail).toContain("spent 2600 of 1000");
+		expect(detail).toContain('most of it on node "heavy" (2600)');
+		expect(detail).toContain("4 node(s) never ran");
+		for (const id of ["w0", "w1", "w2", "w3"]) expect(detail).toContain(id);
+	});
+
+	it("does not blame the node that merely settled last", async () => {
+		// THE CLAIM THIS LINE MUST NOT MAKE. The budget is checked BETWEEN
+		// workers, so the node that tips the total past the cap is whoever was
+		// admitted last — a fact about ordering, not about spending. Here `small`
+		// spends 900 of a 1000 cap and `crosser` is then legally admitted and
+		// spends 200. Blaming `crosser` for the overshoot (as naming the
+		// last-settled node did) accuses a worker that behaved correctly and
+		// hides the one that actually consumed the budget.
+		const spend = new Map([
+			["small", 900],
+			["crosser", 200],
+		]);
+		const spawn: Spawn = async (dispatch) => ok("x", spend.get(dispatch.nodeId) ?? 200);
+		const summary = await runPlan({
+			plan: plan([agentNode("small"), agentNode("crosser"), agentNode("later")], { budgetTokens: 1_000 }),
+			spawn,
+		});
+
+		expect(summary.halted).toBe("budget");
+		const detail = summary.haltDetail ?? "";
+		expect(detail).toContain('most of it on node "small" (900)');
+		expect(detail).not.toContain('"crosser" alone');
+		expect(detail).toContain("never ran: later");
+	});
+
+	it("counts a node skipped behind a failure, not just the ones with no status", async () => {
+		// Two nodes of the SAME kind were split by nothing but their distance from
+		// the failure: `skippableAfterFailure` pre-marks a DIRECT dependent as
+		// skipped, while a TRANSITIVE one still has no status — so the old count
+		// said "never ran: 3" when four nodes never ran, and omitted the direct
+		// dependent from the list entirely.
+		const spawn: Spawn = async (dispatch) => (dispatch.nodeId === "a" ? fail("boom") : ok("x", 5));
+		const summary = await runPlan({
+			plan: plan(
+				[agentNode("a"), agentNode("b", ["a"]), agentNode("b2", ["b"]), agentNode("c"), agentNode("d")],
+				{ budgetTokens: 10 },
+			),
+			spawn,
+		});
+
+		const detail = summary.haltDetail ?? "";
+		if (summary.halted) {
+			for (const id of ["b", "b2", "c", "d"]) expect(detail).toContain(id);
+			expect(detail).toContain("4 node(s) never ran");
+		}
+	});
+
+	it("stays absent on a healthy run", async () => {
+		const spawn: Spawn = async () => ok("x", 10);
+		const summary = await runPlan({ plan: plan([agentNode("a"), agentNode("b", ["a"])]), spawn });
+
+		expect(summary.halted).toBeUndefined();
+		expect(summary.haltDetail).toBeUndefined();
+	});
+});
+
 describe("runPlan — the identical-failure collapse", () => {
 	it("halts once several nodes fail the same way", async () => {
 		// Three nodes failing identically is one problem discovered in parallel,

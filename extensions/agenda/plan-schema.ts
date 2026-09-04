@@ -121,7 +121,26 @@ export const NodeSchema = Type.Union([
 export const CapsSchema = Type.Object({
 	maxConcurrent: Type.Optional(Type.Integer({ minimum: 1, maximum: CEILING_MAX_CONCURRENT })),
 	maxAgents: Type.Optional(Type.Integer({ minimum: 1, maximum: CEILING_MAX_AGENTS })),
-	budgetTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+	/**
+	 * The warning lives in `description`, not here, because a TSDoc comment does
+	 * not survive `PlanSchema` being handed to the model as tool parameters — and
+	 * the model writing the plan is the only reader who can still avoid the cost.
+	 * Three surprises, all of them things `nextBatch` actually implements.
+	 */
+	budgetTokens: Type.Optional(Type.Integer({
+		minimum: 1,
+		description:
+			"A whole-run token ceiling checked BETWEEN workers — NOT an allowance given to any worker. " +
+			"(1) No single worker is bounded by it: a model turn cannot be preempted at an exact token, so the " +
+			"first worker admitted runs to completion, and measured overshoots are 2-6x the entire cap (a 12000 " +
+			"budget crossed by one 27189-token worker). " +
+			"(2) Setting it FORCES the run to one worker at a time for its whole duration, overriding " +
+			"maxConcurrent — a budget silently costs all parallelism. " +
+			"(3) When it trips the run HALTS: every unstarted node, any reconciler included, is dropped rather " +
+			"than trimmed. " +
+			"So size it at several times the largest single worker's expected spend, or leave it unset and bound " +
+			"the wave with maxAgents, which is hard, does not serialize, and is usually what was meant.",
+	})),
 	/**
 	 * Run workers as durable RPC sessions in a background plan. The tool returns
 	 * a run id immediately; workers stay addressable through `worker_send`, and

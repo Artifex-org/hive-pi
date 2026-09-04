@@ -30,6 +30,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
+import { strandedIndexLock } from "../background/indexlock.ts";
 import { AnsiStripper, normalizeCRLF } from "./ansi.ts";
 import { RepaintCollapser } from "./repaint.ts";
 import {
@@ -608,6 +609,25 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 					// "Command timed out after N seconds", so the note rides along with
 					// no change to pi core and no new protocol.
 					if (postMortem !== undefined) onData(Buffer.from(postMortem));
+
+					// WHAT THE KILL LEFT IN THE REPO. The post-mortem names the
+					// processes; it says nothing about the lock a killed `git commit`
+					// strands, and the static timeout hint says one "may remain"
+					// without naming a path. So the agent guesses — measured
+					// 2026-09-02, it guessed `<cwd>/.git/index.lock`, which in a
+					// worktree is a FILE pointing elsewhere and therefore never exists.
+					// `strandedIndexLock` resolves the real git dir, and the cancel
+					// path (`background_cancel`) has been saying so since 2026-08-27.
+					//
+					// HERE and not in `capturePostMortem`: at the kill git is still
+					// alive and legitimately holding its lock, and most of them remove
+					// it on the way down — a probe there would cry "stranded" over
+					// every killed git. By `close` the tree is gone and the lock is
+					// either genuinely left behind or not there at all.
+					if (timedOut || signal?.aborted) {
+						const stranded = strandedIndexLock(cwd);
+						if (stranded) onData(Buffer.from(`\n${stranded}\n`));
+					}
 
 					// These two strings are the protocol with pi's error formatting.
 					// Anything else here would render as an unexplained failure.
