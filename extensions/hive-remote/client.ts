@@ -39,6 +39,21 @@ export interface Capabilities {
 	 * tell an operator that writes are denied while every write tool stayed open.
 	 */
 	can_set_op_mode: boolean;
+	/**
+	 * Which operating modes this build can actually enforce.
+	 *
+	 * `can_set_op_mode` says an enforcer is present; it does not say which
+	 * postures it knows. An older pi handed an unknown mode drops it in SILENCE
+	 * and starts unrestricted in `build`, so a server offering a posture on the
+	 * strength of the boolean alone can show a lead as coordination-only while
+	 * every write tool stays open.
+	 *
+	 * OPTIONAL on the wire for the same HIV-1163 reason as `can_add_workspace`:
+	 * spread in only when the enforcer has reported, so a server that predates
+	 * the field receives a body byte-identical to today's rather than rejecting
+	 * the whole attach.
+	 */
+	op_modes?: readonly string[];
 	/** Receive teammate messages. The server refuses to enqueue a team_message
 	 *  to a client that did not declare it. */
 	can_message: boolean;

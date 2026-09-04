@@ -247,7 +247,7 @@ export default function (pi: ExtensionAPI) {
 	/** Announce the posture so hive-remote can REPORT it (never assume it). */
 	const announce = () => {
 		try {
-			pi.events.emit(OP_MODE_STATE_CHANNEL, { mode } satisfies OpModeStateEvent);
+			pi.events.emit(OP_MODE_STATE_CHANNEL, { mode, modes: OP_MODES } satisfies OpModeStateEvent);
 		} catch {
 			/* no bus, or nothing listening */
 		}

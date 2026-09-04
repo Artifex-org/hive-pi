@@ -152,6 +152,20 @@ export const OP_MODE_STATE_CHANNEL = "hive.opmode.state";
 
 export interface OpModeStateEvent {
 	mode: string;
+	/**
+	 * Every posture this build knows, so the server can offer only what this
+	 * client can actually enforce.
+	 *
+	 * Without it the server has one bit — `can_set_op_mode` — which says some
+	 * enforcer is present, not WHICH postures it understands. An older pi handed
+	 * a mode it does not know drops it in silence (`isOpMode` returns false) and
+	 * runs unrestricted in `build`, so a server guessing wrong shows a lead as
+	 * coordination-only while every write tool stays open.
+	 *
+	 * Optional because the enforcer may predate this field; a subscriber that
+	 * receives none must not assume the empty set.
+	 */
+	modes?: readonly string[];
 }
 
 /**
