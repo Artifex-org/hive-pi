@@ -16,6 +16,7 @@ import {
 	issueGlyph,
 	linearSegments,
 	packSegments,
+	retryCountdown,
 	runGlyph,
 	workspaceRow,
 } from "../extensions/status-footer/render.ts";
@@ -52,6 +53,7 @@ const hive = (over: Partial<HiveSnapshot> = {}): HiveSnapshot => ({
 	health: { passed: 11, total: 12 },
 	live: true,
 	error: null,
+	retryAt: null,
 	...over,
 });
 
@@ -164,6 +166,27 @@ describe("hiveSegments", () => {
 	it("reports an unreachable server instead of pretending the project is idle", () => {
 		const segments = hiveSegments(hive({ status: "error", error: "timeout" }), plain);
 		expect(segments[0].text).toContain("timeout");
+	});
+
+	// A row that just stops moving is read as a broken footer, and the watcher
+	// gets blamed for the outage it is easing (HIV-3313).
+	it("says when it will try again while it is backing off", () => {
+		const segments = hiveSegments(hive({ status: "error", error: "http_503", retryAt: Date.now() + 40_000 }), plain);
+		expect(segments[0].text).toBe("unreachable (http_503) retry 40s");
+	});
+});
+
+describe("retryCountdown", () => {
+	it("counts whole seconds up to a minute and whole minutes beyond it", () => {
+		expect(retryCountdown(40_000, 0)).toBe("40s");
+		expect(retryCountdown(59_400, 0)).toBe("1m");
+		expect(retryCountdown(90_000, 0)).toBe("2m");
+		expect(retryCountdown(300_000, 0)).toBe("5m");
+	});
+
+	it("says nothing when there is no backoff, or when the wait is already over", () => {
+		expect(retryCountdown(null, 0)).toBeNull();
+		expect(retryCountdown(1_000, 5_000)).toBeNull();
 	});
 });
 

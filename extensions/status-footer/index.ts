@@ -34,6 +34,7 @@ import {
 	formatTokens,
 	integrationRow,
 	issueGlyph,
+	retryCountdown,
 	runGlyph,
 	workspaceRow,
 } from "./render.ts";
@@ -208,14 +209,20 @@ export default function statusFooter(pi: ExtensionAPI) {
 	pi.registerCommand("hive", {
 		description: "Hive: this project's runs, trunk state and recent health",
 		handler: async (_args, ctx) => {
-			await hive.refresh();
+			await hive.refreshNow();
 			const snapshot = hive.get();
 			await showOverlay(ctx, "Hive", (theme) => {
 				if (!hive.configured) return [theme.fg("dim", "HIVE_URL / HIVE_TOKEN are not set in this environment.")];
 				if (snapshot.status === "foreign") {
 					return [theme.fg("dim", `${workspace.repo ?? "this repo"} is not a registered Hive project.`)];
 				}
-				if (snapshot.status === "error") return [theme.fg("error", `Hive is unreachable: ${snapshot.error}`)];
+				if (snapshot.status === "error") {
+					const retry = retryCountdown(snapshot.retryAt);
+					return [
+						theme.fg("error", `Hive is unreachable: ${snapshot.error}`),
+						theme.fg("dim", retry ? `Backing off; next attempt in ${retry}.` : "Retrying on the next refresh."),
+					];
+				}
 				if (snapshot.status !== "ok") return [theme.fg("dim", "Resolving…")];
 
 				const lines = [

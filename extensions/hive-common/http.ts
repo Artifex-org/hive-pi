@@ -21,8 +21,33 @@ export interface RequestResult<T = unknown> {
 	authFailed: boolean;
 	/** Permanently malformed for this server: drop rather than retry forever. */
 	permanent: boolean;
+	/**
+	 * How long the server asked the caller to wait, in ms, from a numeric
+	 * `Retry-After`; null when it sent none. Parsed here rather than in each
+	 * caller because the limiter that sends it is per tenant and per token
+	 * (`internal/api/api_ratelimit_test.go` pins "30" and "12"): every client in
+	 * this process is being told the same thing, and a client that ignores it
+	 * makes the next window worse.
+	 */
+	retryAfterMs: number | null;
 	body?: T;
 	error?: string;
+}
+
+/** Longest `Retry-After` taken at face value, so a misconfigured proxy cannot park a client for a day. */
+export const RETRY_AFTER_MAX_MS = 15 * 60_000;
+
+/**
+ * parseRetryAfterMs reads the delta-seconds form of `Retry-After`. The HTTP-date
+ * form is deliberately not read: honouring it would mean trusting this machine's
+ * clock against the server's, and Hive sends seconds everywhere it sends the
+ * header at all.
+ */
+export function parseRetryAfterMs(header: string | null): number | null {
+	if (!header) return null;
+	const seconds = Number(header.trim());
+	if (!Number.isFinite(seconds) || seconds < 0) return null;
+	return Math.min(seconds * 1_000, RETRY_AFTER_MAX_MS);
 }
 
 /**
@@ -116,7 +141,14 @@ export async function request<T = unknown>(
 		);
 		if (!res.ok) {
 			const { authFailed, permanent } = classify(res.status);
-			return { ok: false, status: res.status, authFailed, permanent, error: await serverError(res) };
+			return {
+				ok: false,
+				status: res.status,
+				authFailed,
+				permanent,
+				retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")),
+				error: await serverError(res),
+			};
 		}
 		let parsed: T | undefined;
 		if (res.status !== 204) {
@@ -126,9 +158,9 @@ export async function request<T = unknown>(
 				/* a 2xx with no/!json body is still a success */
 			}
 		}
-		return { ok: true, status: res.status, authFailed: false, permanent: false, body: parsed };
+		return { ok: true, status: res.status, authFailed: false, permanent: false, retryAfterMs: null, body: parsed };
 	} catch (err) {
-		return { ok: false, status: null, authFailed: false, permanent: false, error: redact(err) };
+		return { ok: false, status: null, authFailed: false, permanent: false, retryAfterMs: null, error: redact(err) };
 	}
 }
 

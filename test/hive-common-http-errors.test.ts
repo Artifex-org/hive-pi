@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { request } from "../extensions/hive-common/http.ts";
+import { RETRY_AFTER_MAX_MS, parseRetryAfterMs, request } from "../extensions/hive-common/http.ts";
 
 const auth = { token: "hive_test", url: "https://hive.example" };
 
@@ -71,5 +71,47 @@ describe("request error reporting", () => {
 		const res = await request(auth, "GET", "/x");
 		expect(res.error).toBe("TypeError");
 		expect(res.error).not.toContain("hive_secret");
+	});
+});
+
+// The limiter that sends `Retry-After` is per tenant and per token, so every
+// client in the process is being told the same thing — and a client that drops
+// the header makes the next window worse. It is parsed once, here, rather than
+// in whichever caller happens to remember to look (HIV-3313).
+describe("Retry-After", () => {
+	it("carries the server's wait to the caller that has to honour it", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response("{}", {
+						status: 429,
+						headers: { "content-type": "application/json", "retry-after": "30" },
+					}),
+			),
+		);
+
+		const res = await request(auth, "GET", "/runs");
+		expect(res.status).toBe(429);
+		// 429 is retryable, not permanent — the wait is the whole instruction.
+		expect(res.permanent).toBe(false);
+		expect(res.retryAfterMs).toBe(30_000);
+	});
+
+	it("is null when the server sent none", async () => {
+		respondWith(503, JSON.stringify({ detail: "unavailable" }));
+
+		expect((await request(auth, "GET", "/x")).retryAfterMs).toBeNull();
+	});
+
+	it("reads delta-seconds only, and caps an absurd value", () => {
+		expect(parseRetryAfterMs("40")).toBe(40_000);
+		expect(parseRetryAfterMs(" 40 ")).toBe(40_000);
+		expect(parseRetryAfterMs(null)).toBeNull();
+		expect(parseRetryAfterMs("-1")).toBeNull();
+		// The HTTP-date form would mean trusting this machine's clock against the server's.
+		expect(parseRetryAfterMs("Wed, 21 Oct 2026 07:28:00 GMT")).toBeNull();
+		// A misconfigured proxy must not be able to park a client for a day.
+		expect(parseRetryAfterMs("86400")).toBe(RETRY_AFTER_MAX_MS);
 	});
 });
