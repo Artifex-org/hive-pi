@@ -14,17 +14,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	BACKOFF_BASE_MS,
 	MIN_REFRESH_GAP_MS,
-	RETRY_AFTER_MAX_MS,
+	NETWORK_BACKOFF_MAX_MS,
 	backoffPlan,
 	credentialsFromEnv,
 	HiveWatcher,
 	mapRun,
 	matchesProject,
-	parseRetryAfterMs,
 	pickMine,
 	pipelineFacts,
 	pollDelayMs,
+	sameTarget,
 } from "../extensions/status-footer/hive.ts";
 import {
 	buildOrFilter,
@@ -263,25 +264,33 @@ describe("mergeIssues", () => {
 });
 
 /**
- * A fake Hive: the endpoints the watcher reads, plus a controllable SSE stream so
- * a test can fire fleet events at it the way a busy project does — several a
- * second, all naming the same project.
+ * A fake Hive: the endpoints the watcher reads, plus a controllable SSE stream,
+ * so a test can fire fleet events the way a busy project does — several a
+ * second, all naming the same project — and can hold a request open to put the
+ * watcher into the states that only exist mid-refresh.
  */
 function fakeHive() {
-	const calls: string[] = [];
+	const calls: Array<{ url: string; headers: Record<string, string> }> = [];
 	const encoder = new TextEncoder();
 	let failure: { status: number; headers: Record<string, string> } | null = null;
+	let crash = false;
+	let holding = false;
+	let held: Array<() => void> = [];
 	let events: ReadableStreamDefaultController<Uint8Array> | null = null;
 	const json = (body: unknown) =>
 		new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+	const headersOf = (init?: RequestInit): Record<string, string> =>
+		Object.fromEntries(
+			Object.entries((init?.headers ?? {}) as Record<string, string>).map(([key, value]) => [key.toLowerCase(), value]),
+		);
 
 	vi.stubGlobal(
 		"fetch",
-		vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
+		vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
 			const url = String(input);
-			calls.push(url);
+			calls.push({ url, headers: headersOf(init) });
 			if (url.includes("/api/v1/events")) {
-				// Yields only what a test pushes, so the stream never ends and nothing reconnects.
+				// Yields only what a test pushes, so the stream stays open until a test closes it.
 				return new Response(
 					new ReadableStream<Uint8Array>({
 						start(controller) {
@@ -298,6 +307,8 @@ function fakeHive() {
 				});
 			}
 			if (url.includes("/api/v1/runs")) {
+				if (holding) await new Promise<void>((resolve) => held.push(resolve));
+				if (crash) throw new TypeError("fetch failed");
 				if (failure) return new Response("{}", { status: failure.status, headers: failure.headers });
 				return json({ runs: [] });
 			}
@@ -307,14 +318,32 @@ function fakeHive() {
 
 	return {
 		/** Every refresh reads the active runs exactly once, so this counts refreshes. */
-		refreshes: () => calls.filter((url) => url.includes("status=running")).length,
+		refreshes: () => calls.filter((call) => call.url.includes("status=running")).length,
+		streams: () => calls.filter((call) => call.url.includes("/api/v1/events")),
 		fail: (status: number, headers: Record<string, string> = {}) => {
 			failure = { status, headers };
 		},
+		crash: () => {
+			crash = true;
+		},
 		heal: () => {
 			failure = null;
+			crash = false;
 		},
-		event: () => events?.enqueue(encoder.encode('data: {"project":"pyERP","type":"task.running"}\n\n')),
+		/** Hold every subsequent run read open, so a refresh can be observed mid-flight. */
+		hold: () => {
+			holding = true;
+		},
+		release: () => {
+			holding = false;
+			for (const resolve of held) resolve();
+			held = [];
+		},
+		event: () => events?.enqueue(encoder.encode('id: 42\ndata: {"project":"pyERP","type":"task.running"}\n\n')),
+		endStream: () => {
+			events?.close();
+			events = null;
+		},
 	};
 }
 
@@ -333,39 +362,53 @@ describe("HiveWatcher refresh limiting", () => {
 		vi.unstubAllGlobals();
 	});
 
+	/**
+	 * A watcher pointed at pyERP and left quiet: the initial refresh and the one
+	 * the stream's connection asks for have both landed, and nothing is armed.
+	 * Tests assert against `base` because that settling cost is bookkeeping, not
+	 * the behaviour under test.
+	 */
 	async function watching() {
 		const server = fakeHive();
-		const watcher = new HiveWatcher(() => {}, { url: "https://hive.example", token: "t" });
+		const seen: Array<{ status: string; project: string | null }> = [];
+		const watcher: HiveWatcher = new HiveWatcher(
+			() => seen.push({ status: watcher.get().status, project: watcher.get().project }),
+			{ url: "https://hive.example", token: "t" },
+		);
 		watcher.retarget({ repo: "pyERP", branch: "feature", pr: null });
 		await settle();
-		return { server, watcher };
+		await vi.advanceTimersByTimeAsync(2 * MIN_REFRESH_GAP_MS);
+		return { server, watcher, seen, base: server.refreshes() };
 	}
 
 	it("collapses a burst of fleet events into exactly one trailing refresh", async () => {
-		const { server, watcher } = await watching();
-		expect(server.refreshes()).toBe(1);
+		const { server, watcher, base } = await watching();
+
+		// The gap since the last refresh has elapsed, so this one goes now.
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
 
 		for (let i = 0; i < 25; i += 1) server.event();
 		await settle();
-		expect(server.refreshes()).toBe(1);
+		expect(server.refreshes()).toBe(base + 1);
 
 		// One — the events must still reach the screen — and only one.
 		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS);
-		expect(server.refreshes()).toBe(2);
+		expect(server.refreshes()).toBe(base + 2);
 
 		await vi.advanceTimersByTimeAsync(10 * MIN_REFRESH_GAP_MS);
-		expect(server.refreshes()).toBe(2);
+		expect(server.refreshes()).toBe(base + 2);
 		watcher.stop();
 	});
 
 	it("backs off on a 503, waits out its Retry-After, and resets on the next success", async () => {
-		const { server, watcher } = await watching();
+		const { server, watcher, base } = await watching();
 		server.fail(503, { "retry-after": "40" });
 
-		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS);
 		server.event();
 		await settle();
-		expect(server.refreshes()).toBe(2);
+		expect(server.refreshes()).toBe(base + 1);
 		expect(watcher.get().status).toBe("error");
 		expect(watcher.get().error).toBe("http_503");
 		expect(watcher.get().retryAt).toBe(Date.now() + 40_000);
@@ -373,41 +416,184 @@ describe("HiveWatcher refresh limiting", () => {
 		// Events during the backoff are recorded, not sent.
 		for (let i = 0; i < 5; i += 1) server.event();
 		await vi.advanceTimersByTimeAsync(39_000);
-		expect(server.refreshes()).toBe(2);
+		expect(server.refreshes()).toBe(base + 1);
 
 		server.heal();
 		await vi.advanceTimersByTimeAsync(2_000);
-		expect(server.refreshes()).toBe(3);
+		expect(server.refreshes()).toBe(base + 2);
 		expect(watcher.get().status).toBe("ok");
 		expect(watcher.get().retryAt).toBeNull();
 
 		// Reset: the next event waits the ordinary gap, not a doubled backoff.
 		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 2);
 		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS);
-		expect(server.refreshes()).toBe(4);
+		expect(server.refreshes()).toBe(base + 3);
 		watcher.stop();
 	});
 
-	it("lets a workspace change through the gap, because that one is a person's doing", async () => {
+	// The 503 was only ever half the symptom: an ingress answering for an
+	// unpublished backend returns 502 or 504 just as readily.
+	it.each([502, 503, 504, 429])("treats %i as push-back", async (status) => {
+		const { server, watcher, base } = await watching();
+		server.fail(status);
+
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+		expect(watcher.get().retryAt).not.toBeNull();
+		watcher.stop();
+	});
+
+	it("does not back off from a 404, which waiting cannot fix", async () => {
+		const { server, watcher, base } = await watching();
+		server.fail(404);
+
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+		expect(watcher.get().status).toBe("error");
+		expect(watcher.get().error).toBe("http_404");
+		expect(watcher.get().retryAt).toBeNull();
+		watcher.stop();
+	});
+
+	it("backs off from a request that got no answer at all", async () => {
 		const { server, watcher } = await watching();
-		expect(server.refreshes()).toBe(1);
+		server.crash();
+
+		server.event();
+		await settle();
+		expect(watcher.get().status).toBe("error");
+		expect(watcher.get().error).toBe("TypeError");
+		expect(watcher.get().retryAt).not.toBeNull();
+		watcher.stop();
+	});
+
+	// The countdown on screen is a promise. Nothing else here arms that timer:
+	// no event arrives, and the backstop poll is not even started.
+	it("arms its own retry, so the countdown it renders actually happens", async () => {
+		const { server, watcher, base } = await watching();
+		server.fail(503);
+
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+		expect(watcher.get().retryAt).not.toBeNull();
+
+		await vi.advanceTimersByTimeAsync(BACKOFF_BASE_MS);
+		expect(server.refreshes()).toBe(base + 2);
+		watcher.stop();
+	});
+
+	it("lets a workspace change replace the trailing refresh, not queue behind it", async () => {
+		const { server, watcher, base } = await watching();
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+
+		// Arms the trailing refresh, 15s out.
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
 
 		watcher.retarget({ repo: "pyERP", branch: "other", pr: null });
 		await settle();
-		expect(server.refreshes()).toBe(2);
+		expect(server.refreshes()).toBe(base + 2);
 		watcher.stop();
 	});
 
-	it("does not drop an event that arrives while a refresh is already running", async () => {
-		const { server, watcher } = await watching();
-		void watcher.refresh();
+	it("drops an answer a retarget has outdated rather than painting it over the reset", async () => {
+		const { server, watcher, seen } = await watching();
+		server.hold();
 		server.event();
 		await settle();
-		expect(server.refreshes()).toBe(2);
 
-		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS);
-		expect(server.refreshes()).toBe(3);
+		watcher.retarget({ repo: "other-repo", branch: "x", pr: null });
+		seen.length = 0;
+		server.release();
+		await settle();
+
+		// The held answer was about pyERP; nothing may report it after the move.
+		expect(seen.some((snapshot) => snapshot.project === "pyERP")).toBe(false);
+		expect(watcher.get().status).toBe("foreign");
 		watcher.stop();
+	});
+
+	it("does not drop an event that arrived while a refresh was running", async () => {
+		const { server, watcher, base } = await watching();
+		server.hold();
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+
+		// The gap elapses while that refresh is still open, and another event lands.
+		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS + 1_000);
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+
+		server.release();
+		await settle();
+		expect(server.refreshes()).toBe(base + 2);
+		watcher.stop();
+	});
+
+	it("serves /hive past the gap, joins a running refresh, and adds nothing while backing off", async () => {
+		const { server, watcher, base } = await watching();
+		server.event();
+		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+
+		// Inside the gap, but a person asked.
+		await watcher.refreshNow();
+		expect(server.refreshes()).toBe(base + 2);
+
+		server.hold();
+		const first = watcher.refreshNow();
+		const second = watcher.refreshNow();
+		await settle();
+		expect(server.refreshes()).toBe(base + 3);
+		server.release();
+		await settle();
+		await Promise.all([first, second]);
+
+		server.fail(503);
+		await watcher.refreshNow();
+		const during = server.refreshes();
+		await watcher.refreshNow();
+		expect(server.refreshes()).toBe(during);
+		watcher.stop();
+	});
+
+	it("subscribes to this project's events only, and resumes from the last id it saw", async () => {
+		const { server, watcher } = await watching();
+		const first = server.streams()[0];
+		expect(first.url).toContain("project=pyERP");
+		expect(first.headers["last-event-id"]).toBeUndefined();
+
+		server.event();
+		await settle();
+		server.endStream();
+		await vi.advanceTimersByTimeAsync(10_000);
+
+		const second = server.streams()[1];
+		expect(second).toBeDefined();
+		expect(second.url).toContain("project=pyERP");
+		expect(second.headers["last-event-id"]).toBe("42");
+		watcher.stop();
+	});
+});
+
+describe("sameTarget", () => {
+	const target = { repo: "pyERP", branch: "feature", pr: 1 };
+
+	it("notices every move the footer watches", () => {
+		expect(sameTarget(target, { ...target })).toBe(true);
+		expect(sameTarget(target, { ...target, branch: "other" })).toBe(false);
+		expect(sameTarget(target, { ...target, pr: 2 })).toBe(false);
+		expect(sameTarget(target, { ...target, repo: "hive" })).toBe(false);
 	});
 });
 
@@ -416,35 +602,27 @@ describe("backoffPlan", () => {
 	const worst = () => 1;
 
 	it("doubles from 5s and stops at 5 minutes", () => {
-		expect(backoffPlan(0, null, worst)).toEqual({ ceiling: 5_000, delay: 5_000 });
-		expect(backoffPlan(5_000, null, worst).delay).toBe(10_000);
-		expect(backoffPlan(160_000, null, worst).ceiling).toBe(300_000);
-		expect(backoffPlan(300_000, null, worst).ceiling).toBe(300_000);
+		expect(backoffPlan(0, null, undefined, worst)).toEqual({ ceiling: 5_000, delay: 5_000 });
+		expect(backoffPlan(5_000, null, undefined, worst).delay).toBe(10_000);
+		expect(backoffPlan(160_000, null, undefined, worst).ceiling).toBe(300_000);
+		expect(backoffPlan(300_000, null, undefined, worst).ceiling).toBe(300_000);
+	});
+
+	// A failure this machine caused says nothing about the server's load, so it
+	// must not park the footer behind a five-minute countdown.
+	it("caps a client-side failure at a minute", () => {
+		expect(backoffPlan(40_000, null, NETWORK_BACKOFF_MAX_MS, worst).ceiling).toBe(60_000);
+		expect(backoffPlan(60_000, null, NETWORK_BACKOFF_MAX_MS, worst).ceiling).toBe(60_000);
 	});
 
 	it("draws from [0, ceiling], so sessions that failed together do not return together", () => {
-		expect(backoffPlan(20_000, null, () => 0).delay).toBe(0);
-		expect(backoffPlan(20_000, null, () => 0.5).delay).toBe(20_000);
+		expect(backoffPlan(20_000, null, undefined, () => 0).delay).toBe(0);
+		expect(backoffPlan(20_000, null, undefined, () => 0.5).delay).toBe(20_000);
 	});
 
 	it("never returns sooner than the server asked, and never later than the ceiling needs", () => {
-		expect(backoffPlan(0, 40_000, () => 0).delay).toBe(40_000);
-		expect(backoffPlan(0, 1_000, worst).delay).toBe(5_000);
-	});
-});
-
-describe("parseRetryAfterMs", () => {
-	it("reads delta-seconds and ignores every other spelling", () => {
-		expect(parseRetryAfterMs("40")).toBe(40_000);
-		expect(parseRetryAfterMs(" 40 ")).toBe(40_000);
-		expect(parseRetryAfterMs(null)).toBeNull();
-		expect(parseRetryAfterMs("-1")).toBeNull();
-		// The HTTP-date form would mean trusting this machine's clock against the server's.
-		expect(parseRetryAfterMs("Wed, 21 Oct 2026 07:28:00 GMT")).toBeNull();
-	});
-
-	it("caps an absurd value so a misconfigured proxy cannot park the footer for a day", () => {
-		expect(parseRetryAfterMs("86400")).toBe(RETRY_AFTER_MAX_MS);
+		expect(backoffPlan(0, 40_000, undefined, () => 0).delay).toBe(40_000);
+		expect(backoffPlan(0, 1_000, undefined, worst).delay).toBe(5_000);
 	});
 });
 

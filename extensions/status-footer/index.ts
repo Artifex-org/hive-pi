@@ -209,7 +209,7 @@ export default function statusFooter(pi: ExtensionAPI) {
 	pi.registerCommand("hive", {
 		description: "Hive: this project's runs, trunk state and recent health",
 		handler: async (_args, ctx) => {
-			await hive.refresh();
+			await hive.refreshNow();
 			const snapshot = hive.get();
 			await showOverlay(ctx, "Hive", (theme) => {
 				if (!hive.configured) return [theme.fg("dim", "HIVE_URL / HIVE_TOKEN are not set in this environment.")];
