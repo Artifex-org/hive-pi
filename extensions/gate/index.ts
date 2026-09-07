@@ -33,7 +33,7 @@ import {
 	renderReport,
 	stepsFrom,
 } from "./hivecheck.ts";
-import { cancelRun, dispatch, failedTaskLogs, follow, hivePipelineDir, QUEUED_FOLLOW_MINUTES, resolveCheckAuth } from "./hiverun.ts";
+import { cancelRun, dispatch, dispatchUnconfirmed, failedTaskLogs, follow, hivePipelineDir, QUEUED_FOLLOW_MINUTES, resolveCheckAuth } from "./hiverun.ts";
 import { DECK_SECTION_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 
@@ -411,10 +411,43 @@ async function runHiveCheck(
 		note = note ? `${note}\n${line}` : line;
 	}
 	if (!run.ref) {
-		// The CLI refused, and its refusal is the useful text: an unknown step
-		// name comes back with the pipeline's ACTUAL step list, which nothing here
-		// could reconstruct. Reported verbatim, marked as "no verdict" so it is
-		// never mistaken for a pass.
+		// "Created no run" is a CLAIM, and only some of these outcomes support it.
+		//
+		// The CLI classifies its own exits (hive cmd/hive/exitcode.go, HIV-664)
+		// and reserves 4 for "the result was never confirmed" — a create-run POST
+		// whose response was lost after the body was delivered, so the server was
+		// very likely already evaluating the pipeline. Its own comment on that
+		// code reads: "1 is worse still: it asserts a verdict nobody has." This
+		// branch was asserting exactly that, one layer up, for every exit alike.
+		//
+		// Measured 2026-09-05..07, 88 papercuts across two developers: 77 MB
+		// uploaded, `context deadline exceeded`, and then `NO VERDICT — created
+		// no run`. One agent caught the contradiction unaided — "A timeout is
+		// indeterminate, not proof no run was created; checking list_runs before
+		// any retry" — and another recorded that the false certainty had already
+		// steered it wrong. Both had to reconcile by hand what the exit code
+		// already told them.
+		//
+		// A signal kill is the same class and was worse: the dispatch timeout
+		// SIGKILLs the CLI mid-upload, and this path used to read that as exit 0.
+		if (dispatchUnconfirmed(run)) {
+			const how = run.signal
+				? `the dispatch was killed (${run.signal}) before the CLI could report`
+				: "the CLI could not confirm the result (exit 4)";
+			return text(
+				`NO VERDICT — ${how}. A run MAY have been created: the snapshot upload had already been ` +
+					`delivered, so the server may be evaluating it now.\n\n` +
+					`Do NOT re-dispatch blind — that risks a second run of the same gate on a shared queue. ` +
+					`Reconcile first:\n` +
+					`  hive runs --project <project> --branch <branch>\n` +
+					`If a run is listed for your branch, watch it: hive watch <run>. If none is, re-run the check.` +
+					`\n\n${run.out.trim()}`,
+			);
+		}
+		// Everything else IS a definite answer, and the CLI's own words are the
+		// useful ones: an unknown step name comes back with the pipeline's ACTUAL
+		// step list, which nothing here could reconstruct. Reported verbatim,
+		// marked "no verdict" so it is never mistaken for a pass.
 		return text(`NO VERDICT — \`hive check --step ${steps.join(",")}\` created no run (exit ${run.code}):\n\n${run.out.trim()}`);
 	}
 
