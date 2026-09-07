@@ -641,10 +641,21 @@ export default function (pi: ExtensionAPI) {
 				const hive = await runHiveCheck(pi, params, cwd, signal, onUpdate);
 				const first = hive.content?.[0];
 				if (first?.type === "text") {
+					// Lead with what IS happening, not with what missed.
+					//
+					// This used to open on "matched no checks in the vendored gate",
+					// and agents read that opening as a failure and the dispatch as a
+					// recovery from it — filing it as "first said the names matched no
+					// vendored checks, then re-dispatched". Nothing failed: these are
+					// step names, this repo gates through Hive, and sending them to the
+					// fleet is the whole design (HIV-3077). Said in that order it needs
+					// no interpretation.
+					const named = stepsFrom(params.only);
 					first.text =
-						`\`only=${params.only}\` matched no checks in the vendored gate — on this repo those ` +
-						`name Hive pipeline steps, so the gate was re-dispatched as ` +
-						`\`hive check --step ${stepsFrom(params.only).join(",")}\`. The verdict below is that run's.\n\n` +
+						`\`${named.join("\`, \`")}\` ${named.length === 1 ? "is a Hive pipeline step" : "are Hive pipeline steps"}, ` +
+						`not vendored gate checks — this repo gates through Hive, so the gate ran them on the fleet:\n` +
+						`  hive check ${named.map((s) => `--step ${s}`).join(" ")}\n` +
+						`The verdict below is that run's.\n\n` +
 						first.text;
 				}
 				return hive;
