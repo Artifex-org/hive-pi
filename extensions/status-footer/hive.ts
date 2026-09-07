@@ -10,6 +10,15 @@
  * project nudges a refetch. The periodic poll is only a backstop for a dropped
  * stream, which is why its interval is long.
  *
+ * Refreshes are RATE LIMITED, and that is load-bearing rather than tidiness. One
+ * watcher per session, a fleet feed that fires several times a second on a busy
+ * project, and no floor between refetches turned every session into a refresh
+ * every ~1.5-2s: 112,300 identical `GET /runs?project=…&status=running` in 14
+ * hours, enough to flap the control plane's readiness (HIV-3313). So every
+ * trigger goes through `requestRefresh`, a burst inside one gap collapses into a
+ * single trailing refresh, and a server answering 429/503 gets exponential
+ * backoff instead of the same load it just refused.
+ *
  * Every response is mapped to a narrow type at the boundary. That is deliberate:
  * a run object carries its whole `dag_snapshot` (~14 KB), and holding a few of
  * those in a footer that redraws on a timer is exactly the kind of retained
@@ -22,8 +31,28 @@ const TRUNK_TTL_MS = 3 * 60_000;
 const REQUEST_TIMEOUT_MS = 6_000;
 /** Backstop only — SSE is the primary trigger. */
 export const POLL_INTERVAL_MS = 60_000;
-/** Coalesce a burst of task events into one refetch. */
-export const NUDGE_DEBOUNCE_MS = 1_500;
+/**
+ * Spread of the backstop poll, ±20%. Sessions start together — a fleet restart,
+ * a reconnect after an outage — and a fixed interval keeps them aligned forever
+ * after, so N sessions hit the same second of every minute. The jitter is drawn
+ * again on every tick, so a herd disperses rather than merely shifting.
+ */
+export const POLL_JITTER_RATIO = 0.2;
+/**
+ * No two refreshes closer together than this, whoever asks.
+ *
+ * The footer shows fleet and branch state to a human reading a status bar: a
+ * 15s-old answer is indistinguishable from a fresh one at that glance, and the
+ * SSE `live` patch still lands instantly. What the gap costs is nothing anybody
+ * can see; what it buys is a hard ceiling of four reads a minute per session.
+ */
+export const MIN_REFRESH_GAP_MS = 15_000;
+/** First wait after the server pushes back; doubles per consecutive failure. */
+export const BACKOFF_BASE_MS = 5_000;
+/** Ceiling for that doubling — a server in trouble is still checked every 5 minutes. */
+export const BACKOFF_MAX_MS = 5 * 60_000;
+/** Longest `Retry-After` honoured, so a misconfigured proxy cannot park the footer for a day. */
+export const RETRY_AFTER_MAX_MS = 15 * 60_000;
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 60_000;
 const ACTIVE_LIMIT = 20;
@@ -70,6 +99,8 @@ export interface HiveSnapshot {
 	/** True while the SSE stream is connected. */
 	live: boolean;
 	error: string | null;
+	/** When the next attempt is due while backing off from a server that pushed back; null otherwise. */
+	retryAt: number | null;
 }
 
 export const OFFLINE_HIVE: HiveSnapshot = {
@@ -83,6 +114,7 @@ export const OFFLINE_HIVE: HiveSnapshot = {
 	health: null,
 	live: false,
 	error: null,
+	retryAt: null,
 };
 
 export interface HiveCredentials {
@@ -194,13 +226,88 @@ export function pipelineFacts(raw: RawPipeline[]): PipelineFacts {
 	};
 }
 
+/**
+ * HiveHttpError is a status Hive answered with, kept as a value rather than
+ * folded into a message. The refresh limiter decides on 429/503 and on
+ * `Retry-After`, and re-deriving those from a formatted string is exactly how
+ * that decision comes apart the next time the message is reworded.
+ */
+export class HiveHttpError extends Error {
+	constructor(
+		readonly status: number,
+		readonly retryAfterMs: number | null,
+	) {
+		super(`http_${status}`);
+		this.name = "HiveHttpError";
+	}
+}
+
+/** HiveNetworkError is a request that got no answer at all — DNS, TCP, TLS, or the timeout. */
+export class HiveNetworkError extends Error {
+	constructor(readonly reason: string) {
+		super(reason);
+		this.name = "HiveNetworkError";
+	}
+}
+
 /** redact keeps an error's shape without its content — a fetch error can embed a URL, and a URL can carry a token. */
 function redact(err: unknown): string {
+	// A status is Hive's own answer and carries nothing secret, so it is the one
+	// detail worth showing: "unreachable (http_503)" is actionable, "Error" is not.
+	if (err instanceof HiveHttpError) return `http_${err.status}`;
+	if (err instanceof HiveNetworkError) return err.reason;
 	if (err instanceof Error) {
 		if (err.name === "AbortError" || err.name === "TimeoutError") return "timeout";
 		return err.name || "error";
 	}
 	return "error";
+}
+
+/**
+ * parseRetryAfterMs reads the delta-seconds form of `Retry-After`. The HTTP-date
+ * form is not read: honouring it would mean trusting this machine's clock against
+ * the server's, and Hive sends seconds.
+ */
+export function parseRetryAfterMs(header: string | null): number | null {
+	if (!header) return null;
+	const seconds = Number(header.trim());
+	if (!Number.isFinite(seconds) || seconds < 0) return null;
+	return Math.min(seconds * 1_000, RETRY_AFTER_MAX_MS);
+}
+
+/**
+ * backoffPlan computes the wait after a server pushed back, and the ceiling to
+ * double from next time.
+ *
+ * Full jitter — a uniform draw from [0, ceiling] rather than the ceiling itself —
+ * because every session hammering the same endpoint failed in the same moment: a
+ * deterministic backoff sends them all back in one wave, which is the load that
+ * caused the failure. The draw may land near zero, which is safe because
+ * MIN_REFRESH_GAP_MS still applies on top of it. `Retry-After` wins whenever it
+ * asks for longer; the server knows more than this heuristic does.
+ */
+export function backoffPlan(
+	previousCeilingMs: number,
+	retryAfterMs: number | null,
+	random: () => number = Math.random,
+): { ceiling: number; delay: number } {
+	const ceiling = Math.min(previousCeilingMs === 0 ? BACKOFF_BASE_MS : previousCeilingMs * 2, BACKOFF_MAX_MS);
+	return { ceiling, delay: Math.max(retryAfterMs ?? 0, ceiling * random()) };
+}
+
+/** pollDelayMs is the backstop interval with its jitter applied. */
+export function pollDelayMs(random: () => number = Math.random): number {
+	return Math.round(POLL_INTERVAL_MS * (1 + (random() * 2 - 1) * POLL_JITTER_RATIO));
+}
+
+/**
+ * isBackpressure: the server said "slow down" (429/503), or never answered at
+ * all. Anything else — a 404, a 401, a malformed body — is a fault that waiting
+ * cannot fix, so it is reported and retried on the ordinary gap.
+ */
+function isBackpressure(err: unknown): boolean {
+	if (err instanceof HiveHttpError) return err.status === 429 || err.status === 503;
+	return err instanceof HiveNetworkError;
 }
 
 export class HiveClient {
@@ -215,11 +322,16 @@ export class HiveClient {
 	}
 
 	private async get<T>(pathAndQuery: string): Promise<T> {
-		const res = await fetch(`${this.credentials.url}${pathAndQuery}`, {
-			headers: this.headers(),
-			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-		});
-		if (!res.ok) throw new Error(`http_${res.status}`);
+		let res: Response;
+		try {
+			res = await fetch(`${this.credentials.url}${pathAndQuery}`, {
+				headers: this.headers(),
+				signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+			});
+		} catch (err) {
+			throw new HiveNetworkError(redact(err));
+		}
+		if (!res.ok) throw new HiveHttpError(res.status, parseRetryAfterMs(res.headers.get("retry-after")));
 		return (await res.json()) as T;
 	}
 
@@ -329,9 +441,15 @@ export class HiveWatcher {
 	private target: HiveTarget = { repo: null, branch: null, pr: null };
 	private readonly client: HiveClient | null;
 	private controller: AbortController | null = null;
-	private nudge: ReturnType<typeof setTimeout> | undefined;
-	private poll: ReturnType<typeof setInterval> | undefined;
+	/** The single trailing refresh a burst of triggers collapses into. */
+	private pending: ReturnType<typeof setTimeout> | undefined;
+	private poll: ReturnType<typeof setTimeout> | undefined;
 	private inFlight = false;
+	/** A trigger that arrived while a refresh was already running; re-asked when it finishes. */
+	private queued = false;
+	private lastRefreshAt = 0;
+	private backoffUntil = 0;
+	private backoffCeiling = 0;
 	private projects: { names: string[]; at: number } | null = null;
 	private facts: { value: PipelineFacts; at: number } | null = null;
 	private trunkAt = 0;
@@ -366,22 +484,33 @@ export class HiveWatcher {
 			this.snapshot = { ...OFFLINE_HIVE, status: this.client ? "unresolved" : "off" };
 			this.restartStream();
 		}
-		void this.refresh();
+		// A workspace change is a user action and what is on screen is now about the
+		// wrong branch, so it skips the gap — but not a server that is pushing back.
+		this.requestRefresh({ skipGap: true });
 	}
 
 	start(): void {
 		if (!this.client || this.poll) return;
-		this.poll = setInterval(() => void this.refresh(), POLL_INTERVAL_MS);
-		this.poll.unref?.();
+		this.schedulePoll();
 	}
 
 	stop(): void {
-		if (this.poll) clearInterval(this.poll);
+		if (this.poll) clearTimeout(this.poll);
 		this.poll = undefined;
-		if (this.nudge) clearTimeout(this.nudge);
-		this.nudge = undefined;
+		if (this.pending) clearTimeout(this.pending);
+		this.pending = undefined;
+		this.queued = false;
 		this.controller?.abort();
 		this.controller = null;
+	}
+
+	/** The backstop re-arms itself with a fresh draw each tick — see POLL_JITTER_RATIO. */
+	private schedulePoll(): void {
+		this.poll = setTimeout(() => {
+			this.schedulePoll();
+			this.requestRefresh();
+		}, pollDelayMs());
+		this.poll.unref?.();
 	}
 
 	private restartStream(): void {
@@ -393,19 +522,43 @@ export class HiveWatcher {
 		this.controller = controller;
 		void this.client.streamEvents(
 			project,
-			() => this.scheduleNudge(),
+			() => this.requestRefresh(),
 			(live) => this.patch({ live }),
 			controller.signal,
 		);
 	}
 
-	private scheduleNudge(): void {
-		if (this.nudge) return;
-		this.nudge = setTimeout(() => {
-			this.nudge = undefined;
+	/**
+	 * requestRefresh is the only way a refresh is ASKED for; `refresh` is the only
+	 * way one happens. Every trigger — an SSE event, the backstop poll, a
+	 * retarget — comes through here, so the rate limit holds however loud the
+	 * trigger is.
+	 *
+	 * Any number of triggers inside one gap collapse into exactly ONE trailing
+	 * refresh at the end of it. Not zero: the event that arrived still has to
+	 * reach the screen, and dropping it is how a footer ends up 60s stale on a
+	 * finished run. Not one per event: that is the load this exists to remove.
+	 * While the server is pushing back the same trailing timer simply lands later,
+	 * which is what "nudges are recorded but issue no request" means here.
+	 */
+	private requestRefresh(options: { skipGap?: boolean } = {}): void {
+		if (!this.client || this.pending) return;
+		if (this.inFlight) {
+			// The running refresh may have read the server before this event existed.
+			this.queued = true;
+			return;
+		}
+		const gapUntil = options.skipGap ? 0 : this.lastRefreshAt + MIN_REFRESH_GAP_MS;
+		const wait = Math.max(gapUntil, this.backoffUntil) - Date.now();
+		if (wait <= 0) {
 			void this.refresh();
-		}, NUDGE_DEBOUNCE_MS);
-		this.nudge.unref?.();
+			return;
+		}
+		this.pending = setTimeout(() => {
+			this.pending = undefined;
+			void this.refresh();
+		}, wait);
+		this.pending.unref?.();
 	}
 
 	private patch(patch: Partial<HiveSnapshot>): void {
@@ -413,16 +566,55 @@ export class HiveWatcher {
 		this.onChange();
 	}
 
+	/**
+	 * refresh reads Hive NOW. Everything on a timer goes through `requestRefresh`
+	 * instead; this stays public for the one caller that is a person asking —
+	 * `/hive` — for whom a 15s-old answer is not what was asked for.
+	 */
 	async refresh(): Promise<void> {
 		if (!this.client || this.inFlight) return;
 		this.inFlight = true;
+		// Measured from the START of the request, so the gap bounds the request
+		// rate rather than the idle time between requests.
+		this.lastRefreshAt = Date.now();
 		try {
 			await this.refreshOnce(this.client);
+			this.clearBackoff();
 		} catch (err) {
-			this.patch({ status: "error", error: redact(err) });
+			this.noteFailure(err);
 		} finally {
 			this.inFlight = false;
+			if (this.queued) {
+				this.queued = false;
+				this.requestRefresh();
+			}
 		}
+	}
+
+	private clearBackoff(): void {
+		this.backoffCeiling = 0;
+		this.backoffUntil = 0;
+		if (this.snapshot.retryAt !== null) this.patch({ retryAt: null });
+	}
+
+	/**
+	 * noteFailure decides whether this failure means "slow down", and says so on
+	 * screen either way. A footer that silently stops updating is indistinguishable
+	 * from a project that has gone quiet, so the wait is rendered rather than
+	 * swallowed.
+	 */
+	private noteFailure(err: unknown): void {
+		if (!isBackpressure(err)) {
+			this.patch({ status: "error", error: redact(err), retryAt: null });
+			return;
+		}
+		const { ceiling, delay } = backoffPlan(
+			this.backoffCeiling,
+			err instanceof HiveHttpError ? err.retryAfterMs : null,
+		);
+		this.backoffCeiling = ceiling;
+		this.backoffUntil = Date.now() + delay;
+		this.patch({ status: "error", error: redact(err), retryAt: this.backoffUntil });
 	}
 
 	private async resolveProject(client: HiveClient, repo: string): Promise<string | null> {

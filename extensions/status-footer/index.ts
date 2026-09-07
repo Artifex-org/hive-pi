@@ -34,6 +34,7 @@ import {
 	formatTokens,
 	integrationRow,
 	issueGlyph,
+	retryCountdown,
 	runGlyph,
 	workspaceRow,
 } from "./render.ts";
@@ -215,7 +216,13 @@ export default function statusFooter(pi: ExtensionAPI) {
 				if (snapshot.status === "foreign") {
 					return [theme.fg("dim", `${workspace.repo ?? "this repo"} is not a registered Hive project.`)];
 				}
-				if (snapshot.status === "error") return [theme.fg("error", `Hive is unreachable: ${snapshot.error}`)];
+				if (snapshot.status === "error") {
+					const retry = retryCountdown(snapshot.retryAt);
+					return [
+						theme.fg("error", `Hive is unreachable: ${snapshot.error}`),
+						theme.fg("dim", retry ? `Backing off; next attempt in ${retry}.` : "Retrying on the next refresh."),
+					];
+				}
 				if (snapshot.status !== "ok") return [theme.fg("dim", "Resolving…")];
 
 				const lines = [

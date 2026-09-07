@@ -123,6 +123,21 @@ export function describeRun(run: HiveRun, theme: ThemeLike): string {
 }
 
 /**
+ * retryCountdown is how long the footer will wait before trying Hive again while
+ * it is backing off.
+ *
+ * Showing the wait is the difference between "this thing is broken" and "the
+ * server asked us to wait and we are"; a row that simply stops moving reads as
+ * the first, and the watcher would then be blamed for the outage it is easing.
+ */
+export function retryCountdown(retryAt: number | null, now = Date.now()): string | null {
+	if (retryAt === null) return null;
+	const seconds = Math.ceil((retryAt - now) / 1_000);
+	if (seconds <= 0) return null;
+	return seconds < 60 ? `${seconds}s` : `${Math.ceil(seconds / 60)}m`;
+}
+
+/**
  * hiveSegments renders the Hive half of the integration row.
  *
  * Priorities encode what matters when the terminal is narrow: my own run first,
@@ -133,7 +148,9 @@ export function describeRun(run: HiveRun, theme: ThemeLike): string {
 export function hiveSegments(snapshot: HiveSnapshot, theme: ThemeLike): Segment[] {
 	if (snapshot.status === "off" || snapshot.status === "foreign" || snapshot.status === "unresolved") return [];
 	if (snapshot.status === "error") {
-		return [{ text: theme.fg("dim", `unreachable (${snapshot.error ?? "error"})`), priority: 5 }];
+		const retry = retryCountdown(snapshot.retryAt);
+		const reason = `unreachable (${snapshot.error ?? "error"})`;
+		return [{ text: theme.fg("dim", retry ? `${reason} retry ${retry}` : reason), priority: 5 }];
 	}
 
 	const segments: Segment[] = [];
