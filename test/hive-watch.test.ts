@@ -471,18 +471,25 @@ describe("HiveWatcher refresh limiting", () => {
 		watcher.stop();
 	});
 
-	// The countdown on screen is a promise. Nothing else here arms that timer:
-	// no event arrives, and the backstop poll is not even started.
-	it("arms its own retry, so the countdown it renders actually happens", async () => {
+	// The countdown on screen is a promise, and this is the whole of what keeps
+	// it: no event arrives, and the backstop poll is not even started.
+	it("arms its own retry, and it fires exactly when the countdown says", async () => {
 		const { server, watcher, base } = await watching();
 		server.fail(503);
 
 		server.event();
 		await settle();
 		expect(server.refreshes()).toBe(base + 1);
-		expect(watcher.get().retryAt).not.toBeNull();
 
-		await vi.advanceTimersByTimeAsync(BACKOFF_BASE_MS);
+		const due = watcher.get().retryAt ?? 0;
+		expect(due).toBeGreaterThan(Date.now());
+		// The rendered wait is the gap here, not the sub-5s backoff underneath it:
+		// showing the shorter one would reach zero and then wait again.
+		expect(due).toBeGreaterThanOrEqual(Date.now() + BACKOFF_BASE_MS);
+
+		await vi.advanceTimersByTimeAsync(due - Date.now() - 1);
+		expect(server.refreshes()).toBe(base + 1);
+		await vi.advanceTimersByTimeAsync(1);
 		expect(server.refreshes()).toBe(base + 2);
 		watcher.stop();
 	});

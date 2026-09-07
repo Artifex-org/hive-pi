@@ -627,9 +627,17 @@ export class HiveWatcher {
 		this.pending.unref?.();
 	}
 
-	/** The snapshot's view of `backoff` — the only way retryAt is ever written. */
+	/**
+	 * The snapshot's view of `backoff` — the only way retryAt is ever written, and
+	 * the moment the retry ACTUALLY happens, not just when the backoff expires.
+	 * The gap applies on top of the backoff, so for a short first wait it is the
+	 * gap that decides; rendering the backoff alone would count down to zero and
+	 * then sit there for another ten seconds, which is the same broken promise as
+	 * arming no timer at all.
+	 */
 	private get retryAt(): number | null {
-		return this.backoff?.until ?? null;
+		if (this.backoff === null) return null;
+		return Math.max(this.backoff.until, this.lastRefreshAt + MIN_REFRESH_GAP_MS);
 	}
 
 	private patch(patch: Partial<Omit<HiveSnapshot, "retryAt">>): void {
