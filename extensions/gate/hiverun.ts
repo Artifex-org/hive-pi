@@ -89,9 +89,48 @@ export function resolveCheckAuth(): HiveAuth | null {
 
 export interface Dispatch {
 	ref: RunRef | null;
-	/** Everything the CLI said, for the case where it created no run. */
+	/** Everything the CLI said, for the case where no run came back. */
 	out: string;
-	code: number;
+	/**
+	 * The CLI's exit code, or null when a signal ended it instead.
+	 *
+	 * Null rather than 0, for the reason the vendored-gate path already states:
+	 * a missing code means the process did not exit, and substituting 0 would
+	 * claim it did. `code ?? 0` here turned the 10-minute SIGKILL below into a
+	 * clean success, so a dispatch killed mid-upload was reported as "created no
+	 * run (exit 0)" — a definite claim sourced from a process nobody let finish.
+	 *
+	 * The codes are a documented contract (hive's cmd/hive/exitcode.go, HIV-664):
+	 * 1 gate failed · 2 usage · 3 never ran · 4 NEVER CONFIRMED.
+	 */
+	code: number | null;
+	/** The signal that killed the CLI, when one did. */
+	signal: NodeJS.Signals | null;
+}
+
+/**
+ * `hive check` exit 4: "the result was never confirmed".
+ *
+ * The CLI earns this one. It POSTs the snapshot, and when the wait expires
+ * AWAITING HEADERS the body was already delivered — so the server was very
+ * likely evaluating the pipeline when the client gave up. It refuses to call
+ * that a failure, and exits 4 to say the outcome is unknown.
+ */
+export const EXIT_UNCONFIRMED = 4;
+
+/**
+ * Did this dispatch end without establishing whether a run exists?
+ *
+ * Two ways, and they are not the same as "no run came back". A missing
+ * `ref` only means WE did not learn of one — the question is whether the CLI
+ * was in a position to know. Exit 4 says it was not; a signal says it never
+ * got to finish the sentence.
+ *
+ * Every other exit IS a statement about the run (1 failed, 2 usage, 3 never
+ * ran), and those may be reported as fact.
+ */
+export function dispatchUnconfirmed(run: Pick<Dispatch, "code" | "signal">): boolean {
+	return run.signal !== null || run.code === EXIT_UNCONFIRMED;
 }
 
 /**
@@ -117,9 +156,9 @@ export async function dispatch(steps: string[], cwd: string, signal: AbortSignal
 			clearTimeout(timer);
 			reject(err);
 		});
-		child.on("close", (code) => {
+		child.on("close", (code, killedBy) => {
 			clearTimeout(timer);
-			resolve({ ref: parseRunRef(out), out, code: code ?? 0 });
+			resolve({ ref: parseRunRef(out), out, code, signal: killedBy });
 		});
 	});
 }

@@ -59,7 +59,21 @@ export function isTerminalRun(state: string): boolean {
  * the snapshot, prints the run reference, and gets out of the way.
  */
 export function hiveCheckArgs(steps: string[]): string[] {
-	return ["check", "--step", steps.join(","), "--no-wait"];
+	// One `--step` per step, though the CLI takes both spellings.
+	//
+	// `--step a,b` is valid — hive's flag appends AND splits on commas, and its
+	// help says "repeatable or comma-separated". But the joined form is what
+	// gets ECHOED back to the caller, and it reads as one comma-valued argument.
+	// 18 papercuts in three days filed that as a bug: "collapsing two pipeline
+	// steps into one flag", "turned three valid Hive steps into one comma-valued
+	// `--step` invocation". One agent noticed the tension and filed it anyway —
+	// "the combined step syntax shown by the wrapper also differs from the
+	// documented repeated `--step` CLI syntax."
+	//
+	// Nothing was ever broken. But every one of those agents spent a turn
+	// deciding whether the tool had malformed its own command, and the repeated
+	// form cannot be misread. Cheaper to be unambiguous than to be right.
+	return ["check", ...steps.flatMap((step) => ["--step", step]), "--no-wait"];
 }
 
 /**

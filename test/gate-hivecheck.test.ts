@@ -56,7 +56,20 @@ describe("hiveCheckArgs", () => {
 	// --no-wait is load-bearing: the CLI's own wait loop and ours would be two
 	// consumers of one run, and only one of them can own the abort.
 	it("asks for the steps and declines the CLI's wait loop", () => {
-		expect(hiveCheckArgs(["lint", "test-1"])).toEqual(["check", "--step", "lint,test-1", "--no-wait"]);
+		expect(hiveCheckArgs(["lint", "test-1"])).toEqual(["check", "--step", "lint", "--step", "test-1", "--no-wait"]);
+	});
+
+	it("repeats the flag rather than joining on commas", () => {
+		// Both spellings are valid to the CLI (its flag appends AND splits on
+		// commas). The repeated one is used because it is what gets echoed back,
+		// and `--step a,b` reads as one comma-valued argument: 18 papercuts in
+		// three days filed that as "collapsing two pipeline steps into one flag".
+		expect(hiveCheckArgs(["a", "b", "c"]).filter((arg) => arg === "--step")).toHaveLength(3);
+		expect(hiveCheckArgs(["a", "b"]).join(" ")).not.toContain("a,b");
+	});
+
+	it("still passes a single step unchanged", () => {
+		expect(hiveCheckArgs(["lint"])).toEqual(["check", "--step", "lint", "--no-wait"]);
 	});
 });
 
