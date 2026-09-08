@@ -314,3 +314,87 @@ export function runPg(paths: PgPaths, binary: string, args: string[], signal?: A
 		child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
 	});
 }
+
+/**
+ * Restore a published template dump into a freshly created database.
+ *
+ * WHY THIS EXISTS: a bare dev database costs whatever the project's migrations
+ * cost to replay. Measured on pyERP that is 506 migrations — one DB-backed test
+ * file took 8.5 minutes because every pytest invocation reconstructs the
+ * database. Restoring the template CI already publishes took 25 seconds end to
+ * end (20s fetch, 4.5s restore, 822 tables) and left one migration of delta.
+ *
+ * FAIL-OPEN, ALWAYS. Every failure path — an unreachable object store, an
+ * expired presign, a truncated download, a pg_restore error — returns a reason
+ * instead of throwing. The caller keeps the empty database it already created,
+ * which is exactly the behaviour that shipped before seeding existed. A seed is
+ * an optimisation and must never be able to fail a start.
+ *
+ * pg_restore's own exit code is deliberately NOT treated as fatal on its own:
+ * it exits non-zero for benign per-object warnings (an extension the sandbox
+ * role may not create, a comment on a missing object). What matters is whether
+ * the database ended up with tables, so that is what gets checked.
+ */
+export async function seedFromTemplate(
+	paths: PgPaths,
+	port: number,
+	database: string,
+	url: string,
+	dir: string,
+	fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: boolean; reason: string; tables: number }> {
+	const dump = path.join(dir, `seed-${process.pid}-${Date.now()}.dump`);
+	try {
+		let response: Response;
+		try {
+			response = await fetchImpl(url);
+		} catch (error) {
+			return { ok: false, reason: `template dump unreachable: ${errText(error)}`, tables: 0 };
+		}
+		if (!response.ok) {
+			return { ok: false, reason: `template dump fetch returned ${response.status}`, tables: 0 };
+		}
+		const body = await response.arrayBuffer();
+		if (body.byteLength === 0) {
+			return { ok: false, reason: "template dump was empty", tables: 0 };
+		}
+		fs.writeFileSync(dump, Buffer.from(body));
+
+		const restored = await runPg(paths, "pg_restore", [
+			"-h", "127.0.0.1", "-p", String(port), "-U", "dev",
+			"-d", database, "--no-owner", "--no-privileges", dump,
+		]);
+		const tables = await countTables(paths, port, database);
+		if (tables === 0) {
+			return {
+				ok: false,
+				tables: 0,
+				reason: `template restore produced no tables: ${restored.stderr.slice(-400)}`,
+			};
+		}
+		return { ok: true, reason: "", tables };
+	} catch (error) {
+		return { ok: false, reason: `template restore failed: ${errText(error)}`, tables: 0 };
+	} finally {
+		try {
+			fs.rmSync(dump, { force: true });
+		} catch {
+			// A leftover dump is not a reason to fail a start.
+		}
+	}
+}
+
+function errText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** Public tables in a database — the only honest "did the restore work" signal. */
+async function countTables(paths: PgPaths, port: number, database: string): Promise<number> {
+	const counted = await runPg(paths, "psql", [
+		"-h", "127.0.0.1", "-p", String(port), "-U", "dev", "-d", database,
+		"-tAc", "select count(*) from information_schema.tables where table_schema='public'",
+	]);
+	if (counted.code !== 0) return 0;
+	const parsed = Number.parseInt(counted.stdout.trim(), 10);
+	return Number.isFinite(parsed) ? parsed : 0;
+}

@@ -8,6 +8,22 @@ export interface ResourceRequest {
 	resource: "postgres";
 	action: "start" | "stop";
 	database_name: string;
+	/**
+	 * Backend profile this start asked for. "template" seeds the database from
+	 * the project's newest ready managed template; anything else (including the
+	 * default "") starts bare, which is what every caller got before seeding
+	 * existed.
+	 */
+	profile?: string;
+	/**
+	 * Presigned GET for that template's dump, minted by the server AT CLAIM
+	 * TIME so it is as fresh as the fetch about to use it. Absent whenever the
+	 * server could not resolve one — see template_seed_note — in which case the
+	 * start proceeds bare.
+	 */
+	template_seed_url?: string;
+	template_fingerprint?: string;
+	template_seed_note?: string;
 	requested_at: string;
 	expires_at: string;
 	state: "running";

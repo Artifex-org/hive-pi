@@ -27,6 +27,7 @@ import {
 	serverArgs,
 	startFailureHint,
 	sweepRoots,
+	seedFromTemplate,
 } from "./pg.ts";
 import { HEARTBEAT_INTERVAL_MS, realReapDeps, reapOnce, writeHeartbeat } from "./reap.ts";
 import {
@@ -234,6 +235,11 @@ export default function (pi: ExtensionAPI) {
 			sequence = -1;
 		}
 		managedDatabase = request.database_name;
+		// Why a seed did or did not happen must not vanish. It does NOT belong in
+		// the report's error field: that would pair a healthy, ready database
+		// with an error string and read as a failure to everything downstream.
+		// A skipped seed is a slower start, not a broken one.
+		const noteSeed = (line: string) => process.stderr.write(`devservices: ${line}\n`);
 		try {
 			const server = await ensureServer(async (candidate) => {
 				// State is assigned only after pg_ctl succeeds; publish the allocated
@@ -242,7 +248,21 @@ export default function (pi: ExtensionAPI) {
 				await publish(work.binding, nextReport("starting", "unknown", managedDatabase));
 				state = null;
 			});
+			const fresh = !server.databases.has(managedDatabase);
 			await ensureDatabase(server, managedDatabase);
+			// Seed only a database this start actually created. Restoring over
+			// one an agent has already been using would silently destroy its
+			// data, which is a far worse failure than starting bare.
+			if (fresh && request.profile === "template" && request.template_seed_url) {
+				const seeded = await seedFromTemplate(
+					paths, server.port, managedDatabase, request.template_seed_url, server.dataDir,
+				);
+				noteSeed(seeded.ok
+					? `seeded ${managedDatabase} from template ${request.template_fingerprint ?? "?"} (${seeded.tables} tables)`
+					: `template seed skipped, started an empty database — ${seeded.reason}`);
+			} else if (request.profile === "template" && request.template_seed_note) {
+				noteSeed(`template seed unavailable, started an empty database — ${request.template_seed_note}`);
+			}
 			work.outcome = { ok: true, state: "ready", health: "healthy", error: "" };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "postgres start failed";
