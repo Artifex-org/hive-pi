@@ -241,18 +241,24 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_explain_failure",
 	"hive_find_related_work",
 	"hive_force_kill_agent_session",
+	"hive_get_agent_command",
+	"hive_get_agent_spend",
 	"hive_get_board",
+	"hive_get_factory_provider_limits",
 	"hive_get_occupancy",
 	"hive_get_pull",
 	"hive_get_run",
+	"hive_get_run_tests",
 	"hive_get_task_logs",
 	"hive_get_ticket",
 	"hive_get_work_context",
 	"hive_launch_teammate",
 	"hive_list_agent_launches",
 	"hive_list_agent_sessions",
+	"hive_list_credential_catalog",
 	"hive_list_pulls",
 	"hive_list_run_completions",
+	"hive_list_runs",
 	"hive_list_teams",
 	"hive_list_teammates",
 	"hive_message_teammate",
@@ -362,8 +368,48 @@ const READ_ONLY_COMMANDS = new Set([
 const SAFE_GIT_SUBCOMMANDS = new Set([
 	"status", "log", "diff", "show", "branch", "remote", "ls-files", "grep",
 	"rev-parse", "blame", "describe", "merge-base", "ls-tree", "cat-file",
-	"shortlog", "config", "worktree",
+	"shortlog", "config", "worktree", "ls-remote",
 ]);
+
+/**
+ * `tmux` verbs that only READ the server's state.
+ *
+ * A verb list, never the bare binary: the same command that prints a pane also
+ * types into one. `send-keys`, `kill-*`, `new-*`, `respawn-*`, `run-shell`,
+ * `if-shell`, `source-file` and `set-option` all reach arbitrary execution
+ * inside somebody else's session, so tmux fails closed exactly the way `git`
+ * and `hive` already do.
+ *
+ * MEASURED 2026-09-06..07: three orchestrator sessions were refused
+ * `tmux -L hive-agent capture-pane -p` and `list-panes` while trying to find out
+ * why a launched worker sat idle. `diagnose_agent_session` reported the worker
+ * "attached/idle" from the RECORD, and the pane was the only place the actual
+ * provider error was written — so the one posture whose job is supervising
+ * workers could not read the workers. The lead filed it as blocking.
+ */
+const SAFE_TMUX_SUBCOMMANDS = new Set([
+	"capture-pane", "display-message", "has-session", "info", "list-clients",
+	"list-panes", "list-sessions", "list-windows", "ls", "lsp", "lsw",
+	"show-options",
+]);
+
+/** tmux global flags that take a separate value, e.g. `-L hive-agent`. */
+const TMUX_GLOBAL_VALUE_FLAGS = new Set(["-L", "-S", "-f"]);
+
+/**
+ * The verb, skipping server-selection globals in both spellings.
+ *
+ * `-L hive-agent` and `-Lhive-agent` are the same flag, and the attached form is
+ * the one the agents actually type. Returns undefined when no verb follows,
+ * which fails closed.
+ */
+function tmuxVerb(args: string[]): string | undefined {
+	let i = 0;
+	while (i < args.length && args[i].startsWith("-")) {
+		i += TMUX_GLOBAL_VALUE_FLAGS.has(args[i]) ? 2 : 1;
+	}
+	return args[i];
+}
 
 const SAFE_GH_PATHS = ["pr view", "pr list", "pr diff", "pr checks", "issue view", "issue list", "repo view", "run view", "run list"];
 
@@ -451,8 +497,8 @@ const ORCHESTRATE_SHELL_READERS = new Set([
 ]);
 
 const ORCHESTRATE_GIT_READERS = new Set([
-	"blame", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
-	"rev-parse", "shortlog", "show", "status",
+	"blame", "describe", "diff", "grep", "log", "ls-files", "ls-remote", "ls-tree",
+	"merge-base", "rev-parse", "shortlog", "show", "status",
 ]);
 
 export function classifyOrchestrateCommand(command: string): PlanToolVerdict {
@@ -480,7 +526,7 @@ export function classifyOrchestrateCommand(command: string): PlanToolVerdict {
 			);
 			if (safeGlobals && verb && ORCHESTRATE_GIT_READERS.has(verb) && !unsafeGitFlag) continue;
 		}
-		if (executable === "gh" || executable === "hive") {
+		if (executable === "gh" || executable === "hive" || executable === "tmux") {
 			if (isSafeStructured(executable, args)) continue;
 		}
 		return {
@@ -646,7 +692,50 @@ function hasSafeArguments(command: string, args: string[]): boolean {
 	return true;
 }
 
-/** Commands whose safety depends on the subcommand: `git`, `gh`. */
+
+/**
+ * `gh api` flags that make the call WRITE.
+ *
+ * `gh api <path>` is a GET and nothing else, which makes it the natural way to
+ * read the parts of GitHub the `pr`/`issue` subcommands do not expose — an
+ * issue's close/reopen event timeline, for one, which an orchestrator was
+ * refused while trying to confirm a worker's claim. But the same command POSTs
+ * the moment a field or a method appears, and `-f query=mutation{...}` reaches
+ * every GraphQL mutation there is. So the path is not what decides it: the
+ * presence of any of these flags is.
+ */
+const GH_API_WRITE_FLAGS = new Set([
+	"-X", "--method", "-f", "--raw-field", "-F", "--field", "--input",
+]);
+
+function isReadOnlyGhApi(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (GH_API_WRITE_FLAGS.has(arg)) {
+			// `-X GET` is still a read; anything else, and any field, is not.
+			if ((arg === "-X" || arg === "--method") && args[i + 1]?.toUpperCase() === "GET") {
+				i++;
+				continue;
+			}
+			return false;
+		}
+		// Attached spellings: `-XPOST`, `-fq=…`, `--method=PATCH`.
+		if (/^-X./.test(arg)) {
+			if (arg.slice(2).toUpperCase() !== "GET") return false;
+			continue;
+		}
+		if (/^--method=/.test(arg)) {
+			if (arg.slice("--method=".length).toUpperCase() !== "GET") return false;
+			continue;
+		}
+		if (/^-[fF]./.test(arg) || arg.startsWith("--field=") || arg.startsWith("--raw-field=") || arg.startsWith("--input=")) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/** Commands whose safety depends on the subcommand: `git`, `gh`, `tmux`. */
 function isSafeStructured(command: string, args: string[]): boolean {
 	if (command === "git") {
 		// Skip global flags (`-C path`, `--no-pager`) to reach the verb.
@@ -665,8 +754,14 @@ function isSafeStructured(command: string, args: string[]): boolean {
 	}
 
 	if (command === "gh") {
-		const path = args.filter((arg) => !arg.startsWith("-")).slice(0, 2).join(" ");
-		return SAFE_GH_PATHS.includes(path);
+		const words = args.filter((arg) => !arg.startsWith("-"));
+		if (words[0] === "api") return isReadOnlyGhApi(args);
+		return SAFE_GH_PATHS.includes(words.slice(0, 2).join(" "));
+	}
+
+	if (command === "tmux") {
+		const verb = tmuxVerb(args);
+		return verb !== undefined && SAFE_TMUX_SUBCOMMANDS.has(verb);
 	}
 
 	if (command === "hive") {

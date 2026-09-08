@@ -13,7 +13,14 @@
 
 import { describe, expect, it } from "vitest";
 import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
-import { classifyCommand, classifyDiscussionTool, classifyTool, findBlockedSegment } from "../extensions/plan/policy.ts";
+import {
+	classifyCommand,
+	classifyDiscussionTool,
+	classifyOrchestrateCommand,
+	classifyOrchestrateTool,
+	classifyTool,
+	findBlockedSegment,
+} from "../extensions/plan/policy.ts";
 
 const allowed = (command: string) => classifyCommand(command).allowed;
 
@@ -230,5 +237,81 @@ describe("the blocked segment is named", () => {
 
 	it("names the whole command when it cannot be parsed", () => {
 		expect(findBlockedSegment("echo `whoami`")).toBe("echo `whoami`");
+	});
+});
+
+/**
+ * Orchestrate mode must be able to SEE the work it is supervising.
+ *
+ * The mode's promise is "the lead never implements", not "the lead never
+ * reads". Each case below was refused in a live session and filed as a
+ * papercut: the lead could call `hive_get_run` but not `hive_get_run_tests`,
+ * `hive_list_pulls` but not `hive_list_runs` — arbitrary holes in one read
+ * surface. The shell cases are the same shape one layer down, and the tmux one
+ * cost the most: `diagnose_agent_session` reports a worker's state from the
+ * RECORD, so when it says "attached/idle" the pane is the only place the real
+ * provider error exists.
+ */
+describe("orchestrate — reads the mode needs to supervise", () => {
+	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
+	const bothEnvelopes = (tool: string) =>
+		classifyOrchestrateTool(tool, {}).allowed && classifyOrchestrateTool("mcp", { tool }).allowed;
+
+	it("permits the read-only Hive queries under BOTH calling conventions", () => {
+		// Direct and wrapped are the same operation; #52 established the rule and
+		// these six were simply missing from the list it consults.
+		for (const tool of [
+			"hive_list_runs",
+			"hive_get_run_tests",
+			"hive_get_agent_command",
+			"hive_get_agent_spend",
+			"hive_get_factory_provider_limits",
+			"hive_list_credential_catalog",
+		]) {
+			expect(bothEnvelopes(tool), tool).toBe(true);
+		}
+	});
+
+	it("still denies anything that dispatches, mutates or subscribes", () => {
+		for (const tool of ["hive_trigger_run", "hive_propose_k8s_change", "hive_k8s_action_scale", "hive_watch_ticket"]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
+			expect(classifyOrchestrateTool("mcp", { tool }).allowed, `mcp ${tool}`).toBe(false);
+		}
+	});
+
+	it("reads a worker's pane, in both spellings of the socket flag", () => {
+		expect(orchestrated("tmux -L hive-agent capture-pane -p -t hive-tes-9051 -S -60")).toBe(true);
+		expect(orchestrated("tmux -Lhive-agent capture-pane -p -t hive-tes-9051")).toBe(true);
+		expect(orchestrated("tmux -L hive-agent list-panes")).toBe(true);
+		expect(orchestrated("tmux ls")).toBe(true);
+	});
+
+	it("refuses every tmux verb that reaches execution in someone else's session", () => {
+		expect(orchestrated("tmux -L hive-agent send-keys -t hive-x 'rm -rf /' Enter")).toBe(false);
+		expect(orchestrated("tmux kill-session -t hive-x")).toBe(false);
+		expect(orchestrated("tmux -L hive-agent new-session claude")).toBe(false);
+		expect(orchestrated("tmux run-shell 'touch /tmp/pwned'")).toBe(false);
+		expect(orchestrated("tmux source-file /tmp/evil.conf")).toBe(false);
+		// No verb at all commits to nothing, so it cannot be approved.
+		expect(orchestrated("tmux -L hive-agent")).toBe(false);
+	});
+
+	it("queries remote refs, which writes nothing locally", () => {
+		expect(orchestrated("git ls-remote origin refs/backups/tes-9049/original-250f62ad")).toBe(true);
+		expect(allowed("git ls-remote origin")).toBe(true);
+		// `-o` still turns it into a writer.
+		expect(orchestrated("git ls-remote origin -o /tmp/out")).toBe(false);
+	});
+
+	it("permits `gh api` only while it is a GET", () => {
+		expect(orchestrated("gh api repos/Artifex-org/pyERP/issues/10093/events --paginate")).toBe(true);
+		expect(orchestrated("gh api -X GET repos/o/r/issues/1/events")).toBe(true);
+		// A method or a field is what makes it write — not the path.
+		expect(orchestrated("gh api -X POST repos/o/r/issues/1/comments")).toBe(false);
+		expect(orchestrated("gh api -XDELETE repos/o/r/issues/1")).toBe(false);
+		expect(orchestrated("gh api --method PATCH repos/o/r")).toBe(false);
+		expect(orchestrated("gh api repos/o/r --input body.json")).toBe(false);
+		// `-f query=mutation{…}` reaches every GraphQL mutation there is.
+		expect(orchestrated("gh api graphql -f query=mutation{x}")).toBe(false);
 	});
 });
