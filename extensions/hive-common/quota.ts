@@ -182,3 +182,47 @@ export function newestTurnFailure(branch: readonly unknown[]): TurnFailureClass 
 	}
 	return null;
 }
+
+/**
+ * The newest turn's failure class AND how many consecutive newest turns share
+ * it — the two numbers Hive's status contract asks for, in one walk.
+ *
+ * WHY THIS EXISTS BESIDE `quotaRunLength`. That one answers "how long is the
+ * exhaustion run", and only exhaustion: it stops at any turn that is not a
+ * quota refusal, so an auth wall reads as run 0 and an unrecognised provider
+ * error reads as run 0. Hive wants the run for WHICHEVER class is newest,
+ * because the evidence that separates a wall from a blip is the same evidence
+ * for all three. Reporting `auth_expired` with runs 0 would send the server a
+ * class and then deny it the one number that makes the class actionable.
+ *
+ * Counts backwards over assistant turns only, ignoring tool results and custom
+ * entries between them, for the reason `quotaRunLength` states: a run broken by
+ * a `custom:team-message` is still an unbroken run of refusals as far as the
+ * provider is concerned. Stops at the first assistant turn that is not a
+ * failure of the SAME class, so a session that recovers is immediately healthy
+ * and a session whose failure mode changed reports the current one.
+ *
+ * `null` when the newest assistant turn did not fail — the ordinary case, and
+ * distinct from a failure we do not recognise, which is `"other"`.
+ */
+export function newestTurnFailureRun(
+	branch: readonly unknown[],
+): { class: TurnFailureClass; runs: number } | null {
+	const newest = newestTurnFailure(branch);
+	if (newest === null) return null;
+	let runs = 0;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const message = (branch[i] as BranchEntry | undefined)?.message;
+		if (message?.role !== "assistant") continue;
+		if (message.stopReason !== "error") break;
+		const text = errorTextOf(message);
+		const cls: TurnFailureClass = isAuthFailureText(text)
+			? "auth_expired"
+			: isQuotaExhaustedText(text)
+				? "quota_exhausted"
+				: "other";
+		if (cls !== newest) break;
+		runs++;
+	}
+	return { class: newest, runs };
+}

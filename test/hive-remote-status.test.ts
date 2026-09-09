@@ -179,3 +179,65 @@ describe("isThinkingLevel", () => {
 		expect(isThinkingLevel(undefined)).toBe(false);
 	});
 });
+
+/**
+ * The gate that decides whether a failure report ever leaves the machine.
+ *
+ * This is the load-bearing test of HIV-3387, and the reason is worth stating:
+ * `changed()` exists to stop an idle session POSTing an identical reading
+ * forever — but the sessions a failure report exists to rescue are EXACTLY the
+ * idle ones. An exhausted session runs no turns, so its context tokens are
+ * frozen, its model is unchanged, and its quota window is the same one it read
+ * before the wall. Every other clause in `changed()` therefore says "nothing
+ * moved". Without the failure clauses the reading would be computed correctly
+ * on every tick and never sent, and Hive's two-tier failover would keep
+ * receiving nothing — which is precisely the 26-minute freeze on 2026-09-09
+ * that this work started from.
+ *
+ * So these cases hold a status IDENTICAL in every other field on purpose. If
+ * someone later removes the two clauses, only these fail.
+ */
+describe("changed — provider failure", () => {
+	const frozen: StatusPayload = {
+		context_tokens: 120_000,
+		context_window: 200_000,
+		model: "openai-codex/gpt-5.6-luna",
+		thinking: "medium",
+		op_mode: "build",
+	};
+
+	it("sends the FIRST failure report from a session that is otherwise identical", () => {
+		expect(
+			changed(frozen, { ...frozen, provider_failure: "quota_exhausted", provider_failure_runs: 1 }),
+		).toBe(true);
+	});
+
+	it("sends a lengthening run — the only field that still moves while stuck", () => {
+		const one = { ...frozen, provider_failure: "quota_exhausted" as const, provider_failure_runs: 1 };
+		expect(changed(one, { ...one, provider_failure_runs: 3 })).toBe(true);
+	});
+
+	it("sends RECOVERY, so a failover is not triggered for a session that came back", () => {
+		const stuck = { ...frozen, provider_failure: "quota_exhausted" as const, provider_failure_runs: 2 };
+		expect(changed(stuck, frozen)).toBe(true);
+	});
+
+	it("sends a change of class, because the remedy differs", () => {
+		// quota -> switch provider; auth -> `pi auth`. Reporting the stale class
+		// would send the session the other one's remedy.
+		const quota = { ...frozen, provider_failure: "quota_exhausted" as const, provider_failure_runs: 1 };
+		const auth = { ...frozen, provider_failure: "auth_expired" as const, provider_failure_runs: 1 };
+		expect(changed(quota, auth)).toBe(true);
+	});
+
+	it("still says nothing changed when a healthy reading repeats", () => {
+		// The property `changed` exists for, unbroken: this must NOT become a
+		// per-tick POST for every idle session on the fleet.
+		expect(changed(frozen, { ...frozen })).toBe(false);
+	});
+
+	it("still says nothing changed when an unchanged failure repeats", () => {
+		const stuck = { ...frozen, provider_failure: "quota_exhausted" as const, provider_failure_runs: 2 };
+		expect(changed(stuck, { ...stuck })).toBe(false);
+	});
+});
