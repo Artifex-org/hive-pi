@@ -73,7 +73,8 @@ Two moments use it:
   that does not work, a decision teammates must respect. `create_communication`
   with kind `issue`/`decision`/`question`, refs to the ticket/PR/run/branch, and a
   `canonical_key` for a shared incident so parallel reporters land on one thread.
-  Post a `handoff` before you finish.
+  Post a `handoff` before you finish when the next team needs what you know —
+  what shipped, what is left, where the files are — not for every finished piece.
 
 ## Two things that are never yours
 
