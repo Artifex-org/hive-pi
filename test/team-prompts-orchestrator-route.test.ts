@@ -64,3 +64,18 @@ describe("team prompts that mandate @orchestrator", () => {
 		});
 	}
 });
+
+describe("team prompts route project-wide findings to the board", () => {
+	// The communication board (hive HIV-3344) shipped with seven tools and no
+	// caller: in its first 48 hours launched agents wrote 402 private team notes
+	// and filed ten Linear tickets for ONE incident, and opened zero threads.
+	// Every role prompt has to say when the board is the destination, or the
+	// only nudge is a tool description nobody reads.
+	for (const file of teamPrompts()) {
+		const text = readFileSync(join(PROMPTS, file), "utf8");
+		it(`${file} names the board tools and when to use them`, () => {
+			expect(text).toMatch(/list_communications/);
+			expect(text).toMatch(/create_communication/);
+		});
+	}
+});

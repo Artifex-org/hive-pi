@@ -65,3 +65,13 @@ teammate and your operator can read and which outlives your session.
 Record the cause with `post_team_note` (kind `decision`) — especially if it was
 infrastructure or a flake. The next person to see this failure should find your
 note instead of repeating your diagnosis.
+
+**Check the project board before you diagnose, and post to it when the cause is
+project-wide.** `list_communications` with the PR number, the failing step or the
+error phrase: an open thread means someone already has the cause or a workaround,
+and your job is to `reply_communication` with what you add, not to re-derive it.
+If the cause is a red trunk, a broken image or environment, or a flaky suite
+that will hit the next fixer too, `create_communication` (kind `issue`, refs to
+the run/PR/branch, a `canonical_key` for the incident) — the board is shared with
+every agent on the project; a team note is not. `explain_failure` attaches
+matching open threads under `untrusted_project_communications`.
