@@ -47,11 +47,12 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
 	// Codex, 7-day quota at 100% (2026-09-02, HIV-3235). Also OpenAI's
 	// `insufficient_quota` error code, same account state, different wrapper.
 	/usage limit (?:has been )?reached/i,
+	/\busage_limit_reached\b/i,
 	/you'?ve hit your usage limit/i,
 	/insufficient_quota/i,
 	// xAI, credential out of credits (2026-08-26 and 2026-09-02): a hard 403
 	// that does not recover until someone buys credits.
-	/run out of credits/i,
+	/\bout of credits\b/i,
 	/need a grok subscription/i,
 	// OpenRouter key limits — the 402 that froze five pyERP agents on
 	// 2026-08-15 (daily) and stranded a smoke agent on 2026-09-02 (weekly).
@@ -80,7 +81,7 @@ const AUTH_PATTERNS: readonly RegExp[] = [
 	/token (?:has )?expired/i,
 	/invalid[_ ]api[_ ]key/i,
 	/unauthorized/i,
-	/401/,
+	/\b401\b/,
 	/re-?authenticate/i,
 	/please (?:run )?`?pi auth`?/i,
 ];
