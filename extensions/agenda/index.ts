@@ -32,7 +32,7 @@ import {
 import { createDriftPolicy } from "./drift.ts";
 import { createGatePolicy } from "./gate.ts";
 import { looksUnverifiable, parseGoalCommand } from "./goal-command.ts";
-import { buildHandoffSeed, writeHandoff } from "./handoff.ts";
+import { HANDOFF_FILE, buildHandoffSeed, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
 import {
 	createGoal,
 	reviseGoal,
@@ -109,7 +109,7 @@ import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "
 import { PlanSchema, type Plan, resolveCaps, validatePlan } from "./plan-schema.ts";
 import { discoverAgents } from "../harness/roles.ts";
 import { diffStamp } from "../harness/verify.ts";
-import { type ContextSignal, contextSignalOf, deriveSignals, emptySignals } from "./signals.ts";
+import { type ContextSignal, type SessionSignals, contextSignalOf, deriveSignals, emptySignals } from "./signals.ts";
 import { shouldAutoShutdown } from "./auto-shutdown.ts";
 import { compactInstructions, fetchRecapPayload, handoffRecapSections } from "./session-recap.ts";
 import { rehydratePlan } from "../plan/state.ts";
@@ -124,6 +124,7 @@ import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { randomUUID } from "node:crypto";
 import { DurableRunRegistry, type DurableRunResult } from "./run-registry.ts";
+import { configPathFor, readJSON } from "../hive-common/identity.ts";
 
 /**
  * Set in a spawned worker so a child never re-enters its own loop. Read once at
@@ -1128,6 +1129,111 @@ export default function (pi: ExtensionAPI) {
 	 * the FILE is the review UI, and the next fresh interactive session in this
 	 * cwd consumes it once (session-context.ts).
 	 */
+	/**
+	 * Is the threshold interception enabled?
+	 *
+	 * Read per call rather than cached at startup, so an operator can turn it on
+	 * or off without restarting every agent on the machine — the sessions this
+	 * governs are long-lived by definition, which is the whole reason they reach
+	 * a context threshold at all.
+	 *
+	 * `=== true`, never `!== false`: the opt-in shape this package uses for every
+	 * setting that changes what happens to a running session without being asked.
+	 */
+	function handoffOnThreshold(): boolean {
+		const raw = readJSON<{ handoffOnThreshold?: unknown }>(configPathFor("agenda"));
+		return raw?.handoffOnThreshold === true;
+	}
+
+	/**
+	 * The seed builder, shared by all three ways a handoff can start.
+	 *
+	 * Extracted from the `/handoff` command body unchanged — the command, the
+	 * agent-facing tool and the automatic threshold interception must produce
+	 * the SAME seed, or the automatic path becomes a second, thinner format
+	 * nobody reviews. Returns the path, or the reason it could not write one:
+	 * every caller has to decide what to do when there is no seed, and an
+	 * exception would let the compaction interception below fall through to a
+	 * cancelled compaction with nothing seeded — a session with neither.
+	 */
+	/**
+	 * The ONE place agenda reads every entry.
+	 *
+	 * `deriveSignals` is handed BOTH views on purpose — it compares the whole
+	 * file against the active branch — and test/branch-scoped-state.test.ts pins
+	 * this file to exactly one all-entries read, so a second one has to
+	 * arrive as a diff somebody justifies. The automatic threshold path needs the
+	 * same signals as `/handoff`, so it calls THIS rather than repeating the pair.
+	 */
+	function handoffSignals(ctx: ExtensionContext): SessionSignals {
+		try {
+			return deriveSignals(
+				ctx.sessionManager.getEntries() as readonly unknown[],
+				ctx.sessionManager.getBranch() as readonly unknown[],
+			);
+		} catch {
+			/* unreadable session — the seed still carries goal/conductor/git state */
+			return emptySignals;
+		}
+	}
+
+	async function performHandoff(
+		ctx: ExtensionContext,
+		objective: string,
+	): Promise<{ path: string } | { error: string }> {
+		const signals = handoffSignals(ctx);
+		const cwd = ctx.cwd;
+
+		// The open work items live only on this machine — Hive parses the plan
+		// document for {phase, done, total} and stores no todos at all.
+		//
+		// From the ACTIVE BRANCH, not the whole file (HIV-1972): a session is a
+		// tree, `/tree` moves the leaf, and the newest plan snapshot in the file
+		// may belong to a branch the operator abandoned.
+		let plan = null;
+		try {
+			plan = rehydratePlan(branchEntries(ctx));
+		} catch {
+			/* an unreadable plan degrades to the counts, not to a failed handoff */
+		}
+
+		// `resolveAuth` does blocking I/O. Safe from a command handler and from a
+		// tool `execute`, both of which are already async call sites — but NOT
+		// from an event handler, where pi awaits serially and this would be the
+		// agent loop. The threshold interception below therefore does its own
+		// thing about recap rather than calling in from the event path.
+		let recap: ReturnType<typeof handoffRecapSections> | null = null;
+		try {
+			const payload = await fetchRecapPayload();
+			if (payload !== null) recap = handoffRecapSections(payload);
+		} catch {
+			/* unreachable Hive is a thinner seed, never a failed handoff */
+		}
+
+		const seed = buildHandoffSeed({
+			objective: objective.trim(),
+			goal,
+			conductor,
+			signals,
+			gitStatus: await diffStamp(cwd),
+			cwd,
+			plan,
+			recap,
+		});
+		try {
+			const path = writeHandoff(cwd, seed);
+			// Lineage: the outgoing session records that it handed off.
+			try {
+				pi.appendEntry(GOAL_ENTRY_TYPE, { kind: "handoff", path, createdAt: Date.now() });
+			} catch {
+				/* session going away is exactly when a handoff happens */
+			}
+			return { path };
+		} catch (err) {
+			return { error: String(err) };
+		}
+	}
+
 	pi.registerCommand("handoff", {
 		description: "Seed the next session and end this one cleanly (`/handoff [objective]`)",
 		handler: async (args: string, ctx: ExtensionContext) => {
@@ -1135,70 +1241,190 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/handoff is inert inside a worker process.", "warning");
 				return;
 			}
-			let signals = emptySignals;
-			try {
-				signals = deriveSignals(
-					ctx.sessionManager.getEntries() as readonly unknown[],
-					ctx.sessionManager.getBranch() as readonly unknown[],
-				);
-			} catch {
-				/* unreadable session — the seed still carries goal/conductor/git state */
+			const result = await performHandoff(ctx, args);
+			if ("error" in result) {
+				ctx.ui.notify(`/handoff: could not write the seed: ${result.error}`, "warning");
+				return;
 			}
-			const cwd = ctx.cwd;
+			ctx.ui.notify(
+				`Handoff seed written to ${result.path}. Review/edit it, then start a fresh session here — it will be injected once and consumed.`,
+				"info",
+			);
+		},
+	});
 
-			// The open work items live only on this machine — Hive parses the plan
-			// document for {phase, done, total} and stores no todos at all.
-			//
-			// From the ACTIVE BRANCH, not the whole file (HIV-1972): a session is a
-			// tree, `/tree` moves the leaf, and the newest plan snapshot in the file
-			// may belong to a branch the operator abandoned. Seeding the successor
-			// from that is failure (a) of test/branch-scoped-state.test.ts, with the
-			// abandoned work carried into a fresh session that cannot tell.
+	/**
+	 * The same handoff, reachable by the MODEL (HIV-3388).
+	 *
+	 * `/handoff` is a registerCommand, which the model cannot run — conductor.ts
+	 * says so where it prints the nudge, and the consequence was measurable: over
+	 * 87 transcripts in three days, 34 sessions compacted 168 times and
+	 * `.pi/handoff.md` was written zero times. Every one of those sessions was an
+	 * agent, and an agent has no way to type a slash command, so the deliberate
+	 * tool was unreachable by exactly the population that needed it.
+	 *
+	 * IT WRITES THE SEED AND STOPS THERE — no shutdown. Ending is a separate
+	 * decision with a separate owner: a Hive agent that exits mid-task releases
+	 * its work_unit and, until a successor is wired to context exhaustion the way
+	 * `startQuotaSuccessor` is wired to quota exhaustion, nothing would resume it.
+	 * A tool that silently abandoned the task would be worse than the compaction
+	 * it replaces.
+	 */
+	registerGuardedTool(pi, {
+		// It writes exactly one file, at a path this extension derives from cwd —
+		// never from a parameter. Declared rather than allowlisted so the
+		// declaration sits next to the tool, and because guards are NOT inherited:
+		// guards-bridge matches on tool NAME, so an undeclared tool that writes is
+		// ungoverned. `writesResolved` mirrors `writeHandoff`'s own path
+		// construction (`join(cwd, ".pi", HANDOFF_FILE)`).
+		capability: {
+			writesResolved: (_params, cwd) => [
+				`${(cwd ?? ".").replace(/\/+$/, "")}/.pi/${HANDOFF_FILE}`,
+			],
+		},
+		name: "handoff",
+		label: "Handoff",
+		description: [
+			"Write a seed for your successor session, so the next session in this directory starts with your open work instead of a lossy summary of it.",
+			"Use it at a PHASE BOUNDARY — a PR opened, an investigation concluded — not mid-edit.",
+			"The seed carries open plan items, branch/PR/CI state, claimed tickets and knowledge already read; it is not a summary of this conversation.",
+			"Writing a seed does not end this session. Finish or hand off your current step first.",
+		].join(" "),
+		promptSnippet: "Seed a successor session at a phase boundary",
+		parameters: Type.Object({
+			objective: Type.String({
+				description: "What the next session should set out to do. One or two sentences.",
+			}),
+		}),
+		execute: async (
+			_id: string,
+			params: { objective?: string },
+			_signal: AbortSignal | undefined,
+			_onUpdate: unknown,
+			ctx: ExtensionContext,
+		) => {
+			if (IS_WORKER) {
+				return {
+					content: [{ type: "text", text: "handoff is inert inside a worker process." }],
+					details: null,
+				};
+			}
+			const result = await performHandoff(ctx, params.objective ?? "");
+			if ("error" in result) {
+				return {
+					content: [{ type: "text", text: `Could not write the handoff seed: ${result.error}` }],
+					details: null,
+				};
+			}
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Handoff seed written to ${result.path}. The next session started in this directory consumes it exactly once. This session is still running — finish or stop deliberately.`,
+					},
+				],
+				details: null,
+			};
+		},
+	});
+
+	/**
+	 * Threshold compaction, replaced by a clean break (HIV-3388).
+	 *
+	 * MEASURED FIRST. Across 87 transcripts in three days, all 168 compactions
+	 * carried `fromHook: false` — every one was pi's OWN automatic compaction,
+	 * none came from the four `ctx.compact()` call sites in this package. Median
+	 * `tokensBefore` was 207k. So the thing worth intercepting is the threshold
+	 * path, and only it.
+	 *
+	 * WHAT IS DELIBERATELY NOT INTERCEPTED, and this is the safety argument:
+	 *
+	 *   - `overflow` — the session is ALREADY past the provider's hard limit and
+	 *     every further request is refused, each refusal leaving the context
+	 *     larger than the last (HIV-3060, measured: 15.5 hours burned, one
+	 *     session issuing eleven identical 400s over 12h27m). Compaction is the
+	 *     only thing that can still rescue it. Cancelling here would convert a
+	 *     recoverable session into a dead one.
+	 *   - `manual` — the operator asked for a compaction. Answering a direct
+	 *     instruction with a different action is not a safety improvement.
+	 *   - workers — a `pi -p` child has no successor to seed and no next session
+	 *     in its cwd; its parent chose its context.
+	 *
+	 * AND IT NEVER CANCELS WITHOUT A SEED. If the seed cannot be written, the
+	 * compaction proceeds untouched. Trading a working fallback for a broken
+	 * replacement is the one outcome worse than compacting.
+	 *
+	 * OFF BY DEFAULT — `handoffOnThreshold` in `~/.pi/agenda.json`. Not timidity:
+	 * cancelling a threshold compaction and shutting down ends a session that
+	 * still holds work, and nothing yet starts a successor for context
+	 * exhaustion the way `startQuotaSuccessor` does for quota exhaustion. Until
+	 * that is wired server-side, enabling this fleet-wide would trade lossy
+	 * summaries for abandoned tasks. The mechanism is complete and tested so the
+	 * flip is one line once the successor exists.
+	 */
+	pi.on("session_before_compact", (event, ctx) => {
+		if (
+			!shouldHandoffInsteadOfCompact({
+				reason: event.reason,
+				isWorker: IS_WORKER,
+				enabled: handoffOnThreshold(),
+			})
+		) {
+			return;
+		}
+		// The seed write is synchronous; `performHandoff` is not, because of the
+		// recap fetch. An event handler is awaited serially by pi's runner, so a
+		// network round trip here would BE the agent loop — the same rule
+		// status.ts and hive-remote/index.ts both state. The automatic seed is
+		// therefore the local half only, and says so in its own objective line.
+		let seeded: string | null = null;
+		try {
+			const signals = handoffSignals(ctx);
 			let plan = null;
 			try {
 				plan = rehydratePlan(branchEntries(ctx));
 			} catch {
-				/* an unreadable plan degrades to the counts, not to a failed handoff */
+				/* degrades to the counts */
 			}
-
-			// A command handler is the sanctioned place for this: `resolveAuth` does
-			// blocking I/O and must never run inside an event handler, where pi
-			// awaits serially. `null` means ABSENT — the seed says so rather than
-			// letting the successor read silence as "no PR, no ticket, no team".
-			let recap: ReturnType<typeof handoffRecapSections> | null = null;
-			try {
-				const payload = await fetchRecapPayload();
-				if (payload !== null) recap = handoffRecapSections(payload);
-			} catch {
-				/* unreachable Hive is a thinner seed, never a failed handoff */
-			}
-
 			const seed = buildHandoffSeed({
-				objective: args.trim(),
+				objective:
+					"Continue the previous session's open work — it reached its context threshold and handed off rather than compacting.",
 				goal,
 				conductor,
 				signals,
-				gitStatus: await diffStamp(cwd),
-				cwd,
+				gitStatus: null,
+				cwd: ctx.cwd,
 				plan,
-				recap,
+				recap: null,
 			});
+			seeded = writeHandoff(ctx.cwd, seed);
 			try {
-				const path = writeHandoff(cwd, seed);
-				// Lineage: the outgoing session records that it handed off.
-				try {
-					pi.appendEntry(GOAL_ENTRY_TYPE, { kind: "handoff", path, createdAt: Date.now() });
-				} catch {
-					/* session going away is exactly when a handoff happens */
-				}
-				ctx.ui.notify(
-					`Handoff seed written to ${path}. Review/edit it, then start a fresh session here — it will be injected once and consumed.`,
-					"info",
-				);
-			} catch (err) {
-				ctx.ui.notify(`/handoff: could not write the seed: ${String(err)}`, "warning");
+				pi.appendEntry(GOAL_ENTRY_TYPE, { kind: "handoff", path: seeded, createdAt: Date.now() });
+			} catch {
+				/* the session is going away; lineage is best-effort */
 			}
-		},
+		} catch {
+			seeded = null;
+		}
+		// No seed, no cancel. The fallback stays intact.
+		if (!seeded) return;
+		try {
+			ctx.ui.notify(
+				`Context threshold reached. Seed written to ${seeded}; ending cleanly instead of compacting.`,
+				"info",
+			);
+		} catch {
+			/* notification is decoration */
+		}
+		// Shutdown AFTER returning the cancel, so pi is not torn down mid-decision.
+		setTimeout(() => {
+			try {
+				ctx.shutdown();
+			} catch {
+				/* an un-shutdownable session simply stays up with a seed on disk */
+			}
+		}, 0);
+		return { cancel: true };
 	});
 
 	// A Hive launch is already an operator-authorized coding-agent task. Exposing

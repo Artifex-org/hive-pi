@@ -315,3 +315,39 @@ export function consumeHandoff(cwd: string, now = Date.now()): string | null {
 		return null;
 	}
 }
+
+/**
+ * Should this compaction be replaced by a clean break?
+ *
+ * Pure and exported so the SAFETY argument is testable without a pi session.
+ * Everything this returns false for is a case where cancelling would make the
+ * session worse than compacting, and each has a different reason:
+ *
+ *  - **`overflow`** — the session is ALREADY past the provider's hard limit.
+ *    Every further request is refused and each refusal leaves the context
+ *    larger than the last (HIV-3060, measured: 15.5 hours burned across seven
+ *    sessions, one issuing eleven identical 400s over 12h27m). Compaction is
+ *    the only thing that can still rescue it, so this must never take that
+ *    away. This is the single most important `false` in the function.
+ *  - **`manual`** — the operator asked for a compaction. Answering a direct
+ *    instruction with a different action is not a safety improvement.
+ *  - **worker** — a `pi -p` child has no next session in its cwd to consume a
+ *    seed, and its parent chose its context deliberately.
+ *  - **not enabled** — see the flag's note at the call site: ending a session
+ *    that still holds work needs a successor, and nothing yet starts one for
+ *    context exhaustion the way `startQuotaSuccessor` does for quota.
+ *
+ * `threshold` is the ONLY case this exists for, and it is the only one
+ * measured in practice: across 87 transcripts in three days, all 168
+ * compactions carried `fromHook: false` — pi's own automatic path — with a
+ * median `tokensBefore` of 207k.
+ */
+export function shouldHandoffInsteadOfCompact(input: {
+	reason: "manual" | "threshold" | "overflow";
+	isWorker: boolean;
+	enabled: boolean;
+}): boolean {
+	if (input.isWorker) return false;
+	if (!input.enabled) return false;
+	return input.reason === "threshold";
+}
