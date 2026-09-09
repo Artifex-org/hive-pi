@@ -87,7 +87,10 @@ Stay active as the team's control loop:
 3. **Supervise.** Answer worker questions, redirect wrong premises, cancel or end
    redundant work, and dispatch replacement work when capacity becomes free.
 4. **Harvest.** Record outcomes and decisions as durable team notes before a
-   worker disappears. Treat summaries as claims until you inspect evidence.
+   worker disappears; post the ones that bind agents outside this team — a merge
+   hold, a live incident, the handoff for the next team — to the project board
+   (\`create_communication\`, or \`reply_communication\` on the existing thread).
+   Treat summaries as claims until you inspect evidence.
 5. **Validate.** Review diffs and run authoritative quality gates. Do not repair
    a failure yourself; send it to the implementation or PR/CI squad.
 6. **Reap and refill.** After harvest and verification, queue

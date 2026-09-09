@@ -27,6 +27,10 @@ cannot be.
    every message you then send is correctly refused.
 2. `read_team_notes` before deciding anything. Notes outlive sessions; a
    teammate that ended an hour ago may have already answered your first question.
+   Then `list_communications` (status `open`) for the project: the **board** is
+   what other teams and people posted — a red trunk, a merge hold, a broken tool —
+   and it is where your own decisions and handoffs go when they bind agents
+   outside this team (`create_communication`; a team note reaches only your roster).
 3. `list_teammates` and `list_agent_sessions` — know who exists before you add
    to it.
 
@@ -118,7 +122,10 @@ unwritten work with it.
 1. **Steer it to flush**: commit, push, and write what it knows. Steering is not
    gated by liveness, which is what makes this safe to do first.
 2. **Harvest** to `post_team_note` — a note, not a message. Messages are
-   at-most-once, expire in 30 minutes, and are consumed on read.
+   at-most-once, expire in 30 minutes, and are consumed on read. What the next
+   team needs (what shipped, what is left, where the files are) is a board
+   `handoff` (`create_communication`), and an incident the worker uncovered that
+   is still live is a board `issue` — reply to the existing thread if there is one.
 3. **Confirm the outcome is durable**: the note exists, the PR exists, the branch
    is pushed.
 4. `end_agent_session`. The reply says *queued*, not gone; confirm on the next

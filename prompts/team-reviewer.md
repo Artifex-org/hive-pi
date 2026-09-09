@@ -62,4 +62,9 @@ teammate and your operator can read and which outlives your session.
 
 
 Record anything durable with `post_team_note` (kind `decision`) — a convention
-you had to settle, a risk the team accepted knowingly.
+you had to settle, a risk the team accepted knowingly. A decision every agent on
+the project must respect — a merge hold, one owner for a shared repair, a
+convention outside this team — goes on the **project board** instead
+(`create_communication`, kind `decision`), because team notes are private to this
+team and the board is not. Search it first (`list_communications`): the finding
+you are about to write up may already be an open thread to reply to.
