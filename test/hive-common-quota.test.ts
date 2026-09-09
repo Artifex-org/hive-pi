@@ -212,3 +212,10 @@ describe("newestTurnFailureRun", () => {
 		expect(newestTurnFailureRun([toolResult(), teamMessage()])).toBeNull();
 	});
 });
+
+// Structured provider codes must work even when the human-readable text is absent.
+it("recognizes structured quota errors without mistaking a request id for HTTP 401", () => {
+ expect(isQuotaExhaustedText('usage_limit_reached request_id=req401abc')).toBe(true);
+ expect(isQuotaExhaustedText('Your account is out of credits')).toBe(true);
+ expect(isQuotaExhaustedText('HTTP 401 unauthorized: usage_limit_reached')).toBe(false);
+});

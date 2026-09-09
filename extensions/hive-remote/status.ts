@@ -44,6 +44,7 @@ export interface QuotaWindow {
 /** What a session reports about itself, between turns. Every field optional:
  *  absent means "this client cannot see it", which is not the same as zero. */
 export interface StatusPayload {
+	account_recovery?: boolean;
 	context_tokens?: number;
 	context_window?: number;
 	/** `provider/id`, the same spelling the model selector and telemetry use. */
@@ -266,8 +267,10 @@ export function buildStatus(
 	pi: ExtensionAPI,
 	quota: { quota?: QuotaWindow; plan_type?: string },
 	opMode?: string,
+	accountRecovery?: string,
 ): StatusPayload {
 	const status: StatusPayload = { ...quota };
+	if (accountRecovery !== undefined) status.account_recovery = true;
 	// Passed in rather than read here for the same reason `quota` is: it arrives
 	// on a bus event from another extension and persists between turns. Omitted
 	// entirely when unknown — an absent posture and an unrestricted one are
@@ -300,8 +303,8 @@ export function buildStatus(
 		const failure = newestTurnFailureRun(
 			ctx.sessionManager.getBranch() as readonly unknown[],
 		);
-		if (failure) {
-			status.provider_failure = failure.class;
+		if (failure && (failure.class !== "quota_exhausted" || accountRecovery === undefined || accountRecovery === "exhausted" || accountRecovery === "unavailable" || accountRecovery === "error")) {
+			status.provider_failure = accountRecovery === "error" ? "other" : failure.class;
 			status.provider_failure_runs = failure.runs;
 		}
 	} catch {
@@ -345,6 +348,7 @@ export function changed(previous: StatusPayload | null, next: StatusPayload): bo
 	// same one it read before the wall. Every other clause here would therefore
 	// say "nothing changed" and the report would never leave the machine —
 	// the reading would be correct, computed every tick, and never sent.
+	if (previous.account_recovery !== next.account_recovery) return true;
 	if (previous.provider_failure !== next.provider_failure) return true;
 	// The run length too: it is the evidence separating a wall from a blip, and
 	// it is the only field that still moves while a session is stuck.
