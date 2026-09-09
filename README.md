@@ -104,3 +104,23 @@ npm run check      # tsc --noEmit && vitest run
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Account quota recovery
+
+`credential-recovery` activates only when the Hive lease holder exposes its
+private Unix socket beside the session's canonical `auth.json`. On a confirmed
+quota refusal it returns the current rotation, selects another assigned account
+for the same provider, exchanges only that provider's entry under Pi's locking
+protocol, and queues a continuation of the existing transcript. Completed tools
+are not replayed. Account exhaustion is offered to Hive's provider failover only
+after that account chain is exhausted; auth and transient rate-limit errors do
+not trigger rotation.
+
+Renewal uses the same exchange every ten minutes while idle. A session waiting
+for capacity resumes when a newer quota observation makes an account eligible
+again. An unavailable broker is shown as a recovery error, not as an exhausted
+account. The socket exposes no Hive bearer token and accepts only providers
+leased for this session. Factory JSON consumers receive `credential_recovery`
+with `state: continuing` before an intermediate `agent_end`; `agent_settled`
+remains the final terminal event. This is request recovery inside the existing
+run, separate from the agenda driver's post-settlement task policies.

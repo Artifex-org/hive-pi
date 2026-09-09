@@ -108,6 +108,7 @@ export interface SessionEntryLike {
 }
 
 export interface FakeCtxOptions {
+	model?: ExtensionContext["model"];
 	mode?: ExtensionMode;
 	cwd?: string;
 	/** What `ctx.ui.confirm` resolves to. Defaults to true (accept). */
@@ -259,7 +260,7 @@ function makeCtx(
 			sinks.shutdownReasons.push("quit");
 		},
 		getSystemPrompt: () => "",
-		model: undefined,
+		model: options.model,
 		scopedModels: [],
 		ui: {
 			setStatus: (key: string, text: string | undefined) => {

@@ -1023,12 +1023,24 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		}
 	}
 
+	let accountRecovery: string | undefined;
+	pi.events.on("hive.credential-recovery", (data: unknown) => {
+		if (typeof data !== "object" || data === null || !("state" in data) || typeof data.state !== "string") return;
+		accountRecovery = data.state;
+		if (accountRecovery === "exhausted") lastStatus = null;
+		if ("detail" in data && typeof data.detail === "string" && data.detail) {
+			foldNotice(transcript, data.detail, Date.now(), "hive");
+			kick();
+		}
+		void flushStatus();
+	});
+
 	async function flushStatus(): Promise<void> {
 		if (sendingStatus || !cfg.reportStatus || !auth || !sessionID || !latestCtx) return;
 
 		let next: StatusPayload;
 		try {
-			next = buildStatus(latestCtx, pi, quota, opMode);
+			next = buildStatus(latestCtx, pi, quota, opMode, accountRecovery);
 		} catch {
 			// A ctx replaced mid-read. The next tick has a live one.
 			return;

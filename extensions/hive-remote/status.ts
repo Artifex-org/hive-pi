@@ -266,6 +266,7 @@ export function buildStatus(
 	pi: ExtensionAPI,
 	quota: { quota?: QuotaWindow; plan_type?: string },
 	opMode?: string,
+	accountRecovery?: string,
 ): StatusPayload {
 	const status: StatusPayload = { ...quota };
 	// Passed in rather than read here for the same reason `quota` is: it arrives
@@ -300,8 +301,8 @@ export function buildStatus(
 		const failure = newestTurnFailureRun(
 			ctx.sessionManager.getBranch() as readonly unknown[],
 		);
-		if (failure) {
-			status.provider_failure = failure.class;
+		if (failure && (failure.class !== "quota_exhausted" || accountRecovery === undefined || accountRecovery === "exhausted" || accountRecovery === "error")) {
+			status.provider_failure = accountRecovery === "error" ? "other" : failure.class;
 			status.provider_failure_runs = failure.runs;
 		}
 	} catch {
