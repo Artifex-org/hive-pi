@@ -16,7 +16,7 @@ const oldAccount = { type: "oauth", accountId: "a", access: "a", refresh: "a", e
 const newAccount = { ...oldAccount, accountId: "b", access: "b", refresh: "b" };
 const failure = { role: "assistant", stopReason: "error", errorMessage: "The usage limit has been reached" };
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 async function fixture(status = 200) {
 	const dir = await mkdtemp(join(tmpdir(), "recovery-"));
@@ -24,18 +24,19 @@ async function fixture(status = 200) {
 	const path = join(dir, "auth.json");
 	await writeFile(path, JSON.stringify({ "openai-codex": oldAccount, xai: { type: "api_key", key: "keep" } }));
 	const requests: unknown[] = [];
+	let responseStatus = status;
 	const server = createServer(async (req, res) => {
 		let body = "";
 		for await (const chunk of req) body += chunk.toString();
 		requests.push(JSON.parse(body));
-		res.writeHead(status, { "Content-Type": "application/json" });
+		res.writeHead(responseStatus, { "Content-Type": "application/json" });
 		res.end(JSON.stringify({ "openai-codex": newAccount }));
 	});
 	await new Promise<void>((resolve) => server.listen(path + ".hive-recovery.sock", resolve));
 	const pi = createFakePi();
 	credentialRecovery(pi.api);
 	await pi.emit({ type: "session_start" }, { model });
-	return { pi, path, requests, async close() {
+	return { pi, path, requests, setStatus(value: number) { responseStatus = value; }, async close() {
 		await pi.emit({ type: "session_shutdown" });
 		await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 		await rm(dir, { recursive: true });
@@ -67,6 +68,22 @@ describe("credential recovery", () => {
 			expect(f.pi.messages).toEqual([]);
 			expect(f.pi.statuses.at(-1)?.text).toContain("All assigned accounts exhausted");
 			expect(JSON.parse(await readFile(f.path, "utf8"))["openai-codex"]).toEqual(oldAccount);
+		} finally { await f.close(); }
+	});
+
+	it("automatically retries a quota recovery interrupted by a broker outage", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		const f = await fixture(503);
+		try {
+			await f.pi.emit({ type: "turn_start" }, { model });
+			await f.pi.emit({ type: "agent_end", messages: [failure] }, { model });
+			expect(f.pi.messages).toEqual([]);
+			expect(f.pi.statuses.at(-1)?.text).toContain("Account recovery failed");
+			f.setStatus(200);
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+			await vi.waitFor(() => expect(f.pi.messages).toHaveLength(1));
+			expect(f.requests).toHaveLength(2);
+			expect(f.requests[1]).toMatchObject({ provider: "openai-codex", failed: true });
 		} finally { await f.close(); }
 	});
 

@@ -16,6 +16,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	let captured: { provider: string; identity: string } | undefined;
 	let recovering = false;
 	let waiting = false;
+	let retryProvider: string | undefined;
 	let latestCtx: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	const renewalIntervalMs = 10 * 60 * 1000;
@@ -32,6 +33,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		captured = undefined;
 		recovering = false;
 		waiting = false;
+		retryProvider = undefined;
 		authPath = undefined;
 		socket = "";
 		const path = join(getAgentDir(), "auth.json");
@@ -82,11 +84,13 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 			});
 			if (gen !== generation) return;
 			if (exhausted) {
+				retryProvider = undefined;
 				waiting = true;
 				report(ctx, "exhausted", "All assigned accounts exhausted — waiting for provider failover or quota recovery");
 				return;
 			}
 			waiting = false;
+			retryProvider = undefined;
 			report(ctx, "available", "");
 			if (!failed) return;
 			if (ctx.mode === "json" || ctx.mode === "rpc") {
@@ -97,7 +101,10 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 			// original user request or any already completed tool invocation.
 			pi.sendMessage({ customType: "credential-recovery", content: "The exhausted account was replaced. Continue the interrupted task from the current transcript and completed tool results; do not repeat completed actions.", display: true }, { deliverAs: "followUp", triggerTurn: true });
 		} catch (error) {
-			if (gen === generation) report(ctx, "error", `Account recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+			if (gen === generation) {
+				if (failed) { waiting = true; retryProvider = provider; }
+				report(ctx, "error", `Account recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
 		} finally { if (gen === generation) recovering = false; }
 	});
 
@@ -111,13 +118,14 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 			let exhausted = false;
 			await modifyCredential(authPath, ctx.model.provider, async (current) => {
 				if (!current) throw new Error("The session credential disappeared during renewal");
-				const result = await exchange(socket, provider, current, false);
+				const result = await exchange(socket, provider, current, retryProvider === provider);
 				if (gen !== generation) return current;
 				if (result.status === "exhausted") { exhausted = true; return current; }
 				return result.credential;
 			});
 			if (gen !== generation) return;
-			if (exhausted) { report(ctx, "exhausted", "All assigned accounts exhausted — waiting for measured quota recovery"); return; }
+			if (exhausted) { retryProvider = undefined; report(ctx, "exhausted", "All assigned accounts exhausted — waiting for measured quota recovery"); return; }
+			retryProvider = undefined;
 			report(ctx, "available", "");
 			if (waiting && ctx.isIdle() && !ctx.hasPendingMessages()) {
 				waiting = false;
@@ -129,6 +137,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	}
 
 	pi.on("model_select", (_event, ctx) => {
+		retryProvider = undefined;
 		if (!waiting || recovering || !ctx.isIdle() || ctx.hasPendingMessages()) return;
 		waiting = false;
 		report(ctx, "available", "");
