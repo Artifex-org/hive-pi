@@ -303,7 +303,7 @@ export function buildStatus(
 		const failure = newestTurnFailureRun(
 			ctx.sessionManager.getBranch() as readonly unknown[],
 		);
-		if (failure && (failure.class !== "quota_exhausted" || accountRecovery === undefined || accountRecovery === "exhausted" || accountRecovery === "error")) {
+		if (failure && (failure.class !== "quota_exhausted" || accountRecovery === undefined || accountRecovery === "exhausted" || accountRecovery === "unavailable" || accountRecovery === "error")) {
 			status.provider_failure = accountRecovery === "error" ? "other" : failure.class;
 			status.provider_failure_runs = failure.runs;
 		}

@@ -87,6 +87,33 @@ describe("credential recovery", () => {
 		} finally { await f.close(); }
 	});
 
+	it("reports an unidentifiable account as unavailable without changing credentials", async () => {
+		const f = await fixture(422);
+		try {
+			await f.pi.emit({ type: "turn_start" }, { model });
+			await f.pi.emit({ type: "agent_end", messages: [failure] }, { model });
+			expect(f.pi.messages).toEqual([]);
+			expect(f.pi.statuses.at(-1)?.text).toContain("Account switching unavailable");
+			expect(JSON.parse(await readFile(f.path, "utf8"))["openai-codex"]).toEqual(oldAccount);
+		} finally { await f.close(); }
+	});
+
+	it.each(["completed", "aborted", "replaced"])("does not resume a %s request when capacity returns", async (state) => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		const f = await fixture(409);
+		try {
+			await f.pi.emit({ type: "turn_start" }, { model });
+			await f.pi.emit({ type: "agent_end", messages: [state === "completed" ? { role: "assistant", stopReason: "stop" } : failure] }, { model });
+			if (state === "aborted") await f.pi.emit({ type: "agent_end", messages: [{ role: "assistant", stopReason: "aborted" }] }, { model });
+			if (state === "replaced") await f.pi.emit({ type: "input", source: "interactive", text: "A different request" }, { model });
+			f.setStatus(200);
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+			await vi.waitFor(() => expect(f.pi.statuses.at(-1)?.text).toBeUndefined());
+			expect(f.requests).toHaveLength(2);
+			expect(f.pi.messages).toEqual([]);
+		} finally { await f.close(); }
+	});
+
 	it.each(["429 rate limit", "401 unauthorized"])("does not rotate on %s", async (errorMessage) => {
 		const f = await fixture();
 		try {

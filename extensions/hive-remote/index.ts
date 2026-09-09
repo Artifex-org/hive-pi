@@ -1027,7 +1027,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	pi.events.on("hive.credential-recovery", (data: unknown) => {
 		if (typeof data !== "object" || data === null || !("state" in data) || typeof data.state !== "string") return;
 		accountRecovery = data.state;
-		if (accountRecovery === "exhausted") lastStatus = null;
+		if (accountRecovery === "exhausted" || accountRecovery === "unavailable") lastStatus = null;
 		if ("detail" in data && typeof data.detail === "string" && data.detail) {
 			foldNotice(transcript, data.detail, Date.now(), "hive");
 			kick();

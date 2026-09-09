@@ -2,7 +2,7 @@ import { request } from "node:http";
 import { createHash } from "node:crypto";
 import type { Credential } from "@earendil-works/pi-ai";
 
-export type ExchangeResult = { status: "recovered"; credential: Credential } | { status: "exhausted" };
+export type ExchangeResult = { status: "recovered"; credential: Credential } | { status: "exhausted" | "unavailable" };
 
 export function identity(credential: Credential): string {
 	if (credential.type === "oauth" && typeof credential.accountId === "string") return credential.accountId;
@@ -35,6 +35,7 @@ export function exchange(socketPath: string, provider: string, credential: Crede
 			res.on("error", reject);
 			res.on("end", () => {
 				if (res.statusCode === 409) { resolve({ status: "exhausted" }); return; }
+				if (res.statusCode === 422) { resolve({ status: "unavailable" }); return; }
 				if (res.statusCode !== 200) { reject(new Error(`Credential exchange failed (HTTP ${res.statusCode})`)); return; }
 				try {
 					const doc: unknown = JSON.parse(body);

@@ -13,6 +13,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	let authPath: string | undefined;
 	let socket = "";
 	let generation = 0;
+	let intention = 0;
 	let captured: { provider: string; identity: string } | undefined;
 	let recovering = false;
 	let waiting = false;
@@ -21,7 +22,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	const renewalIntervalMs = 10 * 60 * 1000;
 
-	function report(ctx: ExtensionContext, state: "available" | "recovering" | "exhausted" | "error", detail: string): void {
+	function report(ctx: ExtensionContext, state: "available" | "recovering" | "exhausted" | "unavailable" | "error", detail: string): void {
 		pi.events.emit(RECOVERY_CHANNEL, { state, detail });
 		ctx.ui.setStatus("credential-recovery", detail || undefined);
 	}
@@ -49,6 +50,13 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	});
 	pi.on("session_shutdown", () => { generation++; authPath = undefined; latestCtx = undefined; if (timer) clearInterval(timer); });
 
+	pi.on("input", (event) => {
+		if (event.source === "extension") return;
+		intention++;
+		waiting = false;
+		retryProvider = undefined;
+	});
+
 	pi.on("turn_start", async (_event, ctx) => {
 		captured = undefined;
 		latestCtx = ctx;
@@ -62,16 +70,21 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		const newest = event.messages.findLast((message) => message.role === "assistant");
 		if (!newest || newest.role !== "assistant") return;
 		const failed = newest.stopReason === "error" && isQuotaExhaustedText(newest.errorMessage);
-		if (newest.stopReason === "aborted" || (newest.stopReason === "error" && !failed)) return;
+		if (newest.stopReason === "aborted" || (newest.stopReason === "error" && !failed)) {
+			waiting = false;
+			retryProvider = undefined;
+			return;
+		}
 		const provider = ctx.model.provider;
 		const start = captured;
 		if (!start || start.provider !== provider) return;
 		captured = undefined;
 		const gen = generation;
+		const intent = intention;
 		recovering = true;
 		if (failed) report(ctx, "recovering", "Account quota exhausted — selecting another assigned account");
 		try {
-			let exhausted = false;
+			let exhausted: "exhausted" | "unavailable" | undefined;
 			await modifyCredential(authPath, provider, async (current) => {
 				if (!current) throw new Error("The session credential disappeared during recovery");
 				// Another session may have exchanged the shared credential while this
@@ -79,14 +92,16 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 				if (failed && identity(current) !== start.identity) return current;
 				const result = await exchange(socket, provider, current, failed);
 				if (gen !== generation) return current;
-				if (result.status === "exhausted") { exhausted = true; return current; }
+				if (result.status !== "recovered") { exhausted = result.status; return current; }
 				return result.credential;
 			});
-			if (gen !== generation) return;
+			if (gen !== generation || intent !== intention || ctx.signal?.aborted) { waiting = false; retryProvider = undefined; return; }
 			if (exhausted) {
 				retryProvider = undefined;
-				waiting = true;
-				report(ctx, "exhausted", "All assigned accounts exhausted — waiting for provider failover or quota recovery");
+				waiting = failed;
+				report(ctx, exhausted, exhausted === "unavailable"
+					? "Account switching unavailable for this provider — using configured provider alternatives"
+					: failed ? "All assigned accounts exhausted — waiting for provider failover or quota recovery" : "No account has capacity for the next request");
 				return;
 			}
 			waiting = false;
@@ -101,7 +116,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 			// original user request or any already completed tool invocation.
 			pi.sendMessage({ customType: "credential-recovery", content: "The exhausted account was replaced. Continue the interrupted task from the current transcript and completed tool results; do not repeat completed actions.", display: true }, { deliverAs: "followUp", triggerTurn: true });
 		} catch (error) {
-			if (gen === generation) {
+			if (gen === generation && intent === intention && !ctx.signal?.aborted) {
 				if (failed) { waiting = true; retryProvider = provider; }
 				report(ctx, "error", `Account recovery failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -112,19 +127,20 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		const ctx = latestCtx;
 		if (!ctx || !authPath || !ctx.model || recovering || !ctx.isIdle() || ctx.hasPendingMessages()) return;
 		const gen = generation;
+		const intent = intention;
 		const provider = ctx.model.provider;
 		recovering = true;
 		try {
-			let exhausted = false;
+			let exhausted: "exhausted" | "unavailable" | undefined;
 			await modifyCredential(authPath, ctx.model.provider, async (current) => {
 				if (!current) throw new Error("The session credential disappeared during renewal");
 				const result = await exchange(socket, provider, current, retryProvider === provider);
 				if (gen !== generation) return current;
-				if (result.status === "exhausted") { exhausted = true; return current; }
+				if (result.status !== "recovered") { exhausted = result.status; return current; }
 				return result.credential;
 			});
-			if (gen !== generation) return;
-			if (exhausted) { retryProvider = undefined; report(ctx, "exhausted", "All assigned accounts exhausted — waiting for measured quota recovery"); return; }
+			if (gen !== generation || intent !== intention || ctx.signal?.aborted) { waiting = false; retryProvider = undefined; return; }
+			if (exhausted) { retryProvider = undefined; report(ctx, exhausted, exhausted === "unavailable" ? "Account switching unavailable for this provider" : "All assigned accounts exhausted — waiting for measured quota recovery"); return; }
 			retryProvider = undefined;
 			report(ctx, "available", "");
 			if (waiting && ctx.isIdle() && !ctx.hasPendingMessages()) {
