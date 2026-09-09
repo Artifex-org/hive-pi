@@ -24,6 +24,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import { type TurnFailureClass, newestTurnFailureRun } from "../hive-common/quota.ts";
+
 /**
  * One rate-limit window as the Codex backend reports it.
  *
@@ -56,6 +58,22 @@ export interface StatusPayload {
 	 * loaded, which the workspace must render as unknown and never as "build".
 	 */
 	op_mode?: string;
+	/**
+	 * WHY the newest assistant turn failed — "quota_exhausted", "auth_expired"
+	 * or "other" — absent when it reached the provider.
+	 *
+	 * Only the client can see this. The server says so in its own handler: it
+	 * cannot derive the class, because `cost_usd` and `last_event_at` are
+	 * written by the same flush, so a dead model loop and a broken transcript
+	 * flush freeze both together and are indistinguishable from the server side.
+	 * Hive's two-tier quota failover (HIV-3249) reads exactly this field, and
+	 * until it is sent that whole mechanism has no input.
+	 */
+	provider_failure?: TurnFailureClass;
+	/** How many of the newest consecutive assistant turns failed that way — the
+	 *  evidence that separates a wall from a blip. Zero exactly when
+	 *  `provider_failure` is absent. */
+	provider_failure_runs?: number;
 }
 
 /**
@@ -268,6 +286,28 @@ export function buildStatus(
 	const thinking = ctx.thinkingLevel ?? pi.getThinkingLevel();
 	if (thinking) status.thinking = thinking;
 
+	// The failure class of the newest turn. Read here rather than passed in
+	// because, unlike `quota` and `op_mode`, it is derivable from state this
+	// function already has a handle on and it must be re-derived every tick:
+	// it is the one field whose correct value flips back to absent the moment a
+	// turn succeeds, and a stale "stuck" would keep re-triggering a failover
+	// the session no longer needs.
+	//
+	// Guarded on its own rather than allowed to throw, because the caller's
+	// catch skips the WHOLE status post: a branch this build cannot read must
+	// cost the failure reading only, not the context gauge beside it.
+	try {
+		const failure = newestTurnFailureRun(
+			ctx.sessionManager.getBranch() as readonly unknown[],
+		);
+		if (failure) {
+			status.provider_failure = failure.class;
+			status.provider_failure_runs = failure.runs;
+		}
+	} catch {
+		/* no readable branch this tick; the next one re-derives */
+	}
+
 	return status;
 }
 
@@ -296,6 +336,19 @@ export function changed(previous: StatusPayload | null, next: StatusPayload): bo
 	// for the next context-token move would leave the workspace showing the old
 	// restriction for as long as the session sits idle.
 	if (previous.op_mode !== next.op_mode) return true;
+	// A change in the failure reading is ALWAYS worth a request, and this line
+	// is what makes the whole field work rather than decorate.
+	//
+	// The sessions this exists to rescue are precisely the ones whose readings
+	// have stopped moving: an exhausted session runs no turns, so its context
+	// tokens are frozen, its model is unchanged and its quota window is the
+	// same one it read before the wall. Every other clause here would therefore
+	// say "nothing changed" and the report would never leave the machine —
+	// the reading would be correct, computed every tick, and never sent.
+	if (previous.provider_failure !== next.provider_failure) return true;
+	// The run length too: it is the evidence separating a wall from a blip, and
+	// it is the only field that still moves while a session is stuck.
+	if (previous.provider_failure_runs !== next.provider_failure_runs) return true;
 
 	const before = previous.context_tokens;
 	const after = next.context_tokens;

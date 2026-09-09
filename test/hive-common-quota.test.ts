@@ -14,6 +14,7 @@ import {
 	isQuotaExhausted,
 	isQuotaExhaustedText,
 	newestTurnFailure,
+	newestTurnFailureRun,
 	quotaRunLength,
 } from "../extensions/hive-common/quota.ts";
 
@@ -158,5 +159,56 @@ describe("newestTurnFailure", () => {
 
 	it("reads the newest assistant turn, not the newest entry", () => {
 		expect(newestTurnFailure([drained(CODEX_QUOTA), toolResult(), teamMessage()])).toBe("quota_exhausted");
+	});
+});
+
+/**
+ * The run length Hive is actually sent.
+ *
+ * Written against the session that motivated it: on 2026-09-09 a pyERP agent
+ * hit "Codex error: The usage limit has been reached" on three consecutive
+ * newest turns and sat frozen for 26 minutes while `diagnose_agent_session`
+ * answered "nothing wrong found". The classifier below was already correct then
+ * — this run length, and the field that carries it, are what was missing.
+ */
+describe("newestTurnFailureRun", () => {
+	it("reports the class and the length of the newest run", () => {
+		// The real shape: refusals separated by the injections a stuck session
+		// still receives — a controller steering it, a team message arriving.
+		const branch = [
+			ran(),
+			drained(),
+			teamMessage(),
+			drained(),
+			toolResult(),
+			drained(),
+		];
+		expect(newestTurnFailureRun(branch)).toEqual({ class: "quota_exhausted", runs: 3 });
+	});
+
+	it("is null while the newest turn still reaches the provider", () => {
+		expect(newestTurnFailureRun([drained(), drained(), ran()])).toBeNull();
+	});
+
+	it("stops at a turn of a DIFFERENT class rather than counting it", () => {
+		// An auth wall behind an exhaustion run is a different remedy — `pi auth`,
+		// not a provider switch — so it must not inflate the exhaustion evidence.
+		const branch = [drained("401 Unauthorized"), drained(), drained()];
+		expect(newestTurnFailureRun(branch)).toEqual({ class: "quota_exhausted", runs: 2 });
+	});
+
+	it("reports an auth wall with its own run, not as exhaustion with runs 0", () => {
+		const branch = [drained("401 Unauthorized"), drained("401 Unauthorized")];
+		expect(newestTurnFailureRun(branch)).toEqual({ class: "auth_expired", runs: 2 });
+	});
+
+	it("reports an unrecognised provider error as `other`, never as healthy", () => {
+		// The whole reason `other` exists: a failure we cannot classify is still a
+		// failure, and reporting it as absent is how this class stayed invisible.
+		expect(newestTurnFailureRun([drained("kernel panic")])).toEqual({ class: "other", runs: 1 });
+	});
+
+	it("is null for a branch with no assistant turn at all", () => {
+		expect(newestTurnFailureRun([toolResult(), teamMessage()])).toBeNull();
 	});
 });
