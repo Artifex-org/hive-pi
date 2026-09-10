@@ -160,15 +160,23 @@ describe("stoppedMidWork — an announcement is not a result", () => {
 	it("recognises the measured shapes", () => {
 		expect(stoppedMidWork("Now updating Agents.tsx to pass the renamed params:")).toBe(true);
 		expect(stoppedMidWork("Now I'll write the failing reproduction tests...")).toBe(true);
+		expect(stoppedMidWork("Let me look at the migration first")).toBe(true);
+		// The third measured case ended as a sentence. It is given up ON PURPOSE:
+		// the rule that keeps "Now the tests pass." from being flagged is the
+		// same rule, and a spurious "ended WITHOUT delivering" over a correct
+		// verdict costs more than one missed announcement.
 		expect(
 			stoppedMidWork("Checking the registry defaults for the two gates, and the association reconcile’s dry-run handling for contrast."),
-		).toBe(true);
-		expect(stoppedMidWork("Let me look at the migration first")).toBe(true);
+		).toBe(false);
 	});
 
-	it("leaves real answers alone", () => {
+	it("leaves real answers alone — including short verdicts that open like an announcement", () => {
 		expect(stoppedMidWork("VERIFIED: the caption is inserted only on create; the backfill path is untouched (sales/models.py:412).")).toBe(false);
 		expect(stoppedMidWork("No findings. The three files in the diff match the contract.")).toBe(false);
+		expect(stoppedMidWork("Now the tests pass.")).toBe(false);
+		expect(stoppedMidWork("Running the suite gives 3 failures.")).toBe(false);
+		expect(stoppedMidWork("Checking complete: no issues found.")).toBe(false);
+		expect(stoppedMidWork("Looking good!")).toBe(false);
 		expect(stoppedMidWork("")).toBe(false);
 		// Long text ending in a colon is an answer with a trailing list, not an announcement.
 		expect(stoppedMidWork(`${"Findings: ".repeat(40)}the list follows:`)).toBe(false);

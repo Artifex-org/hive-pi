@@ -1569,12 +1569,20 @@ export default function (pi: ExtensionAPI) {
 					}
 				},
 				sessionModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-				catalog: async () => {
-					const auth = resolveAuth();
-					if (!auth) return [];
-					return (await fetchAgentModeCatalog(auth))?.modes ?? [];
+				// One in-flight fetch per tool call: a parallel wave with an
+				// unconfigured default would otherwise start up to four catalog
+				// requests at once before modes.ts's own cache fills, each up to
+				// 20s against a cold server.
+				catalog: () => {
+					catalogPromise ??= (async () => {
+						const auth = resolveAuth();
+						if (!auth) return [];
+						return (await fetchAgentModeCatalog(auth))?.modes ?? [];
+					})();
+					return catalogPromise;
 				},
 			};
+			let catalogPromise: Promise<readonly { key?: string; model: string }[]> | undefined;
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
 				(results: SingleResult[]): SubagentDetails => ({
@@ -1757,7 +1765,11 @@ export default function (pi: ExtensionAPI) {
 				// Deliberately NOT awaited. The floating promise IS the feature; it
 				// is given a terminal `.then` so nothing can reject unhandled and
 				// take the session down with it.
-				void runSingleAgent(
+				//
+				// Through runAgentWithSchema, not runSingleAgent: all three
+				// measured exit-0 handoffs were BACKGROUND delegations, and the
+				// other-account re-run and the mid-work continuation live there.
+				void runAgentWithSchema(
 					ctx.cwd,
 					agents,
 					agentName,

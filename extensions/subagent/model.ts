@@ -223,7 +223,15 @@ async function safeCatalog(env: WorkerModelEnv): Promise<readonly CatalogMode[]>
  * unfinished scratch files.
  *
  * Conservative on purpose: SHORT and shaped like an announcement. A long
- * message that happens to end in a colon is an answer with a trailing list.
+ * message that happens to end in a colon is an answer with a trailing list,
+ * and an intent-shaped opener that ends as a SENTENCE ("Now the tests pass.")
+ * is a verdict — the false positive there is not merely a wasted
+ * continuation: the retry says the same thing, is flagged again, and the
+ * caller reads "ended WITHOUT delivering" over a correct answer. That rule
+ * gives up the one measured case that ended in a full stop ("Checking the
+ * registry defaults for the two gates … for contrast."), which is also the
+ * genuinely ambiguous one; the two that ended in a colon and an ellipsis are
+ * still caught.
  */
 export const MID_WORK_MAX_CHARS = 240;
 const INTENT_LEAD = /^(now|next|let me|let's|i'll|i will|i am going to|i'm going to|checking|looking|running|updating|writing|reading|starting|first,?)\b/i;
@@ -232,6 +240,7 @@ export function stoppedMidWork(finalText: string): boolean {
 	const text = finalText.trim();
 	if (!text || text.length > MID_WORK_MAX_CHARS) return false;
 	if (/[:…]$/.test(text) || text.endsWith("...")) return true;
+	if (/[.!?]["')\]]*$/.test(text)) return false;
 	return INTENT_LEAD.test(text) && text.split(/\s+/).length <= 20;
 }
 
