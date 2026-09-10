@@ -514,22 +514,39 @@ describe("devservices postgres", () => {
 		const out = await postgresProbe(deps({ exists: binaries }));
 		expect(out.status).toBe("degraded");
 		expect(out.tool).toBe("dev_db_start");
-		expect(out.detail).toContain("no database server is running");
+		expect(out.detail).toContain("this session has no database server running");
 		expect(out.hint).toContain("dev_db_start");
 		expect(out.hint).toContain("hive_request_resource");
 		expect(out.hint).toContain("unreachable from a sandbox");
 	});
 
-	it("is ready when a devservices cluster has a fresh heartbeat", async () => {
+	it("is ready when THIS session's devservices cluster has a fresh heartbeat", async () => {
+		const own = `pi-devservices-${process.pid}-abc`;
 		const out = await postgresProbe(
 			deps({
 				exists: binaries,
-				listDir: (p) => (p === "/home/test/.pi/devservices" ? ["pi-devservices-4242-abc", "unrelated"] : []),
-				mtimeMs: (p) => (p.endsWith("pi-devservices-4242-abc/heartbeat") ? NOW - 60_000 : null),
+				listDir: (p) => (p === "/home/test/.pi/devservices" ? [own, "unrelated"] : []),
+				mtimeMs: (p) => (p.endsWith(`${own}/heartbeat`) ? NOW - 60_000 : null),
 			}),
 		);
 		expect(out.status).toBe("ready");
-		expect(out.detail).toContain("1 devservices database server running");
+		expect(out.detail).toContain("this session's devservices database server is running");
+	});
+
+	// A workstation hosts several launched agents; a neighbour's live database
+	// is on a port this session was never told. Counting it would hand every
+	// neighbour a stronger false green than the one this row exists to retract.
+	it("stays degraded when only OTHER sessions' clusters are live, and says so", async () => {
+		const out = await postgresProbe(
+			deps({
+				exists: binaries,
+				listDir: (p) => (p === "/home/test/.pi/devservices" ? ["pi-devservices-99999-zzz", "pi-devservices-99998-yyy"] : []),
+				mtimeMs: () => NOW - 60_000,
+			}),
+		);
+		expect(out.status).toBe("degraded");
+		expect(out.detail).toContain("2 running for OTHER sessions");
+		expect(out.hint).toContain("dev_db_start");
 	});
 
 	it("does not count a cluster whose heartbeat went stale (the reaper's own bound)", async () => {
