@@ -14,7 +14,8 @@
 	},
 	"retry": {
 		"enabled": true,
-		"maxRetries": 3,
+		"maxRetries": 5,
+		"baseDelayMs": 5000,
 		"provider": {
 			"maxRetries": 0
 		}
