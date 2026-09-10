@@ -19,6 +19,7 @@ import {
 	nextBatch,
 	type RunState,
 	skippableAfterFailure,
+	workId,
 } from "./plan-graph.ts";
 import { type Plan, resolveCaps, type ResolvedCaps } from "./plan-schema.ts";
 
@@ -65,6 +66,8 @@ export interface RunSummary {
 	failures: Array<{ nodeId: string; error: string }>;
 	/** Workers admitted, retries INCLUDED — a retried dispatch is not one agent. */
 	agentsSpawned: number;
+	/** How many of those were retries of a failed or schema-refused attempt. */
+	retrySpawns: number;
 	spentTokens: number;
 	/** Dollars for the whole run. */
 	spentCost: number;
@@ -136,6 +139,7 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 	// worker that tipped the total past the cap is whoever happened to be admitted
 	// last, which is a fact about ordering rather than about spending.
 	const nodeSpend = new Map<string, number>();
+	let retrySpawns = 0;
 
 	// Resume: anything already finished is folded in before the first batch, so
 	// `nextBatch` simply never proposes it again.
@@ -186,10 +190,29 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 			journal({ at: now(), ev: "node_started", workId: dispatch.workId, nodeId: dispatch.nodeId });
 		}
 
+		// RETRIES SPEND ONLY WHAT THE REST OF THE PLAN DOES NOT NEED.
+		//
+		// A retry is a real admission (see runWithRetries), so it counts against
+		// maxAgents — and a plan written as "3 nodes, maxAgents 3" then halted on
+		// the FIRST schema retry with `agents: 6 of 3 worker(s) admitted`, the
+		// join and the reconciler never having run. Measured five times in the
+		// week to 2026-09-10 (5 of 4, 6 of 3, 5 of 3 …), each one the wave's
+		// whole reason to exist dropped for a formatting retry. So the batch
+		// gets a retry POOL: the cap minus what is already spent, minus this
+		// batch's own admissions, minus one reservation for every agent node
+		// that has not started. A retry the pool cannot fund is withheld and the
+		// node fails with that said; the declared nodes always fit.
+		let spare = caps.maxAgents - state.agentsSpawned - batch.dispatch.length - unstartedAgentWork(options.plan, state, batch.dispatch);
+		const takeRetry = (): boolean => {
+			if (spare <= 0) return false;
+			spare -= 1;
+			return true;
+		};
+
 		const settled = await Promise.all(
 			batch.dispatch.map(async (dispatch) => ({
 				dispatch,
-				result: await runWithRetries(dispatch, options.spawn, options.signal),
+				result: await runWithRetries(dispatch, options.spawn, options.signal, takeRetry),
 			})),
 		);
 
@@ -204,6 +227,7 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 			// let a plan run 4x past its own agent cap without the scheduler ever
 			// seeing it. `result.tokens` is likewise the whole sequence's spend.
 			state.agentsSpawned += result.attempts;
+			retrySpawns += Math.max(0, result.attempts - 1);
 			state.spentTokens += result.tokens;
 			state.spentCost += result.cost ?? 0;
 
@@ -303,7 +327,7 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 		}
 	}
 
-	const haltDetail = halted ? describeHalt(halted, caps, state, nodeSpend, neverStarted, haltReason) : undefined;
+	const haltDetail = halted ? describeHalt(halted, caps, state, nodeSpend, neverStarted, haltReason, retrySpawns) : undefined;
 
 	journal({ at: now(), ev: "run_finished", tokens: state.spentTokens, cost: state.spentCost });
 
@@ -313,6 +337,7 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 		halted,
 		failures,
 		agentsSpawned: state.agentsSpawned,
+		retrySpawns,
 		spentTokens: state.spentTokens,
 		spentCost: state.spentCost,
 		...(neverRan.length > 0 ? { neverRan } : {}),
@@ -340,6 +365,7 @@ function describeHalt(
 	nodeSpend: Map<string, number>,
 	neverStarted: string[],
 	haltReason: string | undefined,
+	retrySpawns = 0,
 ): string {
 	const parts: string[] = [];
 
@@ -363,7 +389,10 @@ function describeHalt(
 	} else if (halted === "agents") {
 		// Also the identical-failure collapse's halt, where the cap is NOT reached.
 		// "admitted of" is true either way; "cap reached" would not be.
-		parts.push(`agents: ${state.agentsSpawned} of ${caps.maxAgents} worker(s) admitted`);
+		parts.push(
+			`agents: ${state.agentsSpawned} of ${caps.maxAgents} worker(s) admitted` +
+				(retrySpawns > 0 ? ` (${retrySpawns} of them retries of a failed or schema-refused attempt)` : ""),
+		);
 		if (haltReason) parts.push(haltReason);
 	} else {
 		parts.push("aborted: the run was canceled before it finished");
@@ -428,7 +457,34 @@ interface AttemptedResult extends WorkerResult {
  * bound does not explain. The verdict is still the last attempt's — a retry that
  * finally succeeds succeeded — but the money is the sum.
  */
-async function runWithRetries(dispatch: Dispatch, spawn: Spawn, signal?: AbortSignal): Promise<AttemptedResult> {
+/**
+ * Agent-spawning work that has not started: the admissions the rest of the
+ * plan still needs, which a retry may not take. A fanout whose width is not
+ * known yet counts once; a pipeline counts its stages. Conservative on the
+ * side of fewer retries — the cost of one withheld retry is one failed node,
+ * the cost of one stolen admission is a reconciler that never runs.
+ */
+function unstartedAgentWork(plan: Plan, state: RunState, dispatching: readonly Dispatch[]): number {
+	const inBatch = new Set(dispatching.map((d) => d.nodeId));
+	let n = 0;
+	for (const node of plan.nodes) {
+		if (node.kind !== "agent" && node.kind !== "fanout" && node.kind !== "pipeline") continue;
+		const status = state.status[node.id];
+		if (status === "done" || status === "failed" || status === "skipped") continue;
+		if (inBatch.has(node.id)) continue;
+		if (node.kind === "agent" && state.running.has(workId(node))) continue;
+		n += node.kind === "pipeline" ? node.stages.length : 1;
+	}
+	return n;
+}
+
+async function runWithRetries(
+	dispatch: Dispatch,
+	spawn: Spawn,
+	signal?: AbortSignal,
+	/** Whether the batch's retry pool can fund one more admission (see runPlan). */
+	takeRetry: () => boolean = () => true,
+): Promise<AttemptedResult> {
 	// Capped hard. Claude Code shipped an unbounded retry on exactly this path;
 	// a schema a model cannot satisfy is not a schema more attempts will fix.
 	const maxAttempts = Math.min(dispatch.retries ?? 2, 3) + 1;
@@ -443,6 +499,15 @@ async function runWithRetries(dispatch: Dispatch, spawn: Spawn, signal?: AbortSi
 		// An abort between attempts still owes the caller the spend of the
 		// attempts that DID run — dropping it here would hide a whole wave.
 		if (signal?.aborted) return { ...last, tokens, cost, attempts, error: "aborted" };
+		if (attempt > 0 && !takeRetry()) {
+			return {
+				...last,
+				tokens,
+				cost,
+				attempts,
+				error: `${last.error} (retry withheld: the remaining agent cap is reserved for nodes that have not run yet — raise caps.maxAgents to allow retries)`,
+			};
+		}
 		attempts++;
 		try {
 			last = await spawn(dispatch, signal);
