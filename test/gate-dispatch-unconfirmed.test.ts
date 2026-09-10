@@ -94,6 +94,28 @@ describe("dispatch reports what the CLI could establish", () => {
 		expect(dispatchUnconfirmed(run)).toBe(false);
 	});
 
+	it("reads a pre-contract CLI's exit 1 on a lost response as unconfirmed", async () => {
+		// The exit-4 contract is only as old as 2026-09-04, and a workstation's
+		// `hive` is whatever its operator last built — measured eight days behind.
+		// That CLI prints the Go client timeout and exits 1, and the wrapper
+		// then asserted "created no run": 20 papercuts in the week after exit 4
+		// shipped. Verbatim stderr from one of them.
+		fakeHive(
+			'echo "packed 24423 files (77.2 MB), uploading…"\n' +
+				'echo "hive: Post \\"https://app.hiveci.io/api/v1/runs\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)" >&2\n' +
+				"exit 1",
+		);
+		const run = await dispatch(["lint"], process.cwd(), undefined);
+		expect(run.code).toBe(1);
+		expect(dispatchUnconfirmed(run)).toBe(true);
+	});
+
+	it("does not mistake a gate failure that merely mentions a timeout for a lost response", async () => {
+		fakeHive('echo "test_client_timeout: context deadline exceeded" >&2\nexit 1');
+		const run = await dispatch(["lint"], process.cwd(), undefined);
+		expect(dispatchUnconfirmed(run)).toBe(false);
+	});
+
 	it("leaves a setup failure definite — exit 3 promises the gate never ran", async () => {
 		fakeHive('echo "hive: not inside a git repository" >&2\nexit 3');
 		const run = await dispatch(["lint"], process.cwd(), undefined);

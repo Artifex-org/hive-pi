@@ -22,6 +22,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 
 import { hiveBaseURL, readJSON } from "../hive-common/identity.ts";
 import {
@@ -29,7 +30,8 @@ import {
 	mcpCachePath as sharedCachePath,
 	mcpConfigPath as sharedConfigPath,
 } from "../mcp-common/config.ts";
-import { pgPaths } from "../devservices/pg.ts";
+import { baseDirCandidates, pgPaths } from "../devservices/pg.ts";
+import { DIR_PREFIX, HEARTBEAT_FILE, STALE_AFTER_MS } from "../devservices/reap.ts";
 import { mcpBelongsHere, stdioMissing, type McpServerDef } from "./mcp.ts";
 import { mcpLauncherFor } from "../profile-common/profile.ts";
 import type { ProbeResult, ProbeStatus } from "./state.ts";
@@ -527,23 +529,70 @@ export const ghProbe: Probe = async (deps) => {
 	};
 };
 
+/**
+ * Live devservices clusters on this workstation, split into THIS session's
+ * and other sessions': `pi-devservices-<pid>-<token>` directories under the
+ * roots devservices creates them in, whose heartbeat (or, failing one, the
+ * directory itself) is fresher than the reaper's staleness bound — the same
+ * evidence `devservices/reap.ts` keeps a cluster alive on.
+ *
+ * The split is the point. A workstation hosts several launched agents at
+ * once, and a database one of them started is not a database this session
+ * can reach (its DATABASE_URL was printed to a different transcript, on a
+ * port this session was never told). Counting every live cluster would hand
+ * every neighbour a stronger `✓ dev postgres` than the one this row exists
+ * to retract. devservices runs in this same pi process, so the pid in the
+ * directory name is the ownership test.
+ */
+export function liveDevservicesClusters(deps: ProbeDeps, ownPid: number = process.pid): { own: number; others: number } {
+	const tmp = deps.env.TMPDIR?.trim() || "/tmp";
+	const ownPrefix = `${DIR_PREFIX}${ownPid}-`;
+	let own = 0;
+	let others = 0;
+	for (const root of baseDirCandidates(deps.env, deps.home, tmp)) {
+		for (const name of deps.listDir(root)) {
+			if (!name.startsWith(DIR_PREFIX)) continue;
+			const dir = join(root, name);
+			const beat = deps.mtimeMs(join(dir, HEARTBEAT_FILE)) ?? deps.mtimeMs(dir);
+			if (beat === null || deps.now() - beat >= STALE_AFTER_MS) continue;
+			if (name.startsWith(ownPrefix)) own++;
+			else others++;
+		}
+	}
+	return { own, others };
+}
+
 export const postgresProbe: Probe = async (deps) => {
 	const paths = pgPaths(deps.env, deps.home);
 	if (deps.exists(paths.bin)) {
+		// "ready" ONLY when a database server is actually running. The row
+		// used to be ready on the binaries alone, with the qualifier in
+		// `detail` — and 29 papercuts in seven days read `✓ dev postgres`,
+		// ran the repo's tests against 127.0.0.1:54322, and got connection
+		// refused; one measured a 4m20s gate run spent on that. A workstation
+		// with the binaries and no server is `degraded`: usable, not up.
+		const live = liveDevservicesClusters(deps);
+		if (live.own > 0) {
+			return {
+				id: "devservices.postgres",
+				label: "dev postgres",
+				status: "ready",
+				detail:
+					"this session's devservices database server is running; " +
+					"`dev_db_start` reuses it and prints its DATABASE_URL (a loopback port of its own, not your repo's configured one)",
+				tool: "dev_db_start",
+			};
+		}
+		const foreign = live.others > 0 ? ` (${live.others} running for OTHER sessions on this workstation — not reachable as yours)` : "";
 		return {
 			id: "devservices.postgres",
 			label: "dev postgres",
-			status: "ready",
-			// `detail`, not `hint`: both renderers drop `hint` on a ready row
-			// (`state.ts`), so a qualifier put there is invisible. Without one this
-			// row renders as the bare `✓ dev postgres` and nothing else — and what the
-			// probe measured is that the SERVER BINARIES are on disk, which agents
-			// read as "there is a database listening on the port my repo is
-			// configured for" and then spend a turn discovering there is not.
-			detail:
-				"server binaries installed; a database exists only once `dev_db_start` creates one and prints its " +
-				"DATABASE_URL (a fresh loopback port, not your repo's configured one) — in a Hive-managed session " +
-				'it hands you to the hive MCP tool `request_resource` ({resource:"postgres", action:"start"})',
+			status: "degraded",
+			detail: `server binaries installed, but this session has no database server running${foreign} — nothing answers on your repo's configured port`,
+			hint:
+				"call `dev_db_start` first (it prints a DATABASE_URL on a fresh loopback port); in a Hive-managed session it hands you " +
+				'to the hive MCP tool `hive_request_resource` ({resource:"postgres", action:"start"}). A host Postgres on 127.0.0.1 is ' +
+				"unreachable from a sandbox — for DB-backed tests there, use a focused Hive check instead of waiting on the port",
 			tool: "dev_db_start",
 		};
 	}

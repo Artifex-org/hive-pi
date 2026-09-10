@@ -342,10 +342,26 @@ export default function (pi: ExtensionAPI) {
 		return "unavailable";
 	}
 
+	// The redirect used to say only "use request_resource", and 32 papercuts in
+	// seven days answered it: "no request_resource tool exists in this session"
+	// (it is a HIVE MCP tool, reached as `hive_request_resource` — through the
+	// `mcp` meta-tool where the direct name is not exposed), "rejected
+	// $HIVE_LAUNCH_ID" (a tool argument is JSON; the shell does not expand it),
+	// and "agent session not found" (session_id must be the SESSION id, which
+	// `hive_whoami(launch_id: <echo $HIVE_LAUNCH_ID>)` returns). The reply now
+	// carries the whole call, so nothing is left to guess.
 	function managedToolReply(action: "start" | "stop") {
+		const callID = `postgres-${action}-1`;
 		return text(
-			`Hive manages this session's Postgres. Use request_resource with resource \"postgres\" and action \"${action}\"; poll the same call_id until it finishes.`,
-			{ managed: true, resource: "postgres", action },
+			`Hive manages this session's Postgres; this tool does not ${action} it. Use the hive MCP tool \`hive_request_resource\` ` +
+				`(via the \`mcp\` meta-tool if no direct tool of that name is exposed):\n` +
+				`  1. session_id: run \`echo $HIVE_LAUNCH_ID\` in the shell, then call \`hive_whoami({launch_id: "<that UUID>"})\` — ` +
+				`its session_id is what every session-scoped tool wants (NOT the launch id, NOT the literal $HIVE_LAUNCH_ID).\n` +
+				`  2. \`hive_request_resource({session_id: "<session_id>", resource: "postgres", action: "${action}", call_id: "${callID}"})\`\n` +
+				`  3. Poll with the SAME call_id until state is succeeded; the result carries the connection endpoint. ` +
+				`\`hive_list_resources({session_id})\` reads it back later.\n` +
+				`The repo's configured 127.0.0.1 port is a HOST Postgres and is unreachable from a sandbox — do not wait for it to answer.`,
+			{ managed: true, resource: "postgres", action, tool: "hive_request_resource", call_id: callID },
 		);
 	}
 

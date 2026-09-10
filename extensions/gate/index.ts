@@ -433,7 +433,9 @@ async function runHiveCheck(
 		if (dispatchUnconfirmed(run)) {
 			const how = run.signal
 				? `the dispatch was killed (${run.signal}) before the CLI could report`
-				: "the CLI could not confirm the result (exit 4)";
+				: run.code === 1
+					? "the CLI's request timed out awaiting the server's answer (an older `hive` build reports that as exit 1 — run `hive version`; the node updates it from the server)"
+					: "the CLI could not confirm the result (exit 4)";
 			return text(
 				`NO VERDICT — ${how}. A run MAY have been created: the snapshot upload had already been ` +
 					`delivered, so the server may be evaluating it now.\n\n` +
@@ -448,7 +450,11 @@ async function runHiveCheck(
 		// useful ones: an unknown step name comes back with the pipeline's ACTUAL
 		// step list, which nothing here could reconstruct. Reported verbatim,
 		// marked "no verdict" so it is never mistaken for a pass.
-		return text(`NO VERDICT — \`hive check --step ${steps.join(",")}\` created no run (exit ${run.code}):\n\n${run.out.trim()}`);
+		// Echoed in the repeated form the CLI documents: the comma-joined
+		// spelling is valid too, but reads as one step named "a,b" (HIV-3322).
+		return text(
+			`NO VERDICT — \`hive check ${steps.map((s) => `--step ${s}`).join(" ")}\` created no run (exit ${run.code}):\n\n${run.out.trim()}`,
+		);
 	}
 
 	const emit = (p: GateProgress) => {
