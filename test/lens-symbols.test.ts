@@ -156,6 +156,19 @@ def standalone(a):
     return 0
 
 
+async def place_order(
+    self,
+    symbol: str,
+    qty: float,  # units (not: a colon in a comment)
+) -> "Order":
+    body = build(symbol, qty)
+    return body
+
+
+def after_it():
+    return 2
+
+
 X = 1
 `;
 
@@ -314,4 +327,19 @@ it("reads Starlark as Python", () => {
 	const found = findSymbol(src, ".hive/main.star", "ci");
 	expect(found).toHaveLength(1);
 	expect(found[0].startLine).toBe(1);
+});
+
+/**
+ * A wrapped signature's closing `) -> T:` sits at the def's own column, which
+ * the indent rule read as the end of the symbol — so `read_symbol` returned
+ * the signature and none of the body. Four papercuts on 2026-09-09/10, all on
+ * async multi-line Python methods.
+ */
+describe("findSymbol — Python multi-line signatures", () => {
+	it("returns the whole body, not just the signature", () => {
+		const [s] = findSymbol(PY, "a.py", "place_order");
+		expect(s.text).toContain("body = build(symbol, qty)");
+		expect(s.text).toContain("return body");
+		expect(s.text).not.toContain("def after_it");
+	});
 });

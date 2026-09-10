@@ -292,15 +292,23 @@ describe("runPlan — a retry is spend, and both caps must see it", () => {
 		expect(events.find((event) => event.ev === "node_finished")?.attempts).toBe(3);
 	});
 
-	it("admits each attempt against maxAgents, so the agent cap cannot be run past", async () => {
+	it("admits each attempt against maxAgents, so retries stop at the cap instead of running past it", async () => {
 		const spawn: Spawn = async () => burn(10, 0);
 		const summary = await runPlan({
 			plan: plan([retrier(3), agentNode("b")], { maxAgents: 3, maxConcurrent: 1 }),
 			spawn,
 		});
 
-		expect(summary.agentsSpawned).toBe(4); // one dispatch, four workers
-		expect(summary.halted).toBe("agents");
+		// Four workers would fit the retrier's own budget; the cap holds three,
+		// and one of those is reserved for `b`, which has not run — so the
+		// retrier gets exactly one retry, `b` runs, and nothing halts. Before
+		// the reservation this spawned four and halted with `b` never run.
+		expect(summary.agentsSpawned).toBe(3);
+		expect(summary.retrySpawns).toBe(1);
+		expect(summary.halted).toBeUndefined();
+		// `b` was admitted and ran (this spawner fails everything, so it fails too).
+		expect(summary.failures.map((f) => f.nodeId).sort()).toEqual(["a", "b"]);
+		expect(summary.failures.find((f) => f.nodeId === "a")?.error).toContain("retry withheld");
 	});
 
 	it("lets the token budget see the retried spend", async () => {
@@ -557,5 +565,42 @@ describe("runPlan — the journal", () => {
 		await runPlan({ plan: plan([agentNode("a")]), spawn, journal: (e) => events.push(e) });
 
 		expect(events.find((e) => e.ev === "node_failed")?.reason).toBe("the reason");
+	});
+});
+
+/**
+ * A retry is a real admission, so it counts against maxAgents — and a plan
+ * written as "3 nodes, maxAgents 3" halted on the first schema retry with
+ * `6 of 3 worker(s) admitted`, the reconciler never having run (five runs in
+ * the week to 2026-09-10). Retries may spend only what the unstarted nodes do
+ * not need.
+ */
+describe("runPlan — retries never take a declared node's admission", () => {
+	it("withholds a retry when the cap is reserved for unstarted nodes, so the reconciler still runs", async () => {
+		const calls: string[] = [];
+		const spawn: Spawn = async (d) => {
+			calls.push(d.nodeId);
+			return d.nodeId === "a" ? fail("boom") : ok("fine");
+		};
+		const nodes = [{ ...agentNode("a"), retries: 2 } as PlanNode, agentNode("b"), agentNode("reconcile", ["b"])];
+		const summary = await runPlan({ plan: plan(nodes, { maxAgents: 3 }), spawn });
+		expect(calls.filter((c) => c === "a")).toHaveLength(1);
+		expect(summary.results.reconcile).toBe("fine");
+		expect(summary.halted).toBeUndefined();
+		expect(summary.failures.map((f) => f.nodeId)).toEqual(["a"]);
+		expect(summary.failures[0].error).toContain("retry withheld");
+		expect(summary.retrySpawns).toBe(0);
+	});
+
+	it("still retries when the cap has room, and reports the retries separately", async () => {
+		let aCalls = 0;
+		const spawn: Spawn = async (d) => (d.nodeId === "a" ? (++aCalls < 2 ? fail("boom") : ok("ok-a")) : ok("fine"));
+		const nodes = [{ ...agentNode("a"), retries: 2 } as PlanNode, agentNode("b")];
+		const summary = await runPlan({ plan: plan(nodes, { maxAgents: 4 }), spawn });
+		expect(aCalls).toBe(2);
+		expect(summary.agentsSpawned).toBe(3);
+		expect(summary.retrySpawns).toBe(1);
+		expect(summary.halted).toBeUndefined();
+		expect(summary.results.a).toBe("ok-a");
 	});
 });

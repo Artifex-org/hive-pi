@@ -9,6 +9,7 @@ const summary = (halted?: RunSummary["halted"]): RunSummary => ({
 	...(halted ? { halted } : {}),
 	failures: [],
 	agentsSpawned: 1,
+	retrySpawns: 0,
 	spentTokens: 10,
 	spentCost: 0,
 });

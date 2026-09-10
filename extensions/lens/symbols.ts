@@ -259,14 +259,36 @@ function braceEnd(lines: string[], start: number): number {
  */
 function pythonEnd(lines: string[], start: number): number {
 	const indent = indentOf(lines[start]);
+	// A multi-line signature first. Its continuation lines sit at a deeper
+	// indent, but the closing `) -> T:` returns to the `def`'s own column — and
+	// the indent rule below read that as the end of the symbol, so
+	// `read_symbol` on any function with a wrapped signature returned the
+	// signature and not one line of the body (four papercuts, 2026-09-09/10).
+	// Walk to the line where the header's brackets close before scanning.
 	let end = start;
-	for (let i = start + 1; i < lines.length; i++) {
+	let depth = bracketDepth(lines[start]);
+	while (depth > 0 && end + 1 < lines.length) {
+		end += 1;
+		depth += bracketDepth(lines[end]);
+	}
+	for (let i = end + 1; i < lines.length; i++) {
 		const line = lines[i];
 		if (!line.trim()) continue;
 		if (indentOf(line) <= indent) return end;
 		end = i;
 	}
 	return lines.length - 1;
+}
+
+/** Net bracket depth of one line, strings and comments removed. */
+function bracketDepth(line: string): number {
+	const code = line.replace(/(["'])(?:\\.|(?!\1).)*\1/g, "").replace(/#.*$/, "");
+	let depth = 0;
+	for (const ch of code) {
+		if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+		else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+	}
+	return depth;
 }
 
 function indentOf(line: string): number {
