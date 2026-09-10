@@ -95,8 +95,16 @@ export function delegationOutcome(result: {
 	exitCode: number;
 	stderr: string;
 	output: string;
+	/**
+	 * The worker's own verdict, from `isFailedResult`. A pi child exits 0 on a
+	 * provider error and on a writer that changed nothing — both carry
+	 * `stopReason: "error"` — so the exit code alone reported `done (exit 0)`
+	 * next to a mid-sentence handoff and no work (three delegations, 2026-09-08).
+	 */
+	failed?: boolean;
 }): { status: Exclude<JobStatus, "running">; exitCode: number } {
-	return { status: result.exitCode === 0 ? "done" : "failed", exitCode: result.exitCode };
+	const failed = result.failed ?? result.exitCode !== 0;
+	return { status: failed ? "failed" : "done", exitCode: failed && result.exitCode === 0 ? 1 : result.exitCode };
 }
 
 /** One line for a subagent job in `background_list`, used by the renderer. */
