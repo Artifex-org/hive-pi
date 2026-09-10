@@ -507,3 +507,39 @@ describe("estimateAgents — for the pre-run confirmation", () => {
 		expect(estimateAgents(p)).toBe(1);
 	});
 });
+
+/**
+ * A token budget that cannot admit every worker is refused before any worker
+ * exists. Sixteen runs in eight days set 14k-50k over three or four workers,
+ * each spent ~80k tokens on ONE worker, and halted with the reconciler dropped
+ * — the field's own description said so and was not read.
+ */
+describe("validatePlan — budget floor", () => {
+	it("refuses a budget below the per-worker floor, naming the number that would pass", () => {
+		const p = { ...plan([agentNode("a"), agentNode("b"), agentNode("c")]), caps: { budgetTokens: 18_000 } };
+		const issues = validatePlan(p as Plan, ROLES);
+		const issue = issues.find((i) => i.message.includes("budgetTokens"));
+		expect(issue?.message).toContain("18000 cannot admit this plan's 3 worker node(s)");
+		expect(issue?.message).toContain("at least 75000");
+		expect(issue?.message).toContain("caps.maxAgents");
+	});
+
+	it("counts pipeline stages as workers and accepts a budget at the floor", () => {
+		const pipeline = {
+			id: "p",
+			kind: "pipeline",
+			over: "a",
+			stages: [
+				{ role: "research", prompt: "{item}" },
+				{ role: "research", prompt: "{item}" },
+			],
+		} as PlanNode;
+		const nodes = [agentNode("a"), pipeline];
+		expect(validatePlan({ ...plan(nodes), caps: { budgetTokens: 74_999 } } as Plan, ROLES).some((i) => i.message.includes("budgetTokens"))).toBe(true);
+		expect(validatePlan({ ...plan(nodes), caps: { budgetTokens: 75_000 } } as Plan, ROLES)).toEqual([]);
+	});
+
+	it("says nothing when no budget is set — maxAgents is the bound then", () => {
+		expect(validatePlan(plan([agentNode("a"), agentNode("b")]), ROLES)).toEqual([]);
+	});
+});

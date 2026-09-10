@@ -225,29 +225,68 @@ const ORCHESTRATE_TOOLS = new Set([
 //
 // The rule applied is "every READ-ONLY ticket tool is permitted", not "anything
 // ticket-shaped": watch_ticket registers a subscription, so it stays out.
+//
+// Second pass, 2026-09-10, from the papercut corpus (seven days, both
+// developers): a coordination-only lead was refused, in this order of
+// frequency, the project communication board (`hive_list_communications` ×4,
+// `hive_reply_communication`), Linear reads (`linear_list_issues` at the
+// mandatory inventory step), the read-only pipeline preview
+// (`hive_evaluate_pipeline`, "documented as a DAG preview that starts no run"),
+// and queue ordering (`hive_prioritize_run`, "a non-preemptive ordering
+// operation required launching a low-tier worker and harvesting it"). Each
+// addition below is one of those, read for what it mutates:
+//
+// - The communication board is the coordination surface by definition — the
+//   house rules REQUIRE a lead to search it before diagnosing anything and to
+//   reply with evidence. Reads, replies, encounters, claims and patches are all
+//   statements about the project, never implementation.
+// - `hive_evaluate_pipeline` renders a DAG and inserts no run.
+// - `hive_prioritize_run` / `hive_set_run_priority` reorder the queue; they
+//   dispatch nothing new.
+// - The `linear_*` entries are the LIST/GET half of the Linear adapter; every
+//   `save_*`/`create_*`/`delete_*` stays out, since an issue write is exactly
+//   the kind of decision this mode wants made by a visible teammate.
+// - The remaining `hive_get_*`/`hive_list_*` entries are pure reads a lead
+//   needs to vet work (PR comments, origin state, run reports, review
+//   rejections, the project goals it links work to).
 const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_add_teammate",
 	"hive_approve_plan",
 	"hive_assign_teammate_squad",
 	"hive_cancel_agent_launch",
 	"hive_cancel_run",
+	"hive_claim_communication",
 	"hive_claim_ticket",
 	"hive_comment_ticket",
+	"hive_create_communication",
 	"hive_create_squad",
 	"hive_create_team",
 	"hive_delete_squad",
 	"hive_diagnose_agent_session",
+	"hive_encounter_communication",
 	"hive_end_agent_session",
+	"hive_evaluate_pipeline",
 	"hive_explain_failure",
 	"hive_find_related_work",
+	"hive_find_similar_failures",
 	"hive_force_kill_agent_session",
 	"hive_get_agent_command",
 	"hive_get_agent_spend",
+	"hive_get_agent_startup",
 	"hive_get_board",
+	"hive_get_communication",
 	"hive_get_factory_provider_limits",
+	"hive_get_factory_tier_health",
 	"hive_get_occupancy",
+	"hive_get_origin_pull",
+	"hive_get_project_goals",
 	"hive_get_pull",
+	"hive_get_pull_comments",
+	"hive_get_readiness",
+	"hive_get_review_rejections",
 	"hive_get_run",
+	"hive_get_run_changes",
+	"hive_get_run_reports",
 	"hive_get_run_tests",
 	"hive_get_task_logs",
 	"hive_get_ticket",
@@ -255,7 +294,9 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_launch_teammate",
 	"hive_list_agent_launches",
 	"hive_list_agent_sessions",
+	"hive_list_communications",
 	"hive_list_credential_catalog",
+	"hive_list_projects",
 	"hive_list_pulls",
 	"hive_list_run_completions",
 	"hive_list_runs",
@@ -265,17 +306,39 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_my_tickets",
 	"hive_move_ticket_state",
 	"hive_offload_to_factory",
+	"hive_patch_communication",
 	"hive_post_team_note",
+	"hive_prioritize_run",
 	"hive_read_inbox",
 	"hive_read_team_notes",
 	"hive_recap_session",
 	"hive_remove_teammate",
 	"hive_rename_squad",
+	"hive_reply_communication",
 	"hive_retry_run",
 	"hive_search_tickets",
+	"hive_set_run_priority",
 	"hive_steer_agent",
 	"hive_wait_for_run",
 	"hive_whoami",
+	"linear_get_document",
+	"linear_get_issue",
+	"linear_get_issue_status",
+	"linear_get_milestone",
+	"linear_get_project",
+	"linear_get_team",
+	"linear_get_user",
+	"linear_list_comments",
+	"linear_list_cycles",
+	"linear_list_documents",
+	"linear_list_issue_labels",
+	"linear_list_issue_statuses",
+	"linear_list_issues",
+	"linear_list_milestones",
+	"linear_list_projects",
+	"linear_list_teams",
+	"linear_list_users",
+	"linear_search_documentation",
 ]);
 
 /**

@@ -159,3 +159,36 @@ describe("AgmsgController.pollInbox", () => {
 		expect(inject).not.toHaveBeenCalled();
 	});
 });
+
+/**
+ * A Hive-launched session reads its team messages through Hive. The old
+ * wording sent it to agmsg — a workstation-local fabric it was never joined
+ * to — and told it to "ask the user", in a session with no user in it: ten
+ * papercuts in a week, every one an agent trying to answer a `Team message
+ * from <uuid>` it had just received.
+ */
+describe("AgmsgController.roleProblem", () => {
+	it("names the Hive tools when the session was launched by Hive", () => {
+		script("whoami.sh", `echo "not-joined=true project=$1"`);
+		const c = new AgmsgController({
+			cwd: project,
+			sessionId: "sid",
+			pid: 4242,
+			home,
+			hiveLaunchId: "8687ae25-3a97-4153-8d03-381be1097a02",
+			inject: () => {},
+			notify: () => {},
+			repaint: () => {},
+		});
+		const problem = c.roleProblem();
+		expect(problem).toContain("launched by Hive");
+		expect(problem).toContain("hive_message_teammate");
+		expect(problem).toContain("hive_read_inbox");
+		expect(problem).not.toContain("Ask the user");
+	});
+
+	it("keeps the join instruction for a human's own session", () => {
+		script("whoami.sh", `echo "not-joined=true project=$1"`);
+		expect(controller().roleProblem()).toContain("/agmsg join");
+	});
+});

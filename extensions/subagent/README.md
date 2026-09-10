@@ -14,6 +14,16 @@ Highest precedence first:
 
 The env var exists so a launcher never has to write `settings.json`: on the workstation that file is a stow symlink into a git checkout, and pi rewrites it on `/model`, so a third writer would fight both.
 
+Above all of those sits the per-call **`model`** parameter (single mode, each `tasks[]` item, each `chain[]` step): an explicit override, honoured when this machine can run it and refused before any spawn when it cannot.
+
+### When the chosen model cannot run here (`model.ts`)
+
+The choice is made BEFORE the spawn, against the session's model registry. A default this machine has no credential for (the measured `No API key found for xai.`) falls back to the cheapest configured mode in the Hive agent-mode catalog, then to the session's own model, and the result carries a `[model note]` saying what ran and why. Nothing configured → a refusal naming the provider and the fix; nothing is spawned.
+
+A read-only role whose worker was refused by its ACCOUNT — a 429 throttle or an exhausted allowance, the two things another account would clear — is re-run once on a configured model from a different provider, again with a note. Writers are never re-run.
+
+A worker that exits 0 with a final message announcing work ("Now updating Agents.tsx to pass the renamed params:") instead of reporting it is flagged `midWork` on every rendering; a read-only role gets one continuation run that carries the announcement. Background delegations report `failed` from the worker's own verdict, never from the exit code alone.
+
 ## Local role inventory
 
 - Domain: `borealis-trader`, `babysit-build`, `incident-responder`, `k8s-deployment-manager`, `omarchy-config-manager`, `aurora-developer`
