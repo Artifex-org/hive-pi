@@ -11,6 +11,7 @@ import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts"
 
 import {
 	browserProbe,
+	delegationProbe,
 	ghProbe,
 	harnessUpdateProbe,
 	mcpCacheStaleness,
@@ -792,5 +793,60 @@ describe("repo", () => {
 	it("is unknown outside a checkout", async () => {
 		const out = await repoProbe(deps());
 		expect(out.status).toBe("unknown");
+	});
+});
+
+/**
+ * The delegation lane is a DIFFERENT provider from the session's, and the
+ * measured contradiction — "openrouter ready with $34 left" beside a subagent
+ * dying on `No API key found for xai` — was two true statements about two
+ * accounts. This row is the one that says so before the delegation.
+ */
+describe("delegation", () => {
+	const settingsWith = (model: string) => (path: string) =>
+		path.endsWith("settings.json") ? ({ subagentDefaultModel: model } as never) : null;
+
+	it("is degraded when the worker model's provider has no credential here, naming the fix", async () => {
+		const out = await delegationProbe(deps({ env: { PI_SUBAGENT_MODEL: "xai/grok-4", OPENROUTER_API_KEY: "sk" }, readJson: () => null }));
+		expect(out.status).toBe("degraded");
+		expect(out.detail).toContain("xai/grok-4 (PI_SUBAGENT_MODEL)");
+		expect(out.detail).toContain('provider "xai"');
+		expect(out.hint).toContain("XAI_API_KEY");
+	});
+
+	it("is ready when auth.json holds the provider", async () => {
+		const out = await delegationProbe(
+			deps({
+				env: { PI_SUBAGENT_MODEL: "openai-codex/gpt-5.6-luna" },
+				readJson: (path: string) => (path.endsWith("auth.json") ? ({ "openai-codex": { type: "oauth" } } as never) : null),
+			}),
+		);
+		expect(out.status).toBe("ready");
+		expect(out.detail).toContain("openai-codex credential present");
+	});
+
+	it("is ready when the provider's env key is set, reading the model from settings when the env does not name one", async () => {
+		const out = await delegationProbe(deps({ env: { ZAI_API_KEY: "k" }, readJson: settingsWith("zai/glm-5.3-flash") }));
+		expect(out.status).toBe("ready");
+		expect(out.detail).toContain("zai/glm-5.3-flash (subagentDefaultModel)");
+	});
+
+	it("is unknown, not degraded, when no delegation model is pinned at all", async () => {
+		const out = await delegationProbe(deps({ readJson: () => null }));
+		expect(out.status).toBe("unknown");
+	});
+
+	it("honours PI_CODING_AGENT_DIR over ~/.pi/agent", async () => {
+		const seen: string[] = [];
+		await delegationProbe(
+			deps({
+				env: { PI_CODING_AGENT_DIR: "/custom/agent", PI_SUBAGENT_MODEL: "xai/grok-4" },
+				readJson: (path: string) => {
+					seen.push(path);
+					return null;
+				},
+			}),
+		);
+		expect(seen).toContain("/custom/agent/auth.json");
 	});
 });

@@ -272,8 +272,40 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 		}
 	});
 
+	it("permits the coordination surfaces the second papercut pass found refused", () => {
+		// The board is the coordination surface the house rules REQUIRE a lead
+		// to read and answer; a pipeline preview inserts no run; a priority bump
+		// dispatches nothing; the Linear reads are the inventory step. Each was
+		// refused in a live orchestrate session in the week to 2026-09-10.
+		for (const tool of [
+			"hive_list_communications",
+			"hive_get_communication",
+			"hive_reply_communication",
+			"hive_encounter_communication",
+			"hive_evaluate_pipeline",
+			"hive_prioritize_run",
+			"hive_set_run_priority",
+			"hive_get_pull_comments",
+			"hive_get_run_reports",
+			"linear_list_issues",
+			"linear_get_issue",
+			"linear_list_comments",
+		]) {
+			expect(bothEnvelopes(tool), tool).toBe(true);
+		}
+	});
+
 	it("still denies anything that dispatches, mutates or subscribes", () => {
-		for (const tool of ["hive_trigger_run", "hive_propose_k8s_change", "hive_k8s_action_scale", "hive_watch_ticket"]) {
+		for (const tool of [
+			"hive_trigger_run",
+			"hive_propose_k8s_change",
+			"hive_k8s_action_scale",
+			"hive_watch_ticket",
+			// The Linear WRITE half stays a visible teammate's decision.
+			"linear_save_issue",
+			"linear_save_comment",
+			"linear_delete_comment",
+		]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
 			expect(classifyOrchestrateTool("mcp", { tool }).allowed, `mcp ${tool}`).toBe(false);
 		}

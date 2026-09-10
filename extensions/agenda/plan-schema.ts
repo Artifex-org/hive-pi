@@ -212,12 +212,56 @@ export function isAgentBearing(node: PlanNode): boolean {
  * plus every key in `required` — so the borrowed rule would have 400'd every
  * node at the provider.
  */
+/**
+ * The least a single worker has been measured to spend, in budget tokens.
+ *
+ * A worker re-sends its whole context every turn, so a read-only research node
+ * over a large repo costs 78-97k tokens (six runs measured 2026-09-07..09,
+ * pyERP and hive); the smallest single-worker overshoot on record is 27,189.
+ * `budgetTokens` is checked BETWEEN workers, so a budget below one worker's
+ * spend admits exactly one worker and then halts the run — every other node,
+ * the reconciler included, is dropped. Sixteen runs in eight days did exactly
+ * that, with budgets of 14k-50k spread over three or four workers; each spent
+ * ~80k tokens to learn that the cap was unreachable. The description on the
+ * field says all of this and was not read, because a description is read once
+ * at registration while an error in the tool result arrives at the moment it
+ * can be acted on. So a budget that cannot admit every agent node is refused
+ * here, before any worker exists.
+ */
+export const MIN_BUDGET_PER_AGENT = 25_000;
+
+/** Agent-spawning nodes: `agent` and `fanout` count once each (a fanout's width is unknown until it runs). */
+function agentNodeCount(plan: Plan): number {
+	let n = 0;
+	for (const node of plan.nodes) {
+		if (node.kind === "agent" || node.kind === "fanout") n += 1;
+		if (node.kind === "pipeline") n += node.stages.length;
+	}
+	return n;
+}
+
 export function validatePlan(plan: Plan, knownRoles: readonly string[]): ValidationIssue[] {
 	const issues: ValidationIssue[] = [];
 	const ids = new Set<string>();
 
 	if (plan.nodes.length > MAX_NODES) {
 		issues.push({ message: `plan has ${plan.nodes.length} nodes; the limit is ${MAX_NODES}` });
+	}
+
+	const budget = plan.caps?.budgetTokens;
+	if (budget !== undefined) {
+		const agents = agentNodeCount(plan);
+		const floor = agents * MIN_BUDGET_PER_AGENT;
+		if (budget < floor) {
+			issues.push({
+				message:
+					`caps.budgetTokens ${budget} cannot admit this plan's ${agents} worker node(s): a single worker measures ` +
+					`27k-97k tokens (context is re-sent every turn), the budget is checked only BETWEEN workers, and a ` +
+					`budget below one worker's spend admits the first worker and then HALTS the run with every other node ` +
+					`dropped. Either raise it to at least ${floor} (${MIN_BUDGET_PER_AGENT} per worker node), or drop it ` +
+					`and bound the wave with caps.maxAgents, which is hard, keeps parallelism, and is usually what was meant.`,
+			});
+		}
 	}
 
 	for (const node of plan.nodes) {

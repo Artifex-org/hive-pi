@@ -55,6 +55,12 @@ export interface ControllerOptions extends ControllerHooks {
 	sessionId: string | undefined;
 	home?: string;
 	pid?: number;
+	/**
+	 * `$HIVE_LAUNCH_ID` when Hive launched this session. Injected rather than
+	 * read from `process.env` inside, so the controller test can pin both
+	 * wordings of `roleProblem`.
+	 */
+	hiveLaunchId?: string;
 }
 
 export interface ControllerState {
@@ -110,6 +116,22 @@ export class AgmsgController {
 	roleProblem(): string {
 		if (this.identityValue.state === "multiple") {
 			return `This session has several agmsg identities (${this.identityValue.agents.join(", ")}). Ask the user which one to use, then run /agmsg actas <name>.`;
+		}
+		// A Hive-launched session reads its team messages through HIVE, and the
+		// old wording sent it to agmsg — a different, workstation-local fabric it
+		// was never joined to. Ten papercuts in a week, every one an agent trying
+		// to answer a `Team message from <uuid>` it had just received, told to
+		// "ask the user whether to join a team" in a session with no user in it.
+		// The launch id is the tell, and the remedy is the tool that delivered
+		// the message in the first place.
+		if (this.options.hiveLaunchId) {
+			return (
+				"This session has no agmsg identity — and does not need one: it was launched by Hive, and its team " +
+				"messages travel through Hive, not agmsg. To reply to a `Team message from <session>`, call " +
+				"hive_message_teammate with that sender's session id (pass your own id as from_session_id — " +
+				"hive_whoami {launch_id: $HIVE_LAUNCH_ID} resolves it); hive_read_inbox reads what was sent to you. " +
+				"agmsg is a separate workstation-local fabric this session was never joined to."
+			);
 		}
 		return "This session has no agmsg identity. Ask the user whether to join a team, then run /agmsg join <team> <name>.";
 	}

@@ -88,7 +88,19 @@ import { emptyJsonRunState, foldJsonLine, type WorkerRetries } from "../harness/
 import { frame } from "../harness/framing.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { isQuotaExhaustedText } from "../hive-common/quota.ts";
+import { resolveAuth } from "../hive-common/identity.ts";
+import { fetchAgentModeCatalog } from "../advisor/modes.ts";
 import { HIVE_METRIC_CHANNEL, type HiveMetricEvent } from "../hive-telemetry/types.ts";
+import {
+	chooseWorkerModel,
+	continuationTask,
+	isAccountRefusal,
+	pickAlternateAccount,
+	RATE_LIMITED,
+	stoppedMidWork,
+	type WorkerModelEnv,
+} from "./model.ts";
+import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, reviewTaskWithDiff } from "./reviewdiff.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -229,6 +241,19 @@ export interface SingleResult {
 	structuredError?: string;
 	/** What pi already spent retrying a retryable provider error, if anything. */
 	retries?: WorkerRetries;
+	/**
+	 * Why this worker ran on a model other than the one the caller would
+	 * expect — a fallback from an unconfigured default, or a re-run on another
+	 * account after a provider refusal. Printed with the result: a worker that
+	 * silently ran elsewhere is the harder defect to diagnose.
+	 */
+	modelNote?: string;
+	/** The final message announced work instead of delivering it (model.ts). */
+	midWork?: boolean;
+	/** For a review role: the files of the change it was handed (reviewdiff.ts). */
+	reviewFiles?: string[];
+	/** Paths the review cited that are not in that change. */
+	outsideDiff?: string[];
 }
 
 export interface SubagentUsageByModel {
@@ -382,11 +407,24 @@ function getResultOutput(result: SingleResult): string {
 }
 
 /**
- * A rate limit, anchored the way `quota.ts` anchors its patterns: on the status
- * code or the two-word phrase, never on a bare "limit", which every quota,
- * budget and context message also contains.
+ * The lines a caller must not miss about HOW a result was produced, appended
+ * to every rendering of it (single, parallel, chain, background). Exported for
+ * the test that pins them: a note that renders nowhere is a note nobody reads.
  */
-const RATE_LIMITED = /\b429\b|\brate.?limit/i;
+export function resultNotes(result: SingleResult): string {
+	const notes: string[] = [];
+	if (result.modelNote) notes.push(`[model note] ${result.modelNote}`);
+	if (result.midWork) {
+		notes.push(
+			"⚠ the worker ended WITHOUT delivering: its last message announces work rather than reporting it. " +
+				"Treat this as incomplete — check the tree for partial edits before building on it.",
+		);
+	}
+	if (result.outsideDiff && result.outsideDiff.length > 0) {
+		notes.push(outsideDiffWarning(result.outsideDiff, result.reviewFiles?.length ?? 0));
+	}
+	return notes.length > 0 ? `\n\n${notes.join("\n\n")}` : "";
+}
 
 /**
  * Which provider refusal this is, and therefore whether retrying is worth
@@ -684,6 +722,8 @@ async function runSingleAgent(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	schema?: unknown,
+	requestedModel?: string,
+	env?: WorkerModelEnv,
 ): Promise<SingleResult> {
 	const agent = resolveAgent(agents, agentName);
 
@@ -707,7 +747,29 @@ async function runSingleAgent(
 	}
 
 	const executionCwd = cwd ?? defaultCwd;
-	const model = agent.model ?? getSubagentDefaultModel();
+
+	// Decided BEFORE the spawn, so an unconfigured model is refused in the tool
+	// result the caller is reading rather than surfacing as a dead worker's
+	// `No API key found for xai.` — the shape that cost eight delegations in a
+	// day while readiness reported another provider ready (model.ts).
+	const choice = await chooseWorkerModel(
+		{ requested: requestedModel, preferred: agent.model ?? getSubagentDefaultModel(), roleName: agent.name },
+		env,
+	);
+	if (choice.refusal) {
+		return {
+			agent: agentName,
+			agentSource: agent.source,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: choice.refusal,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model: requestedModel ?? agent.model ?? getSubagentDefaultModel(),
+			step,
+		};
+	}
+	const model = choice.spec;
 
 	// The worktree guard, for delegated work — and this is the ONLY place it can
 	// happen. A worker spawns with `--no-extensions`, which strips guards-bridge
@@ -793,6 +855,7 @@ async function runSingleAgent(
 		startedAtMs: Date.now(),
 		lastActivityAtMs: Date.now(),
 		activity: "preparing worker",
+		modelNote: choice.note,
 	};
 
 	const emitUpdate = () => {
@@ -825,7 +888,17 @@ async function runSingleAgent(
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 
-		args.push(`Task: ${task}`);
+		// A review role is handed the change it is reviewing (reviewdiff.ts):
+		// left to find it, a worker reviewed files that were not in the diff.
+		let effectiveTask = task;
+		if (isReviewRole(agent.name)) {
+			const diff = captureReviewDiff(executionCwd);
+			if (diff) {
+				effectiveTask = reviewTaskWithDiff(task, diff, executionCwd);
+				currentResult.reviewFiles = diff.files;
+			}
+		}
+		args.push(`Task: ${effectiveTask}`);
 		let wasAborted = false;
 		emitUpdate();
 
@@ -979,6 +1052,16 @@ async function runSingleAgent(
 			if (parsed.ok) currentResult.structured = parsed.value;
 			else currentResult.structuredError = parsed.error;
 		}
+		// Exit 0 with an announcement for a final message is not a result. A
+		// writer with no change already folded above; this catches the rest —
+		// the reader that "completed" with "Checking the registry defaults…".
+		if (!isFailedResult(currentResult) && stoppedMidWork(getFinalOutput(currentResult.messages))) {
+			currentResult.midWork = true;
+		}
+		if (currentResult.reviewFiles && !isFailedResult(currentResult)) {
+			const outside = citedOutsideDiff(getFinalOutput(currentResult.messages), currentResult.reviewFiles);
+			if (outside.length > 0) currentResult.outsideDiff = outside;
+		}
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)
@@ -1020,8 +1103,11 @@ async function runAgentWithSchema(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	schema: unknown,
+	requestedModel?: string,
+	env?: WorkerModelEnv,
 ): Promise<SingleResult> {
 	let attemptTask = task;
+	let attemptModel = requestedModel;
 	let result = await runSingleAgent(
 		defaultCwd,
 		agents,
@@ -1033,12 +1119,87 @@ async function runAgentWithSchema(
 		onUpdate,
 		makeDetails,
 		schema,
+		attemptModel,
+		env,
 	);
+	const readOnly = !agentIsWriterCapable(resolveAgent(agents, agentName));
+
+	// Provider refusal, read-only role: ONE re-run on another account.
+	//
+	// This is the sentence `providerLimitGuidance` already printed — "re-run
+	// with a role/model on another account" — done by the tool instead of
+	// being handed back to a caller that has no `model` in its own guidance
+	// (39 papercuts, whole fan-outs at 0/4, each worker having already spent
+	// pi's retry budget on the same throttled key). Read-only only, for the
+	// same reason the schema retry is: re-running a writer is a second
+	// mutation attempt. The retry is kept only if it is not worse; a fallback
+	// that also failed leaves the original refusal, plus a note that the
+	// alternate account was tried, so the caller does not try it a third time.
+	if (readOnly && !signal?.aborted && isFailedResult(result) && isAccountRefusal(result.errorMessage, isQuotaExhaustedText)) {
+		const alternate = await pickAlternateAccount(result.model, env);
+		if (alternate) {
+			const retried = await runSingleAgent(
+				defaultCwd,
+				agents,
+				agentName,
+				attemptTask,
+				cwd,
+				step,
+				signal,
+				onUpdate,
+				makeDetails,
+				schema,
+				alternate,
+				env,
+			);
+			const attemptedMessages = [...messagesForTelemetry(result), ...messagesForTelemetry(retried)];
+			const refusal = `${result.model ?? "the delegation default"} refused: ${(result.errorMessage ?? "").slice(0, 160)}`;
+			if (isFailedResult(retried)) {
+				telemetryMessages.set(result, attemptedMessages);
+				result.modelNote = `also re-ran on ${alternate} (another account) and that failed too: ${(retried.errorMessage ?? retried.stderr ?? "").slice(0, 160)}`;
+			} else {
+				telemetryMessages.set(retried, attemptedMessages);
+				retried.modelNote = `ran on ${alternate} — another account — after ${refusal}`;
+				attemptModel = alternate;
+				result = retried;
+			}
+		}
+	}
+
+	// Stopped mid-work, read-only role: ONE continuation. The first attempt's
+	// announcement rides along in the task so the second worker knows what
+	// "done" is not. A writer is only flagged (index.ts renders `midWork`);
+	// re-running one would be a second mutation attempt.
+	if (readOnly && !signal?.aborted && result.midWork) {
+		const retried = await runSingleAgent(
+			defaultCwd,
+			agents,
+			agentName,
+			continuationTask(attemptTask, getFinalOutput(result.messages)),
+			cwd,
+			step,
+			signal,
+			onUpdate,
+			makeDetails,
+			schema,
+			attemptModel,
+			env,
+		);
+		const attemptedMessages = [...messagesForTelemetry(result), ...messagesForTelemetry(retried)];
+		if (isFailedResult(retried)) {
+			telemetryMessages.set(result, attemptedMessages);
+		} else {
+			telemetryMessages.set(retried, attemptedMessages);
+			retried.modelNote = retried.modelNote ?? result.modelNote;
+			result = retried;
+		}
+	}
+
 	if (!schema) return result;
 
 	for (let retry = 0; retry < MAX_SCHEMA_RETRIES; retry++) {
 		if (!result.structuredError || isFailedResult(result)) break;
-		if (agentIsWriterCapable(resolveAgent(agents, agentName))) break;
+		if (!readOnly) break;
 		attemptTask = structuredRetryTask(task, result.structuredError);
 		const retried = await runSingleAgent(
 			defaultCwd,
@@ -1051,6 +1212,8 @@ async function runAgentWithSchema(
 			onUpdate,
 			makeDetails,
 			schema,
+			attemptModel,
+			env,
 		);
 		// Keep the retry only if it is not worse: a retry that crashed leaves the
 		// original answer, which at least contained the work.
@@ -1093,10 +1256,25 @@ const SchemaParam = Type.Optional(
 	}),
 );
 
+/**
+ * A per-call model override. Measured need: "the tool offered no way to choose
+ * a different model" five times verbatim in one week, each time after a whole
+ * read-only fan-out died on the delegation default's throttled account.
+ * Refused before any spawn when the named model is not configured here.
+ */
+const ModelParam = Type.Optional(
+	Type.String({
+		description:
+			"Model to run this worker on, as provider/id (e.g. openrouter/deepseek/deepseek-v4-flash). Omit to use " +
+			"the role's pin or the delegation default; set it when that default's account is throttled or drained.",
+	}),
+);
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	model: ModelParam,
 	schema: SchemaParam,
 });
 
@@ -1104,6 +1282,7 @@ const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	model: ModelParam,
 	schema: SchemaParam,
 });
 
@@ -1122,6 +1301,7 @@ const SubagentParams = Type.Object({
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
 	),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+	model: ModelParam,
 	/**
 	 * Backgrounding is SINGLE mode only, and that is a real constraint rather
 	 * than an unfinished edge.
@@ -1177,6 +1357,7 @@ async function runVerifierOn(
 	target: SingleResult,
 	targetCwd: string,
 	signal: AbortSignal | undefined,
+	env?: WorkerModelEnv,
 ): Promise<string | null> {
 	if (!resolveAgent(agents, "verifier")) return null;
 	const claim = getFinalOutput(target.messages).slice(0, VERIFIER_CLAIM_CHARS);
@@ -1197,12 +1378,25 @@ async function runVerifierOn(
 		.filter(Boolean)
 		.join("\n");
 	try {
-		const result = await runSingleAgent(defaultCwd, agents, "verifier", task, targetCwd, undefined, signal, undefined, (results) => ({
-			mode: "single",
-			agentScope: "user",
-			projectAgentsDir: null,
-			results,
-		}));
+		const result = await runSingleAgent(
+			defaultCwd,
+			agents,
+			"verifier",
+			task,
+			targetCwd,
+			undefined,
+			signal,
+			undefined,
+			(results) => ({
+				mode: "single",
+				agentScope: "user",
+				projectAgentsDir: null,
+				results,
+			}),
+			undefined,
+			undefined,
+			env,
+		);
 		appendTelemetryMessages(target, messagesForTelemetry(result));
 		if (isFailedResult(result)) return null;
 		const report = getFinalOutput(result.messages).trim();
@@ -1383,6 +1577,34 @@ export default function (pi: ExtensionAPI) {
 					return "unknown";
 				}
 			};
+			// What a worker may run on, read off ctx BEFORE the first await (ctx
+			// goes stale when the session is replaced). The catalog is a
+			// closure, fetched only on the paths that need a fallback.
+			const modelEnv: WorkerModelEnv = {
+				isConfigured: (spec) => {
+					const at = spec.indexOf("/");
+					if (at <= 0 || at === spec.length - 1) return null;
+					try {
+						return ctx.modelRegistry.find(spec.slice(0, at), spec.slice(at + 1)) !== undefined;
+					} catch {
+						return null;
+					}
+				},
+				sessionModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+				// One in-flight fetch per tool call: a parallel wave with an
+				// unconfigured default would otherwise start up to four catalog
+				// requests at once before modes.ts's own cache fills, each up to
+				// 20s against a cold server.
+				catalog: () => {
+					catalogPromise ??= (async () => {
+						const auth = resolveAuth();
+						if (!auth) return [];
+						return (await fetchAgentModeCatalog(auth))?.modes ?? [];
+					})();
+					return catalogPromise;
+				},
+			};
+			let catalogPromise: Promise<readonly { key?: string; model: string }[]> | undefined;
 			const makeDetails =
 				(mode: "single" | "parallel" | "chain") =>
 				(results: SingleResult[]): SubagentDetails => ({
@@ -1565,7 +1787,11 @@ export default function (pi: ExtensionAPI) {
 				// Deliberately NOT awaited. The floating promise IS the feature; it
 				// is given a terminal `.then` so nothing can reject unhandled and
 				// take the session down with it.
-				void runSingleAgent(
+				//
+				// Through runAgentWithSchema, not runSingleAgent: all three
+				// measured exit-0 handoffs were BACKGROUND delegations, and the
+				// other-account re-run and the mid-work continuation live there.
+				void runAgentWithSchema(
 					ctx.cwd,
 					agents,
 					agentName,
@@ -1579,6 +1805,8 @@ export default function (pi: ExtensionAPI) {
 					undefined,
 					makeDetails("single"),
 					params.schema,
+					params.model,
+					modelEnv,
 				)
 					.then((result) => {
 						const usageByModel = subagentUsageByModel([result], authModeFor);
@@ -1590,7 +1818,19 @@ export default function (pi: ExtensionAPI) {
 						// strings yields a run of empty strings — every successful
 						// delegation would have reported "it produced no output",
 						// which is the quiet-failure shape rather than a visible bug.
-						const summary = [getFinalOutput(result.messages), structuredSection(result), result.stderr?.trim()]
+						// `errorMessage` is part of the summary because it is where a
+						// worker's failure actually lives: a writer that touched
+						// nothing exits 0 with NO_CHANGE_ERROR in `errorMessage` and an
+						// empty stderr, and reporting only the exit code turned that
+						// into `done (exit 0)` next to a mid-sentence handoff.
+						const failed = isFailedResult(result);
+						const summary = [
+							failed ? result.errorMessage : undefined,
+							getFinalOutput(result.messages),
+							structuredSection(result),
+							result.stderr?.trim(),
+							resultNotes(result).trim(),
+						]
 							.map((part) => part?.trim())
 							.filter(Boolean)
 							.join("\n\n");
@@ -1608,8 +1848,10 @@ export default function (pi: ExtensionAPI) {
 							// the exit code of a killed worker says nothing about the work,
 							// and calling it a failure would send the model debugging a
 							// stop that a human asked for.
-							status: controller.signal.aborted ? "canceled" : result.exitCode === 0 ? "done" : "failed",
-							exitCode: controller.signal.aborted ? undefined : result.exitCode,
+							// `isFailedResult`, not the exit code: a provider error and a
+							// no-change writer both exit 0 with `stopReason: "error"`.
+							status: controller.signal.aborted ? "canceled" : failed ? "failed" : "done",
+							exitCode: controller.signal.aborted ? undefined : failed && result.exitCode === 0 ? 1 : result.exitCode,
 						} satisfies BackgroundJobEvent);
 					})
 					.catch((err: unknown) => {
@@ -1669,6 +1911,8 @@ export default function (pi: ExtensionAPI) {
 						chainUpdate,
 						makeDetails("chain"),
 						step.schema,
+						step.model,
+						modelEnv,
 					);
 					results.push(result);
 
@@ -1711,9 +1955,10 @@ export default function (pi: ExtensionAPI) {
 							: getFinalOutput(result.messages) + structuredSection(result);
 				}
 				const last = results[results.length - 1];
+				const chainNotes = results.map(resultNotes).filter(Boolean).join("");
 				return {
 					content: [
-						{ type: "text", text: (getFinalOutput(last.messages) || "(no output)") + structuredSection(last) },
+						{ type: "text", text: (getFinalOutput(last.messages) || "(no output)") + structuredSection(last) + chainNotes },
 					],
 					details: makeDetails("chain")(results),
 					usage: subagentToolUsage(subagentUsageByModel(results, authModeFor)),
@@ -1802,6 +2047,8 @@ export default function (pi: ExtensionAPI) {
 						},
 						makeDetails("parallel"),
 						t.schema,
+						t.model,
+						modelEnv,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -1819,7 +2066,7 @@ export default function (pi: ExtensionAPI) {
 					const warning = cited.length > 0 ? `\n\n${citationWarning(cited)}` : "";
 					const note = failed ? `\n\nRetry note (distilled):\n${retryNote(r)}` : "";
 					const structured = failed ? "" : structuredSection(r);
-					return `### [${r.agent}] ${status}\n\n${output}${structured}${warning}${note}`;
+					return `### [${r.agent}] ${status}\n\n${output}${structured}${warning}${note}${resultNotes(r)}`;
 				});
 
 				// Sampled verification: the writer, if one succeeded — the result the
@@ -1836,6 +2083,7 @@ export default function (pi: ExtensionAPI) {
 							results[writerIndex],
 							params.tasks?.[writerIndex]?.cwd ?? ctx.cwd,
 							signal,
+							modelEnv,
 						);
 						if (report) verifierSection = `\n\n---\n\n### [verifier] on ${results[writerIndex].agent}\n\n${report}`;
 					}
@@ -1861,6 +2109,8 @@ export default function (pi: ExtensionAPI) {
 					reportUpdate,
 					makeDetails("single"),
 					params.schema,
+					params.model,
+					modelEnv,
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
@@ -1869,7 +2119,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `Agent ${result.stopReason || "failed"}: ${errorMsg}\n\nRetry note (distilled):\n${retryNote(result)}`,
+								text: `Agent ${result.stopReason || "failed"}: ${errorMsg}\n\nRetry note (distilled):\n${retryNote(result)}${resultNotes(result)}`,
 							},
 						],
 						details: makeDetails("single")([result]),
@@ -1880,13 +2130,13 @@ export default function (pi: ExtensionAPI) {
 				const executionCwd = params.cwd ?? ctx.cwd;
 				const output = getFinalOutput(result.messages) || "(no output)";
 				const cited = missingCitedPaths(output, executionCwd);
-				const parts = [output + structuredSection(result)];
+				const parts = [output + structuredSection(result) + resultNotes(result)];
 				if (cited.length > 0) parts.push(citationWarning(cited));
 				if (
 					(params.verify ?? "sample") !== "off" &&
 					agentIsWriterCapable(agents.find((a) => a.name === result.agent))
 				) {
-					const report = await runVerifierOn(ctx.cwd, agents, result, executionCwd, signal);
+					const report = await runVerifierOn(ctx.cwd, agents, result, executionCwd, signal, modelEnv);
 					if (report) parts.push(`### [verifier]\n\n${report}`);
 				}
 				parts.push(VERIFY_FOOTER);

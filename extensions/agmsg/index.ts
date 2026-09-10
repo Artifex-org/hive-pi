@@ -101,6 +101,7 @@ export default function (pi: ExtensionAPI) {
 		controller = new AgmsgController({
 			cwd: ctx.cwd,
 			sessionId: ctx.sessionManager.getSessionId?.(),
+			hiveLaunchId: process.env.HIVE_LAUNCH_ID?.trim() || undefined,
 			inject: (message) => {
 				pi.sendMessage(
 					{
