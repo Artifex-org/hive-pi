@@ -26,7 +26,7 @@ import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-a
 import { resolveAuth } from "../hive-common/identity.ts";
 import { splitModelSpec } from "../hive-remote/status.ts";
 import { loadAdvisorConfig } from "./config.ts";
-import { advisorFailureMessage, fetchAgentModeOutcome, pickAdvisorModel, type AdvisorPick } from "./modes.ts";
+import { advisorFailureMessage, fetchAgentModeOutcome, pickConfiguredAdvisor, type ConfiguredAdvisorPick } from "./modes.ts";
 import { buildAdvisorPrompt, capTranscript } from "./prompt.ts";
 
 /** Answer budget. Advice is prose, not code — 16k tokens is a long memo. */
@@ -65,14 +65,29 @@ export default function (pi: ExtensionAPI) {
 			const serialized = serializeConversation(convertToLlm(messages));
 			const { text: transcript, capped } = capTranscript(serialized, cfg.maxChars);
 
-			const pick = await resolveAdvisor(cfg.modelOverride, currentSpec);
+			const isConfigured = (spec: string): boolean => {
+				const p = splitModelSpec(spec);
+				return p !== null && registry.find(p.provider, p.id) !== undefined;
+			};
+			const pick = await resolveAdvisor(cfg.modelOverride, currentSpec, isConfigured);
 			const parts = splitModelSpec(pick.spec);
 			if (!parts) throw new Error(`advisor model spec ${JSON.stringify(pick.spec)} is not provider/id`);
 			const model = registry.find(parts.provider, parts.id);
 			if (!model) {
+				// Only the explicit override can get here: the catalog path picks
+				// among configured models. Name what IS configured for that
+				// provider, so the fix is a copy-paste rather than a hunt.
+				const here = registry
+					.getAll()
+					.filter((m) => m.provider === parts.provider)
+					.map((m) => `${m.provider}/${m.id}`)
+					.slice(0, 8);
 				throw new Error(
-					`advisor model ${pick.spec} is not configured on this machine — ` +
-						`add it to pi's models, or set PI_ADVISOR_MODEL to one that is`,
+					`PI_ADVISOR_MODEL=${pick.spec} names a model that is not configured on this machine. ` +
+						(here.length > 0
+							? `Configured for ${parts.provider} here: ${here.join(", ")}. `
+							: `No model of provider ${parts.provider} is configured here. `) +
+						"Unset PI_ADVISOR_MODEL to let the Hive mode catalog choose a configured model, or point it at one of these.",
 				);
 			}
 			// Kept as a PRECONDITION even though `registry.complete` resolves auth
@@ -143,8 +158,11 @@ export default function (pi: ExtensionAPI) {
 			if (!advice) throw new Error(describeEmptyAnswer(pick.spec, response));
 
 			const usage = response.usage;
+			// A same-class advisor announces itself AHEAD of its advice — the
+			// doctrine on resolveAdvisor, kept by being loud rather than by failing.
+			const text = pick.note ? `[advisor note] ${pick.note}\n\n${advice}` : advice;
 			return {
-				content: [{ type: "text" as const, text: advice }],
+				content: [{ type: "text" as const, text }],
 				// The consultation's spend, surfaced as this tool result's usage:
 				// pi adds it to the session totals and hive-telemetry folds it into
 				// the session's cost — the advisor never bills invisibly.
@@ -183,14 +201,24 @@ export default function (pi: ExtensionAPI) {
 }
 
 /**
- * resolveAdvisor: explicit override → Hive mode catalog → a clear error.
+ * resolveAdvisor: explicit override → Hive mode catalog, restricted to what
+ * this machine can run → a clear error.
  *
- * There is deliberately NO "fall back to the current model" tail: an advisor
- * that silently answers with the same class the agent already has would look
- * like a second opinion while being nothing of the kind. Failing loudly tells
- * the operator which prerequisite (override or Hive auth/catalog) is missing.
+ * There is deliberately NO "fall back to the current model" tail that is
+ * SILENT: an advisor that quietly answers with the same class the agent
+ * already has would look like a second opinion while being nothing of the
+ * kind. When the catalog's stronger modes are not configured here, the pick
+ * carries a `note` the tool prints ahead of the advice — a same-class read
+ * that says so is still worth more than the error it replaced (100 papercuts
+ * in seven days from one node whose registry lacked the catalog's top model,
+ * every one at the mandated pre-completion review; see pickConfiguredAdvisor).
+ * Failing is reserved for NO catalog model being configured at all.
  */
-async function resolveAdvisor(override: string | undefined, currentSpec: string): Promise<AdvisorPick> {
+async function resolveAdvisor(
+	override: string | undefined,
+	currentSpec: string,
+	isConfigured: (spec: string) => boolean,
+): Promise<ConfiguredAdvisorPick> {
 	if (override) return { spec: override, modeKey: "override" };
 	const auth = resolveAuth();
 	if (!auth) throw new Error(advisorFailureMessage("no-auth"));
@@ -198,9 +226,11 @@ async function resolveAdvisor(override: string | undefined, currentSpec: string)
 	const outcome = await fetchAgentModeOutcome(auth);
 	if (outcome.kind !== "ok") throw new Error(advisorFailureMessage(outcome));
 
-	const pick = pickAdvisorModel(outcome.catalog.modes, currentSpec);
+	const usable = outcome.catalog.modes.filter((m) => m && typeof m.model === "string" && m.model.includes("/"));
 	// The catalog had entries but none usable — every `model` malformed.
-	if (!pick) throw new Error(advisorFailureMessage("no-usable-model"));
+	if (usable.length === 0) throw new Error(advisorFailureMessage("no-usable-model"));
+	const pick = pickConfiguredAdvisor(outcome.catalog.modes, currentSpec, isConfigured);
+	if (!pick) throw new Error(advisorFailureMessage("none-configured"));
 	return pick;
 }
 

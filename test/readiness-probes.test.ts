@@ -504,21 +504,43 @@ describe("gh", () => {
 });
 
 describe("devservices postgres", () => {
-	it("is ready when the server binaries are present", async () => {
-		const out = await postgresProbe(deps({ exists: (p) => p.includes(".hive/tools/postgres") }));
-		expect(out.status).toBe("ready");
+	const binaries = (p: string) => p.includes(".hive/tools/postgres");
+
+	// Binaries on disk are not a database. The row used to be ready on them
+	// alone (with the caveat in `detail`), and 29 papercuts in seven days read
+	// `✓ dev postgres`, ran the suite against the repo's configured port, and got
+	// connection refused. Degraded renders the hint; ready does not.
+	it("is DEGRADED, not ready, when the binaries are present but no server is running", async () => {
+		const out = await postgresProbe(deps({ exists: binaries }));
+		expect(out.status).toBe("degraded");
 		expect(out.tool).toBe("dev_db_start");
+		expect(out.detail).toContain("no database server is running");
+		expect(out.hint).toContain("dev_db_start");
+		expect(out.hint).toContain("hive_request_resource");
+		expect(out.hint).toContain("unreachable from a sandbox");
 	});
 
-	// The ready row used to be `✓ dev postgres` and nothing else, which reads as
-	// "a database is up". The qualifier has to live in `detail`: `renderLines`
-	// and `snapshotBlock` both drop `hint` on a ready row, so the same words in
-	// `hint` would ship invisible.
-	it("says what it measured — binaries, not a live database — in `detail`, the only field a ready row renders", async () => {
-		const out = await postgresProbe(deps({ exists: (p) => p.includes(".hive/tools/postgres") }));
-		expect(out.detail).toContain("binaries installed");
-		expect(out.detail).toContain("dev_db_start");
-		expect(out.detail).toContain("request_resource");
+	it("is ready when a devservices cluster has a fresh heartbeat", async () => {
+		const out = await postgresProbe(
+			deps({
+				exists: binaries,
+				listDir: (p) => (p === "/home/test/.pi/devservices" ? ["pi-devservices-4242-abc", "unrelated"] : []),
+				mtimeMs: (p) => (p.endsWith("pi-devservices-4242-abc/heartbeat") ? NOW - 60_000 : null),
+			}),
+		);
+		expect(out.status).toBe("ready");
+		expect(out.detail).toContain("1 devservices database server running");
+	});
+
+	it("does not count a cluster whose heartbeat went stale (the reaper's own bound)", async () => {
+		const out = await postgresProbe(
+			deps({
+				exists: binaries,
+				listDir: (p) => (p === "/tmp" ? ["pi-devservices-1-old"] : []),
+				mtimeMs: () => NOW - 31 * 60 * 1000,
+			}),
+		);
+		expect(out.status).toBe("degraded");
 	});
 
 	it("is absent with the host install command — the HIV-1966 papercut, pre-empted", async () => {

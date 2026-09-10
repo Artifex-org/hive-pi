@@ -54,6 +54,76 @@ export function pickAdvisorModel(modes: AgentMode[], currentSpec: string): Advis
 }
 
 /**
+ * What pickConfiguredAdvisor decided, and why — the "why" is rendered to the
+ * agent, because a same-class advisor must announce itself as one.
+ */
+export interface ConfiguredAdvisorPick extends AdvisorPick {
+	/**
+	 * Set when the pick is NOT strictly above the caller's class: the catalog's
+	 * higher modes are all unconfigured on this machine, so the advisor is a
+	 * fresh context on the same class (or, unrankable caller, the highest that
+	 * runs here). A sentence for the result text.
+	 */
+	note?: string;
+}
+
+/**
+ * pickConfiguredAdvisor is pickAdvisorModel with the machine's registry in the
+ * loop: the highest catalog mode ABOVE the caller that this machine can
+ * actually run; failing that, the highest configured mode at or below it,
+ * with a note saying so; null only when NO catalog mode is configured here.
+ *
+ * WHY THE LADDER ALONE WAS NOT ENOUGH. pickAdvisorModel answers from the
+ * server's catalog and nothing else, and the catalog's top entry on this fleet
+ * is an openai-codex model. A workstation with no Codex credential — one of
+ * the two developer nodes measured — has it in the catalog and not in pi's
+ * registry, so every advisor call there died on "advisor model
+ * openai-codex/… is not configured on this machine": 100 papercuts in seven
+ * days from ONE node, every one at the mandated pre-completion review, every
+ * one leaving the agent with no reviewer while a configured model one rung
+ * down sat unused.
+ *
+ * The doctrine in index.ts — never SILENTLY answer with the caller's own class
+ * — is kept by being loud: a same-class or lower pick carries `note`, which
+ * the tool prints ahead of the advice.
+ */
+export function pickConfiguredAdvisor(
+	modes: AgentMode[],
+	currentSpec: string,
+	isConfigured: (spec: string) => boolean,
+): ConfiguredAdvisorPick | null {
+	const usable = modes.filter((m) => m && typeof m.model === "string" && m.model.includes("/"));
+	if (usable.length === 0) return null;
+	let idx = usable.findIndex((m) => m.model === currentSpec);
+	if (idx < 0) idx = usable.findIndex((m) => modelID(m.model) === modelID(currentSpec));
+	const ranked = idx >= 0;
+	// Above the caller, best first — or the whole ladder when the caller is
+	// unrankable, where "the strongest that runs here" is the only answer.
+	const above = ranked ? usable.slice(0, idx) : usable;
+	for (const m of above) {
+		if (isConfigured(m.model)) return { spec: m.model, modeKey: m.key, thinking: m.thinking };
+	}
+	// Nothing above is configured. Same class, then downward, still best first.
+	const rest = ranked ? usable.slice(idx) : [];
+	for (const m of rest) {
+		if (!isConfigured(m.model)) continue;
+		const missing = above.map((a) => a.model).join(", ");
+		const where = m.model === currentSpec || modelID(m.model) === modelID(currentSpec) ? "the same class as this session" : "a LOWER class than this session";
+		return {
+			spec: m.model,
+			modeKey: m.key,
+			thinking: m.thinking,
+			note:
+				`advisor is ${m.model} — ${where}, not a stronger one: ` +
+				(missing ? `the stronger catalog mode(s) ${missing} are not configured on this machine. ` : "") +
+				"Treat this as a fresh, independent read of the same class, not a higher-class review; " +
+				"to get one, configure a stronger model in pi or set PI_ADVISOR_MODEL.",
+		};
+	}
+	return null;
+}
+
+/**
  * The bare model id, with any provider prefix stripped.
  *
  * Specs are `provider/id`, but a provider may itself be path-shaped
@@ -183,12 +253,19 @@ export const NO_ADVISOR = "no advisor model resolvable";
  * that produced it. Every branch below states only what its input proves, and
  * ends with the action that branch calls for.
  */
-export function advisorFailureMessage(outcome: CatalogOutcome | "no-auth" | "no-usable-model"): string {
+export function advisorFailureMessage(outcome: CatalogOutcome | "no-auth" | "no-usable-model" | "none-configured"): string {
 	if (outcome === "no-auth") {
 		return `${NO_ADVISOR}: no Hive auth on this machine (run /hive-login) — or set PI_ADVISOR_MODEL`;
 	}
 	if (outcome === "no-usable-model") {
 		return `${NO_ADVISOR}: the Hive mode catalog has no usable model — set PI_ADVISOR_MODEL`;
+	}
+	if (outcome === "none-configured") {
+		return (
+			`${NO_ADVISOR}: none of the Hive mode catalog's models is configured on this machine ` +
+			"(no matching provider credential or model entry in pi) — log in to one of its providers, " +
+			"or set PI_ADVISOR_MODEL to a provider/id that is configured here"
+		);
 	}
 	switch (outcome.kind) {
 		case "unreachable":

@@ -41,8 +41,14 @@ describe("managed devservices posture", () => {
 	it("redirects the compatibility tool when the managed API exists", async () => {
 		const { execute } = managedHarness();
 		const result = await execute("call-1", { database: "app" });
-		expect(result.details).toEqual({ managed: true, resource: "postgres", action: "start" });
-		expect(result.content[0].text).toContain("request_resource");
+		expect(result.details).toMatchObject({ managed: true, resource: "postgres", action: "start", tool: "hive_request_resource" });
+		// The whole call, not a tool name to go and guess the shape of: the MCP
+		// name, where the session_id comes from, and that the launch id is not it.
+		const text = result.content[0].text;
+		expect(text).toContain("hive_request_resource");
+		expect(text).toContain("hive_whoami");
+		expect(text).toContain("call_id");
+		expect(text).toContain("NOT the launch id");
 	});
 
 	it("refuses an untracked start during a transient Hive outage", async () => {

@@ -129,8 +129,25 @@ export const EXIT_UNCONFIRMED = 4;
  * Every other exit IS a statement about the run (1 failed, 2 usage, 3 never
  * ran), and those may be reported as fact.
  */
-export function dispatchUnconfirmed(run: Pick<Dispatch, "code" | "signal">): boolean {
-	return run.signal !== null || run.code === EXIT_UNCONFIRMED;
+export function dispatchUnconfirmed(run: Pick<Dispatch, "code" | "signal"> & Partial<Pick<Dispatch, "out">>): boolean {
+	return run.signal !== null || run.code === EXIT_UNCONFIRMED || staleCLITimedOut(run);
+}
+
+/**
+ * The exit-4 contract is only as old as 2026-09-04, and the CLI a workstation's
+ * launched agents run is whatever the operator last built — measured eight
+ * days behind on 2026-09-10, on the node this wrapper's author uses. A CLI from
+ * before the contract exits 1 on the same lost-response timeout, and the
+ * wrapper then printed "created no run" for it: 20 papercuts in the seven days
+ * AFTER the exit-4 branch shipped, on both developers' nodes.
+ *
+ * So the CLI's own words are read as well as its exit code. Go's client
+ * timeout and the CLI's context deadline both name the request that timed
+ * out; a gate FAILURE never prints either.
+ */
+export function staleCLITimedOut(run: Pick<Dispatch, "code"> & Partial<Pick<Dispatch, "out">>): boolean {
+	if (run.code !== 1 || !run.out) return false;
+	return /Post "[^"]*\/api\/v1\/runs":.*(context deadline exceeded|Client\.Timeout exceeded)/.test(run.out);
 }
 
 /**

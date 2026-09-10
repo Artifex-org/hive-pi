@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadAdvisorConfig } from "../extensions/advisor/config.ts";
-import { pickAdvisorModel, type AgentMode } from "../extensions/advisor/modes.ts";
+import { pickAdvisorModel, pickConfiguredAdvisor, type AgentMode } from "../extensions/advisor/modes.ts";
 import { buildAdvisorPrompt, capTranscript } from "../extensions/advisor/prompt.ts";
 
 // The advisor's pure core: which model is "one class above", how a transcript
@@ -66,6 +66,57 @@ describe("pickAdvisorModel", () => {
 	it("returns null for an empty or unusable catalog", () => {
 		expect(pickAdvisorModel([], "x/y")).toBeNull();
 		expect(pickAdvisorModel([{ key: "bad", model: "notaspec" }], "x/y")).toBeNull();
+	});
+});
+
+// The catalog is the SERVER's ladder; whether a rung runs on THIS machine is a
+// separate fact, and the measured failure was the two disagreeing: the top
+// rung in the catalog, absent from one workstation's registry, and every
+// advisor call there dying on "not configured on this machine" — 100 in seven
+// days — while a configured model one rung down sat unused.
+describe("pickConfiguredAdvisor", () => {
+	const only = (...specs: string[]) => (spec: string) => specs.includes(spec);
+
+	it("is pickAdvisorModel when everything is configured", () => {
+		const pick = pickConfiguredAdvisor(LADDER, "openai-codex/gpt-5.6-terra", () => true);
+		expect(pick?.spec).toBe("openai-codex/gpt-5.6-sol");
+		expect(pick?.note).toBeUndefined();
+	});
+
+	it("skips an unconfigured higher rung for the next configured one above the caller", () => {
+		const ladder: AgentMode[] = [
+			{ key: "top", model: "openai-codex/gpt-6-astra" },
+			{ key: "high", model: "openai-codex/gpt-5.6-sol" },
+			{ key: "low", model: "openai-codex/gpt-5.6-luna" },
+		];
+		const pick = pickConfiguredAdvisor(ladder, "openai-codex/gpt-5.6-luna", only("openai-codex/gpt-5.6-sol", "openai-codex/gpt-5.6-luna"));
+		expect(pick?.spec).toBe("openai-codex/gpt-5.6-sol");
+		expect(pick?.note).toBeUndefined();
+	});
+
+	it("falls to the caller's own class WITH a note when nothing above is configured", () => {
+		const pick = pickConfiguredAdvisor(LADDER, "openai-codex/gpt-5.6-terra", only("openai-codex/gpt-5.6-terra"));
+		expect(pick?.spec).toBe("openai-codex/gpt-5.6-terra");
+		expect(pick?.note).toContain("the same class as this session");
+		expect(pick?.note).toContain("openai-codex/gpt-5.6-sol");
+		expect(pick?.note).toContain("PI_ADVISOR_MODEL");
+	});
+
+	it("falls below the caller, still with a note, rather than failing", () => {
+		const pick = pickConfiguredAdvisor(LADDER, "openai-codex/gpt-5.6-sol", only("openai-codex/gpt-5.6-luna"));
+		expect(pick?.spec).toBe("openai-codex/gpt-5.6-luna");
+		expect(pick?.note).toContain("LOWER class");
+	});
+
+	it("gives an unrankable caller the strongest CONFIGURED rung", () => {
+		const pick = pickConfiguredAdvisor(LADDER, "openrouter/anthropic/claude-opus-4.8", only("openai-codex/gpt-5.6-terra"));
+		expect(pick?.spec).toBe("openai-codex/gpt-5.6-terra");
+		expect(pick?.note).toBeUndefined();
+	});
+
+	it("returns null only when no catalog model is configured at all", () => {
+		expect(pickConfiguredAdvisor(LADDER, "openai-codex/gpt-5.6-terra", () => false)).toBeNull();
+		expect(pickConfiguredAdvisor([], "x/y", () => true)).toBeNull();
 	});
 });
 
