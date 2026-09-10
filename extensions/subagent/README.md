@@ -241,3 +241,7 @@ a writer-capable role: re-running one that already wrote its changes would fold
 to `NO_CHANGE_ERROR` on an unchanged tree.
 
 Chain mode and `orchestrate` stages are not wired yet.
+
+### Review roles are handed the diff (`reviewdiff.ts`, HIV-3421)
+
+A role whose name says *review* or *verify* gets the change it is reviewing appended to its task — working tree against HEAD, else the branch against its base (only when the remote publishes a HEAD; guessing `main` on a `feature`-default repo would diff the wrong branch) — with the file list and the diff delimited as data. Afterwards, any source path the review cites that is not in that file list is flagged on the result. Measured: four reviews in one week returned findings only for files that were not in `git diff`.

@@ -861,11 +861,63 @@ export const harnessUpdateProbe: Probe = async (deps) => {
 	return { id: "harness.update", label: "harness update", status: "ready", detail: `ok ${ageText}` };
 };
 
+/**
+ * The delegation lane: which model a `subagent` worker will run on, and
+ * whether THIS machine holds a credential for its provider.
+ *
+ * Every other row here is about the session. A worker runs on
+ * `PI_SUBAGENT_MODEL` / `subagentDefaultModel`, which is routinely a different
+ * provider — and the measured contradiction, seven times in the week to
+ * 2026-09-10, was "readiness reported OpenRouter ready with $34 left; the
+ * subagent failed with `No API key found for xai`". Both were true. This row
+ * is the one that would have said so before the delegation.
+ *
+ * Credential presence is judged the way pi judges it: a provider entry in
+ * `auth.json`, or the provider's `*_API_KEY` in the environment. Presence,
+ * not validity — a drained or throttled key is the subagent tool's own
+ * fallback to handle (subagent/model.ts).
+ */
+export const delegationProbe: Probe = async (deps) => {
+	const agentDir = deps.env.PI_CODING_AGENT_DIR?.trim() || join(deps.home, ".pi", "agent");
+	const fromEnv = deps.env.PI_SUBAGENT_MODEL?.trim();
+	const settings = deps.readJson<{ subagentDefaultModel?: string }>(join(agentDir, "settings.json"));
+	const model = fromEnv || settings?.subagentDefaultModel?.trim() || "";
+	if (!model) {
+		return {
+			id: "delegation",
+			label: "delegation",
+			status: "unknown",
+			detail: "no delegation model configured — workers run on pi's own default",
+			hint: "set PI_SUBAGENT_MODEL or subagentDefaultModel to pin the cheap lane",
+		};
+	}
+	const at = model.indexOf("/");
+	if (at <= 0) {
+		return { id: "delegation", label: "delegation", status: "degraded", detail: `delegation model "${model}" is not provider/id` };
+	}
+	const provider = model.slice(0, at);
+	const auth = deps.readJson<Record<string, unknown>>(join(agentDir, "auth.json"));
+	const envKey = `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+	const configured = Boolean(auth && typeof auth === "object" && provider in auth) || Boolean(deps.env[envKey]);
+	const source = fromEnv ? "PI_SUBAGENT_MODEL" : "subagentDefaultModel";
+	if (!configured) {
+		return {
+			id: "delegation",
+			label: "delegation",
+			status: "degraded",
+			detail: `worker model ${model} (${source}): no credential for provider "${provider}" here`,
+			hint: `every subagent falls back to another configured model or refuses — add ${provider} to auth.json / $${envKey}, or point ${source} at a provider this machine has`,
+		};
+	}
+	return { id: "delegation", label: "delegation", status: "ready", detail: `worker model ${model} (${source}), ${provider} credential present`, tool: "subagent" };
+};
+
 export const BASE_PROBES: { id: string; label: string; probe: Probe }[] = [
 	{ id: "repo", label: "repo", probe: repoProbe },
 	{ id: "harness.update", label: "harness update", probe: harnessUpdateProbe },
 	{ id: "hive", label: "hive", probe: hiveProbe },
 	{ id: "openrouter", label: "openrouter", probe: openrouterProbe },
+	{ id: "delegation", label: "delegation", probe: delegationProbe },
 	{ id: "gh", label: "gh auth", probe: ghProbe },
 	{ id: "devservices.postgres", label: "dev postgres", probe: postgresProbe },
 	{ id: "browser", label: "browser", probe: browserProbe },

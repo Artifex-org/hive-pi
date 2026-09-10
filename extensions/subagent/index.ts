@@ -100,6 +100,7 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
+import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, reviewTaskWithDiff } from "./reviewdiff.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -249,6 +250,10 @@ export interface SingleResult {
 	modelNote?: string;
 	/** The final message announced work instead of delivering it (model.ts). */
 	midWork?: boolean;
+	/** For a review role: the files of the change it was handed (reviewdiff.ts). */
+	reviewFiles?: string[];
+	/** Paths the review cited that are not in that change. */
+	outsideDiff?: string[];
 }
 
 export interface SubagentUsageByModel {
@@ -414,6 +419,9 @@ export function resultNotes(result: SingleResult): string {
 			"⚠ the worker ended WITHOUT delivering: its last message announces work rather than reporting it. " +
 				"Treat this as incomplete — check the tree for partial edits before building on it.",
 		);
+	}
+	if (result.outsideDiff && result.outsideDiff.length > 0) {
+		notes.push(outsideDiffWarning(result.outsideDiff, result.reviewFiles?.length ?? 0));
 	}
 	return notes.length > 0 ? `\n\n${notes.join("\n\n")}` : "";
 }
@@ -880,7 +888,17 @@ async function runSingleAgent(
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 
-		args.push(`Task: ${task}`);
+		// A review role is handed the change it is reviewing (reviewdiff.ts):
+		// left to find it, a worker reviewed files that were not in the diff.
+		let effectiveTask = task;
+		if (isReviewRole(agent.name)) {
+			const diff = captureReviewDiff(executionCwd);
+			if (diff) {
+				effectiveTask = reviewTaskWithDiff(task, diff, executionCwd);
+				currentResult.reviewFiles = diff.files;
+			}
+		}
+		args.push(`Task: ${effectiveTask}`);
 		let wasAborted = false;
 		emitUpdate();
 
@@ -1039,6 +1057,10 @@ async function runSingleAgent(
 		// the reader that "completed" with "Checking the registry defaults…".
 		if (!isFailedResult(currentResult) && stoppedMidWork(getFinalOutput(currentResult.messages))) {
 			currentResult.midWork = true;
+		}
+		if (currentResult.reviewFiles && !isFailedResult(currentResult)) {
+			const outside = citedOutsideDiff(getFinalOutput(currentResult.messages), currentResult.reviewFiles);
+			if (outside.length > 0) currentResult.outsideDiff = outside;
 		}
 		return currentResult;
 	} finally {
