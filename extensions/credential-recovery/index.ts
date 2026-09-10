@@ -7,6 +7,11 @@ import { isQuotaExhaustedText } from "./quota.ts";
 
 export const RECOVERY_CHANNEL = "hive.credential-recovery";
 
+/** A unix-socket connect that will keep failing: the sandbox forbids it, or the socket is gone. */
+export function isSocketUnreachable(text: string): boolean {
+	return /\b(EPERM|EACCES|ENOENT|ECONNREFUSED)\b/.test(text);
+}
+
 /** Account repair happens inside the existing agent run, before settlement.
  * The agenda driver continues to own normal post-settlement task re-entry. */
 export default function credentialRecovery(pi: ExtensionAPI): void {
@@ -148,7 +153,23 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 				pi.sendMessage({ customType: "credential-recovery", content: "Account capacity recovered. Continue the interrupted task from the existing transcript and completed tool results.", display: true }, { deliverAs: "followUp", triggerTurn: true });
 			}
 		} catch (error) {
-			if (gen === generation) report(ctx, "error", `Account renewal failed: ${error instanceof Error ? error.message : String(error)}`);
+			if (gen === generation) {
+				const text = error instanceof Error ? error.message : String(error);
+				// The socket is not reachable from here and will not become so:
+				// a sandboxed launch (srt) refuses unix-socket connects with
+				// EPERM, and a lease that ended removes the file. Renewing every
+				// ten minutes against that produced one "Account renewal failed:
+				// connect EPERM …hive-recovery.sock" line per interval on every
+				// sandboxed agent (2026-09-11). Say it once, then stop the timer;
+				// an exchange on a real exhaustion still tries, and still reports.
+				if (isSocketUnreachable(text)) {
+					if (timer) clearInterval(timer);
+					timer = undefined;
+					report(ctx, "unavailable", "Account renewal unavailable: the recovery socket is not reachable from this sandbox — renewals stopped");
+				} else {
+					report(ctx, "error", `Account renewal failed: ${text}`);
+				}
+			}
 		} finally { if (gen === generation) recovering = false; }
 	}
 

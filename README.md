@@ -130,3 +130,24 @@ identity). OAuth credentials without one are reported as unavailable for account
 rotation and use the configured provider alternatives. They are never swapped
 by guessing from a slot name. Completed, aborted and superseded requests are not
 automatically resumed when capacity returns.
+
+## Rate-limit backoff
+
+`ratelimit-backoff` is the layer above pi's in-turn retry. pi retries a
+retryable provider error inside the turn (`settings.retry`: now 5 attempts from a
+5 s base in the fleet default, up from 3 from 2 s) and then the turn fails and
+the session sits idle. On a turn that died on a **rate limit** (429 / "rate
+limit", never an exhausted allowance or an auth failure — those are
+`credential-recovery`'s), this extension waits 30 s, doubling per consecutive
+rate-limited turn to a 5 min cap with ±25 % jitter (a provider's `Retry-After`
+wins), shows the wait in the status bar, and then queues the same
+"continue from the current transcript" follow-up credential-recovery uses. Any
+human input, a model switch or a session replacement drops the pending
+continuation. After 8 consecutive rate-limited turns it stops and says so —
+that is a capacity decision for the operator. Measured trigger: the TES-9799
+worker on 2026-09-11, four `Turn failed · 429 code 1302` lines a second apart
+and nobody to continue it.
+
+`credential-recovery` now also stops its ten-minute renewal timer, once, when the
+recovery socket is unreachable from a sandbox (`connect EPERM …hive-recovery.sock`)
+instead of logging the same failure every interval.
