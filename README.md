@@ -133,6 +133,8 @@ automatically resumed when capacity returns.
 
 ## Rate-limit backoff
 
+`meta-media` gives the `meta` provider pi-native video/audio/PDF: it re-registers the overlay's Muse Spark models on its own api id and rewrites each request through `onPayload` to carry a media ref (an image part with a private mime) as a real `input_video`/`input_file` block — lifting it out of the tool-output slot Meta rejects it in. Its `watch_media` tool attaches media on a meta session and falls back to Hive's watcher (`/media/describe`) on any other provider. It never registers `context` (forbidden here); the off-meta boundary is documented instead.
+
 `ratelimit-backoff` is the layer above pi's in-turn retry. pi retries a
 retryable provider error inside the turn (`settings.retry`: now 5 attempts from a
 5 s base in the fleet default, up from 3 from 2 s) and then the turn fails and
