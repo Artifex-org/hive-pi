@@ -1,122 +1,29 @@
 /**
- * meta-media — pure logic (HIV-3566). No pi imports, so every rule here is
- * testable without a session.
+ * meta-media — pure logic (HIV-3566). No pi or network imports, so every rule
+ * here is testable without a session.
  *
- * THE CONTRACT. pi's content parts are text and image, and its schema will
- * not admit a third kind. So a piece of media rides INSIDE an image part with a
- * private mime type, `application/x-hive-media-ref`, whose base64 body is a
- * small JSON ref: `{kind, url}` for a URL the vendor fetches itself, or
- * `{kind, file_id}` for a file the tool uploaded. pi serialises that part for
- * the Responses API as `input_image` with a data URL — measured 2026-09-15, it
- * does so for ANY mime — and `rewritePayload` turns it back into the block the
- * vendor understands (`input_video` / `input_file`) before the request leaves.
+ * The extension is a thin, guarded pi-native front for Hive's media watcher
+ * (POST /media/describe, HIV-3565): a `watch_media` tool that hands a media URL
+ * to a video-capable model server-side and returns its timeline + transcript +
+ * verdict as text. That works on EVERY provider, because the watching happens
+ * in hive-server, not in this session's model.
  *
- * TWO PLACEMENT RULES, both measured, both non-obvious:
- *
- *  1. A tool result's parts land in `function_call_output.output[]`, and Meta
- *     refuses anything but a real image THERE ("unsupported media type at
- *     input[5].output[1]: video/mp4"). So a ref is LIFTED out of the tool
- *     output into a following user item, which is where `input_file` and
- *     `input_video` are accepted.
- *  2. The overlay's meta models declare `api: openai-responses`, which routes
- *     them to pi's built-in transport and past any provider `streamSimple`. The
- *     extension therefore re-registers those models under its OWN api id; that
- *     replaces the provider's list, so it must re-register ALL of them, read
- *     from the overlay rather than retyped.
+ * WHY NOT ATTACH THE MEDIA TO THE MODEL DIRECTLY. pi's content parts are text
+ * and image only; carrying a video would mean rewriting the provider payload,
+ * which needs either the forbidden `before_provider_request`/`context` hooks or
+ * a wrap of pi's built-in transport reached through `@earendil-works/pi-ai/compat`
+ * — a non-root subpath the repo bans (test/pi-api-surface). Reimplementing the
+ * Responses streaming protocol in an extension just to rewrite one payload is
+ * disproportionate, so native in-conversation attachment is deferred and the
+ * watcher runs server-side instead. The user-visible result is the same text.
  */
-
-export const MEDIA_REF_MIME = "application/x-hive-media-ref";
-export const META_API_ID = "meta-responses";
-export const META_BASE_URL = "https://api.meta.ai/v1";
 
 export type MediaKind = "video" | "audio" | "image" | "pdf";
 
-export interface MediaRef {
-	kind: MediaKind;
-	url?: string;
-	file_id?: string;
-	/** original mime, when known — audio needs its format on the wire */
-	mime?: string;
-}
-
-/** Encode a ref as the image part pi will carry. */
-export function encodeMediaRef(ref: MediaRef): { type: "image"; mimeType: string; data: string } {
-	return { type: "image", mimeType: MEDIA_REF_MIME, data: Buffer.from(JSON.stringify(ref), "utf8").toString("base64") };
-}
-
-/** Decode a data URL (`data:<mime>;base64,<body>`) back into a ref, or null when it is not one of ours. */
-export function decodeMediaRefDataURL(url: string): MediaRef | null {
-	const prefix = `data:${MEDIA_REF_MIME};base64,`;
-	if (!url.startsWith(prefix)) return null;
-	try {
-		const parsed = JSON.parse(Buffer.from(url.slice(prefix.length), "base64").toString("utf8")) as MediaRef;
-		if (!parsed || typeof parsed !== "object" || !parsed.kind) return null;
-		if (!parsed.url && !parsed.file_id) return null;
-		return parsed;
-	} catch {
-		return null;
-	}
-}
-
-/** The Responses-API block for a ref. Mirrors hive's mediaunderstand.fileBlock. */
-export function refToBlock(ref: MediaRef): Record<string, unknown> {
-	if (ref.file_id) return { type: "input_file", file_id: ref.file_id };
-	switch (ref.kind) {
-		case "video":
-			return { type: "input_video", video_url: ref.url };
-		case "image":
-			return { type: "input_image", image_url: ref.url };
-		default:
-			return { type: "input_file", file_url: ref.url };
-	}
-}
-
-/**
- * Rewrite a Responses payload in place: every media-ref image part is removed
- * from where pi put it and re-attached as a user item directly after, so the
- * model sees the media at the point in the conversation it was fetched.
- * Returns how many refs were lifted (0 = payload untouched).
- */
-export function rewritePayload(payload: unknown): number {
-	const p = payload as { input?: unknown };
-	if (!p || !Array.isArray(p.input)) return 0;
-	const out: unknown[] = [];
-	let lifted = 0;
-	for (const item of p.input as Array<Record<string, unknown>>) {
-		const refs: MediaRef[] = [];
-		const strip = (parts: unknown): unknown => {
-			if (!Array.isArray(parts)) return parts;
-			return parts.filter((part) => {
-				const url = (part as { type?: string; image_url?: unknown })?.image_url;
-				if ((part as { type?: string })?.type !== "input_image" || typeof url !== "string") return true;
-				const ref = decodeMediaRefDataURL(url);
-				if (!ref) return true;
-				refs.push(ref);
-				return false;
-			});
-		};
-		if (item && typeof item === "object") {
-			if ("content" in item) item.content = strip(item.content);
-			if ("output" in item) item.output = strip(item.output);
-		}
-		out.push(item);
-		if (refs.length) {
-			lifted += refs.length;
-			out.push({
-				role: "user",
-				content: [
-					{ type: "input_text", text: `(${refs.length === 1 ? "media" : `${refs.length} media items`} attached by the tool result above)` },
-					...refs.map(refToBlock),
-				],
-			});
-		}
-	}
-	p.input = out;
-	return lifted;
-}
-
-/** Media kind from a mime type or a file name / URL; null when neither says. */
-export function inferKind(contentType: string | undefined, name: string | undefined): MediaKind | null {
+/** Media kind from an explicit hint, a mime type, or a file name / URL; null when none says. */
+export function inferKind(explicit: string | undefined, contentType: string | undefined, name: string | undefined): MediaKind | null {
+	const hint = (explicit ?? "").trim().toLowerCase();
+	if (hint === "video" || hint === "audio" || hint === "image" || hint === "pdf") return hint;
 	const ct = (contentType ?? "").split(";")[0].trim().toLowerCase();
 	if (ct.startsWith("video/")) return "video";
 	if (ct.startsWith("audio/")) return "audio";
@@ -131,53 +38,22 @@ export function inferKind(contentType: string | undefined, name: string | undefi
 	return null;
 }
 
-/** Contributor-tier models train on their inputs; customer media never goes there. */
-export function isContributorModel(modelId: string): boolean {
-	return modelId.endsWith("-contributor");
+export interface DescribeBody {
+	url: string;
+	kind?: string;
+	question?: string;
 }
 
-export interface OverlayModel {
-	id: string;
-	name?: string;
-	api?: string;
-	baseUrl?: string;
-	reasoning?: boolean;
-	input?: string[];
-	cost?: unknown;
-	contextWindow?: number;
-	maxTokens?: number;
-	thinkingLevelMap?: unknown;
-	compat?: unknown;
+/** The JSON body for POST /media/describe. Pure, so the wire shape is tested. */
+export function describeRequestBody(url: string, kind: MediaKind | null, question: string | undefined): DescribeBody {
+	const body: DescribeBody = { url };
+	if (kind) body.kind = kind;
+	const q = (question ?? "").trim();
+	if (q) body.question = q;
+	return body;
 }
 
-/**
- * The overlay's meta models, re-declared on this extension's api id. The
- * overlay is the one source of the model definitions (hive's catalog and its
- * drift test read the same file); this only swaps the transport.
- */
-export function modelsFromOverlay(overlayJSON: string | null): OverlayModel[] {
-	if (!overlayJSON) return [];
-	let doc: { providers?: Record<string, { models?: OverlayModel[] }> };
-	try {
-		doc = JSON.parse(overlayJSON);
-	} catch {
-		return [];
-	}
-	const models = doc?.providers?.meta?.models ?? [];
-	return models
-		.filter((m) => m && typeof m.id === "string" && m.id)
-		.map((m) => {
-			// `provider` is not a models.json field; `api` is replaced. Everything
-			// else rides through untouched so cost, context and thinking levels
-			// stay exactly what the overlay says.
-			const { api: _api, baseUrl: _baseUrl, ...rest } = m;
-			return { ...rest, api: META_API_ID, baseUrl: META_BASE_URL };
-		});
-}
-
-/** Text shown when the tool falls back to Hive's watcher for a non-meta session. */
-export function fallbackNotice(provider: string | undefined): string {
-	return provider === "meta"
-		? ""
-		: `This session runs on ${provider ?? "an unknown provider"}, which cannot take media directly; Hive's watcher model analysed it and this is its report.`;
+/** The header line prepended to the watcher's report so the reader knows how it was produced. */
+export function reportHeader(model: string | undefined, inputTokens: number | undefined): string {
+	return `[watched server-side by ${model ?? "a video-capable model"}${inputTokens ? `, ${inputTokens} input tokens` : ""}]`;
 }
