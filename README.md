@@ -133,7 +133,7 @@ automatically resumed when capacity returns.
 
 ## Rate-limit backoff
 
-`meta-media` adds a pi-native `watch_media` tool: an agent on any model hands it a media URL (a Linear screen recording, a Sentry replay) and Hive's server-side watcher (`/media/describe`) returns a timeline, transcript and triage verdict as text. It is the ergonomic twin of the `describe_media` MCP tool. It does not attach media to the session's own model — pi carries only text and images, and the payload-rewrite that would need is blocked by the forbidden provider-path hooks and the banned `/compat` transport import, so the watcher runs server-side instead.
+`meta-media` does two things. It declares the **Meta (Muse Spark) provider in the base harness** so Muse Spark is launchable wherever pi runs — workstation launches and the Code Factory image alike (it previously lived only in the artifex-pi workstation overlay, which is why a factory run that demoted onto a meta rung died with `Model "meta/…" not found`). Models only, over the built-in OpenAI-Responses transport — no `/compat` wrap. And it adds a pi-native `watch_media` tool: an agent on any model hands it a media URL and Hive's server-side watcher (`/media/describe`) returns a timeline, transcript and triage verdict as text, so it works even on providers whose sandbox cannot reach api.meta.ai.
 
 `ratelimit-backoff` is the layer above pi's in-turn retry. pi retries a
 retryable provider error inside the turn (`settings.retry`: now 5 attempts from a
