@@ -60,6 +60,7 @@ const READ_ONLY: Record<string, string> = {
 	compact_schedule: "sets a flag; compaction itself is pi's",
 	fetch_content: "network read; has its own SSRF vetting per redirect hop",
 	find: "read-only search",
+	watch_media: "network read: hands a media URL to Hive's server-side watcher and returns text; writes nothing, spawns nothing",
 	goal_set: "persists a session entry via pi.appendEntry",
 	grep: "read-only search",
 	knowledge_collections: "hive knowledge read",
