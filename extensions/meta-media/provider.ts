@@ -17,10 +17,26 @@
  */
 export const META_BASE_URL = "https://api.meta.ai/v1";
 
+/**
+ * `compat.supportsStrictMode` turns on strict JSON-schema constrained tool
+ * inputs — the "structured output" capability Meta advertises for Muse. It is
+ * scoped and safe: the transport applies it only to tools that opt in with a
+ * `json_schema` constrainedSampling config, and a schema that cannot be made
+ * strict falls back PER-TOOL to non-strict (resolveJsonSchemaStrictSampling)
+ * rather than failing the request — the same reason openai-codex carries it on
+ * every model with no ill effect.
+ *
+ * Verified against api.meta.ai directly (2026-09-16): a `/v1/responses` call
+ * with a `strict:true` function tool returned HTTP 200 and a correct
+ * schema-shaped call. The two OTHER Muse-lacking flags are deliberately NOT set:
+ * `supportsToolSearch` makes api.meta.ai return HTTP 500 on the `tool_search`
+ * wire item, and `supportsOpenAIGrammarTools` is inert here (no hive tool ships
+ * an `openai_lark` grammar variant).
+ */
 export const metaModels = [
-		{ id: "muse-spark-1.3", name: "Muse Spark 1.3", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 1.25, "output": 4.25, "cacheRead": 0.15, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null} },
-		{ id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 Contributor", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 0.1, "output": 0.2, "cacheRead": 0.002, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null} },
-		{ id: "muse-spark-1.2", name: "Muse Spark 1.2", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 1.25, "output": 4.25, "cacheRead": 0.15, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null} },
-		{ id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 Contributor", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 0.1, "output": 0.2, "cacheRead": 0.002, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null} },
-		{ id: "muse-spark-1.1", name: "Muse Spark 1.1", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 1.25, "output": 4.25, "cacheRead": 0.15, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null} },
+		{ id: "muse-spark-1.3", name: "Muse Spark 1.3", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 1.25, "output": 4.25, "cacheRead": 0.15, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null}, compat: { supportsStrictMode: true } },
+		{ id: "muse-spark-1.3-contributor", name: "Muse Spark 1.3 Contributor", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 0.1, "output": 0.2, "cacheRead": 0.002, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null}, compat: { supportsStrictMode: true } },
+		{ id: "muse-spark-1.2", name: "Muse Spark 1.2", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 1.25, "output": 4.25, "cacheRead": 0.15, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null}, compat: { supportsStrictMode: true } },
+		{ id: "muse-spark-1.2-contributor", name: "Muse Spark 1.2 Contributor", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 0.1, "output": 0.2, "cacheRead": 0.002, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null}, compat: { supportsStrictMode: true } },
+		{ id: "muse-spark-1.1", name: "Muse Spark 1.1", reasoning: true, input: ["text", "image"], contextWindow: 1048576, maxTokens: 131072, cost: {"input": 1.25, "output": 4.25, "cacheRead": 0.15, "cacheWrite": 0}, thinkingLevelMap: {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": null}, compat: { supportsStrictMode: true } },
 ];
