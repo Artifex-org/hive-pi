@@ -32,10 +32,13 @@ session transcript *and* sent to the model on the next turn. Use the prompt, or
 
 ## What is sent
 
-Model and provider ids, token counts, cost, turns, tool **names** with call and
-error counts, **a count per error kind from a fixed ten-value vocabulary**
-(see the exception below), gate outcomes, session duration, the git remote as a
-normalized `owner/repo`, agent + version, source.
+Model and provider ids, token counts, cost, turns, **per-model generation speed**
+(summed decode milliseconds, generated tokens, time-to-first-token milliseconds
+and a timed-turn count — all durations and counts, measured from the message
+stream, no text), tool **names** with call and error counts, **a count per error
+kind from a fixed ten-value vocabulary** (see the exception below), gate
+outcomes, session duration, the git remote as a normalized `owner/repo`, agent +
+version, source.
 
 ## What is never sent
 

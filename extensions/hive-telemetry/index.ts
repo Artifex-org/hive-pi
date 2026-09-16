@@ -124,6 +124,18 @@ export default function (pi: ExtensionAPI) {
 	let cfg: ResolvedConfig = loadConfig();
 
 	let run: RunAccumulator | null = null;
+	/**
+	 * Clock readings for the ONE main-turn assistant message currently streaming,
+	 * used to measure generation speed. pi awaits extension handlers serially and
+	 * runs a single main LLM call at a time, so one slot suffices: message_start
+	 * (re)arms it with headersAt, the FIRST message_update stamps firstTokenAt,
+	 * message_end reads it (adding endAt) and clears it. endAt is not stored here
+	 * because it is only known at message_end. Held in the closure next to `run`,
+	 * NEVER module scope (pi builds a fresh module per session, but the handlers
+	 * close over these bindings) and never on the pure accumulator — it is
+	 * transient per-message state that never ships.
+	 */
+	let inflight: { headersAt: number; firstTokenAt: number | null } | null = null;
 	let flushTimer: ReturnType<typeof setTimeout> | undefined;
 	let intervalTimer: ReturnType<typeof setInterval> | undefined;
 	let unsubscribeMetrics: (() => void) | undefined;
@@ -516,6 +528,10 @@ export default function (pi: ExtensionAPI) {
 		const envSource = process.env.HIVE_TELEMETRY_SOURCE;
 		const source = envSource === "eval" || envSource === "cloud" ? envSource : "workstation";
 		run = createRun(randomUUID(), sessionId, forkedFrom, source, Date.now());
+		// Drop any stale timing slot: session_start can fire again on /reload
+		// without a shutdown, and a slot armed by the previous session must not be
+		// consumed by the next session's first message_end.
+		inflight = null;
 		const current = run;
 
 		// Announce the run id to any sibling Hive extension in this process
@@ -677,6 +693,34 @@ export default function (pi: ExtensionAPI) {
 		});
 	});
 
+	// Generation-speed timing, option A (no pi-ai change). message_start fires on
+	// the provider stream's "start" event, which pi-ai pushes AFTER the HTTP await
+	// and onResponse — so this ≈ response headers received, the TTFT baseline.
+	// Re-arm unconditionally: a new assistant message supersedes any prior slot
+	// whose stream was aborted before its end.
+	pi.on("message_start", (event) => {
+		try {
+			if (!run) return;
+			if (event.message.role !== "assistant") return;
+			inflight = { headersAt: Date.now(), firstTokenAt: null };
+		} catch {
+			/* fail open */
+		}
+	});
+
+	// HOT PATH: fires once per streamed content event (≈ per token). It MUST stay
+	// O(1) — no allocation, no logging, no `run` writes, no flush. pi emits
+	// message_update only for content-block events (text/thinking/toolcall
+	// start/delta/end), never the stream "start", so the FIRST update after a
+	// message_start is the first output token. Stamp it once and ignore every
+	// later delta; a delta-less tool-only turn (toolcall_start→end) is still
+	// caught by the first update. Disabled sessions never arm `inflight`, so this
+	// is a single null-check per token then.
+	pi.on("message_update", () => {
+		const t = inflight;
+		if (t !== null && t.firstTokenAt === null) t.firstTokenAt = Date.now();
+	});
+
 	pi.on("message_end", (event, ctx) => {
 		try {
 			if (!run) return;
@@ -695,7 +739,15 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				/* unknown — the server's own policy still classifies it */
 			}
-			foldMessageEnd(run, assistant, notional);
+			// Consume the timing captured across this message's start/update
+			// stream, stamping endAt now, then clear the slot before the next
+			// message. A non-streaming reply leaves firstTokenAt null, which makes
+			// the fold a no-op (timedTurnContribution returns null).
+			const timing = inflight !== null
+				? { headersAt: inflight.headersAt, firstTokenAt: inflight.firstTokenAt, endAt: Date.now() }
+				: undefined;
+			inflight = null;
+			foldMessageEnd(run, assistant, notional, timing);
 			if (run.dirty >= cfg.eventThreshold) queueFlush("threshold");
 		} catch {
 			/* fail open: telemetry must never break the agent loop */

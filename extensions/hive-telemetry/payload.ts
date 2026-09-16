@@ -4,9 +4,11 @@
  * This is the only file that constructs what leaves the machine. Review it
  * alone and you have reviewed the privacy boundary: one function, one diff.
  *
- * SENT: model + provider ids, token counts, cost, turns, tool NAMES with call
- * and error counts, gate outcomes, session duration, the git remote as a
- * normalized owner/repo, agent + version, source.
+ * SENT: model + provider ids, token counts, cost, turns, per-model generation
+ * speed (decode ms, generated tokens, TTFT ms, timed-turn count — all durations
+ * and counts, no text), tool NAMES with call and error counts, gate outcomes,
+ * session duration, the git remote as a normalized owner/repo, agent + version,
+ * source.
  *
  * NEVER SENT, and with no config option that could enable it: prompts,
  * completions, thinking blocks, tool arguments, tool results, file paths or
@@ -155,6 +157,21 @@ function buildModels(run: RunAccumulator): PayloadModel[] {
 			// Infinity, org-wide and permanently. The server rejects it; we
 			// never send it in the first place.
 			cost_usd: Number.isFinite(bucket.cost) && bucket.cost > 0 ? bucket.cost : 0,
+			// Generation speed, gated on timedTurns and emitted ALL-FOUR-OR-NONE.
+			// The gate is `!== undefined`, NOT truthiness: generationMs can be 0
+			// for a sub-millisecond one-token decode, and that turn must still
+			// ship its timed_turns and ttft. The four fields become defined
+			// together in the accumulator, so testing one is testing all. Absent
+			// means the server stores NULL ("not measured") — a 0 would assert
+			// infinite throughput no measurement made.
+			...(bucket.timedTurns !== undefined
+				? {
+					generation_ms: Math.max(0, Math.round(bucket.generationMs ?? 0)),
+					generated_tokens: Math.max(0, Math.round(bucket.generatedTokens ?? 0)),
+					ttft_ms: Math.max(0, Math.round(bucket.ttftMs ?? 0)),
+					timed_turns: bucket.timedTurns,
+				}
+				: {}),
 		});
 	}
 	return out;
