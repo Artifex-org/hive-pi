@@ -136,6 +136,24 @@ export interface PayloadModel {
 	 */
 	reasoning_tokens?: number;
 	cost_usd: number;
+	/**
+	 * Client-measured LLM generation speed. All four OPTIONAL and sent
+	 * ALL-FOUR-OR-NONE: omitted together when this model saw no TIMED message (a
+	 * client too old, a non-streaming reply, or one that stopped abnormally). The
+	 * server stores each as nullable; NULL means "not measured", and a 0 would
+	 * read as infinitely fast / zero throughput — so they are NEVER sent as 0 for
+	 * an unmeasured model, only omitted.
+	 *
+	 *   generation_ms    Σ decode interval (message_end − first_output_token).
+	 *   generated_tokens Σ output of those SAME timed messages — the matched
+	 *                    numerator, NOT output_tokens.
+	 *   ttft_ms          Σ (first_output_token − message_start).
+	 *   timed_turns      coverage denominator (avg ttft = ttft_ms / timed_turns).
+	 */
+	generation_ms?: number;
+	generated_tokens?: number;
+	ttft_ms?: number;
+	timed_turns?: number;
 }
 
 export interface PayloadTool {

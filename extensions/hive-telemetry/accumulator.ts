@@ -47,6 +47,29 @@ export interface ModelBucket {
 	 */
 	reasoning?: number;
 	cost: number;
+	/**
+	 * Client-measured LLM generation speed, folded ONLY from the MAIN-turn
+	 * message stream (foldMessageEnd given a `timing`). Nested/subagent and
+	 * non-streaming folds never touch these, so they stay undefined there.
+	 *
+	 * All four start undefined and become numbers TOGETHER, the first time a
+	 * timed message contributes (see timedTurnContribution). undefined is "not
+	 * measured"; a 0 would read as infinitely fast / zero throughput, so a bucket
+	 * that saw no timed message must emit null for all four, never 0 — payload.ts
+	 * gates the whole group on `timedTurns !== undefined`.
+	 *
+	 *   generationMs    Σ (message_end − first_output_token): the DECODE interval.
+	 *   generatedTokens Σ output tokens of those SAME timed messages — the matched
+	 *                   numerator, NEVER the bucket's total `output`.
+	 *   ttftMs          Σ (first_output_token − message_start); message_start ≈
+	 *                   response-headers-received.
+	 *   timedTurns      count of messages that contributed to the three sums —
+	 *                   the coverage denominator (avg ttft = ttftMs / timedTurns).
+	 */
+	generationMs?: number;
+	generatedTokens?: number;
+	ttftMs?: number;
+	timedTurns?: number;
 }
 
 export interface ToolBucket {
@@ -539,11 +562,11 @@ function modelKey(provider: string, model: string): string {
 /** Metric-only child usage supplied by the subagent producer. */
 export type NestedUsageModel = NestedUsageMetric;
 
-function addModelUsage(a: RunAccumulator, usage: NestedUsageModel): void {
+function addModelUsage(a: RunAccumulator, usage: NestedUsageModel): ModelBucket | undefined {
 	const key = modelKey(usage.provider, usage.model);
 	let bucket = a.models.get(key);
 	if (!bucket) {
-		if (a.models.size >= MAX_MODELS) return;
+		if (a.models.size >= MAX_MODELS) return undefined;
 		bucket = {
 			model: usage.model,
 			provider: usage.provider,
@@ -568,6 +591,60 @@ function addModelUsage(a: RunAccumulator, usage: NestedUsageModel): void {
 	if (Number.isFinite(usage.cost) && usage.cost > 0) bucket.cost += usage.cost;
 	bucket.turns += usage.turns;
 	a.dirty += 1;
+	return bucket;
+}
+
+/** The clock readings for ONE in-flight assistant message, taken in index.ts. */
+export interface MessageTiming {
+	/** Date.now() at message_start — the provider pushes the stream "start" AFTER
+	 * the HTTP await and its onResponse, so this ≈ response headers received. */
+	headersAt: number;
+	/** Date.now() at the FIRST message_update. pi emits message_update only for
+	 * content-block events (never the stream "start"), so the first one is the
+	 * first output token — this also captures a delta-less tool-only turn.
+	 * null when the message never streamed (a non-streaming reply emits
+	 * message_start then message_end with no update between). */
+	firstTokenAt: number | null;
+	/** Date.now() at message_end. */
+	endAt: number;
+}
+
+/** Stop reasons that mark a COMPLETE decode worth timing. A truncated or failed
+ * decode (aborted/error/pending/deferred) would understate ms-per-token, so it
+ * contributes nothing. `length` is a clean stop at the token cap. */
+const TIMED_STOP_REASONS = new Set(["stop", "toolUse", "length"]);
+
+/**
+ * timedTurnContribution decides whether one assistant message counts as a TIMED
+ * turn and, if so, returns its decode/ttft split; null means "contribute
+ * nothing, leave the bucket's four speed fields untouched".
+ *
+ * It returns null when there is no honest decode measurement to make:
+ *   - the message never streamed a token (firstTokenAt null) — non-streaming or
+ *     served-from-cache reply, so there is no decode interval at all;
+ *   - it produced no output tokens (output <= 0) — nothing was decoded, and it
+ *     would also be a zero numerator;
+ *   - it stopped abnormally — see TIMED_STOP_REASONS;
+ *   - a clock skew made either interval negative.
+ *
+ * Pure and exported so the fold decision is testable without a pi harness, the
+ * same reason shouldHeartbeat and resolveEndOutcome sit here.
+ */
+export function timedTurnContribution(
+	msg: AssistantMessage,
+	timing: MessageTiming,
+): { generationMs: number; generatedTokens: number; ttftMs: number } | null {
+	if (timing.firstTokenAt === null) return null;
+	const output = msg.usage?.output ?? 0;
+	if (!(output > 0)) return null;
+	if (!TIMED_STOP_REASONS.has(String(msg.stopReason))) return null;
+	const generationMs = timing.endAt - timing.firstTokenAt;
+	const ttftMs = timing.firstTokenAt - timing.headersAt;
+	// A non-monotonic wall clock (NTP step, suspend/resume) can invert an
+	// interval; a negative summand would corrupt the cumulative total, so drop
+	// the whole turn rather than fold a lie.
+	if (generationMs < 0 || ttftMs < 0) return null;
+	return { generationMs, generatedTokens: output, ttftMs };
 }
 
 /**
@@ -580,12 +657,17 @@ function addModelUsage(a: RunAccumulator, usage: NestedUsageModel): void {
  * factory_spend: a single model field on a multi-model run credits everything to
  * whichever model finished.
  */
-export function foldMessageEnd(a: RunAccumulator, msg: AssistantMessage, notionalCost: boolean): void {
+export function foldMessageEnd(
+	a: RunAccumulator,
+	msg: AssistantMessage,
+	notionalCost: boolean,
+	timing?: MessageTiming,
+): void {
 	const provider = String(msg.provider ?? "");
 	const model = String(msg.responseModel ?? msg.model ?? "");
 	if (!model) return;
 	const usage: Usage | undefined = msg.usage;
-	addModelUsage(a, {
+	const bucket = addModelUsage(a, {
 		provider,
 		model,
 		authMode: notionalCost ? "subscription" : "api_key",
@@ -600,6 +682,22 @@ export function foldMessageEnd(a: RunAccumulator, msg: AssistantMessage, notiona
 		// is notional, which is exactly what authMode above tells the server.
 		cost: usage?.cost?.total ?? 0,
 	});
+	// Fold stream timing into the SAME bucket addModelUsage just keyed, so the
+	// decode numerator (generatedTokens) and this message's `output` land on the
+	// same row. When the bucket is undefined (cardinality cap hit) the timing is
+	// dropped with the usage rather than orphaned onto another model. Only the
+	// MAIN-turn message_end path passes `timing`; nested/subagent folds never do,
+	// so their buckets keep the four fields undefined and emit null.
+	if (bucket && timing) {
+		const t = timedTurnContribution(msg, timing);
+		if (t) {
+			bucket.generationMs = (bucket.generationMs ?? 0) + t.generationMs;
+			bucket.generatedTokens = (bucket.generatedTokens ?? 0) + t.generatedTokens;
+			bucket.ttftMs = (bucket.ttftMs ?? 0) + t.ttftMs;
+			bucket.timedTurns = (bucket.timedTurns ?? 0) + 1;
+			a.dirty += 1;
+		}
+	}
 }
 
 function validNestedUsage(usage: NestedUsageModel): boolean {
