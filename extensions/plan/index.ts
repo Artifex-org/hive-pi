@@ -21,8 +21,16 @@
  *     `tool_call` is the enforcement.
  *  3. Nothing mutable at module scope: pi builds a fresh jiti per extension
  *     entry with `moduleCache:false`, so state lives in the factory closure.
- *  4. Nothing here injects a turn or re-enters the agent loop, so the
- *     one-injector invariant in `agenda/driver.ts` is untouched.
+ *  4. ONE injector lives here — `plan auto-continue` (autocontinue.ts), wired
+ *     to a single `agent_settled` handler below. It is a SECOND automatic
+ *     injector beside `agenda/driver.ts`, and it composes with it the same way
+ *     `@narumitw/pi-goal` does: it reads `ctx.isIdle()` live before injecting,
+ *     so whichever injector runs first in pi's serial handler chain flips
+ *     `_isAgentRunActive` and the rest stand down — at most one injection per
+ *     settle. It reuses the driver's own guards (`turnFailureOf`,
+ *     `blocksReentry`) so an error, an abort or a question is never re-driven.
+ *     Its cap is per-session and independent of the driver's ledger; the two
+ *     caps do not compose, which is by design — see the PR and autocontinue.ts.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -56,6 +64,11 @@ import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
 import { lintPlanComposition, type PlanLintIssue } from "./lint.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
 import { currentLane, isObservedKind, targetLane } from "./lanes.ts";
+import {
+	createAutoContinueState,
+	runAutoContinue,
+	type AutoContinueState,
+} from "./autocontinue.ts";
 import { registerFacadeTools } from "./facades.ts";
 import { opsForLane, TEMPLATE_NAMES_TUPLE } from "./templates.ts";
 import {
@@ -1404,6 +1417,59 @@ export default function (pi: ExtensionAPI) {
 		narrowTools();
 		paint();
 		announceMode();
+	});
+
+	/* ---------------------------------------------------------------------- */
+	/* Auto-continue (autocontinue.ts)                                         */
+	/* ---------------------------------------------------------------------- */
+
+	// Per-session, in the factory closure — module scope is not per-session
+	// (moduleCache:false). Wiped on session_start, like the driver's ledger.
+	let autoContinue: AutoContinueState = createAutoContinueState();
+	// A blocking UI/approval prompt is up between these two events. Auto-continue
+	// must never inject under one (it would answer the operator's prompt for them).
+	let uiPromptOpen = false;
+
+	pi.on("session_start", () => {
+		autoContinue = createAutoContinueState();
+		uiPromptOpen = false;
+	});
+
+	pi.on("ui_prompt_start", () => {
+		uiPromptOpen = true;
+	});
+	pi.on("ui_prompt_end", () => {
+		uiPromptOpen = false;
+	});
+
+	// The "stopped short" signal. A settle whose LAST turn made no tool call is
+	// the text-only summary this feature exists to un-stick; one that ended on a
+	// tool call is mid-work and not ours to re-drive. `turn_end` carries the
+	// turn's tool results, so an empty set is a text-only turn.
+	pi.on("turn_end", (event) => {
+		autoContinue.lastTurnMadeToolCall = event.toolResults.length > 0;
+	});
+
+	// Any real user message is re-engagement: it resets the cap and the anti-spin
+	// streak, so a human who steers gets the full budget again. Every `source`
+	// counts, including `extension` — that is how a hive-remote operator's steer
+	// (`sendUserMessage`, source "extension") arrives, and the primary deployment
+	// is a Hive launch steered from the workspace. This feature's OWN injection
+	// rides `sendMessage` (custom), which fires no `input` event at all, and a
+	// slash command sent as a message (`/compact`) is handled before the event —
+	// so nothing this or any policy injects can trip this reset.
+	pi.on("input", () => {
+		autoContinue = createAutoContinueState();
+	});
+
+	// THE injector. Synchronous, cheap, and idle-gated so it composes with the
+	// agenda driver (at most one injection per settle). See autocontinue.ts.
+	pi.on("agent_settled", (_event, ctx) => {
+		runAutoContinue(pi, ctx, {
+			loadDoc: (c) => rehydratePlan(branchEntries(c)) ?? emptyPlan(Date.now()),
+			state: autoContinue,
+			uiPromptOpen,
+		});
 	});
 
 	/* ---------------------------------------------------------------------- */
