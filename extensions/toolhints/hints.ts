@@ -295,6 +295,42 @@ export const HINTS: readonly ToolHint[] = [
 			"`hive_wait_for_run` six times).",
 		evidence: "108 sessions / 7d: 292 rejected proxy calls, the top messages all this class",
 	},
+	{
+		// `mcp` with NO recognised mode (no tool/search/server/connect/describe/
+		// instructions/action) falls through to the STATUS listing — the adapter's
+		// `executeStatus`, whose first line is `MCP: <n>/<m> servers, <k> tools`
+		// (`proxy-modes.ts:277`). A low-tier worker that drifts into calling
+		// `mcp {}` reads that listing — with its `not connected` / `cached` lines —
+		// as having LOST access to the tools, and self-blocks. This says the
+		// opposite, at the moment it is misread.
+		//
+		// `[1-9]\d*` on the tool count is load-bearing: `MCP: 0/0 servers, 0 tools`
+		// means nothing is configured, where "the tools ARE available" would be a
+		// lie — and a hint that is wrong is worse than none (see `mcp-proxy-no-match`
+		// above, which shipped a false claim and cost two sessions). No `^` anchor:
+		// `scanTail` keeps only the last 4KB, so the line need not be at the start.
+		//
+		// The empty-args case for `mcpScript` cannot be answered here: `code` is a
+		// REQUIRED parameter, so `mcpScript {}` fails `validateToolArguments`
+		// (pi-agent-core `agent-loop.ts`) BEFORE either the tool_call or tool_result
+		// hook runs — the result is an "immediate" validation error no extension
+		// sees. That error already names `code` as required, so it does not misread
+		// as lost access; the batch shape is included below so the same worker that
+		// just typed `mcp {}` learns it here.
+		id: "mcp-empty-args",
+		tools: ["mcp"],
+		match: /MCP: \d+\/\d+ servers, [1-9]\d* tools/,
+		hint:
+			"This is a SUCCESSFUL status listing, not a failure: `mcp` was called with no mode, so it printed server " +
+			"status. Every server listed with a tool count is reachable and its tools are callable RIGHT NOW — you " +
+			"have NOT lost access. To CALL a tool: `mcp({tool:\"hive_get_board\", args:{...}})` (args takes an object, " +
+			"or a JSON string encoding one). To FIND a tool: `mcp({search:\"keywords\"})`. To run several MCP calls " +
+			"with logic between them: `mcpScript({code:\"emit(await tools.hive_get_board({}))\"})`. Do NOT conclude the " +
+			"tools are unavailable or that you need a different, tool-holding session and hand off — that is the exact " +
+			"misread this note exists to prevent.",
+		evidence:
+			"session f16f86e9: a low-tier worker (meta/muse-spark-1.3-contributor) used mcp/mcpScript correctly for ~60 turns (linking ~13 HIV tickets), then drifted into calling `mcp {}` with no mode, misread the resulting server-status listing as lost tool access, and wrongly self-declared \"blocked, needs a tool-holding session\" and handed off — while the tools worked the whole time",
+	},
 ];
 
 /** One matching hint for a tool result, or null. First match wins. */

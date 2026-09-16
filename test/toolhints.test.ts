@@ -23,6 +23,21 @@ const REAL_ERRORS = {
 		"fatal: cannot lock ref 'refs/heads/feature/tes-7731': 'refs/heads/feature' exists; cannot create 'refs/heads/feature/tes-7731'",
 	mcpNoMatch: 'No tools matching "issues search" in "linear"',
 	mcpSchema: 'Error: validating "arguments": validating root: unexpected additional properties ["tail"]',
+	// `mcp {}` with no mode falls through to executeStatus (proxy-modes.ts:277).
+	// A low-tier worker read a listing shaped like this as lost tool access
+	// (session f16f86e9). Verbatim shape, connected + not-connected + failed rows.
+	mcpStatus:
+		"MCP: 1/3 servers, 63 tools\n\n" +
+		"✓ hive (63 tools)\n" +
+		"○ linear (0 tools, not connected)\n" +
+		"✗ sentry (failed 30s ago)\n\n" +
+		'mcp({ server: "name" }) to list tools, mcp({ search: "..." }) to search',
+	// Nothing configured: "the tools ARE available" would be a lie, so no hint.
+	mcpStatusEmpty: "MCP: 0/0 servers, 0 tools",
+	// executeList / executeSearch outputs — mcp results that are NOT the status,
+	// and must not draw the empty-args hint.
+	mcpList: "hive (63 tools)\nget_board\n  Read a board's columns and cards.",
+	mcpSearchHit: "- hive_get_metering_usage - Booster wallet + metering usage",
 	// Verbatim from a launched agent's sandbox, 2026-08-16 (HIV-1979).
 	miseShim:
 		"mise ERROR Failed to install aqua:cli/cli@latest: Read-only file system (os error 30)\n" +
@@ -110,6 +125,37 @@ describe("matchHint", () => {
 
 	it("names a schema rejection as a schema rejection", () => {
 		expect(matchHint("mcp", REAL_ERRORS.mcpSchema)?.id).toBe("mcp-schema-rejection");
+	});
+
+	it("tells a worker that read `mcp {}` status as lost access that it has not (f16f86e9)", () => {
+		const hint = matchHint("mcp", REAL_ERRORS.mcpStatus);
+		expect(hint?.id).toBe("mcp-empty-args");
+		// The load-bearing negative: the status is not a failure and nothing is lost.
+		expect(hint?.hint).toMatch(/have NOT lost access/);
+		expect(hint?.hint).toMatch(/Do NOT conclude the tools are unavailable/);
+		// And it must hand back the shapes the worker drifted away from — including
+		// the batch tool, which cannot be answered from its own empty-args error.
+		expect(hint?.hint).toContain("mcp({tool:");
+		expect(hint?.hint).toContain("mcp({search:");
+		expect(hint?.hint).toContain("mcpScript({code:");
+	});
+
+	it("does NOT claim tools exist when none are configured — 0 tools gets no hint", () => {
+		// `MCP: 0/0 servers, 0 tools` means nothing is set up. A hint asserting the
+		// tools are available would be the exact false-claim class mcp-proxy-no-match
+		// was corrected for.
+		expect(matchHint("mcp", REAL_ERRORS.mcpStatusEmpty)).toBeNull();
+	});
+
+	it("stays quiet on the other mcp modes — only the status listing is the empty call", () => {
+		// executeList and executeSearch are real, mode-bearing mcp calls; annotating
+		// them would be pure context tax on a call that worked.
+		expect(matchHint("mcp", REAL_ERRORS.mcpList)).toBeNull();
+		expect(matchHint("mcp", REAL_ERRORS.mcpSearchHit)).toBeNull();
+	});
+
+	it("keeps the empty-args hint scoped to mcp — a bash echo of the line is not ours", () => {
+		expect(matchHint("bash", REAL_ERRORS.mcpStatus)).toBeNull();
 	});
 
 	it("tells an agent whose gh is too old for --attach what to do (HIV-3240)", () => {
@@ -224,6 +270,34 @@ describe("the extension", () => {
 			content: [{ type: "text", text: REAL_ERRORS.mcpNoMatch }],
 		})) as ({ content?: { text: string }[] } | undefined)[];
 		expect(patch?.content?.[0].text).toContain("mcp-proxy-no-match");
+	});
+
+	it("annotates the empty-args status listing without touching isError", async () => {
+		const pi = load();
+		const [patch] = (await pi.emit({
+			type: "tool_result",
+			toolName: "mcp",
+			isError: false,
+			input: {},
+			content: [{ type: "text", text: REAL_ERRORS.mcpStatus }],
+		})) as ({ content?: { text: string }[] } | undefined)[];
+		expect(patch?.content?.[0].text).toContain("mcp-empty-args");
+		// The original status is kept — the hint interprets it, never replaces it.
+		expect(patch?.content?.[0].text.startsWith(REAL_ERRORS.mcpStatus)).toBe(true);
+		// A hint is not a verdict: content only, isError left alone.
+		expect(Object.keys(patch ?? {})).toEqual(["content"]);
+	});
+
+	it("leaves a real mcp tool-call result alone", async () => {
+		const pi = load();
+		const [patch] = await pi.emit({
+			type: "tool_result",
+			toolName: "mcp",
+			isError: false,
+			input: { tool: "hive_get_board" },
+			content: [{ type: "text", text: '{"columns": []}' }],
+		});
+		expect(patch).toBeUndefined();
 	});
 
 	it("returns nothing for an unknown failure, so the result is passed through", async () => {
