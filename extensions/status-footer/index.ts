@@ -38,6 +38,7 @@ import {
 	runGlyph,
 	workspaceRow,
 } from "./render.ts";
+import { SpeedTracker } from "./speed.ts";
 import { EMPTY_WORKSPACE, type Workspace, projectLabel, resolveWorkspace, sameWorkspace } from "./workspace.ts";
 
 const REDRAW_INTERVAL_MS = 2_500;
@@ -49,7 +50,7 @@ function formatContext(ctx: ExtensionContext, theme: ThemeLike, compact = false)
 	return contextCell(usage, usage?.contextWindow ?? ctx.model?.contextWindow, theme, compact);
 }
 
-function formatSession(ctx: ExtensionContext, theme: ThemeLike): string {
+function formatSession(ctx: ExtensionContext, theme: ThemeLike, speed = ""): string {
 	let input = 0;
 	let output = 0;
 	let cacheRead = 0;
@@ -71,6 +72,9 @@ function formatSession(ctx: ExtensionContext, theme: ThemeLike): string {
 		formatCost(cost),
 		`${turns}t`,
 	];
+	// Live generation speed sits after the turn count; "" until the first timed
+	// turn, so a fresh session's row does not carry a placeholder.
+	if (speed) parts.push(speed);
 	return theme.fg("dim", parts.join(" · "));
 }
 
@@ -130,6 +134,10 @@ export default function statusFooter(pi: ExtensionAPI) {
 	const requestRender = () => tui?.requestRender();
 	const hive = new HiveWatcher(requestRender);
 	const linear = new LinearWatcher(requestRender);
+	// Per-session generation-speed timing. Lives in this closure (pi's
+	// `moduleCache: false` means module scope is not shared) and is reset on
+	// session_start so a new session does not inherit the last one's average.
+	const speed = new SpeedTracker();
 
 	/**
 	 * refreshWorkspace re-resolves the cwd and only retargets the watchers when
@@ -156,6 +164,9 @@ export default function statusFooter(pi: ExtensionAPI) {
 	const installFooter = (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") return;
 		stopTimers();
+		// A new session must not inherit the previous one's average TTFT; this
+		// closure (and its tracker) outlives /new.
+		speed.reset();
 		project = projectLabel(ctx.cwd, workspace.repo, null);
 		// Fire-and-forget: this handler must not await network or `gh`.
 		void refreshWorkspace(ctx.cwd);
@@ -189,7 +200,7 @@ export default function statusFooter(pi: ExtensionAPI) {
 					if (compact) return [fitRow(context, modelText, width)];
 
 					const rows = [
-						fitRow(context, formatSession(ctx, theme), width),
+						fitRow(context, formatSession(ctx, theme, speed.cell()), width),
 						fitRow(modelText, quota ? theme.fg("accent", quota) : theme.fg("muted", "quota ?"), width),
 						truncateToWidth(
 							workspaceRow({ ...workspace, cwd: ctx.cwd }, project, branch, hive.get().mine, theme),
@@ -277,7 +288,25 @@ export default function statusFooter(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => installFooter(ctx));
-	pi.on("message_end", () => requestRender());
+
+	// Generation-speed timing — the same capture hive-pi #70 added to
+	// hive-telemetry. message_start (assistant) ≈ headers received; the FIRST
+	// message_update is the first output token (stamp once, O(1)); message_end
+	// closes the decode. pi runs the main LLM one call at a time, so one slot in
+	// the tracker suffices.
+	pi.on("message_start", (event) => {
+		if (event.message.role === "assistant") speed.start(Date.now());
+	});
+	pi.on("message_update", () => speed.update(Date.now()));
+	pi.on("message_end", (event) => {
+		const msg = event.message;
+		if (msg.role === "assistant") {
+			const assistant = msg as AssistantMessage;
+			speed.end(assistant.usage?.output ?? 0, assistant.stopReason, Date.now());
+		}
+		requestRender();
+	});
+
 	pi.on("model_select", () => requestRender());
 	pi.on("session_tree", () => requestRender());
 	pi.on("session_compact", () => requestRender());
