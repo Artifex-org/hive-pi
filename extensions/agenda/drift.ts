@@ -71,10 +71,27 @@ export interface DriftHooks {
  *   - on the 126 points where the incumbent agrees with itself, Jev scores
  *     AUC 0.84; at the bar below it catches 3 of the 7 stable drifts and nags
  *     4 of the 119 stable-aligned points (3.4%).
+ *   - Jev's latency tail is tight: p90 3.2s, p99 3.4s, max 3.6s — so the
+ *     timeout below never lengthens today's worst case.
+ *   - the two points the incumbent twice called "drifted" but Jev rated 0.81
+ *     and 0.87 were read by hand: one was the agent diagnosing the very PR the
+ *     goal names (a necessary detour), the other the plan's own triage work.
+ *     Both favour Jev.
  * No human labels exist, so neither probe is shown to be RIGHT — Jev is shown
- * to be faster, reproducible, and in agreement where the incumbent is stable.
+ * to be faster, self-consistent (stdev 0.004 in the Phase 0 measurement), and in
+ * agreement where the incumbent is stable. The corpus is one developer's local
+ * sessions. The trade accepted: Jev's nag names no specific tangent, only a
+ * rating; the quoted condition is the anchor either way.
  */
 export const DRIFT_JEV_BAR = 0.5;
+/**
+ * The metric name when JEV answered. The `pi -p` path keeps reporting as
+ * `drift`, so the per-session gate table separates "Jev answered" from "Jev was
+ * never reached" — a configured Jev that silently falls through on every probe
+ * would otherwise look exactly like the time before this existed.
+ */
+export const DRIFT_JEV_METRIC = "drift-jev";
+
 /** Jev's timeout for this probe. The state is up to 10k chars (~2.5k tokens), and
  *  the measured median was 3.1s, so the client's 3s default would miss half. */
 export const DRIFT_JEV_TIMEOUT_MS = 10_000;
@@ -205,9 +222,11 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 						const p = await askJevAlignment(jev, goal.condition, transcript);
 						if (p !== null) {
 							const elapsed = Date.now() - startedAt;
-							if (p >= DRIFT_JEV_BAR) return { metric: { outcome: "pass", value: elapsed } };
+							if (p >= DRIFT_JEV_BAR) {
+								return { metric: { outcome: "pass", value: elapsed, name: DRIFT_JEV_METRIC } };
+							}
 							return {
-								metric: { outcome: "fail", value: elapsed },
+								metric: { outcome: "fail", value: elapsed, name: DRIFT_JEV_METRIC },
 								inject: realignmentInjection(goal.condition, jevDriftReason(p)),
 								ledger: (state) => record(state, ledgerId),
 							};

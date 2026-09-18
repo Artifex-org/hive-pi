@@ -17,6 +17,7 @@ import {
 	createDriftPolicy,
 	DRIFT_CHECK_EVERY,
 	DRIFT_JEV_BAR,
+	DRIFT_JEV_METRIC,
 	driftLedgerId,
 	jevDriftReason,
 } from "../extensions/agenda/drift.ts";
@@ -79,6 +80,7 @@ describe("drift probe with Jev", () => {
 		const { client, fetchImpl, bodies } = fakeJev(0.9);
 		const out = await probeOnce(client);
 		expect(out.metric.outcome).toBe("pass");
+		expect(out.metric.name).toBe(DRIFT_JEV_METRIC);
 		expect(out.inject).toBeUndefined();
 		expect(fetchImpl).toHaveBeenCalledTimes(1);
 		expect(runOneShot).not.toHaveBeenCalled();
@@ -93,6 +95,7 @@ describe("drift probe with Jev", () => {
 		const { client } = fakeJev(DRIFT_JEV_BAR - 0.2);
 		const out = await probeOnce(client);
 		expect(out.metric.outcome).toBe("fail");
+		expect(out.metric.name).toBe(DRIFT_JEV_METRIC);
 		expect(out.inject).toContain(`The goal is still: ${goal.condition}`);
 		expect(out.inject).toContain(jevDriftReason(DRIFT_JEV_BAR - 0.2));
 		expect(count(out.ledger!(emptyLedger), driftLedgerId(goal.id))).toBe(1);
@@ -112,6 +115,8 @@ describe("drift probe with Jev", () => {
 		expect(fetchImpl).toHaveBeenCalled();
 		expect(runOneShot).toHaveBeenCalledTimes(1);
 		expect(out.metric.outcome).toBe("fail");
+		// Counted as the incumbent's answer, not Jev's: this is the liveness split.
+		expect(out.metric.name).toBeUndefined();
 		expect(out.inject).toContain("refactoring CSS");
 	});
 
