@@ -28,6 +28,38 @@ import { runOneShot } from "./spawn.ts";
 import { parseVerdict } from "./verdict.ts";
 
 const JUDGE_TIMEOUT_MS = 60_000;
+
+/**
+ * The judge runs WITHOUT reasoning, and a "met" is confirmed WITH it.
+ *
+ * Before this, the judge inherited the user's `defaultThinkingLevel` (medium),
+ * and a reasoning pass over a 12k-character excerpt on every settle is what
+ * the timeouts were. Production over 30 days: 10-20% of judge runs hit the 60s
+ * ceiling, rising to 20% by mid-September, at a 22-27s mean — and each one
+ * blocks the agent and spends a judge-error (three pause the goal).
+ *
+ * Measured 2026-09-18 on 40 real judge prompts rebuilt from goal sessions, two
+ * runs each:
+ *   - inherited medium: 7 and 9 of 40 timed out, p50 15-18s.
+ *   - thinking off:     0 and 0 of 40 timed out, p50 7s, p90 16-25s.
+ * Verdicts agree except in one place that matters: `off` is unstable on MET.
+ * Across its two runs it once called a goal met whose evidence was not in the
+ * transcript (medium said not met, both runs) and once missed the one goal
+ * medium called met twice. A false "met" closes the goal early; a missed one
+ * costs a turn. So a fast "met" is re-judged at the user's default level
+ * before it is believed, and a confirmation that cannot run fails CLOSED — a
+ * judge error, never a verdict.
+ *
+ * `PI_AGENDA_JUDGE_THINKING` overrides the fast pass's level ("" restores the
+ * inherited default for both passes).
+ */
+export const FAST_JUDGE_THINKING = "off";
+
+export function fastJudgeThinking(env: Record<string, string | undefined> = process.env): string | undefined {
+	const override = env.PI_AGENDA_JUDGE_THINKING;
+	if (override === undefined) return FAST_JUDGE_THINKING;
+	return override.trim() === "" ? undefined : override.trim();
+}
 /** Transcript excerpt handed to the judge. Beyond this it fails closed. */
 const EXCERPT_BUDGET_CHARS = 12_000;
 
@@ -181,27 +213,41 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 				status: "judging goal…",
 				run: async () => {
 					const startedAt = Date.now();
-					const result = await runOneShot({
-						prompt: buildJudgePrompt(goal.condition, transcript),
-						model: hooks.evaluatorModel(),
-						cwd: process.cwd(),
-						timeoutMs: JUDGE_TIMEOUT_MS,
-						// Makes agenda inert in the child, so a judge cannot start
-						// its own goal loop.
-						env: { PI_AGENDA_WORKER: "1" },
-					});
+					const judge = (thinking: string | undefined) =>
+						runOneShot({
+							prompt: buildJudgePrompt(goal.condition, transcript),
+							model: hooks.evaluatorModel(),
+							cwd: process.cwd(),
+							timeoutMs: JUDGE_TIMEOUT_MS,
+							// Makes agenda inert in the child, so a judge cannot start
+							// its own goal loop.
+							env: { PI_AGENDA_WORKER: "1" },
+							...(thinking ? { thinking } : {}),
+						});
+
+					const fast = fastJudgeThinking();
+					let result = await judge(fast);
+					let tokens = result.tokens;
+					// A fast "met" is not believed until a reasoning judge agrees.
+					// Only when the fast pass actually ran without reasoning; with
+					// no override there is nothing faster to confirm.
+					if (fast !== undefined && judgedMet(result)) {
+						const confirm = await judge(undefined);
+						tokens += confirm.tokens;
+						result = confirm;
+					}
 					const elapsed = Date.now() - startedAt;
 
 					const applied = result.timedOut
-						? applyJudgeError(goal, "evaluator timed out", Date.now(), result.tokens)
+						? applyJudgeError(goal, "evaluator timed out", Date.now(), tokens)
 						: result.exitCode !== 0
 							? applyJudgeError(
 									goal,
 									`evaluator exited ${result.exitCode}: ${result.stderr.slice(-200)}`,
 									Date.now(),
-									result.tokens,
+									tokens,
 								)
-							: foldAnswer(goal, result.text, result.tokens);
+							: foldAnswer(goal, result.text, tokens);
 
 					hooks.commit(applied.goal, applied.outcome);
 
@@ -216,6 +262,13 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 			};
 		},
 	};
+}
+
+/** Did a judge run come back with a parseable "met"? */
+function judgedMet(result: { timedOut: boolean; exitCode: number | null; text: string }): boolean {
+	if (result.timedOut || result.exitCode !== 0) return false;
+	const parsed = parseVerdict(result.text);
+	return parsed.kind !== "error" && parsed.verdict.ok;
 }
 
 function foldAnswer(goal: GoalItem, text: string, tokens: number): { goal: GoalItem; outcome: GoalOutcome } {
