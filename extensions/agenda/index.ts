@@ -29,7 +29,7 @@ import {
 	createAdvisorWatchPolicy,
 	MAX_ADVISOR_INJECTIONS,
 } from "./advisor-watch.ts";
-import { createDriftPolicy } from "./drift.ts";
+import { createDriftPolicy, driftJevClient } from "./drift.ts";
 import { createGatePolicy } from "./gate.ts";
 import { looksUnverifiable, parseGoalCommand } from "./goal-command.ts";
 import { HANDOFF_FILE, buildHandoffSeed, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
@@ -298,9 +298,14 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// Jev for the drift probe, built once here — the config and key reads block,
+	// and typesafe-common forbids them inside a handler. Not live (no config
+	// `enabled: true`, or no key) leaves the probe exactly as it was.
+	const driftJev = driftJevClient();
 	const driftPolicy = createDriftPolicy({
 		goal: () => goal,
 		evaluatorModel: () => process.env.PI_AGENDA_EVALUATOR_MODEL || DEFAULT_EVALUATOR_MODEL,
+		jev: () => driftJev,
 	});
 
 	// Enabled state lives here, not behind a factory-time check, so
