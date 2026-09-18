@@ -388,7 +388,25 @@ export function classifyToolError(message: string | undefined): ToolErrorKind {
 		m.includes("blocked:") ||
 		m.includes("blocked by") ||
 		m.includes("refusing to") ||
-		m.includes("is blocked")
+		m.includes("is blocked") ||
+		// The OPERATING-MODE refusals, which are the largest guard family on a
+		// workstation and matched NOTHING above. Measured over a 400-error
+		// corpus harvested from real sessions: 48 results are mode refusals and
+		// not one of them reached this branch. 34 were captured below by
+		// `permission` (the bare "read-only" substring matches "read-only shell
+		// commands" and "read-only MCP cards"), 14 fell through to `other`, and
+		// the whole class reported guard_blocked exactly ONCE.
+		//
+		// All six wordings are emitted by extensions/plan/policy.ts and reduce
+		// to three mode-independent tails. Matched on the tail, never on the
+		// mode name, so adding a posture cannot silently reopen the hole:
+		//   :543 "<posture> mode allows only read-only shell commands, …"
+		//   :393 "Orchestrate mode does not permit MCP tool `x`; …"
+		//   :173 "Discussion mode permits only its read-only MCP cards; …"
+		//   :180 / :399 / :597 "<Mode> mode permits only …"
+		m.includes("mode allows only read-only shell commands") ||
+		m.includes("mode does not permit") ||
+		m.includes("mode permits only")
 	) {
 		return "guard_blocked";
 	}
@@ -429,7 +447,13 @@ export function classifyToolError(message: string | undefined): ToolErrorKind {
 	if (
 		m.includes("permission denied") ||
 		m.includes("eacces") ||
-		m.includes("read-only") ||
+		// The FULL phrase, not a bare "read-only". The short form also matches
+		// the harness's own "read-only shell commands" mode refusal, which is a
+		// guard block and not a filesystem denial — it stole 30 of the 44 mode
+		// refusals in the measured corpus. hive's Go classifier
+		// (cmd/factory-exec/tool_error_class.go) has always matched the full
+		// phrase; this is the copy that drifted.
+		m.includes("read-only file system") ||
 		m.includes("not permitted")
 	) {
 		return "permission";

@@ -104,6 +104,41 @@ describe("classifyToolError", () => {
 		expect(classifyToolError(message)).toBe(want);
 	});
 
+	// The OPERATING-MODE refusals. Measured over a 400-error corpus harvested
+	// from real workstation sessions: 55 results are mode refusals, the largest
+	// single guard family there is, and BEFORE this block not one of them
+	// reached guard_blocked. 34 were swallowed by `permission` (its bare
+	// "read-only" substring matches "read-only shell commands" and "read-only
+	// MCP cards"), 21 fell through to `other`, and the whole class reported
+	// guard_blocked exactly ONCE across 400 errors.
+	//
+	// Each row is a real message shape emitted by extensions/plan/policy.ts.
+	// They are matched on the mode-independent tail, never on the posture name,
+	// so a new posture cannot silently reopen the hole — which is why the rows
+	// below deliberately span four different postures.
+	it.each([
+		["Orchestrate mode allows only read-only shell commands, and this one is not on the list:\n  git fetch origin main", "guard_blocked"],
+		["Plan mode allows only read-only shell commands, and this one is not on the list:\n  hive check --step lint", "guard_blocked"],
+		["Discussion mode allows only read-only shell commands, and this one is not on the list:\n  echo $HIVE_RUN_ID", "guard_blocked"],
+		["Orchestrate mode does not permit MCP tool `hive_list_cases`; delegate implementation to a teammate or Factory run.", "guard_blocked"],
+		["Discussion mode permits only its read-only MCP cards; `hive_whoami` is not one of them. Switch to build mode.", "guard_blocked"],
+		["Orchestrate mode permits only MCP discovery or reviewed coordination tools.", "guard_blocked"],
+		["Orchestrate mode permits only its strict inspection shell subset; delegate this command:\n  go test ./...", "guard_blocked"],
+	])("classifies the mode refusal %j as %s", (message, want) => {
+		expect(classifyToolError(message)).toBe(want);
+	});
+
+	// The narrowing that makes the block above possible, stated as its own
+	// assertion so nobody widens it back. A real read-only FILESYSTEM is still
+	// `permission`; the harness's own "read-only shell commands" is not.
+	// hive's Go classifier (cmd/factory-exec/tool_error_class.go) has always
+	// matched the full phrase — this copy is the one that drifted.
+	it("separates a read-only filesystem from a read-only operating mode", () => {
+		expect(classifyToolError("EROFS: read-only file system, open '/x/y.go'")).toBe("permission");
+		expect(classifyToolError("touch: cannot touch '/x/probe': Read-only file system")).toBe("permission");
+		expect(classifyToolError("Plan mode allows only read-only shell commands, and this one is not on the list:\n  git push")).toBe("guard_blocked");
+	});
+
 	// no_match is NOT bad_args, and the distinction is the point of the kind:
 	// bad_args means the call and the tool's schema disagree, no_match means the
 	// call was well-formed and the file on disk is not what the model last read.
