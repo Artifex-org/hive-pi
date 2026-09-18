@@ -23,5 +23,9 @@
   },
   // types/ carries hand-written declarations for runtime deps that ship none
   // (asciichart), so it must be compiled in rather than merely present.
-  "include": ["extensions/**/*.ts", "test/**/*.ts", "types/**/*.d.ts"]
+  // scripts/ is included so `npm run check` actually checks it. The .mjs
+  // scripts beside it are unaffected; the one .ts script here
+  // (typesafe-route-replay.ts) imports extension code, and a replay whose
+  // numbers decide whether a feature ships must not be the one file tsc skips.
+  "include": ["extensions/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "types/**/*.d.ts"]
 }
