@@ -429,14 +429,22 @@ describe("this package is not an extension", () => {
 		expect(existsSync(join(root, "extensions", "typesafe-common", "index.ts"))).toBe(false);
 	});
 
-	it("registers no pi event handlers at all — Phase 0 changes nothing in the agent loop", async () => {
+	it("registers nothing with pi — the library changes the agent loop only through a consumer", async () => {
 		const { readdirSync, readFileSync } = await import("node:fs");
 		const { dirname, join, resolve } = await import("node:path");
 		const { fileURLToPath } = await import("node:url");
 		const dir = resolve(dirname(fileURLToPath(import.meta.url)), "..", "extensions", "typesafe-common");
 		const offenders = readdirSync(dir)
 			.filter((f) => f.endsWith(".ts"))
-			.filter((f) => /\.on\s*\(\s*["']/.test(readFileSync(join(dir, f), "utf8")));
+			// Every pi surface that reaches the agent loop, not only event handlers:
+			// a registered tool, command, shortcut or flag, an injected message, a
+			// persisted entry. The first version grepped `.on(` alone, and a
+			// `registerTool` would have walked straight past it.
+			.filter((f) =>
+				/\.on\s*\(\s*["']|\b(registerTool|registerGuardedTool|registerCommand|registerShortcut|registerFlag|sendMessage|sendUserMessage|appendEntry)\s*\(/.test(
+					readFileSync(join(dir, f), "utf8"),
+				),
+			);
 		expect(offenders).toEqual([]);
 	});
 });

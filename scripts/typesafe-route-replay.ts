@@ -74,7 +74,15 @@ async function main(): Promise<number> {
 	const live = flag(argv, "live");
 	const fixturePath = resolve(option(argv, "fixture") ?? DEFAULT_FIXTURE);
 	const cachePath = option(argv, "cache");
-	const minMembers = Number(option(argv, "min-members") ?? DEFAULT_MIN_MEMBERS);
+	const rawMinMembers = option(argv, "min-members");
+	const minMembers = rawMinMembers === undefined ? DEFAULT_MIN_MEMBERS : Number(rawMinMembers);
+	// NaN (or 0, or 2.5) used to reach categorise() and silently collapse every
+	// server into one catch-all category — while the report still printed
+	// "floor holds", about a router nobody would ship. Refuse it instead.
+	if (!Number.isInteger(minMembers) || minMembers < 1) {
+		console.error(`--min-members must be a positive integer, got ${JSON.stringify(rawMinMembers)}`);
+		return 2;
+	}
 
 	const corpus = loadToolCorpus(cachePath === undefined ? {} : { cachePath });
 	console.log(`corpus: ${corpus.tools.length} tools across ${Object.keys(corpus.servers).length} servers`);
