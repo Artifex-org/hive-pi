@@ -2099,6 +2099,9 @@ export function describeGoal(goal: GoalItem | null, now: number): string {
 	}
 	if (goal.lastReason) lines.push(`  latest: ${goal.lastReason}`);
 	if (goal.ledger.judgeErrors > 0) lines.push(`  evaluator errors: ${goal.ledger.judgeErrors} consecutive`);
+	if (goal.lastJudgeError) {
+		lines.push(`  last evaluator error (${new Date(goal.lastJudgeError.at).toISOString()}): ${goal.lastJudgeError.message}`);
+	}
 
 	if (goal.state === "active" && goal.ledger.turnsEvaluated === 0) {
 		lines.push("  ⚠ armed but has evaluated nothing yet");
