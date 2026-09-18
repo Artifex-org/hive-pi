@@ -89,6 +89,38 @@ export function atomicWrite(path: string, contents: string): void {
 	renameSync(tmp, path);
 }
 
+/**
+ * Pull a usable API key out of ONE `auth.json` credential.
+ *
+ * The shape is pi's, not ours (`@earendil-works/pi-ai` → `Credential`):
+ *
+ *     { "openai": { "type": "api_key", "key": "sk-…", "env": { … } } }
+ *     { "openai-codex": { "type": "oauth", "access": …, "refresh": …  } }
+ *
+ * The first version of compaction read `credential.apiKey`. No version of pi
+ * has ever written that field, so the auth-store fallback could not fire and
+ * `/compaction` reported `api key: MISSING — feature inert` for every user
+ * whose key lives in auth.json rather than in `$OPENAI_API_KEY`. That bug is
+ * why this vetting exists at all, and why it lives here rather than in the one
+ * extension that hit it first — `compaction` and `typesafe-common` both call
+ * it, and a second copy would be a second thing to review.
+ *
+ * A stored `key` may be a REFERENCE rather than a literal: a leading `!` means
+ * "run the rest as a shell command", `$VAR`/`${VAR}` means "read that env var".
+ * pi resolves those with `resolveConfigValue`, which it does not export.
+ * Handing an unresolved reference to `fetch` would put someone's 1Password
+ * command line into an `Authorization:` header sent off this machine, so
+ * anything that is not a plain literal is refused rather than guessed at.
+ */
+export function apiKeyFromCredential(credential: unknown): string | null {
+	if (!credential || typeof credential !== "object") return null;
+	const { type, key } = credential as { type?: unknown; key?: unknown };
+	if (type !== "api_key") return null;
+	if (typeof key !== "string" || key.length === 0) return null;
+	if (key.startsWith("!") || key.includes("$")) return null;
+	return key;
+}
+
 export function numberOr(value: unknown, fallback: number, min: number, max: number): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
 	return Math.min(max, Math.max(min, Math.round(value)));

@@ -1,0 +1,36 @@
+{
+  "note": "FROZEN LABELS for scripts/typesafe-route-replay.ts. Every row is a query this repo already committed to an answer for, in a test, with the file and line that pins it. Nothing was labelled by judgement: a label nobody can point at is a benchmark that moves when the benchmark is inconvenient.",
+  "storesServerAndName": "`expect` is {server, name}, NOT the qualified name, because qualification depends on this machine's mcp.json toolPrefix (mcp-common/search.ts:qualifyToolName). A fixture that hardcoded `hive_get_run` would fail on a box configured with a different prefix.",
+  "pinsIsNotDecoration": "`pins` records what the cited test actually asserts. Two rows are pinned only by CONTAINMENT — the test says the tool must appear in the shortlist, not that it must be first. Scoring them as top-1 is therefore a HARDER bar than the repo's own tests set, and the accuracy number below is against the INTENDED tool. Saying so here is the difference between a strict benchmark and an overstated one.",
+  "whatIsDeliberatelyAbsent": "`booster` -> get_metering_usage (test/toolhints.test.ts:118) is NOT here. It is a real documented probe result, but hive_get_booster_wallet is an equally defensible answer to the bare word `booster`, and an ambiguous label measures the labeller rather than the router. Dropped openly rather than kept and quietly excused when it misses.",
+  "queries": [
+    {
+      "query": "factory settings",
+      "expect": { "server": "hive", "name": "get_scheduler_settings" },
+      "source": "test/mcp-search-fallback.test.ts:89",
+      "pins": "containment",
+      "why": "Benchmark 1. The adapter's coverage gate returns ZERO rows for this two-token query. In the measured hierarchy pilot stage 2 could never reach the tool, because its category was not one stage 1 would pick — the answer was not on the ballot. On the 635-tool corpus the lexical ranker has it at rank 7 of a floor of 8: the structural floor saves this query with one slot to spare."
+    },
+    {
+      "query": "find related work canceled task empty log failed run",
+      "expect": { "server": "hive", "name": "find_related_work" },
+      "source": "test/mcp-search-fallback.test.ts:90",
+      "pins": "rank-1",
+      "why": "Benchmark 2. Lands under the adapter's 0.6 coverage threshold. In the pilot stage 1 picked a defensible-but-wrong category with no recovery path."
+    },
+    {
+      "query": "scheduler settings",
+      "expect": { "server": "hive", "name": "get_scheduler_settings" },
+      "source": "test/mcp-search-fallback.test.ts:102",
+      "pins": "rank-1",
+      "why": "Full lexical coverage — the easy case, kept so that a strategy which regresses on the easy case is visible rather than averaged away."
+    },
+    {
+      "query": "vpm resync",
+      "expect": { "server": "asfam", "name": "asfam_qis_vpm_resync" },
+      "source": "test/mcp-search-fallback.test.ts:119",
+      "pins": "rank-1",
+      "why": "The only labelled query outside the hive server; catches a router that has quietly learned one server's naming conventions."
+    }
+  ]
+}

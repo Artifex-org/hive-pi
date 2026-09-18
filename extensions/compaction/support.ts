@@ -55,31 +55,16 @@ export const INERT_REASON =
 /**
  * Pull a usable API key out of ONE `auth.json` credential.
  *
- * The shape is pi's, not ours (`@earendil-works/pi-ai` → `Credential`):
- *
- *     { "openai": { "type": "api_key", "key": "sk-…", "env": { … } } }
- *     { "openai-codex": { "type": "oauth", "access": …, "refresh": …  } }
- *
- * The first version of this extension read `credential.apiKey`. No version of
- * pi has ever written that field, so the auth-store fallback could not fire and
- * `/compaction` reported `api key: MISSING — feature inert` for every user
- * whose key lives in auth.json rather than in `$OPENAI_API_KEY`.
- *
- * A stored `key` may be a REFERENCE rather than a literal: a leading `!` means
- * "run the rest as a shell command", `$VAR`/`${VAR}` means "read that env var".
- * pi resolves those with `resolveConfigValue`, which it does not export.
- * Handing an unresolved reference to `fetch` would put someone's 1Password
- * command line into an `Authorization:` header sent to OpenAI, so anything that
- * is not a plain literal is refused rather than guessed at.
+ * MOVED to `hive-common/identity.ts` and re-exported here. It stopped being
+ * compaction's business the moment a second extension package needed it
+ * (`typesafe-common/key.ts`): a `*-common` library importing from a sibling
+ * EXTENSION inverts the layering, and copying the vetting rules would give this
+ * repo two places to review when answering "what can reach an Authorization
+ * header". The re-export stays because `test/compaction.test.ts` imports the
+ * name from here, and because this is still where a reader of the compaction
+ * key path expects to find it.
  */
-export function apiKeyFromCredential(credential: unknown): string | null {
-	if (!credential || typeof credential !== "object") return null;
-	const { type, key } = credential as { type?: unknown; key?: unknown };
-	if (type !== "api_key") return null;
-	if (typeof key !== "string" || key.length === 0) return null;
-	if (key.startsWith("!") || key.includes("$")) return null;
-	return key;
-}
+export { apiKeyFromCredential } from "../hive-common/identity.ts";
 
 /** What this extension can actually do for a given provider. */
 export type SupportLevel =
