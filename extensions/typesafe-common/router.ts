@@ -8,11 +8,18 @@
  *
  * ## THE STRUCTURAL FLOOR — read this before changing `stageTwoOptions`
  *
- * Stage 2's option set is ALWAYS the chosen category's members UNION
+ * Stage 2's option set is the chosen category's members UNION
  * `rankByAnyToken`'s top 8 over the WHOLE corpus. That union is not a safety
  * net bolted on afterwards; it is the reason this design is allowed to exist at
  * all, because it makes the router structurally incapable of scoring below the
  * lexical shortlist it would replace.
+ *
+ * The two halves are NOT equally durable, and the asymmetry is deliberate. The
+ * floor is pushed non-evictably; category members are evictable under the
+ * option cap and the token budget. So under pressure the set degrades TOWARD
+ * the lexical shortlist and never below it, which is exactly the guarantee —
+ * but it means "always" holds for the floor alone, not for the whole union.
+ * `truncated` reports when that happened; do not read it as cosmetic.
  *
  * It is not a hypothetical. In a measured pilot the plain hierarchy MISSED BOTH
  * of this repo's own recorded benchmark queries — the two that

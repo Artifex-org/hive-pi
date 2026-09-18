@@ -56,10 +56,12 @@ cannot do them — and it is prompt-injectable, so a tool description is data.
 
 ## The structural floor
 
-Stage 2's option set is ALWAYS the chosen category's members UNION
-`rankByAnyToken`'s top 8 over the whole corpus. That union is why this design is
-allowed to exist: it makes the router structurally incapable of scoring below
-the lexical shortlist it replaces. In a measured pilot the plain hierarchy
+Stage 2's option set is the chosen category's members UNION `rankByAnyToken`'s
+top 8 over the whole corpus. That union is why this design is allowed to exist:
+it makes the router structurally incapable of scoring below the lexical
+shortlist it replaces. The floor half is non-evictable and the category half is
+not, so under the option cap or the token budget the set degrades toward the
+lexical shortlist and never below it. `truncated` says when that happened. In a measured pilot the plain hierarchy
 missed BOTH benchmark queries `test/mcp-search-fallback.test.ts:89-90` pins. See
 `router.ts` for the two failure modes and `test/typesafe-router.test.ts` for the
 guard that dies if the union is removed.
