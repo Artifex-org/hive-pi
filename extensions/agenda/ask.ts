@@ -44,6 +44,7 @@
  * deliberately not done here — the model may have good reason to proceed.
  */
 
+import { noulQuestion, type TypesafeClient } from "../typesafe-common/client.ts";
 import { atCap, record } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
 import { stripCode } from "./question-guard.ts";
@@ -139,6 +140,74 @@ export const ASK_NUDGE = [
 	"carry on. Either is fine. Ending the turn on the question is the one thing that is not.",
 ].join("\n");
 
+/**
+ * ## Jev: the second tier behind the phrase list
+ *
+ * The phrase list is precise and blind. Measured 2026-09-18 over 2,501 real
+ * turn endings from local sessions (the ones not ending in `?`): the list
+ * matched 2. Jev, asked one `noul` ("does this turn end waiting on a decision
+ * or input from the human?"), rated 26 at p >= 0.7, and every one of the 26
+ * read by hand is a genuine ask the list missed — "I need your scope
+ * decision", "Decision needed from you: lift the freeze or extend it", "Say
+ * which of those to start", "ready for your approval". The list caught 1 of
+ * them. Between 0.5 and 0.7 the answers mix real asks with "waiting on a CI
+ * run", so the bar is 0.7.
+ *
+ * So the list stays the floor and answers first, for free. Jev is asked only
+ * when the list is silent AND the last two paragraphs carry a word a request
+ * cannot be phrased without (`ASK_PREFILTER`). On the same 2,501 endings that
+ * prefilter passed 26% and kept all 26 positives, so three settles in four
+ * never make the call. The call itself measured a 1.8s median.
+ *
+ * The consequence of a wrong answer is unchanged: one nudge the model may
+ * ignore, capped at MAX_ASK_NUDGES per session, attended sessions only.
+ */
+export const ASK_JEV_BAR = 0.7;
+/** The metric name when Jev decided, so its liveness is visible apart from the list's. */
+export const ASK_JEV_METRIC = "ask-jev";
+
+/**
+ * Words a request for a decision is hard to phrase without. A cheap gate on the
+ * call, NOT a classifier: it only decides whether Jev is asked.
+ */
+const ASK_PREFILTER =
+	/\b(you|your|approv\w*|decision|decide|choice|choose|authori[sz]\w*|awaiting|waiting|wait|direction|confirm|operator|controller|go-ahead|verdict|orders|say which|say the word|pending)\b/i;
+
+/** The last two paragraphs, code removed: where an ask lives when there is one. */
+export function askTail(text: string): string {
+	const paragraphs = stripCode(text)
+		.trim()
+		.split(/\n\s*\n/)
+		.filter((p) => p.trim().length > 0);
+	return paragraphs.slice(-2).join("\n\n");
+}
+
+/** Should Jev be asked about this ending at all? */
+export function worthAskingJev(text: string | undefined): boolean {
+	if (!text) return false;
+	const trimmed = stripCode(text).replace(/[\s)\]}"'*_>]+$/u, "");
+	if (trimmed.endsWith("?")) return false; // question-guard.ts owns these
+	return ASK_PREFILTER.test(askTail(text));
+}
+
+const ASK_JEV_QUESTION = {
+	asks: noulQuestion(
+		"This is the END of an AI coding agent's turn. Does it end by asking the human operator to make a decision or give input " +
+			"that the agent is waiting for before it continues? A report, a summary, a stated assumption, or a plan the agent will " +
+			"carry out itself is NOT asking. Offering optional follow-ups after the work is done is NOT asking.",
+		{
+			true: "the turn ends waiting on a decision or input from the human",
+			false: "the turn ends with a report, a summary, or the agent's own next step; nothing is being asked",
+		},
+	),
+};
+
+/** Jev's probability that the ending asks the human, or null when it did not answer. */
+export async function askJevForDecision(client: TypesafeClient, text: string): Promise<number | null> {
+	const outcome = await client.ask(askTail(text), ASK_JEV_QUESTION);
+	return outcome.kind === "ok" ? outcome.answers.asks.noul : null;
+}
+
 export interface AskHooks {
 	/**
 	 * Can a human actually answer right now?
@@ -149,6 +218,8 @@ export interface AskHooks {
 	 * policy must stay silent.
 	 */
 	attended(): boolean;
+	/** Jev, when configured. Absent or not live leaves the phrase list alone. */
+	jev?(): TypesafeClient | null;
 }
 
 export function createAskPolicy(hooks: AskHooks): Policy {
@@ -156,18 +227,42 @@ export function createAskPolicy(hooks: AskHooks): Policy {
 		name: "ask",
 
 		decide(context: PolicyContext): PolicyWork | null {
-			if (!endsWithProseDecisionRequest(context.lastAssistantText)) return null;
 			if (!hooks.attended()) return null;
 			if (atCap(context.ledger, LEDGER_ID, MAX_ASK_NUDGES)) return null;
+			const text = context.lastAssistantText;
 
+			if (endsWithProseDecisionRequest(text)) {
+				return {
+					name: "ask",
+					status: "",
+					run: async () => ({
+						metric: { outcome: "fail", value: 1 },
+						inject: ASK_NUDGE,
+						ledger: (state) => record(state, LEDGER_ID),
+					}),
+				};
+			}
+
+			// The phrase list is silent. Ask Jev — only when it is live and the
+			// ending carries a request-shaped word.
+			const jev = hooks.jev?.();
+			if (!jev?.live || !text || !worthAskingJev(text)) return null;
 			return {
 				name: "ask",
 				status: "",
-				run: async () => ({
-					metric: { outcome: "fail", value: 1 },
-					inject: ASK_NUDGE,
-					ledger: (state) => record(state, LEDGER_ID),
-				}),
+				run: async () => {
+					const started = Date.now();
+					const p = await askJevForDecision(jev, text);
+					const value = Date.now() - started;
+					// No answer is no nudge: Jev failing must never invent a question.
+					if (p === null) return { metric: { outcome: "skip", value, name: ASK_JEV_METRIC } };
+					if (p < ASK_JEV_BAR) return { metric: { outcome: "pass", value, name: ASK_JEV_METRIC } };
+					return {
+						metric: { outcome: "fail", value, name: ASK_JEV_METRIC },
+						inject: ASK_NUDGE,
+						ledger: (state) => record(state, LEDGER_ID),
+					};
+				},
 			};
 		},
 	};

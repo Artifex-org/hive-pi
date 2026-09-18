@@ -343,6 +343,8 @@ export default function (pi: ExtensionAPI) {
 	}
 	const askPolicy = createAskPolicy({
 		attended: () => heldCtx?.mode === "tui" || remoteAnswerable,
+		// The same client the drift probe uses, built once at construction.
+		jev: () => driftJev,
 	});
 
 	// Chain order is load-bearing: build health first (gate), then the prose
