@@ -72,6 +72,12 @@ export interface OneShotOptions {
 	timeoutMs: number;
 	/** Extra environment for the child, merged over `process.env`. */
 	env?: Record<string, string>;
+	/**
+	 * `--thinking <level>` for the child. Absent inherits the user's
+	 * `defaultThinkingLevel`, which is what every judge did before this option
+	 * existed — see goal.ts for what that cost.
+	 */
+	thinking?: string;
 }
 
 /**
@@ -91,6 +97,7 @@ export interface OneShotOptions {
 export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 	const args = ["--mode", "json", "-p", "--no-session", "--no-tools"];
 	if (options.model) args.push("--model", options.model);
+	if (options.thinking) args.push("--thinking", options.thinking);
 	args.push(options.prompt);
 
 	return new Promise((resolve) => {

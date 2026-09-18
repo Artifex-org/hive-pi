@@ -15,7 +15,14 @@ vi.mock("../extensions/agenda/spawn.ts", () => ({
 }));
 
 import agenda, { describeGoal } from "../extensions/agenda/index.ts";
-import { buildJudgePrompt, createGoalPolicy, injectionFor, metricFor } from "../extensions/agenda/goal.ts";
+import {
+	buildJudgePrompt,
+	createGoalPolicy,
+	FAST_JUDGE_THINKING,
+	fastJudgeThinking,
+	injectionFor,
+	metricFor,
+} from "../extensions/agenda/goal.ts";
 import { createGoal, DEFAULT_MAX_ITERATIONS, type GoalItem } from "../extensions/agenda/goal-state.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 
@@ -204,6 +211,71 @@ describe("the goal policy", () => {
 		const harness = policyFor(createGoal("g", "c", 1));
 		await harness.policy.decide(context)!.run();
 		expect(harness.current?.ledger.tokens).toBe(250);
+	});
+});
+
+describe("the fast judge and the confirmed met", () => {
+	const context = { cwd: "/repo", ledger: { iterations: {} }, lastAssistantText: undefined, transcript: "work" };
+	function policyFor(goal: GoalItem) {
+		let current: GoalItem = goal;
+		const policy = createGoalPolicy({
+			current: () => current,
+			commit: (next) => {
+				current = next;
+			},
+			evaluatorModel: () => "test/model",
+		});
+		return { policy, get current() { return current; } };
+	}
+	const reply = (text: string) => ({ text, tokens: 10, exitCode: 0, timedOut: false, stderr: "" });
+	const met = reply('{"ok": true, "reason": "done", "pending": false}');
+	const notMet = reply('{"ok": false, "reason": "the PR is not open yet", "pending": false}');
+
+	it("the first pass runs without reasoning", async () => {
+		runOneShot.mockResolvedValueOnce(notMet);
+		await policyFor(createGoal("g", "c", 1)).policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(1);
+		expect(runOneShot.mock.calls[0][0]).toMatchObject({ thinking: FAST_JUDGE_THINKING });
+	});
+
+	it("a fast MET is confirmed by a reasoning judge before the goal closes", async () => {
+		runOneShot.mockResolvedValueOnce(met).mockResolvedValueOnce(met);
+		const h = policyFor(createGoal("g", "c", 1));
+		await h.policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(2);
+		expect(runOneShot.mock.calls[1][0].thinking).toBeUndefined();
+		expect(h.current.state).toBe("achieved");
+	});
+
+	it("a fast MET the confirmation rejects does not close the goal, and carries the confirming reason", async () => {
+		runOneShot.mockResolvedValueOnce(met).mockResolvedValueOnce(notMet);
+		const h = policyFor(createGoal("g", "c", 1));
+		const out = await h.policy.decide(context)!.run();
+		expect(h.current.state).toBe("active");
+		expect(out.inject).toContain("the PR is not open yet");
+	});
+
+	it("a confirmation that times out fails CLOSED: no verdict, no injection", async () => {
+		runOneShot
+			.mockResolvedValueOnce(met)
+			.mockResolvedValueOnce({ text: "", tokens: 0, exitCode: 1, timedOut: true, stderr: "" });
+		const h = policyFor(createGoal("g", "c", 1));
+		const out = await h.policy.decide(context)!.run();
+		expect(h.current.state).toBe("active");
+		expect(h.current.ledger.judgeErrors).toBe(1);
+		expect(out.inject).toBeUndefined();
+	});
+
+	it("a fast not-met is believed as is — one call", async () => {
+		runOneShot.mockResolvedValueOnce(notMet);
+		await policyFor(createGoal("g", "c", 1)).policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(1);
+	});
+
+	it("PI_AGENDA_JUDGE_THINKING overrides the fast level, and empty restores the inherited default", () => {
+		expect(fastJudgeThinking({})).toBe("off");
+		expect(fastJudgeThinking({ PI_AGENDA_JUDGE_THINKING: "low" })).toBe("low");
+		expect(fastJudgeThinking({ PI_AGENDA_JUDGE_THINKING: "" })).toBeUndefined();
 	});
 });
 
