@@ -1,7 +1,13 @@
 # typesafe-common
 
 The typed client for the TypeSafe ("Jev") System One API, and the two-stage tool
-router built on it. **Phase 0: nothing here is wired to a consumer.**
+router built on it.
+
+**Consumers:** `agenda/drift.ts` asks Jev first for the drift probe and falls
+back to its `pi -p` probe when Jev does not answer. The router is still
+unwired. A consumer builds its client once, at construction, and is only live
+with `enabled: true` in `~/.pi/agent/hive-telemetry/typesafe.config.json` plus a
+key (`$TYPESAFE_API_KEY` or the `typesafe` credential in pi's auth store).
 
 ## This directory is NOT an extension
 

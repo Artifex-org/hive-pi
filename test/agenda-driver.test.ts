@@ -64,6 +64,31 @@ function metricEvents() {
 	return pi.busEvents.filter((event) => event.name === "hive.metric");
 }
 
+describe("driver — metric name", () => {
+	// A policy with two paths names the one that answered (drift reports
+	// `drift-jev` when Jev answered). Without the override both paths would read
+	// as the same gate and "Jev was never reached" would be invisible.
+	it("reports the outcome's own metric name when it gives one", async () => {
+		const policy: Policy = {
+			name: "drift",
+			decide: () => ({
+				name: "drift",
+				status: "",
+				run: async () => ({ metric: { outcome: "pass", value: 1, name: "drift-jev" } }),
+			}),
+		};
+		installDriver(pi.api, { policies: [policy] });
+		await pi.emit({ type: "agent_settled" });
+		expect((metricEvents()[0].payload as Record<string, unknown>).name).toBe("drift-jev");
+	});
+
+	it("falls back to the work's name", async () => {
+		installDriver(pi.api, { policies: [runsButSilent("drift")] });
+		await pi.emit({ type: "agent_settled" });
+		expect((metricEvents()[0].payload as Record<string, unknown>).name).toBe("drift");
+	});
+});
+
 describe("driver — one injection per settle", () => {
 	it("injects exactly once when a policy asks to", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });

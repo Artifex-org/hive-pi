@@ -20,8 +20,14 @@ import type { SessionSignals } from "./signals.ts";
 export type MetricOutcome = "pass" | "fail" | "timeout" | "skip";
 
 export interface PolicyOutcome {
-	/** Reported on the bus as `hive.metric`. Numbers and enums only — never free text. */
-	metric: { outcome: MetricOutcome; value: number };
+	/**
+	 * Reported on the bus as `hive.metric`. Numbers and enums only — never free
+	 * text. `name` overrides the work's name for THIS report, so a policy with
+	 * two paths can say which one answered (drift reports `drift-jev` when Jev
+	 * answered and `drift` when the `pi -p` probe did). It must be a fixed
+	 * constant, never derived from content.
+	 */
+	metric: { outcome: MetricOutcome; value: number; name?: string };
 	/** Text to inject as a follow-up turn. Absent means "nothing to say". */
 	inject?: string;
 	/** Applied to the ledger after the work completes. */
