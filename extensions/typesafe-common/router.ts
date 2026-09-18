@@ -214,7 +214,20 @@ export function categoryCriteria(categories: readonly Category[]): Record<string
 	return criteria;
 }
 
-/** How many whole-corpus lexical candidates form the floor. */
+/**
+ * How many whole-corpus lexical candidates form the floor.
+ *
+ * THE FRAGILE NUMBER IN THIS FILE. It is 8 because
+ * `mcp-common/search.ts:DEFAULT_CANDIDATE_LIMIT` is 8 — the floor has to be the
+ * shortlist we are claiming never to do worse than, and a floor of 5 would be a
+ * different, weaker claim. Measured on the 635-tool corpus (2026-09-18):
+ * "factory settings" -> `hive_get_scheduler_settings` sits at lexical rank
+ * SEVEN, one slot inside the floor. (The pilot's 589-tool corpus had it at rank
+ * 2; four more `hive_get_factory_*` tools have shipped since.) One more
+ * plausible `factory` tool and this benchmark falls off the floor, so the
+ * replay prints each query's lexical rank on every run — the day one of them
+ * reads 8 is the day to raise this, not the day after.
+ */
 export const FLOOR_SIZE = 8;
 
 export interface StageTwoOptions {

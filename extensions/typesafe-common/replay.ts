@@ -9,7 +9,7 @@
  * by untested code is not evidence.
  */
 
-import { rankByAnyToken, type CorpusTool, type McpToolCorpus } from "../mcp-common/search.ts";
+import { rankByAnyToken, type McpToolCorpus } from "../mcp-common/search.ts";
 import {
 	certaintyOf,
 	choiceQuestion,
@@ -308,5 +308,3 @@ export function formatMisses(report: StrategyReport, labels: readonly ResolvedLa
 		.filter((t) => !t.correct)
 		.map((t) => `      MISS "${t.query}" -> ${t.top1 ?? "<nothing>"} (wanted ${expected.get(t.query) ?? "?"})`);
 }
-
-export type { CorpusTool };

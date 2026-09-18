@@ -18,7 +18,7 @@ can leave this machine", and two logins for one server.
 
 | File | Contents |
 | --- | --- |
-| `identity.ts` | credential + config paths, `resolveAuth`, `resolveProject`, `resolveBranch` |
+| `identity.ts` | credential + config paths, `resolveAuth`, `resolveProject`, `resolveBranch`, `apiKeyFromCredential` |
 | `http.ts` | timeouts, error redaction, the 4xx/5xx retry classification, `validateToken` |
 | `channels.ts` | in-process event-bus channels between Hive extensions |
 

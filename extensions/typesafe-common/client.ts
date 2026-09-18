@@ -311,6 +311,13 @@ export function decodeAnswer(asked: Question, raw: unknown): DecodeResult {
 
 	if (asked.type === "score") {
 		if (!finite(body.score)) return { ok: false, reason: "score is not a finite number" };
+		// INFERRED, NOT MEASURED: that a score runs 0..levels-1 comes from the
+		// legend keys in the observed answer ("0","1" for two levels), not from
+		// a live probe of the range. If the API in fact returns 0..1 normalised,
+		// every multi-level score lands in `malformed` — loudly, in the tally,
+		// which is the right way for an inference to be wrong. Fix it here when
+		// the first live run says so; do not widen it to "any finite number",
+		// which would make the check decorative.
 		const top = asked.criteria.length - 1;
 		if (body.score < 0 || body.score > top) {
 			return { ok: false, reason: `score ${body.score} is outside the 0..${top} levels supplied` };

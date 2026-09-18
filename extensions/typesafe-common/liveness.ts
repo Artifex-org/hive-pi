@@ -42,13 +42,22 @@ export function newTally(): Tally {
 	return { counts, agreed: 0, differed: 0, inputTokens: 0, latenciesMs: [] };
 }
 
+type OkOutcome<T> = Extract<Outcome<T>, { kind: "ok" }>;
+type FailedOutcome<T> = Exclude<Outcome<T>, { kind: "ok" }>;
+
 /**
  * Record one consultation.
  *
- * `agreedWithHeuristic` is deliberately required-when-ok rather than optional:
- * a caller that forgets it produces the exact ambiguity this file exists to
- * remove, and leaving it optional would let that happen silently.
+ * `agreedWithHeuristic` is REQUIRED when the outcome is `ok` and rejected
+ * otherwise, and the overloads below are what make that true rather than
+ * merely stated. A caller that recorded an `ok` without it would increment
+ * `ok` and neither `agreed` nor `differed` — reproducing, inside the very
+ * counter built to remove it, the ambiguity this file exists for. An earlier
+ * draft had exactly that: the parameter optional and a comment claiming it was
+ * not.
  */
+export function record<T>(tally: Tally, outcome: OkOutcome<T>, agreedWithHeuristic: boolean): Tally;
+export function record<T>(tally: Tally, outcome: FailedOutcome<T>): Tally;
 export function record<T>(tally: Tally, outcome: Outcome<T>, agreedWithHeuristic?: boolean): Tally {
 	tally.counts[outcome.kind] += 1;
 	if (outcome.kind === "ok") {
