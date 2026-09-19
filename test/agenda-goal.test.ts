@@ -389,6 +389,14 @@ describe("describeGoal", () => {
 		expect(describeGoal(null, 0)).toBe("No goal set.");
 	});
 
+	it("shows the last evaluator error, so a broken judge can be read without a debugger", () => {
+		const goal = createGoal("g", "c", 0);
+		goal.ledger.judgeErrors = 2;
+		goal.lastJudgeError = { message: "evaluator exited 1: 402 insufficient credits", at: Date.UTC(2026, 8, 4) };
+		const text = describeGoal(goal, 1000);
+		expect(text).toContain("last evaluator error (2026-09-04T00:00:00.000Z): evaluator exited 1: 402 insufficient credits");
+	});
+
 	it("flags an armed goal that has evaluated nothing — the success-shaped-nothing case", () => {
 		const fresh = createGoal("g", "tests pass", 1000);
 		expect(describeGoal(fresh, 2000)).toContain("armed but has evaluated nothing yet");

@@ -87,6 +87,17 @@ export interface GoalItem {
 	createdAt: number;
 	updatedAt: number;
 	lastReason?: string;
+	/**
+	 * The most recent evaluator failure: its message and when it happened.
+	 *
+	 * The ledger only COUNTS judge errors, and a count cannot be diagnosed.
+	 * 2026-09-03 to -06 every judge run on this fleet failed in about six
+	 * seconds and nothing on disk says why, because the message was used once
+	 * and dropped. Kept after a later verdict on purpose: "what broke last
+	 * time" is the question asked after the fact. Capped, since it can carry a
+	 * child's stderr tail.
+	 */
+	lastJudgeError?: { message: string; at: number };
 	ledger: GoalLedger;
 	/**
 	 * Conditions this goal has had before, oldest first.
@@ -109,6 +120,8 @@ export const GOAL_ENTRY_TYPE = "agenda";
 export const MAX_CONDITION_CHARS = 4000;
 export const DEFAULT_MAX_ITERATIONS = 8;
 export const MAX_JUDGE_ERRORS = 3;
+/** Cap on the persisted judge-error message; see `GoalItem.lastJudgeError`. */
+export const MAX_JUDGE_ERROR_CHARS = 300;
 export const MAX_NO_PROGRESS = 3;
 /**
  * How many consecutive "still in flight" verdicts to wait through.
@@ -253,7 +266,13 @@ export function applyJudgeError(
 	const paused = judgeErrors >= MAX_JUDGE_ERRORS;
 	const ledger: GoalLedger = { ...goal.ledger, judgeErrors, tokens: goal.ledger.tokens + spentTokens };
 	return {
-		goal: { ...goal, updatedAt: now, ledger, state: paused ? "paused" : goal.state },
+		goal: {
+			...goal,
+			updatedAt: now,
+			ledger,
+			state: paused ? "paused" : goal.state,
+			lastJudgeError: { message: message.slice(0, MAX_JUDGE_ERROR_CHARS), at: now },
+		},
 		outcome: { kind: "judge_error", message, paused },
 	};
 }
@@ -350,6 +369,7 @@ export function validateGoal(data: unknown): GoalItem | null {
 		createdAt: positiveInt(record.createdAt, 0),
 		updatedAt: positiveInt(record.updatedAt, 0),
 		lastReason: typeof record.lastReason === "string" ? record.lastReason : undefined,
+		lastJudgeError: judgeErrorFrom(record.lastJudgeError),
 		ledger: {
 			// Rehydrated, NOT zeroed — see the header. A resetting spend counter
 			// makes a persisted budget unenforceable.
@@ -384,4 +404,11 @@ export function reviseGoal(goal: GoalItem, condition: string, now: number): Goal
 		updatedAt: now,
 		revisions: [...(goal.revisions ?? []), { at: now, from: goal.condition }],
 	};
+}
+
+function judgeErrorFrom(raw: unknown): GoalItem["lastJudgeError"] {
+	if (!raw || typeof raw !== "object") return undefined;
+	const r = raw as { message?: unknown; at?: unknown };
+	if (typeof r.message !== "string" || typeof r.at !== "number") return undefined;
+	return { message: r.message.slice(0, MAX_JUDGE_ERROR_CHARS), at: r.at };
 }
