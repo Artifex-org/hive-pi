@@ -75,6 +75,25 @@ function text(body: string, details: unknown) {
 	return { content: [{ type: "text" as const, text: body }], details };
 }
 
+export type DevDbPosture = "local" | "managed" | "legacy" | "unavailable";
+
+/**
+ * What dev_db_start should do.
+ *
+ * A server this process already started wins over the managed redirect. The
+ * resource loop and a direct call share that server; readiness reports it as
+ * ready and says this tool prints DATABASE_URL. Redirecting anyway was the
+ * week-of-2026-09-21 papercut: twenty sessions read the ready row, called the
+ * tool, and got the three-step lecture. A Hive-managed session with NO server
+ * still must not start an untracked database.
+ */
+export function decideDevDbStart(hasLocalServer: boolean, posture: DevDbPosture): "reuse" | "redirect" | "unavailable" | "start" {
+	if (hasLocalServer) return "reuse";
+	if (posture === "managed") return "redirect";
+	if (posture === "unavailable") return "unavailable";
+	return "start";
+}
+
 function readPostmasterPID(dataDir: string): number | undefined {
 	try {
 		const value = Number.parseInt(fs.readFileSync(path.join(dataDir, "postmaster.pid"), "utf8").split("\n")[0], 10);
@@ -370,19 +389,24 @@ export default function (pi: ExtensionAPI) {
 			capability: DB_CAPABILITY,
 			name: "dev_db_start",
 			label: "Dev DB: start",
-			description: "Start (or reuse) this session's disposable Postgres and ensure a database exists.",
+			description:
+				"Reuse this session's disposable Postgres and print DATABASE_URL when a server is already running. " +
+				"Otherwise start one, except in a Hive-managed session with no server yet: that does not start an untracked database " +
+				"and instead returns the hive_request_resource call to make.",
 			promptSnippet: "Start a per-session Postgres",
 			parameters: Type.Object({
 				database: Type.Optional(Type.String({ pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$" })),
 			}),
 			async execute(_id, params) {
 				const database = params.database ?? "app";
-				const posture = await managedPosture();
-				if (posture === "managed") return managedToolReply("start");
-				if (posture === "unavailable") {
+				// Posture is only asked when nothing is running. A live server must
+				// not become "temporarily unavailable" because the control plane blipped.
+				const decision = decideDevDbStart(state !== null, state ? "local" : await managedPosture());
+				if (decision === "redirect") return managedToolReply("start");
+				if (decision === "unavailable") {
 					throw new Error("Hive resource control is temporarily unavailable; retry instead of starting an untracked database.");
 				}
-				const server = await ensureServer();
+				const server = state ?? (await ensureServer());
 				await ensureDatabase(server, database);
 				const url = databaseUrl(server.port, database);
 				return text(
