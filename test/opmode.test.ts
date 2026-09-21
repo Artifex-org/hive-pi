@@ -224,12 +224,24 @@ describe("the orchestrate gate", () => {
 		//
 		// Measured 2026-09-04: one orchestrator hit two of these inside sixty
 		// seconds and filed both as blocking its ticket vetting.
-		for (const tool of ["hive_search_tickets", "hive_get_work_context", "hive_my_tickets"]) {
+		for (const tool of ["hive_search_tickets", "hive_get_work_context", "hive_my_tickets", "hive_watch_ticket"]) {
 			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, tool).toBe(true);
 		}
-		// The rule is "every READ-ONLY ticket tool", not "anything ticket-shaped".
-		// watch_ticket registers a subscription, so it stays denied.
-		expect(classifyOrchestrateTool("mcp", { tool: "hive_watch_ticket", args: {} }).allowed).toBe(false);
+	});
+
+	it("allows the supervision tools the week of 2026-09-21 refused", () => {
+		for (const tool of ["hive_answer_question", "hive_fleet_status", "hive_get_project_goal_work"]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} direct`).toBe(true);
+			expect(classifyOrchestrateTool("mcp", { tool }).allowed, `${tool} wrapped`).toBe(true);
+		}
+	});
+
+	it("names the real coordination tool for a measured misspelling", () => {
+		const refused = classifyOrchestrateTool("mcp", { tool: "hive_list_pending_launches" });
+		expect(refused.allowed).toBe(false);
+		if (refused.allowed) return;
+		expect(refused.reason).toContain("hive_list_agent_launches");
+		expect(refused.reason).not.toContain("delegate implementation");
 	});
 
 	it("names printenv when it refuses a command only for its $VAR", () => {
