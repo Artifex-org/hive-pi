@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import devservicesExtension from "../extensions/devservices/index.ts";
+import devservicesExtension, { decideDevDbStart } from "../extensions/devservices/index.ts";
 import { HIVE_SESSION_CHANNEL } from "../extensions/hive-common/channels.ts";
 import { createFakePi } from "./fake-pi.ts";
 
@@ -35,6 +35,20 @@ function managedHarness(status = 200) {
 afterEach(() => {
 	process.env = { ...savedEnv };
 	vi.unstubAllGlobals();
+});
+
+describe("decideDevDbStart", () => {
+	it("reuses a server this process already started, even when Hive manages the session", () => {
+		expect(decideDevDbStart(true, "managed")).toBe("reuse");
+		expect(decideDevDbStart(true, "unavailable")).toBe("reuse");
+	});
+
+	it("still refuses to start an untracked database in a managed session", () => {
+		expect(decideDevDbStart(false, "managed")).toBe("redirect");
+		expect(decideDevDbStart(false, "unavailable")).toBe("unavailable");
+		expect(decideDevDbStart(false, "legacy")).toBe("start");
+		expect(decideDevDbStart(false, "local")).toBe("start");
+	});
 });
 
 describe("managed devservices posture", () => {
