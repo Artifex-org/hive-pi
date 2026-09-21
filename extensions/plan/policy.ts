@@ -224,7 +224,10 @@ const ORCHESTRATE_TOOLS = new Set([
 // ticket/claim preflight), blocking full ticket vetting before delegation".
 //
 // The rule applied is "every READ-ONLY ticket tool is permitted", not "anything
-// ticket-shaped": watch_ticket registers a subscription, so it stays out.
+// ticket-shaped". watch_ticket registers a subscription; it stayed out until
+// the week of 2026-09-21, when leads were refused it while supervising a
+// teammate's ticket. claim_ticket, a stronger write, was already permitted, and
+// a watch is how a lead tracks that ticket without appearing as its worker.
 //
 // Second pass, 2026-09-10, from the papercut corpus (seven days, both
 // developers): a coordination-only lead was refused, in this order of
@@ -249,8 +252,39 @@ const ORCHESTRATE_TOOLS = new Set([
 // - The remaining `hive_get_*`/`hive_list_*` entries are pure reads a lead
 //   needs to vet work (PR comments, origin state, run reports, review
 //   rejections, the project goals it links work to).
+//
+// Third pass, 2026-09-21, from the week's papercuts (6 sessions refused a
+// supervision call). Each name below was a real tool, read for what it does:
+//
+// - hive_answer_question unblocks a worker parked on plan_ask. diagnose names
+//   it as the action; steer interrupt throws the question away.
+// - hive_fleet_status is read-only coordination data (HIV-3435 named it).
+// - hive_get_project_goal_work is the work list under the goals tool already
+//   permitted.
+// - hive_watch_ticket is the supervision subscription described above.
+//
+// Names that are not tools (hive_list_pending_launches, hive_interrupt_agent,
+// hive_list_team_notes) stay denied. The refusal names the real coordination
+// tool instead of saying "delegate implementation".
+const ORCHESTRATE_MCP_ALIASES: Record<string, string> = {
+	hive_interrupt_agent: "hive_steer_agent",
+	hive_list_pending_launches: "hive_list_agent_launches",
+	hive_list_team_agents: "hive_list_teammates",
+	hive_list_team_notes: "hive_read_team_notes",
+	hive_list_linear_teams: "linear_list_teams",
+};
+
+export function orchestrateMcpRefusal(name: string): string {
+	const alias = ORCHESTRATE_MCP_ALIASES[name];
+	if (alias) {
+		return `No MCP tool \`${name}\`. The coordination tool is \`${alias}\`.`;
+	}
+	return `Orchestrate mode does not permit MCP tool \`${name}\`; delegate implementation to a teammate or Factory run.`;
+}
+
 const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_add_teammate",
+	"hive_answer_question",
 	"hive_approve_plan",
 	"hive_assign_teammate_squad",
 	"hive_cancel_agent_launch",
@@ -269,6 +303,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_explain_failure",
 	"hive_find_related_work",
 	"hive_find_similar_failures",
+	"hive_fleet_status",
 	"hive_force_kill_agent_session",
 	"hive_get_agent_command",
 	"hive_get_agent_spend",
@@ -279,6 +314,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_get_factory_tier_health",
 	"hive_get_occupancy",
 	"hive_get_origin_pull",
+	"hive_get_project_goal_work",
 	"hive_get_project_goals",
 	"hive_get_pull",
 	"hive_get_pull_comments",
@@ -320,6 +356,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_set_run_priority",
 	"hive_steer_agent",
 	"hive_wait_for_run",
+	"hive_watch_ticket",
 	"hive_whoami",
 	"linear_get_document",
 	"linear_get_issue",
@@ -388,10 +425,7 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 		if (typeof params.tool === "string") {
 			return ORCHESTRATE_MCP_TOOLS.has(params.tool) || discussionReadOnlyMcpTools().has(params.tool)
 				? { allowed: true }
-				: {
-						allowed: false,
-						reason: `Orchestrate mode does not permit MCP tool \`${params.tool}\`; delegate implementation to a teammate or Factory run.`,
-					};
+				: { allowed: false, reason: orchestrateMcpRefusal(params.tool) };
 		}
 		const keys = Object.keys(params);
 		return keys.every((key) => MCP_DISCOVERY_KEYS.has(key))
@@ -401,6 +435,7 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 
 	const base = classifyDiscussionTool(name, input);
 	if (base.allowed || ORCHESTRATE_TOOLS.has(name)) return { allowed: true };
+	if (ORCHESTRATE_MCP_ALIASES[name]) return { allowed: false, reason: orchestrateMcpRefusal(name) };
 	return {
 		allowed: false,
 		reason:

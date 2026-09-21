@@ -300,7 +300,6 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 			"hive_trigger_run",
 			"hive_propose_k8s_change",
 			"hive_k8s_action_scale",
-			"hive_watch_ticket",
 			// The Linear WRITE half stays a visible teammate's decision.
 			"linear_save_issue",
 			"linear_save_comment",
