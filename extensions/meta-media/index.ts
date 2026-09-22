@@ -17,7 +17,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { describeRequestBody, inferKind, reportHeader, type MediaKind } from "./logic.ts";
-import { META_BASE_URL, metaModels } from "./provider.ts";
+import registerMetaProvider from "./provider-only.ts";
 
 const DESCRIBE_TIMEOUT_MS = 4 * 60_000;
 
@@ -54,15 +54,8 @@ async function describeViaHive(url: string, kind: MediaKind | null, question: st
 export default function metaMedia(pi: ExtensionAPI) {
 	// Declare the Meta provider in the base harness so Muse Spark is launchable
 	// wherever pi runs — workstation and the factory image alike (HIV-3563).
-	// Models only: Muse Spark speaks OpenAI Responses, so pi's built-in transport
-	// serves it and no /compat transport wrap is needed.
-	pi.registerProvider("meta", {
-		name: "Meta (Muse Spark)",
-		baseUrl: META_BASE_URL,
-		apiKey: "$META_API_KEY",
-		api: "openai-responses",
-		models: metaModels as never,
-	});
+	// Shared with delegated workers, which load provider-only.ts alone.
+	registerMetaProvider(pi);
 
 	// A network read that returns text: no filesystem write, no subprocess, so it
 	// is registered plain and listed in the tool-capability conformance READ_ONLY

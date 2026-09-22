@@ -3,6 +3,8 @@ import {
 	HEARTBEAT_MS,
 	MAX_DETAIL,
 	buildPayload,
+	compactionEnded,
+	compactionStarted,
 	createActivity,
 	enterPhase,
 	shouldReport,
@@ -229,5 +231,38 @@ describe("detail on the wire", () => {
 		buildPayload(s, T0 + 1_000);
 		enterPhase(s, "thinking", T0 + 5_000);
 		expect(buildPayload(s, T0 + 5_000).detail).toBeUndefined();
+	});
+});
+
+// Automatic compaction runs after turn_end. Before this phase existed the whole
+// summarisation read `idle` and sent no beats: a 7.5-minute compaction on
+// 2026-09-22 looked exactly like a stuck session, and diagnose said all was well.
+describe("compaction", () => {
+	it("is its own phase, which beats, and names what it is summarising", () => {
+		const s = createActivity(T0);
+		turnEnded(s, T0 + 1_000);
+		compactionStarted(s, T0 + 2_000, "threshold", 209_963);
+		expect(s.phase).toBe("compacting");
+		expect(s.detail).toBe("threshold · 210k tokens");
+		expect(shouldReport(s, T0 + 2_000)).toBe(true);
+		buildPayload(s, T0 + 2_000);
+		expect(shouldReport(s, T0 + 2_000 + HEARTBEAT_MS)).toBe(true);
+	});
+
+	it("returns to idle when it ends, so an empty queue does not beat", () => {
+		const s = createActivity(T0);
+		compactionStarted(s, T0 + 1_000);
+		expect(s.detail).toBeUndefined();
+		compactionEnded(s, T0 + 60_000);
+		expect(s.phase).toBe("idle");
+		expect(s.sinceMs).toBe(T0 + 60_000);
+	});
+
+	it("a late end does not relabel the phase that already followed", () => {
+		const s = createActivity(T0);
+		compactionStarted(s, T0 + 1_000, "overflow");
+		enterPhase(s, "working", T0 + 2_000);
+		compactionEnded(s, T0 + 3_000);
+		expect(s.phase).toBe("working");
 	});
 });

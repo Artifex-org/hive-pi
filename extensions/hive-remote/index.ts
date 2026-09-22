@@ -77,6 +77,8 @@ import {
 	HEARTBEAT_MS,
 	buildPayload,
 	createActivity,
+	compactionEnded,
+	compactionStarted,
 	enterPhase,
 	shouldReport,
 	toolEnded,
@@ -2232,6 +2234,23 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			// second or two, and guessing in the meantime would put a label on the
 			// pane that the next frame contradicts.
 			enterPhase(activity, "working", turnStartedAtMs);
+			beat();
+		});
+
+		// Compaction runs outside a turn when it is automatic, so without these
+		// the whole summarisation reported `idle` and sent no beats — minutes of
+		// a session that looked stuck (see activity.ts `compacting`). Pure state
+		// changes plus the detached beat; nothing here may block pi's loop.
+		pi.on("session_before_compact", (event) => {
+			compactionStarted(activity, Date.now(), event?.reason, event?.preparation?.tokensBefore);
+			beat();
+		});
+		pi.on("session_compact", () => {
+			compactionEnded(activity, Date.now());
+			beat();
+		});
+		pi.on("session_compact_failed", () => {
+			compactionEnded(activity, Date.now());
 			beat();
 		});
 
