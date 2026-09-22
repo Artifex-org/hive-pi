@@ -3,7 +3,7 @@ import { connect } from "node:net";
 import { join } from "node:path";
 import { readStoredCredential, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { modifyCredential } from "./storage.ts";
-import { exchange, identity } from "./client.ts";
+import { exchange, identity, type Transport } from "./client.ts";
 import { isQuotaExhaustedText } from "./quota.ts";
 
 export const RECOVERY_CHANNEL = "hive.credential-recovery";
@@ -39,7 +39,10 @@ export function probeSocket(path: string, timeoutMs = 2000): Promise<string | un
  * The agenda driver continues to own normal post-settlement task re-entry. */
 export default function credentialRecovery(pi: ExtensionAPI): void {
 	let authPath: string | undefined;
-	let socket = "";
+	let transport: Transport | undefined;
+	// Resolves once the socket probe has chosen the transport. Every exchange
+	// awaits it, so a quota failure in the first turn cannot race the probe.
+	let ready: Promise<void> = Promise.resolve();
 	let generation = 0;
 	let intention = 0;
 	let captured: { provider: string; identity: string } | undefined;
@@ -67,22 +70,30 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		waiting = false;
 		retryProvider = undefined;
 		authPath = undefined;
-		socket = "";
+		transport = undefined;
+		ready = Promise.resolve();
 		unreachable = false;
 		const path = join(getAgentDir(), "auth.json");
 		if (!existsSync(path)) return;
 		const canonical = realpathSync(path);
 		const candidate = canonical + ".hive-recovery.sock";
-		if (!existsSync(candidate)) return; // a session not leased by Hive
-		socket = candidate;
+		const mailbox = canonical + ".hive-recovery.d";
+		if (!existsSync(candidate) && !existsSync(mailbox)) return; // a session not leased by Hive
+		transport = existsSync(candidate) ? { kind: "socket", path: candidate } : { kind: "mailbox", dir: mailbox };
 		authPath = path;
 		report(ctx, "available", "");
 		timer = setInterval(() => { void renew(); }, renewalIntervalMs);
 		timer.unref();
+		if (transport.kind !== "socket") return;
 		const gen = generation;
-		void probeSocket(candidate).then((reason) => {
+		ready = probeSocket(candidate).then((reason) => {
 			if (gen !== generation || !reason || !isSocketUnreachable(reason)) return;
-			markUnreachable(ctx);
+			// A sandbox (srt seccomp) or a dead socket. The lease holder also
+			// serves the same exchange through files, which the sandbox can
+			// write: switch to that when it is there, and only when it is not
+			// hand the failure to Hive's failover.
+			if (existsSync(mailbox)) transport = { kind: "mailbox", dir: mailbox };
+			else markUnreachable(ctx);
 		});
 	});
 
@@ -90,6 +101,17 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	// "error" to provider_failure=other, which the server's quota sweep never
 	// selects, so the session parked for good; "unavailable" keeps the failure
 	// classed as quota_exhausted and lets Hive switch rung or seed a successor.
+	function fallBackToMailbox(): boolean {
+		if (transport?.kind !== "socket") return false;
+		const mailbox = transport.path.replace(/\.hive-recovery\.sock$/, ".hive-recovery.d");
+		if (!existsSync(mailbox)) return false;
+		transport = { kind: "mailbox", dir: mailbox };
+		// Retry on the new transport now rather than at the next ten-minute
+		// renewal; renew() re-sends failed=true for a pending quota failure.
+		setTimeout(() => { void renew(); }, 1000).unref();
+		return true;
+	}
+
 	function markUnreachable(ctx: ExtensionContext): void {
 		unreachable = true;
 		if (timer) clearInterval(timer);
@@ -123,10 +145,12 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 			retryProvider = undefined;
 			return;
 		}
-		if (unreachable) {
+		await ready;
+		if (unreachable || !transport) {
 			if (failed) report(ctx, "unavailable", SANDBOX_UNAVAILABLE);
 			return;
 		}
+		const via = transport;
 		const provider = ctx.model.provider;
 		const start = captured;
 		if (!start || start.provider !== provider) return;
@@ -142,7 +166,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 				// Another session may have exchanged the shared credential while this
 				// model call was in flight. Retry that replacement without blaming it.
 				if (failed && identity(current) !== start.identity) return current;
-				const result = await exchange(socket, provider, current, failed);
+				const result = await exchange(via, provider, current, failed);
 				if (gen !== generation) return current;
 				if (result.status !== "recovered") { exhausted = result.status; return current; }
 				return result.credential;
@@ -170,7 +194,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		} catch (error) {
 			if (gen === generation && intent === intention && !ctx.signal?.aborted) {
 				const text = error instanceof Error ? error.message : String(error);
-				if (isSocketUnreachable(text)) {
+				if (isSocketUnreachable(text) && !fallBackToMailbox()) {
 					markUnreachable(ctx);
 				} else {
 					if (failed) { waiting = true; retryProvider = provider; }
@@ -183,6 +207,9 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	async function renew(): Promise<void> {
 		const ctx = latestCtx;
 		if (!ctx || !authPath || !ctx.model || recovering || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+		await ready;
+		if (unreachable || !transport) return;
+		const via = transport;
 		const gen = generation;
 		const intent = intention;
 		const provider = ctx.model.provider;
@@ -191,7 +218,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 			let exhausted: "exhausted" | "unavailable" | undefined;
 			await modifyCredential(authPath, ctx.model.provider, async (current) => {
 				if (!current) throw new Error("The session credential disappeared during renewal");
-				const result = await exchange(socket, provider, current, retryProvider === provider);
+				const result = await exchange(via, provider, current, retryProvider === provider);
 				if (gen !== generation) return current;
 				if (result.status !== "recovered") { exhausted = result.status; return current; }
 				return result.credential;
@@ -214,7 +241,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 				// connect EPERM …hive-recovery.sock" line per interval on every
 				// sandboxed agent (2026-09-11). Say it once, then stop the timer;
 				// an exchange on a real exhaustion still tries, and still reports.
-				if (isSocketUnreachable(text)) {
+				if (isSocketUnreachable(text) && !fallBackToMailbox()) {
 					markUnreachable(ctx);
 				} else {
 					report(ctx, "error", `Account renewal failed: ${text}`);
