@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Model } from "@earendil-works/pi-ai";
-import credentialRecovery from "../extensions/credential-recovery/index.ts";
+import credentialRecovery, { RECOVERY_CHANNEL, SANDBOX_UNAVAILABLE, isSocketUnreachable, probeSocket } from "../extensions/credential-recovery/index.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 const model: Model<"openai-codex-responses"> = {
@@ -112,6 +112,40 @@ describe("credential recovery", () => {
 			expect(f.requests).toHaveLength(2);
 			expect(f.pi.messages).toEqual([]);
 		} finally { await f.close(); }
+	});
+
+	// HIV-3452: srt's seccomp makes the socket FILE visible but every connect
+	// fail. A plain file at the socket path reproduces that shape without srt
+	// (connect answers ECONNREFUSED/ENOTSOCK-class errors the same way).
+	it("hands a sandboxed quota failure to Hive's failover instead of retrying an unreachable socket", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "recovery-blocked-"));
+		vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+		const path = join(dir, "auth.json");
+		await writeFile(path, JSON.stringify({ "openai-codex": oldAccount }));
+		await writeFile(path + ".hive-recovery.sock", "");
+		const pi = createFakePi();
+		credentialRecovery(pi.api);
+		try {
+			await pi.emit({ type: "session_start" }, { model });
+			await vi.waitFor(() => expect(pi.statuses.at(-1)?.text).toBe(SANDBOX_UNAVAILABLE));
+			await pi.emit({ type: "turn_start" }, { model });
+			await pi.emit({ type: "agent_end", messages: [failure] }, { model });
+			const states = pi.busEvents.filter((e) => e.name === RECOVERY_CHANNEL).map((e) => (e.payload as { state: string }).state);
+			expect(states).not.toContain("error");
+			expect(states).not.toContain("recovering");
+			expect(states.at(-1)).toBe("unavailable");
+			expect(pi.messages).toEqual([]);
+			expect(JSON.parse(await readFile(path, "utf8"))["openai-codex"]).toEqual(oldAccount);
+		} finally {
+			await pi.emit({ type: "session_shutdown" });
+			await rm(dir, { recursive: true });
+		}
+	});
+
+	it("still classifies an exchange that fails on the socket as unavailable, not a retrying error", async () => {
+		expect(isSocketUnreachable("connect EPERM /tmp/hive-launch-pi-1/auth.json.hive-recovery.sock")).toBe(true);
+		expect(isSocketUnreachable("Credential exchange failed (HTTP 503)")).toBe(false);
+		expect(await probeSocket(join(tmpdir(), "definitely-absent-recovery.sock"))).toMatch(/ENOENT/);
 	});
 
 	it.each(["429 rate limit", "401 unauthorized"])("does not rotate on %s", async (errorMessage) => {

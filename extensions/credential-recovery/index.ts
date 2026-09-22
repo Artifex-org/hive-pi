@@ -1,4 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
+import { connect } from "node:net";
 import { join } from "node:path";
 import { readStoredCredential, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { modifyCredential } from "./storage.ts";
@@ -10,6 +11,28 @@ export const RECOVERY_CHANNEL = "hive.credential-recovery";
 /** A unix-socket connect that will keep failing: the sandbox forbids it, or the socket is gone. */
 export function isSocketUnreachable(text: string): boolean {
 	return /\b(EPERM|EACCES|ENOENT|ECONNREFUSED)\b/.test(text);
+}
+
+/** The one-line reason a sandboxed session cannot switch accounts itself. */
+export const SANDBOX_UNAVAILABLE = "Account switching unavailable in this sandbox (the recovery socket cannot be reached) — handing the quota failure to Hive's provider failover";
+
+/**
+ * Whether the recovery socket accepts a connection from THIS process.
+ *
+ * `existsSync` cannot answer that: srt's seccomp filter blocks socket(AF_UNIX)
+ * outright, so a sandboxed agent sees the file and still gets `connect EPERM`
+ * (HIV-3452). A stat said "available", every quota failure then printed
+ * "selecting another assigned account" followed by the EPERM, and the session
+ * parked instead of failing over.
+ */
+export function probeSocket(path: string, timeoutMs = 2000): Promise<string | undefined> {
+	return new Promise((resolve) => {
+		const sock = connect({ path });
+		const done = (reason: string | undefined) => { sock.destroy(); resolve(reason); };
+		sock.setTimeout(timeoutMs, () => done(undefined)); // slow is not unreachable
+		sock.once("connect", () => done(undefined));
+		sock.once("error", (error) => done(error.message));
+	});
 }
 
 /** Account repair happens inside the existing agent run, before settlement.
@@ -24,6 +47,9 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	let waiting = false;
 	let retryProvider: string | undefined;
 	let latestCtx: ExtensionContext | undefined;
+	// Set when the socket is provably unreachable from this process (a sandbox).
+	// Every exchange would fail identically, so none is attempted.
+	let unreachable = false;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	const renewalIntervalMs = 10 * 60 * 1000;
 
@@ -42,6 +68,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		retryProvider = undefined;
 		authPath = undefined;
 		socket = "";
+		unreachable = false;
 		const path = join(getAgentDir(), "auth.json");
 		if (!existsSync(path)) return;
 		const canonical = realpathSync(path);
@@ -52,7 +79,23 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		report(ctx, "available", "");
 		timer = setInterval(() => { void renew(); }, renewalIntervalMs);
 		timer.unref();
+		const gen = generation;
+		void probeSocket(candidate).then((reason) => {
+			if (gen !== generation || !reason || !isSocketUnreachable(reason)) return;
+			markUnreachable(ctx);
+		});
 	});
+
+	// "unavailable" rather than "error" is the whole fix. hive-remote maps an
+	// "error" to provider_failure=other, which the server's quota sweep never
+	// selects, so the session parked for good; "unavailable" keeps the failure
+	// classed as quota_exhausted and lets Hive switch rung or seed a successor.
+	function markUnreachable(ctx: ExtensionContext): void {
+		unreachable = true;
+		if (timer) clearInterval(timer);
+		timer = undefined;
+		report(ctx, "unavailable", SANDBOX_UNAVAILABLE);
+	}
 	pi.on("session_shutdown", () => { generation++; authPath = undefined; latestCtx = undefined; if (timer) clearInterval(timer); });
 
 	pi.on("input", (event) => {
@@ -78,6 +121,10 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		if (newest.stopReason === "aborted" || (newest.stopReason === "error" && !failed)) {
 			waiting = false;
 			retryProvider = undefined;
+			return;
+		}
+		if (unreachable) {
+			if (failed) report(ctx, "unavailable", SANDBOX_UNAVAILABLE);
 			return;
 		}
 		const provider = ctx.model.provider;
@@ -122,8 +169,13 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 			pi.sendMessage({ customType: "credential-recovery", content: "The exhausted account was replaced. Continue the interrupted task from the current transcript and completed tool results; do not repeat completed actions.", display: true }, { deliverAs: "followUp", triggerTurn: true });
 		} catch (error) {
 			if (gen === generation && intent === intention && !ctx.signal?.aborted) {
-				if (failed) { waiting = true; retryProvider = provider; }
-				report(ctx, "error", `Account recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+				const text = error instanceof Error ? error.message : String(error);
+				if (isSocketUnreachable(text)) {
+					markUnreachable(ctx);
+				} else {
+					if (failed) { waiting = true; retryProvider = provider; }
+					report(ctx, "error", `Account recovery failed: ${text}`);
+				}
 			}
 		} finally { if (gen === generation) recovering = false; }
 	});
@@ -163,9 +215,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 				// sandboxed agent (2026-09-11). Say it once, then stop the timer;
 				// an exchange on a real exhaustion still tries, and still reports.
 				if (isSocketUnreachable(text)) {
-					if (timer) clearInterval(timer);
-					timer = undefined;
-					report(ctx, "unavailable", "Account renewal unavailable: the recovery socket is not reachable from this sandbox — renewals stopped");
+					markUnreachable(ctx);
 				} else {
 					report(ctx, "error", `Account renewal failed: ${text}`);
 				}
