@@ -270,7 +270,11 @@ export function buildStatus(
 	accountRecovery?: string,
 ): StatusPayload {
 	const status: StatusPayload = { ...quota };
-	if (accountRecovery !== undefined) status.account_recovery = true;
+	// "unavailable" means this client CANNOT switch accounts (a sandbox that
+	// blocks the recovery socket, or a credential with no account identity).
+	// Claiming recovery there told the server's quota sweep to wait for a
+	// client-side swap that can never come, instead of failing over (HIV-3452).
+	if (accountRecovery !== undefined && accountRecovery !== "unavailable") status.account_recovery = true;
 	// Passed in rather than read here for the same reason `quota` is: it arrives
 	// on a bus event from another extension and persists between turns. Omitted
 	// entirely when unknown — an absent posture and an unrestricted one are
