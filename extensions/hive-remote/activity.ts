@@ -37,6 +37,12 @@
  * showed a registered session doing nothing, and a launch that was working
  * normally was indistinguishable from one that had hung (HIV-2242).
  *
+ * `compacting` is the other phase that can fall outside a turn: pi's automatic
+ * compaction runs after `turn_end`, and summarising a 200k context on a
+ * reasoning model took 7.5 minutes (2026-09-22). That whole window read `idle`
+ * — no beats, and diagnose_agent_session said "nothing wrong found" — while a
+ * queued steer sat unapplied behind it, so the operator saw a stuck session.
+ *
  * The wire does NOT constrain this set. Hive stores what it is sent, so a phase
  * added here needs no server deploy first, and a browser that predates one
  * renders it as generic work rather than dropping it.
@@ -44,6 +50,7 @@
 export type Phase =
 	| "idle"
 	| "briefing"
+	| "compacting"
 	| "working"
 	| "thinking"
 	| "responding"
@@ -181,6 +188,24 @@ function lastValue(map: Map<string, string>): string | undefined {
  *  event, and a stale entry would make the next turn report the wrong tool. */
 export function turnEnded(state: ActivityState, nowMs: number): void {
 	state.running.clear();
+	enterPhase(state, "idle", nowMs);
+}
+
+/** A compaction began. It can start at a turn boundary (automatic) or while
+ *  work is in flight (overflow), so it names the phase either way; the detail
+ *  says which, with the context size it is summarising when pi reports it. */
+export function compactionStarted(state: ActivityState, nowMs: number, reason?: string, tokens?: number): void {
+	const parts = [reason, typeof tokens === "number" && tokens > 0 ? `${Math.round(tokens / 1000)}k tokens` : undefined]
+		.filter((p): p is string => typeof p === "string" && p.length > 0);
+	enterPhase(state, "compacting", nowMs, undefined, parts.length > 0 ? parts.join(" · ") : undefined);
+}
+
+/** A compaction finished. Back to `idle`: pi's next `turn_start` (a queued
+ *  steer, or its own continuation after an overflow) re-enters `working`, and
+ *  claiming work here would beat for a session that may have nothing queued.
+ *  Guarded so a late event cannot relabel whatever phase already followed. */
+export function compactionEnded(state: ActivityState, nowMs: number): void {
+	if (state.phase !== "compacting") return;
 	enterPhase(state, "idle", nowMs);
 }
 
