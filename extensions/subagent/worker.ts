@@ -63,11 +63,19 @@ import { ensureWorkerMcpConfig } from "../mcp-common/config.ts";
  *   now. Restoring it means extracting the tool registration into a hook-free
  *   module a worker can load, which is a deliberate follow-up and not a thing
  *   to do by widening this list.
+ * - `meta-media/provider-only.ts` — registers the `meta` PROVIDER only, no
+ *   tools, no hooks. `meta` has no models.json entry, so a worker without it
+ *   resolves `meta/muse-spark-*` by bare id — which the OpenRouter catalogue
+ *   also carries — and every delegation on the fleet's meta `low` rung died on
+ *   OpenRouter's `404 … Paid model training violation` while readiness said
+ *   ready (22 papercuts, 2026-09-20..22). Any provider that exists only via
+ *   `registerProvider` must be listed here for workers to run on it.
  */
 const WORKER_EXTENSIONS = [
 	"../knowledge-tools.ts",
 	"../edit-common/rowtool.ts",
 	"../opmode/index.ts",
+	"../meta-media/provider-only.ts",
 ];
 
 /**
