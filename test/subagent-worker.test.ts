@@ -92,6 +92,19 @@ describe("subagent worker invocation", () => {
 		expect(workerExtensionPaths().length).toBeLessThanOrEqual(5);
 	});
 
+	it("loads the meta provider, so a meta delegation model never resolves through OpenRouter", () => {
+		// `meta` exists only via registerProvider. Without it a worker resolved
+		// `--model meta/muse-spark-1.3-contributor` by bare id, matched the
+		// OpenRouter catalogue entry of the same name, and died on OpenRouter's
+		// `404 … Paid model training violation` — 22 papercuts while readiness
+		// reported delegation ready (2026-09-20..22).
+		const provider = workerExtensionPaths().find((path) => path.endsWith("/extensions/meta-media/provider-only.ts"));
+		expect(provider, "worker must load the meta provider").toBeDefined();
+		const source = readFileSync(provider as string, "utf8");
+		expect(source).toMatch(/registerProvider\("meta"/);
+		expect(source, "a worker provider module must not add tools").not.toMatch(/\bregisterTool\(/);
+	});
+
 	it("only reviewed protocol extensions register worker event hooks", () => {
 		// `workflow/index.ts` was the second entry until HIV-2904 merged that
 		// document into the plan. It is deliberately NOT replaced by
