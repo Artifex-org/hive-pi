@@ -73,10 +73,11 @@ const IS_WORKER = process.env.PI_AGENDA_WORKER === "1";
 export default function (pi: ExtensionAPI) {
 	let armed = false;
 	/**
-	 * Separate from `armed`, deliberately: a handoff seed (`.pi/handoff.md`,
-	 * written by `/handoff` — see agenda/handoff.ts) is consumed ONLY at a
-	 * fresh session's first start. The compaction re-arm below must not eat a
-	 * seed written mid-session for the NEXT one.
+	 * Separate from `armed`, deliberately: a handoff seed (per-worktree git dir,
+	 * or legacy `.pi/handoff.md` outside any repo — written by `/handoff`, see
+	 * agenda/handoff.ts) is consumed ONLY at a fresh session's first start. The
+	 * compaction re-arm below must not eat a seed written mid-session for the
+	 * NEXT one.
 	 */
 	let handoffArmed = false;
 	let pending: Promise<string | null> | null = null;
