@@ -182,17 +182,32 @@ describe.runIf(canRunPty)("a command running on a real pty", () => {
 	 * the local pass was the accident and the CI failure was the truth.
 	 */
 	it("names a terminal type even when the environment has none", async () => {
-		const { model } = await run("echo TERM=$TERM; echo COLS=$(tput cols); echo ROWS=$(tput lines)", {
+		const prior = process.env.TERM;
+		delete process.env.TERM;
+		try {
+			const { model } = await run("echo TERM=$TERM; tput cols", {
+				// Neither the requested env nor the server process has TERM.
+				env: { ...process.env, TERM: undefined } as NodeJS.ProcessEnv,
+			});
+			expect(model).toContain("TERM=xterm-256color");
+			expect(model).not.toContain("No value for $TERM");
+		} finally {
+			if (prior === undefined) delete process.env.TERM;
+			else process.env.TERM = prior;
+		}
+	});
+
+	it("matches exported geometry to the resized terminal, not the caller", async () => {
+		const { model } = await run("stty size; env | grep -E '^(COLUMNS|LINES)='; echo COLS=$(tput cols); echo ROWS=$(tput lines)", {
 			rows: 24,
 			cols: 100,
-			// A service-runner TERM gap and stale exported geometry, independent
-			// of the machine on which the suite is invoked.
-			env: { ...process.env, TERM: undefined, COLUMNS: "80", LINES: "20" } as NodeJS.ProcessEnv,
+			env: { ...process.env, COLUMNS: "80", LINES: "20" },
 		});
-		expect(model).toMatch(/TERM=\S/);
+		expect(model).toContain("24 100");
+		expect(model).toContain("COLUMNS=100");
+		expect(model).toContain("LINES=24");
 		expect(model).toContain("COLS=100");
 		expect(model).toContain("ROWS=24");
-		expect(model).not.toContain("No value for $TERM");
 	});
 
 	it("does not override a TERM the operator set", async () => {
