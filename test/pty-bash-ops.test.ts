@@ -182,14 +182,16 @@ describe.runIf(canRunPty)("a command running on a real pty", () => {
 	 * the local pass was the accident and the CI failure was the truth.
 	 */
 	it("names a terminal type even when the environment has none", async () => {
-		const { model } = await run("echo TERM=$TERM; echo COLS=$(tput cols)", {
+		const { model } = await run("echo TERM=$TERM; echo COLS=$(tput cols); echo ROWS=$(tput lines)", {
 			rows: 24,
 			cols: 100,
-			// The CI environment, reproduced deliberately.
-			env: { ...process.env, TERM: undefined } as NodeJS.ProcessEnv,
+			// A service-runner TERM gap and stale exported geometry, independent
+			// of the machine on which the suite is invoked.
+			env: { ...process.env, TERM: undefined, COLUMNS: "80", LINES: "20" } as NodeJS.ProcessEnv,
 		});
 		expect(model).toMatch(/TERM=\S/);
 		expect(model).toContain("COLS=100");
+		expect(model).toContain("ROWS=24");
 		expect(model).not.toContain("No value for $TERM");
 	});
 
