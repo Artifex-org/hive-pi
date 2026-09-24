@@ -488,7 +488,7 @@ export function renderConductorLines(
 	// the MODEL cannot run it, so instructing the model to would be an order its
 	// recipient has no way to obey. And the widget never writes the seed itself:
 	// `writeHandoff` overwrites, so an automatic write would silently clobber a
-	// pending `.pi/handoff.md` the operator had already reviewed and edited.
+	// pending handoff seed the operator had already reviewed and edited.
 	if (context && suggestsHandoff(item.stage, context)) {
 		lines.push(
 			`  context ${Math.round(context.percent ?? 0)}% — at a phase boundary: \`/handoff\` starts clean instead of compacting`,

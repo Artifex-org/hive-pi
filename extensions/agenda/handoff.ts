@@ -4,10 +4,20 @@
  * Amp's measured position: repeated summarization distorts earlier reasoning,
  * so for phase-structured work a CLEAN BREAK beats lossy compression — end the
  * session at a phase boundary and seed the next one with a reviewable prompt.
- * This is the pi version: `/handoff [objective]` writes the seed to
- * `.pi/handoff.md`, the USER reviews/edits it (the file is the review UI —
+ * This is the pi version: `/handoff [objective]` writes the seed to the
+ * per-worktree private git dir (`git rev-parse --git-dir`/handoff/handoff.md),
+ * the USER reviews/edits it (the file is the review UI —
  * no new overlay machinery), and the next fresh session in that cwd consumes
  * it exactly once via session-context's one-shot injection.
+ *
+ * The git dir — NOT the common dir — is load-bearing: inside a linked
+ * worktree `--git-dir` points at `<common>/.git/worktrees/<name>`, which is
+ * outside the checkout, so the seed never appears in `git status`, snapshots
+ * or commits. (In a Hive checkout `.pi/` is not ignored, which is exactly how
+ * the old `.pi/handoff.md` location contaminated them.) A cwd outside any git
+ * repo falls back to the legacy `.pi/handoff.md`, and a pending legacy seed is
+ * still consumed once — but the consumed rename always lands beside the
+ * pending seed's successor location, never as a new file in the checkout.
  *
  * Consumption guards (both load-bearing):
  *   - workers never consume (PI_AGENDA_WORKER, checked by the caller) — every
@@ -38,8 +48,18 @@
  * successor could not otherwise cheaply obtain.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { GoalItem } from "./goal-state.ts";
 import type { ConductorItem } from "./conductor-state.ts";
 import type { SessionSignals } from "./signals.ts";
@@ -47,6 +67,26 @@ import type { PlanDoc, WorkItem } from "../plan/state.ts";
 import type { RecapSection } from "./session-recap.ts";
 
 export const HANDOFF_FILE = "handoff.md";
+/** Subdirectory of the git dir holding pending and consumed seeds. */
+const HANDOFF_DIR = "handoff";
+/**
+ * Git env vars that override cwd-based repo discovery (`git -C <dir>` does
+ * NOT win over an inherited GIT_DIR). Scrubbed before `rev-parse` for the
+ * same reason guards-common/worktree-guard.ts scrubs them: discovery must be
+ * honest and cwd-based, and this function must never reroute a seed on the
+ * strength of an inherited variable. Read-only use — nothing here writes
+ * machine config.
+ */
+const GIT_ENV_OVERRIDES = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_COMMON_DIR",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_CEILING_DIRECTORIES",
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+] as const;
 const MAX_SEED_CHARS = 12_000;
 /** A worktree mid-rebase can carry hundreds of paths; the seed is not a diff. */
 const MAX_GIT_STATUS_LINES = 40;
@@ -284,36 +324,199 @@ function assemble(head: string[], sections: SeedSection[], footer: string[]): st
 	return out.length <= MAX_SEED_CHARS ? out : out.slice(0, MAX_SEED_CHARS);
 }
 
-/** Where the seed lives for a cwd. */
-export function handoffPath(cwd: string): string {
+/** How git-dir discovery ended.
+ *
+ * `ok:true` with a null gitDir is a TRUE non-git cwd (git itself said "not a
+ * git repository") — the only case that falls back to the legacy checkout
+ * path. `ok:false` is a discovery FAILURE (no git on PATH, timeout, an
+ * unexpected git error): the cwd may be a real repo whose status must not be
+ * contaminated, so writers fail closed instead of falling back.
+ */
+export type GitDirDiscovery = { ok: true; gitDir: string | null } | { ok: false; detail: string };
+
+const GIT_DISCOVERY_TIMEOUT_MS = 5_000;
+
+/** Discriminated git-dir discovery: true non-git vs failure. Read-only — this
+ * runs `rev-parse` and writes nothing to the machine config. */
+export function discoverGitDir(cwd: string): GitDirDiscovery {
+	// Scrubbed so discovery is honest and cwd-based: an inherited GIT_DIR wins
+	// over `-C <dir>` and would route the seed into a different repo than the
+	// session's checkout (same class guards-common/worktree-guard.ts scrubs for).
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	for (const key of GIT_ENV_OVERRIDES) delete env[key];
+	let res: SpawnSyncReturns<string>;
+	try {
+		res = spawnSync("git", ["-C", cwd, "rev-parse", "--git-dir"], {
+			encoding: "utf8",
+			timeout: GIT_DISCOVERY_TIMEOUT_MS,
+			env,
+		});
+	} catch (err) {
+		return { ok: false, detail: `could not spawn git: ${String(err)}` };
+	}
+	if (res.error) {
+		const code = (res.error as NodeJS.ErrnoException)?.code;
+		if (code === "ETIMEDOUT") {
+			return {
+				ok: false,
+				detail: `git rev-parse timed out after ${GIT_DISCOVERY_TIMEOUT_MS}ms in ${cwd}`,
+			};
+		}
+		return { ok: false, detail: `could not run git rev-parse in ${cwd}: ${res.error.message}` };
+	}
+	if (res.status === 0) {
+		const out = (res.stdout ?? "").trim().split("\n")[0]?.trim();
+		if (!out) return { ok: false, detail: "git rev-parse --git-dir exited 0 but printed nothing" };
+		// git answers relative (".git") in a main worktree, absolute in a linked
+		// one — resolve both, or the seed lands on formatting rather than fact.
+		return { ok: true, gitDir: isAbsolute(out) ? out : resolve(cwd, out) };
+	}
+	const stderr = (res.stderr ?? "").trim().split("\n")[0]?.trim() ?? "";
+	// Exit 128 with "not a git repository" is the ONLY answer that means "not a
+	// repo". Every other failure (dubious ownership, corrupt gitfile, a wrapper
+	// on PATH) means the cwd may be a real repo — falling back to `.pi` there
+	// would write checkout litter, so it fails closed instead.
+	if (/not a git repository/i.test(stderr)) return { ok: true, gitDir: null };
+	return {
+		ok: false,
+		detail: stderr ? `git rev-parse failed: ${stderr}` : `git rev-parse exited with status ${res.status}`,
+	};
+}
+
+/** Where the seed lives for a cwd.
+ *
+ * The per-worktree private git dir (`git rev-parse --git-dir`, never the
+ * common dir), so the seed is outside the checkout: no `git status` noise, no
+ * snapshot/commit surface. Read-path compat only: on discovery FAILURE this
+ * falls back to the legacy checkout path, so WRITERS must use `writeHandoff` /
+ * `consumeHandoff` (which fail closed) rather than writing here.
+ */
+export function gitDirFor(cwd: string): string | null {
+	const discovery = discoverGitDir(cwd);
+	return discovery.ok ? discovery.gitDir : null;
+}
+
+/** The pre-git-dir location, kept as the non-git fallback and the compat read. */
+export function legacyHandoffPath(cwd: string): string {
 	return join(cwd, ".pi", HANDOFF_FILE);
 }
 
-/** Write the seed. Returns the path. Creates `.pi/` when missing. */
+export function handoffPath(cwd: string): string {
+	const gitDir = gitDirFor(cwd);
+	if (gitDir) return join(gitDir, HANDOFF_DIR, HANDOFF_FILE);
+	return legacyHandoffPath(cwd);
+}
+
+/** Write the seed. Returns the path. Creates the parent dir when missing.
+ *
+ * Fail-closed: when git-dir discovery FAILS (as opposed to a true non-git
+ * cwd) this throws instead of falling back to `.pi` — inside a real repo that
+ * fallback would contaminate `git status` and snapshots. Both `/handoff`
+ * callers already degrade safely (`performHandoff` returns the error for the
+ * operator; the threshold path keeps the compaction fallback).
+ */
 export function writeHandoff(cwd: string, seed: string): string {
-	const dir = join(cwd, ".pi");
-	mkdirSync(dir, { recursive: true });
-	const path = handoffPath(cwd);
+	const discovery = discoverGitDir(cwd);
+	if (!discovery.ok) {
+		throw new Error(
+			`refusing to write handoff seed: git discovery failed (${discovery.detail}). ` +
+				`Falling back to the checkout would contaminate git status and snapshots, so no seed was written. ` +
+				`Check that git is on PATH and ${cwd} is readable, then retry — outside any repo the legacy .pi fallback applies.`,
+		);
+	}
+	const path = discovery.gitDir ? join(discovery.gitDir, HANDOFF_DIR, HANDOFF_FILE) : legacyHandoffPath(cwd);
+	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, seed, "utf8");
 	return path;
+}
+
+/** Move a pending seed to its consumed name, crossing filesystems when needed.
+ *
+ * `renameSync` throws EXDEV when the checkout and the git dir live on
+ * different filesystems (a `--separate-git-dir` repo, a gitdir pointer
+ * elsewhere): the fallback copies then unlinks, preserving consume-once. When
+ * anything else fails — or the copy succeeds but the unlink does not — this
+ * returns false with NO duplicate left behind: a copied-but-not-unlinked seed
+ * is removed again, so two pending seeds can never exist.
+ */
+function moveConsumedSeed(src: string, dest: string): boolean {
+	try {
+		renameSync(src, dest);
+		return true;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code !== "EXDEV") return false;
+	}
+	try {
+		copyFileSync(src, dest);
+	} catch {
+		return false;
+	}
+	try {
+		unlinkSync(src);
+	} catch {
+		try {
+			unlinkSync(dest);
+		} catch {
+			/* best-effort rollback: the next consume simply finds the pending seed */
+		}
+		return false;
+	}
+	return true;
 }
 
 /**
  * Consume a pending handoff seed: read it, then RENAME it so it can never be
  * injected twice. Returns null when there is nothing to consume or the file
  * cannot be read — failing open (no injection) is the safe direction.
+ *
+ * A pre-fix `.pi/handoff.md` still pending is honored once (newest pending
+ * seed wins and a stale twin is removed so it can never inject later), and the
+ * consumed rename always lands in the git-dir handoff dir when there is one —
+ * consuming a legacy seed must not itself leave a file in the checkout.
  */
 export function consumeHandoff(cwd: string, now = Date.now()): string | null {
-	const path = handoffPath(cwd);
+	const discovery = discoverGitDir(cwd);
+	// Discovery failure fails closed with NO writes and NO injection: without a
+	// trustworthy primary location a legacy rename would land a consumed file in
+	// the checkout, and returning the seed without moving it would inject it on
+	// every future session. The seed stays pending for a session whose git works.
+	if (!discovery.ok) return null;
+	const primary = discovery.gitDir ? join(discovery.gitDir, HANDOFF_DIR, HANDOFF_FILE) : legacyHandoffPath(cwd);
+	const legacy = legacyHandoffPath(cwd);
+	const candidates = primary === legacy ? [primary] : [primary, legacy];
+	let best: { path: string; seed: string; mtime: number } | null = null;
+	for (const path of candidates) {
+		try {
+			if (!existsSync(path)) continue;
+			const seed = readFileSync(path, "utf8");
+			if (!seed.trim()) continue;
+			let mtime = 0;
+			try {
+				mtime = statSync(path).mtimeMs;
+			} catch {
+				/* undated seed still counts, just never outranks a dated one */
+			}
+			if (!best || mtime > best.mtime) best = { path, seed, mtime };
+		} catch {
+			/* unreadable candidate degrades to the other one, not to a failure */
+		}
+	}
+	if (!best) return null;
 	try {
-		if (!existsSync(path)) return null;
-		const seed = readFileSync(path, "utf8");
-		if (!seed.trim()) return null;
-		renameSync(path, join(cwd, ".pi", `handoff-consumed-${now}.md`));
-		return seed;
+		mkdirSync(dirname(primary), { recursive: true });
 	} catch {
 		return null;
 	}
+	if (!moveConsumedSeed(best.path, join(dirname(primary), `handoff-consumed-${now}.md`))) return null;
+	for (const path of candidates) {
+		if (path === best.path) continue;
+		try {
+			unlinkSync(path);
+		} catch {
+			/* best-effort: the next consume simply finds nothing there */
+		}
+	}
+	return best.seed;
 }
 
 /**

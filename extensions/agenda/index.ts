@@ -32,7 +32,7 @@ import {
 import { createDriftPolicy, driftJevClient } from "./drift.ts";
 import { createGatePolicy } from "./gate.ts";
 import { looksUnverifiable, parseGoalCommand } from "./goal-command.ts";
-import { HANDOFF_FILE, buildHandoffSeed, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
+import { buildHandoffSeed, legacyHandoffPath, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
 import {
 	createGoal,
 	reviseGoal,
@@ -1132,9 +1132,9 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * `/handoff [objective]` — the clean break that replaces compaction at a
-	 * phase boundary (HIV-1231). Writes a reviewable seed to `.pi/handoff.md`;
-	 * the FILE is the review UI, and the next fresh interactive session in this
-	 * cwd consumes it once (session-context.ts).
+	 * phase boundary (HIV-1231). Writes a reviewable seed to the per-worktree
+	 * private git dir (see handoff.ts); the FILE is the review UI, and the next
+	 * fresh interactive session in this cwd consumes it once (session-context.ts).
 	 */
 	/**
 	 * Is the threshold interception enabled?
@@ -1266,7 +1266,7 @@ export default function (pi: ExtensionAPI) {
 	 * `/handoff` is a registerCommand, which the model cannot run — conductor.ts
 	 * says so where it prints the nudge, and the consequence was measurable: over
 	 * 87 transcripts in three days, 34 sessions compacted 168 times and
-	 * `.pi/handoff.md` was written zero times. Every one of those sessions was an
+	 * `.pi/handoff.md` (the legacy location) was written zero times. Every one of those sessions was an
 	 * agent, and an agent has no way to type a slash command, so the deliberate
 	 * tool was unreachable by exactly the population that needed it.
 	 *
@@ -1282,12 +1282,15 @@ export default function (pi: ExtensionAPI) {
 		// never from a parameter. Declared rather than allowlisted so the
 		// declaration sits next to the tool, and because guards are NOT inherited:
 		// guards-bridge matches on tool NAME, so an undeclared tool that writes is
-		// ungoverned. `writesResolved` mirrors `writeHandoff`'s own path
-		// construction (`join(cwd, ".pi", HANDOFF_FILE)`).
+		// ungoverned. `writesResolved` mirrors the non-git fallback
+		// (`legacyHandoffPath`); the primary target — the per-worktree private git
+		// dir from `git rev-parse --git-dir`, outside the checkout — is stated in
+		// `writesExemptBecause`, because a write outside the checkout is not a
+		// checkout edit and there is nothing for the worktree guard to judge there.
 		capability: {
-			writesResolved: (_params, cwd) => [
-				`${(cwd ?? ".").replace(/\/+$/, "")}/.pi/${HANDOFF_FILE}`,
-			],
+			writesResolved: (_params, cwd) => [legacyHandoffPath(cwd ?? ".")],
+			writesExemptBecause:
+				"The primary seed target is the per-worktree private git dir (`git rev-parse --git-dir`, never the common dir), which lives outside the checkout: writing session lineage there is not a checkout edit, so the worktree guard has nothing to judge. The non-git fallback is still declared in writesResolved and guarded.",
 		},
 		name: "handoff",
 		label: "Handoff",

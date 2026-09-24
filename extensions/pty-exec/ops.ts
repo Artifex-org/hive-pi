@@ -340,6 +340,11 @@ export function ptyBashOperations(opts: PtyBashOptions = {}): BashOperations | n
 						// what CI reproduced. Only defaulted, never overridden: an
 						// operator who set one meant it.
 						TERM: env?.TERM ?? process.env.TERM ?? "xterm-256color",
+						// Match the exported geometry to the slave's stty size. A caller's
+						// stale COLUMNS/LINES can otherwise override the ioctl in tput and
+						// curses (including commands whose output is captured by a pipe).
+						COLUMNS: String(cols),
+						LINES: String(rows),
 						// THE COST OF A REAL TERMINAL, AND ITS PRICE TAG. With a tty on
 						// stdout `git diff|show|log|blame` invokes `less`, and `less`
 						// reads its keyboard from /dev/tty rather than fd 0 — so the

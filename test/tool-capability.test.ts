@@ -206,6 +206,18 @@ beforeAll(async () => {
 	process.env.QMD_FORCE = "1";
 	process.env.HIVE_TELEMETRY_TOKEN ||= "conformance-test-token";
 	process.env.HIVE_TELEMETRY_URL ||= "http://127.0.0.1:1";
+	// Grade the MAIN-session tool set no matter where the suite runs. Two
+	// extensions suppress registration inside a worker — `session-grep` its tool
+	// (module-load `IS_WORKER` gate), `brief` its command set (`isWorkerProcess`
+	// covers both markers) — so an ambient PI_AGENDA_WORKER/PI_BRIEF_WORKER
+	// leaking in from the parent environment (Hive agents run worker-shaped)
+	// makes the suite grade the WORKER set against a main-session READ_ONLY
+	// list, and `session_grep` reads as a stale entry for a tool that was never
+	// removed. Deleted before the dynamic imports below, while the gates can
+	// still read the scrubbed values; production semantics are untouched —
+	// workers still never see the tool, only this process forgets it ever was one.
+	delete process.env.PI_AGENDA_WORKER;
+	delete process.env.PI_BRIEF_WORKER;
 	// Set before the dynamic imports below: the gated extensions read HOME in
 	// their factory, and `guards-bridge` resolves its hook path at module load.
 	process.env.HOME = fakeHome();
