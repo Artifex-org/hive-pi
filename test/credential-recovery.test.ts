@@ -87,6 +87,23 @@ describe("credential recovery", () => {
 		} finally { await f.close(); }
 	});
 
+	// A completed turn triggers a routine renewal, not a recovery. When the
+	// broker is briefly unreachable that renewal fails, but the session's
+	// credential is untouched and valid: no error banner, no credential change.
+	it("keeps quiet when a routine post-turn renewal hits a broker outage", async () => {
+		const f = await fixture(503);
+		try {
+			await f.pi.emit({ type: "turn_start" }, { model });
+			await f.pi.emit({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] }, { model });
+			expect(f.requests).toEqual([{ provider: "openai-codex", credential: oldAccount, failed: false }]);
+			const states = f.pi.busEvents.filter((e) => e.name === RECOVERY_CHANNEL).map((e) => (e.payload as { state: string }).state);
+			expect(states).not.toContain("error");
+			expect(f.pi.statuses.at(-1)?.text ?? "").not.toContain("Account recovery failed");
+			expect(f.pi.messages).toEqual([]);
+			expect(JSON.parse(await readFile(f.path, "utf8"))["openai-codex"]).toEqual(oldAccount);
+		} finally { await f.close(); }
+	});
+
 	it("reports an unidentifiable account as unavailable without changing credentials", async () => {
 		const f = await fixture(422);
 		try {
