@@ -196,8 +196,16 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 				const text = error instanceof Error ? error.message : String(error);
 				if (isSocketUnreachable(text) && !fallBackToMailbox()) {
 					markUnreachable(ctx);
+				} else if (!failed) {
+					// A routine post-turn renewal, not a recovery: the session's
+					// credential is untouched and still works, and the renewal timer
+					// tries again. Reporting it as "Account recovery failed" put a red
+					// banner on a healthy session every time the broker was briefly
+					// unreachable (a hive-server rollout, 2026-09-28).
+					report(ctx, "available", "");
 				} else {
-					if (failed) { waiting = true; retryProvider = provider; }
+					waiting = true;
+					retryProvider = provider;
 					report(ctx, "error", `Account recovery failed: ${text}`);
 				}
 			}
