@@ -89,7 +89,21 @@ describe("subagent worker invocation", () => {
 		//
 		// Raised 3 -> 5 for the reviewed bugfix protocol pair. The two hook-bearing
 		// entries are pinned below; remaining entries stay tool-only and scoped.
-		expect(workerExtensionPaths().length).toBeLessThanOrEqual(5);
+		// Raised 5 -> 6 for fast/worker.ts (Fast mode for delegations), whose
+		// single session_start hook is pinned below.
+		expect(workerExtensionPaths().length).toBeLessThanOrEqual(6);
+	});
+
+	it("loads the fast worker module, with its one hook and no tools or commands", () => {
+		// A delegation's model calls happen in the worker's own process, so the
+		// parent's wrapped provider cannot give them the priority tier. The worker
+		// module may hook session_start — the first point the registry is
+		// reachable — and nothing else.
+		const fast = workerExtensionPaths().find((path) => path.endsWith("/extensions/fast/worker.ts"));
+		expect(fast, "worker must load the fast worker module").toBeDefined();
+		const source = readFileSync(fast as string, "utf8");
+		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map((m) => m[1])).toEqual(["session_start"]);
+		expect(source).not.toMatch(/\bregisterTool\(|\bregisterCommand\(|\bregisterFlag\(/);
 	});
 
 	it("loads the meta provider, so a meta delegation model never resolves through OpenRouter", () => {
@@ -111,7 +125,7 @@ describe("subagent worker invocation", () => {
 		// `plan/index.ts`: that extension carries plan-mode enforcement, and a
 		// worker inheriting a read-only posture nobody reviewed it for is a
 		// worse trade than losing the projection. See worker.ts.
-		const allowedHooks = new Set(["opmode/index.ts"]);
+		const allowedHooks = new Set(["opmode/index.ts", "fast/worker.ts"]);
 		const ours = workerExtensionPaths().filter((path) => path.includes("/extensions/"));
 		expect(ours.length, "expected at least one in-repo worker extension").toBeGreaterThan(0);
 		for (const path of ours) {
