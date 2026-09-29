@@ -54,6 +54,15 @@ export interface Capabilities {
 	 * the whole attach.
 	 */
 	op_modes?: readonly string[];
+	/**
+	 * Toggle OpenAI Fast mode mid-session. Declared only once the `fast`
+	 * extension has announced itself — a toggle for a client with nothing to
+	 * apply it would show a speed the session never gets.
+	 *
+	 * OPTIONAL on the wire and spread only when true, for the same reason as
+	 * `op_modes`: a server that predates the field receives today's body.
+	 */
+	can_set_fast?: boolean;
 	/** Receive teammate messages. The server refuses to enqueue a team_message
 	 *  to a client that did not declare it. */
 	can_message: boolean;
@@ -405,6 +414,7 @@ export interface RemoteCommand {
 		| "set_mode"
 		| "team_message"
 		| "set_op_mode"
+		| "set_fast"
 		| "plan_approve"
 		| "plan_grill"
 		| "question_answer"

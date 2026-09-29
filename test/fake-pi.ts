@@ -109,6 +109,8 @@ export interface SessionEntryLike {
 
 export interface FakeCtxOptions {
 	model?: ExtensionContext["model"];
+	/** What `ctx.modelRegistry` is. Defaults to an empty object: most extensions never touch it. */
+	modelRegistry?: unknown;
 	mode?: ExtensionMode;
 	cwd?: string;
 	/** What `ctx.ui.confirm` resolves to. Defaults to true (accept). */
@@ -303,7 +305,7 @@ function makeCtx(
 			getEntry: () => undefined,
 			getLeafEntry: () => undefined,
 		},
-		modelRegistry: {},
+		modelRegistry: options.modelRegistry ?? {},
 	};
 
 	// A Proxy is the only way to make EVERY access throw once stale, including

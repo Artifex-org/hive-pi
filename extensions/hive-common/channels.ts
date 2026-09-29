@@ -169,6 +169,36 @@ export interface OpModeStateEvent {
 }
 
 /**
+ * Announces whether OpenAI Fast mode (the priority service tier) is on, so
+ * hive-remote can REPORT it to the workspace.
+ *
+ * Two facts, because they diverge: `enabled` is the switch, `applies` is
+ * whether the CURRENT model actually gets the tier (only allowlisted models
+ * do). A browser showing "fast" for a model that runs at the default tier would
+ * be claiming a speed and a cost the session is not paying.
+ */
+export const FAST_STATE_CHANNEL = "hive.fast.state";
+
+export interface FastStateEvent {
+	enabled: boolean;
+	applies: boolean;
+}
+
+/**
+ * Asks the `fast` extension to turn Fast mode on or off for THIS SESSION.
+ *
+ * Session-scoped by design, like the effort slider beside it in the workspace:
+ * a browser toggle must not rewrite the machine's stored default, which is what
+ * every future session on that machine would then inherit. `/fast` at the
+ * terminal still persists.
+ */
+export const FAST_CONTROL_CHANNEL = "hive.fast.control";
+
+export interface FastControlEvent {
+	enabled: boolean;
+}
+
+/**
  * Announces that the user APPROVED the plan (via the `plan_ready` confirm or
  * `/plan approve`). Counters and booleans only — the plan's prose (its goal
  * sentence, step titles) is deliberately NOT carried, per the rule at the top
