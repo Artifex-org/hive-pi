@@ -130,9 +130,13 @@ describe("registry drift guard", () => {
 	 * change, and only when a human types the command. New destination: none.
 	 * New retention: none. So: local-only — and if that reasoning ever stops
 	 * holding (a different provider for side questions, say), it moves.
+	 *
+	 * `fast` changes the price and speed of requests already going to the same
+	 * provider under the same credentials; it adds one request field and no
+	 * destination or retention. Local-only — its cost is the setting's warning.
 	 */
 	const OFF_MACHINE = ["compaction", "hive-telemetry", "hive-remote"];
-	const LOCAL_ONLY = ["filerank", "papercuts", "narrate", "term-title", "skill-scope", "rowtool", "btw"];
+	const LOCAL_ONLY = ["filerank", "papercuts", "narrate", "term-title", "skill-scope", "rowtool", "btw", "fast"];
 
 	it("every registered setting is classified off-machine or local-only", () => {
 		const classified = new Set([...OFF_MACHINE, ...LOCAL_ONLY]);
