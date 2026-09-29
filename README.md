@@ -51,6 +51,14 @@ to the workspace, and is steerable from it.
 session behaves as plain pi. Running this package outside a Hive fleet is a
 supported, tested state, not an accident.
 
+## Advisor reasoning
+
+`advisor` uses the chosen Hive mode's thinking level through pi's
+provider-neutral streaming API, which maps it for the selected provider/model.
+Missing or unrecognized catalog thinking, and `PI_ADVISOR_MODEL` overrides,
+default to `high`; an explicit `off` disables reasoning. The call still forwards
+the whole conversation and retains its timeout and answer-token budget.
+
 ## Configuring it for your organisation
 
 Four extensions need facts only your organisation has — which repos exist, which
