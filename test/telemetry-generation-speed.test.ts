@@ -20,6 +20,8 @@ import {
 	foldMessageEnd,
 	foldToolUsage,
 	type MessageTiming,
+	MIN_DECODE_MS,
+	MIN_DECODE_TOKENS,
 	type RunAccumulator,
 	timedTurnContribution,
 } from "../extensions/hive-telemetry/accumulator.ts";
@@ -89,6 +91,48 @@ describe("timedTurnContribution — the fold decision, pure", () => {
 	it("returns null when a clock skew inverts an interval", () => {
 		const skewed: MessageTiming = { headersAt: T0, firstTokenAt: T0 - 50, endAt: T0 + 100 };
 		expect(timedTurnContribution(assistant("p", "m", usage(10, 5)), skewed)).toBeNull();
+	});
+});
+
+/** The live shape: visible deltas stamped between first update and message_end. */
+function visibleTiming(ttftMs: number, firstVisibleMs: number, lastVisibleMs: number, endMs: number, base = T0): MessageTiming {
+	return {
+		headersAt: base,
+		firstTokenAt: base + ttftMs,
+		visibleFirstAt: base + firstVisibleMs,
+		visibleLastAt: base + lastVisibleMs,
+		endAt: base + endMs,
+	};
+}
+
+function reasoningUsage(input: number, output: number, reasoning: number): Usage {
+	return { ...usage(input, output), reasoning } as unknown as Usage;
+}
+
+describe("timedTurnContribution — decode timed on visible deltas", () => {
+	it("excludes the wait after the last delta and the hidden reasoning", () => {
+		// 1,000 tokens, 400 of them reasoning; visible deltas from +500 to +8,000,
+		// then 1.5 s until message_end. The old interval (+100 → +9,500) would
+		// have read 1000 / 9.4 s ≈ 106 tok/s; the decode is 600 / 7.5 s = 80.
+		const c = timedTurnContribution(
+			assistant("p", "m", reasoningUsage(1000, 1000, 400)),
+			visibleTiming(100, 500, 8_000, 9_500),
+		);
+		expect(c).toEqual({ generationMs: 7_500, generatedTokens: 600, ttftMs: 100 });
+	});
+
+	it("leaves out a turn too short for the stream's chunking to be a rate", () => {
+		// The measured shape: ~120 tokens, 40% reasoning, a short visible burst.
+		const short = assistant("p", "m", reasoningUsage(1000, MIN_DECODE_TOKENS + 10, 20));
+		expect(timedTurnContribution(short, visibleTiming(100, 300, 1_000, 2_500))).toBeNull();
+		const brief = assistant("p", "m", reasoningUsage(1000, 400, 0));
+		expect(timedTurnContribution(brief, visibleTiming(100, 300, 300 + MIN_DECODE_MS - 1, 2_000))).toBeNull();
+		expect(timedTurnContribution(brief, visibleTiming(100, 300, 300 + MIN_DECODE_MS, 2_000))).not.toBeNull();
+	});
+
+	it("contributes nothing when only thinking streamed", () => {
+		const t: MessageTiming = { headersAt: T0, firstTokenAt: T0 + 100, visibleFirstAt: null, visibleLastAt: null, endAt: T0 + 3_000 };
+		expect(timedTurnContribution(assistant("p", "m", reasoningUsage(1000, 500, 500)), t)).toBeNull();
 	});
 });
 

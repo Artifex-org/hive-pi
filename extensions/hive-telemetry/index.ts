@@ -135,7 +135,12 @@ export default function (pi: ExtensionAPI) {
 	 * close over these bindings) and never on the pure accumulator — it is
 	 * transient per-message state that never ships.
 	 */
-	let inflight: { headersAt: number; firstTokenAt: number | null } | null = null;
+	let inflight: {
+		headersAt: number;
+		firstTokenAt: number | null;
+		visibleFirstAt: number | null;
+		visibleLastAt: number | null;
+	} | null = null;
 	let flushTimer: ReturnType<typeof setTimeout> | undefined;
 	let intervalTimer: ReturnType<typeof setInterval> | undefined;
 	let unsubscribeMetrics: (() => void) | undefined;
@@ -702,7 +707,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			if (!run) return;
 			if (event.message.role !== "assistant") return;
-			inflight = { headersAt: Date.now(), firstTokenAt: null };
+			inflight = { headersAt: Date.now(), firstTokenAt: null, visibleFirstAt: null, visibleLastAt: null };
 		} catch {
 			/* fail open */
 		}
@@ -716,9 +721,22 @@ export default function (pi: ExtensionAPI) {
 	// later delta; a delta-less tool-only turn (toolcall_start→end) is still
 	// caught by the first update. Disabled sessions never arm `inflight`, so this
 	// is a single null-check per token then.
-	pi.on("message_update", () => {
+	//
+	// The decode interval is timed on VISIBLE deltas only (text and tool-call
+	// arguments): thinking deltas are summaries of reasoning decoded out of
+	// sight, and the gap between the last delta and message_end is the wait for
+	// the response to complete, not decoding. Still O(1): one string compare
+	// and at most two stamps per token.
+	pi.on("message_update", (event) => {
 		const t = inflight;
-		if (t !== null && t.firstTokenAt === null) t.firstTokenAt = Date.now();
+		if (t === null) return;
+		const now = Date.now();
+		if (t.firstTokenAt === null) t.firstTokenAt = now;
+		const kind = event.assistantMessageEvent?.type;
+		if (kind === "text_delta" || kind === "toolcall_delta") {
+			if (t.visibleFirstAt === null) t.visibleFirstAt = now;
+			t.visibleLastAt = now;
+		}
 	});
 
 	pi.on("message_end", (event, ctx) => {
@@ -744,7 +762,13 @@ export default function (pi: ExtensionAPI) {
 			// message. A non-streaming reply leaves firstTokenAt null, which makes
 			// the fold a no-op (timedTurnContribution returns null).
 			const timing = inflight !== null
-				? { headersAt: inflight.headersAt, firstTokenAt: inflight.firstTokenAt, endAt: Date.now() }
+				? {
+						headersAt: inflight.headersAt,
+						firstTokenAt: inflight.firstTokenAt,
+						visibleFirstAt: inflight.visibleFirstAt,
+						visibleLastAt: inflight.visibleLastAt,
+						endAt: Date.now(),
+					}
 				: undefined;
 			inflight = null;
 			foldMessageEnd(run, assistant, notional, timing);

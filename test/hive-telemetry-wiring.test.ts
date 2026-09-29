@@ -449,3 +449,38 @@ describe("liveness on a busy session", () => {
 		expect(hive.heartbeats().length).toBeGreaterThan(0);
 	});
 });
+
+describe("generation speed", () => {
+	it("times the decode between the first and last VISIBLE delta, ignoring thinking and the tail", async () => {
+		const hive = fakeHive();
+		hiveTelemetry(fake.api);
+		await fake.emit({ type: "session_start", reason: "new" });
+		await fake.emit({ type: "message_start", message: { role: "assistant" } });
+		vi.advanceTimersByTime(100);
+		await fake.emit({ type: "message_update", assistantMessageEvent: { type: "thinking_delta" } });
+		vi.advanceTimersByTime(900);
+		await fake.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta" } });
+		vi.advanceTimersByTime(2_000);
+		await fake.emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta" } });
+		vi.advanceTimersByTime(1_500); // waiting for the response to complete
+		await fake.emit({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "done" }],
+				provider: "openai-codex",
+				model: "gpt-6-luna",
+				stopReason: "toolUse",
+				usage: { input: 100, output: 260, reasoning: 60 },
+			},
+		});
+		await fake.emit({ type: "turn_end" });
+		await vi.advanceTimersByTimeAsync(2_000);
+
+		const models = hive.sessions().at(-1)?.body.models as Array<Record<string, unknown>> | undefined;
+		const luna = models?.find((m) => String(m.model).includes("gpt-6-luna"));
+		expect(luna?.generation_ms).toBe(2_000);
+		expect(luna?.generated_tokens).toBe(200);
+		expect(luna?.ttft_ms).toBe(100);
+	});
+});
