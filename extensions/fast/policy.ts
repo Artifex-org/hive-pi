@@ -48,19 +48,45 @@ export interface FastModel {
 }
 
 /**
+ * Whether this process is a delegated WORKER: a subagent, a briefer, or a
+ * one-shot helper (recap, drift check, judge, advisor-watch). Every spawner in
+ * this package marks its child with one of these two variables.
+ */
+export function isWorkerEnv(env: NodeJS.ProcessEnv): boolean {
+	return env.PI_AGENDA_WORKER === "1" || env.PI_BRIEF_WORKER === "1";
+}
+
+/**
  * Reads the stored config. Opt-in: an absent or non-boolean `enabled` is OFF,
  * because this setting spends money. `HIVE_PI_FAST=1` turns it on for one
  * process without writing anything, which is how a Hive launch asks for it.
+ *
+ * A WORKER decides by `PI_SUBAGENT_FAST=1` alone. Workers are spawned with the
+ * parent's whole environment, so `HIVE_PI_FAST` — the parent's own switch —
+ * reaches every child, and the stored `enabled` is the operator's choice for
+ * their interactive sessions. Honouring either in a child would make "main
+ * session fast, helpers at the default tier" impossible to express, and the
+ * reverse ("helpers fast, the main session not") likewise. The allowlist
+ * (`models`) still comes from the stored config: it is a fact about models,
+ * not a choice about this process.
  */
 export function resolveFastConfig(raw: Partial<Record<string, unknown>> | null, env: NodeJS.ProcessEnv): FastConfig {
-	const stored = { enabled: raw?.enabled === true };
 	const models = Array.isArray(raw?.models)
 		? raw.models.filter((m): m is string => typeof m === "string" && m.includes("/"))
 		: [];
-	return {
-		enabled: stored.enabled || env.HIVE_PI_FAST === "1",
-		models: models.length > 0 ? models : DEFAULT_FAST_MODELS,
-	};
+	// The literal reader form test/settings.test.ts's registry drift guard reads.
+	const stored = { enabled: raw?.enabled === true };
+	const enabled = isWorkerEnv(env) ? env.PI_SUBAGENT_FAST === "1" : stored.enabled || env.HIVE_PI_FAST === "1";
+	return { enabled, models: models.length > 0 ? models : DEFAULT_FAST_MODELS };
+}
+
+/**
+ * Whether a request is pi's cache warmer rather than a real turn. The warmer
+ * re-sends the session's request with `maxTokens: 1` to keep the prompt cache
+ * hot; the priority tier would buy nothing for it and still cost 2–2.5×.
+ */
+export function isCacheWarm(options: { maxTokens?: number } | undefined): boolean {
+	return options?.maxTokens === 1;
 }
 
 export function modelKey(model: Pick<FastModel, "provider" | "id"> | undefined): string {

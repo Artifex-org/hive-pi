@@ -153,3 +153,19 @@ and nobody to continue it.
 `credential-recovery` now also stops its ten-minute renewal timer, once, when the
 recovery socket is unreachable from a sandbox (`connect EPERM …hive-recovery.sock`)
 instead of logging the same failure every interval.
+
+## OpenAI Fast mode
+
+`extensions/fast` requests OpenAI's priority service tier ("Fast mode": about
+1.5× faster on Codex, 2–2.5× the credits) on an allowlist of `openai-codex/*`
+and `openai/*` models. It is off unless asked for, with two separate switches:
+
+| Switch | Applies to |
+| --- | --- |
+| `HIVE_PI_FAST=1`, `pi --fast`, `/fast on`, the Hive workspace toggle | the main session |
+| `PI_SUBAGENT_FAST=1` | delegated workers (subagents, briefers) and one-shot helpers (recap, drift, judge, advisor-watch) |
+
+Workers inherit the parent's environment, so inside a worker only
+`PI_SUBAGENT_FAST` counts — a launch can run its helpers fast without its main
+session, or the reverse. Workers load `extensions/fast/worker.ts`, which wraps
+the providers and nothing else. pi's cache warm-up requests never get the tier.

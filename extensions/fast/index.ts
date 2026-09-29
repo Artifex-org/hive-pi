@@ -6,6 +6,8 @@
  *   /fast status        what the current model would get
  *   pi --fast           on for this process
  *   HIVE_PI_FAST=1      on for this process (how a Hive launch asks for it)
+ *   PI_SUBAGENT_FAST=1  on for delegated workers and one-shot helpers, which
+ *                       ignore HIVE_PI_FAST and the stored setting (policy.ts)
  *
  * Off by default: priority costs 2–2.5× the credits or dollars. Applies only to
  * the allowlisted models in policy.ts, extendable with `models` in
@@ -28,21 +30,13 @@
  * upstream deletes that entry, and nothing would announce the breakage.
  */
 
-import type { Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { FAST_CONTROL_CHANNEL, FAST_STATE_CHANNEL, type FastControlEvent, type FastStateEvent } from "../hive-common/channels.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
-import {
-	type FastConfig,
-	type PayloadHook,
-	fastApplies,
-	modelKey,
-	parseFastCommand,
-	resolveFastConfig,
-	withPriorityTier,
-} from "./policy.ts";
+import { type FastConfig, fastApplies, isWorkerEnv, modelKey, parseFastCommand, resolveFastConfig } from "./policy.ts";
+import { providerWrapper } from "./wrap.ts";
 
 const STATUS_KEY = "fast";
 const CONFIG = "fast";
@@ -52,38 +46,10 @@ export default function fast(pi: ExtensionAPI): void {
 	// file I/O there is agent-loop latency. Commands re-read, they are allowed to.
 	let config: FastConfig = resolveFastConfig(readJSON(configPathFor(CONFIG)), process.env);
 
-	const decorate =
-		(base: Provider): NonNullable<Provider["streamSimple"]> =>
-		(model, context, options) => {
-			if (!fastApplies(model, config)) return base.streamSimple(model, context, options);
-			return base.streamSimple(model, context, {
-				...options,
-				onPayload: withPriorityTier(options?.onPayload as PayloadHook | undefined),
-			});
-		};
-
-	// Once per process: a later session_start would find THIS override in the
-	// registry, and wrapping it would call itself.
-	let wrapped = false;
-	const wrapProviders = (ctx: ExtensionContext) => {
-		if (wrapped) return;
-		wrapped = true;
-		for (const [id, api] of [
-			["openai-codex", "openai-codex-responses"],
-			["openai", "openai-responses"],
-		] as const) {
-			let base: Provider | undefined;
-			try {
-				base = ctx.modelRegistry?.getProvider?.(id);
-			} catch {
-				base = undefined;
-			}
-			// No provider to wrap (a build without it, or a registry this version
-			// cannot read): leave pi's stream alone rather than guess one.
-			if (!base) continue;
-			pi.registerProvider(id, { api, streamSimple: decorate(base) });
-		}
-	};
+	const wrapProviders = providerWrapper(pi, () => config);
+	// A delegated worker decides by PI_SUBAGENT_FAST alone (policy.ts); a
+	// `--fast` it was never meant to receive must not override that.
+	const worker = isWorkerEnv(process.env);
 
 	pi.registerFlag("fast", {
 		description: "Use OpenAI Fast mode (priority tier) on supported models for this session",
@@ -113,7 +79,11 @@ export default function fast(pi: ExtensionAPI): void {
 
 	const showStatus = (ctx: ExtensionContext) => {
 		latestCtx = ctx;
-		ctx.ui.setStatus(STATUS_KEY, fastApplies(ctx.model, config) ? "⚡ fast" : undefined);
+		try {
+			ctx.ui.setStatus(STATUS_KEY, fastApplies(ctx.model, config) ? "⚡ fast" : undefined);
+		} catch {
+			/* no status bar (print mode, a helper process): the marker is cosmetic */
+		}
 		announce(ctx);
 	};
 
@@ -174,9 +144,15 @@ export default function fast(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		wrapProviders(ctx);
-		if (pi.getFlag("fast") === true) config = { ...config, enabled: true };
+		if (!worker && pi.getFlag("fast") === true) config = { ...config, enabled: true };
 		showStatus(ctx);
 	});
 	pi.on("model_select", (_event, ctx) => showStatus(ctx));
-	pi.on("session_shutdown", (_event, ctx) => ctx.ui.setStatus(STATUS_KEY, undefined));
+	pi.on("session_shutdown", (_event, ctx) => {
+		try {
+			ctx.ui.setStatus(STATUS_KEY, undefined);
+		} catch {
+			/* no status bar to clear */
+		}
+	});
 }

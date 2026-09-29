@@ -70,12 +70,19 @@ import { ensureWorkerMcpConfig } from "../mcp-common/config.ts";
  *   OpenRouter's `404 … Paid model training violation` while readiness said
  *   ready (22 papercuts, 2026-09-20..22). Any provider that exists only via
  *   `registerProvider` must be listed here for workers to run on it.
+ * - `fast/worker.ts` — OpenAI Fast mode for delegations, when the launch sets
+ *   `PI_SUBAGENT_FAST=1` (otherwise it returns before registering anything). It
+ *   wraps the OpenAI providers only — no tools, no commands — and needs ONE hook,
+ *   session_start, because the model registry is unreachable before a ctx
+ *   exists. Without it a delegation could never run at the priority tier, since
+ *   the parent's wrapped provider lives in the parent's process.
  */
 const WORKER_EXTENSIONS = [
 	"../knowledge-tools.ts",
 	"../edit-common/rowtool.ts",
 	"../opmode/index.ts",
 	"../meta-media/provider-only.ts",
+	"../fast/worker.ts",
 ];
 
 /**
