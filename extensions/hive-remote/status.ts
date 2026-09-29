@@ -60,6 +60,14 @@ export interface StatusPayload {
 	 */
 	op_mode?: string;
 	/**
+	 * Whether OpenAI Fast mode is switched on, and whether the current model
+	 * actually gets the priority tier. Reported by the `fast` extension over the
+	 * bus; both absent when it never announced, which the workspace renders as
+	 * "no toggle" rather than as off.
+	 */
+	fast?: boolean;
+	fast_applies?: boolean;
+	/**
 	 * WHY the newest assistant turn failed — "quota_exhausted", "auth_expired"
 	 * or "other" — absent when it reached the provider.
 	 *
@@ -268,6 +276,7 @@ export function buildStatus(
 	quota: { quota?: QuotaWindow; plan_type?: string },
 	opMode?: string,
 	accountRecovery?: string,
+	fast?: { enabled: boolean; applies: boolean },
 ): StatusPayload {
 	const status: StatusPayload = { ...quota };
 	// "unavailable" means this client CANNOT switch accounts (a sandbox that
@@ -280,6 +289,12 @@ export function buildStatus(
 	// entirely when unknown — an absent posture and an unrestricted one are
 	// different claims, and only the client that enforces one may make it.
 	if (opMode) status.op_mode = opMode;
+	// Same rule as the posture: only what the `fast` extension said, never a
+	// default — an absent reading and "off" are different claims.
+	if (fast) {
+		status.fast = fast.enabled;
+		status.fast_applies = fast.applies;
+	}
 
 	const usage = ctx.getContextUsage();
 	// contextWindow falls back to the model's own declaration: usage reports it
@@ -343,6 +358,9 @@ export function changed(previous: StatusPayload | null, next: StatusPayload): bo
 	// for the next context-token move would leave the workspace showing the old
 	// restriction for as long as the session sits idle.
 	if (previous.op_mode !== next.op_mode) return true;
+	// Fast mode changes the price and speed of every turn; the toggle in the
+	// workspace must not show the old state while the session sits idle.
+	if (previous.fast !== next.fast || previous.fast_applies !== next.fast_applies) return true;
 	// A change in the failure reading is ALWAYS worth a request, and this line
 	// is what makes the whole field work rather than decorate.
 	//

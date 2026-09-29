@@ -6,21 +6,27 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const calls: Array<{ api: string; options: Record<string, unknown> | undefined }> = [];
-vi.mock("@earendil-works/pi-ai/compat", () => {
-	const fakeApi = (api: string) => () => ({
-		stream: () => {
-			throw new Error("not used");
-		},
-		streamSimple: (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
-			calls.push({ api, options });
-			return {} as never;
-		},
-	});
-	return { openAICodexResponsesApi: fakeApi("openai-codex-responses"), openAIResponsesApi: fakeApi("openai-responses") };
-});
+
+/**
+ * The built-in providers as `ctx.modelRegistry.getProvider()` hands them out.
+ * The extension captures these BEFORE overriding, and delegates to them.
+ */
+const registry = {
+	getProvider: (id: string) => {
+		const api = id === "openai-codex" ? "openai-codex-responses" : id === "openai" ? "openai-responses" : undefined;
+		if (!api) return undefined;
+		return {
+			id,
+			streamSimple: (_model: unknown, _context: unknown, options?: Record<string, unknown>) => {
+				calls.push({ api, options });
+				return {} as never;
+			},
+		};
+	},
+};
 
 import fast from "../extensions/fast/index.ts";
 import {
@@ -107,24 +113,44 @@ describe("the extension", () => {
 
 	const configFile = () => join(home, ".pi", "agent", "hive-telemetry", "fast.config.json");
 
-	function load() {
+	async function load() {
 		const fake = createFakePi();
 		const providers = new Map<string, { api: string; streamSimple: (...args: unknown[]) => unknown }>();
 		(fake.api as unknown as { registerProvider: unknown }).registerProvider = (name: string, config: never) => {
 			providers.set(name, config);
 		};
 		fast(fake.api);
+		await fake.emit({ type: "session_start", reason: "startup" }, { model: terra as never, modelRegistry: registry });
 		return { fake, providers };
 	}
 
-	it("registers the built-in provider ids, so pi routes their models through it", () => {
-		const { providers } = load();
+	it("wraps nothing when the registry has no provider to delegate to", async () => {
+		const fake = createFakePi();
+		const registered: string[] = [];
+		(fake.api as unknown as { registerProvider: unknown }).registerProvider = (name: string) => registered.push(name);
+		fast(fake.api);
+		await fake.emit({ type: "session_start", reason: "startup" }, { model: terra as never });
+		expect(registered).toEqual([]);
+	});
+
+	it("wraps once per process, so a later session cannot wrap its own override", async () => {
+		const fake = createFakePi();
+		const registered: string[] = [];
+		(fake.api as unknown as { registerProvider: unknown }).registerProvider = (name: string) => registered.push(name);
+		fast(fake.api);
+		await fake.emit({ type: "session_start", reason: "startup" }, { modelRegistry: registry });
+		await fake.emit({ type: "session_start", reason: "new" }, { modelRegistry: registry });
+		expect(registered).toEqual(["openai-codex", "openai"]);
+	});
+
+	it("registers the built-in provider ids, so pi routes their models through it", async () => {
+		const { providers } = await load();
 		expect(providers.get("openai-codex")?.api).toBe("openai-codex-responses");
 		expect(providers.get("openai")?.api).toBe("openai-responses");
 	});
 
-	it("off, hands pi's own options through untouched", () => {
-		const { providers } = load();
+	it("off, hands pi's own options through untouched", async () => {
+		const { providers } = await load();
 		const options = { reasoning: "high" };
 		providers.get("openai-codex")?.streamSimple(terra, {}, options);
 		expect(calls).toEqual([{ api: "openai-codex-responses", options }]);
@@ -132,7 +158,7 @@ describe("the extension", () => {
 
 	it("on, requests the priority tier for an allowlisted model and not for another", async () => {
 		process.env.HIVE_PI_FAST = "1";
-		const { providers } = load();
+		const { providers } = await load();
 		const codex = providers.get("openai-codex");
 		codex?.streamSimple(terra, {}, { reasoning: "high" });
 		codex?.streamSimple(spark, {}, { reasoning: "high" });
@@ -144,7 +170,7 @@ describe("the extension", () => {
 	});
 
 	it("/fast on persists, shows the marker, and the next request carries the tier", async () => {
-		const { fake, providers } = load();
+		const { fake, providers } = await load();
 		await fake.runCommand("fast", "on", { model: terra as never });
 
 		expect(JSON.parse(readFileSync(configFile(), "utf8"))).toMatchObject({ enabled: true });
@@ -160,7 +186,7 @@ describe("the extension", () => {
 	it("keeps the rest of an existing config file when toggling", async () => {
 		mkdirSync(join(home, ".pi", "agent", "hive-telemetry"), { recursive: true });
 		writeFileSync(configFile(), JSON.stringify({ models: ["openai-codex/gpt-5.3-codex-spark"] }));
-		const { fake, providers } = load();
+		const { fake, providers } = await load();
 		await fake.runCommand("fast", "on", { model: spark as never });
 
 		expect(JSON.parse(readFileSync(configFile(), "utf8"))).toEqual({
