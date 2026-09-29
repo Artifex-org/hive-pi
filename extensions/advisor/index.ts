@@ -24,7 +24,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { resolveAuth } from "../hive-common/identity.ts";
-import { splitModelSpec } from "../hive-remote/status.ts";
+import { isThinkingLevel, splitModelSpec } from "../hive-remote/status.ts";
 import { loadAdvisorConfig } from "./config.ts";
 import { advisorFailureMessage, fetchAgentModeOutcome, pickConfiguredAdvisor, type ConfiguredAdvisorPick } from "./modes.ts";
 import { buildAdvisorPrompt, capTranscript } from "./prompt.ts";
@@ -90,7 +90,7 @@ export default function (pi: ExtensionAPI) {
 						"Unset PI_ADVISOR_MODEL to let the Hive mode catalog choose a configured model, or point it at one of these.",
 				);
 			}
-			// Kept as a PRECONDITION even though `registry.complete` resolves auth
+			// Kept as a PRECONDITION even though `registry.streamSimple` resolves auth
 			// itself, because the errors are not equally useful: this one names the
 			// provider and says the credential is missing on this machine, which is
 			// the actual fix. Letting the request fail instead surfaces a provider
@@ -109,24 +109,10 @@ export default function (pi: ExtensionAPI) {
 			});
 
 			const startedAtMs = Date.now();
-			// `registry.complete`, NOT `complete()` from `@earendil-works/pi-ai/compat`.
-			//
-			// That module's own header says it "is deleted with the coding-agent
-			// ModelManager migration", and several of its members are already
-			// `@deprecated` — scheduled breakage under a tool used daily.
-			//
-			// HIV-1585 expected this to be a stream refactor, because `complete()`
-			// appeared to exist only in `/compat`. It does not: `ModelRegistry`
-			// carries the same `complete(model, context, options)` and pi already
-			// hands it to every extension on `ctx`. The registry we were ALREADY
-			// using for `find()` and `getApiKeyAndHeaders()` could answer the call
-			// the whole time.
-			//
-			// `apiKey`/`headers`/`env` are gone from the options because the
-			// registry resolves auth itself — "Models resolves auth and delegates
-			// each request to the provider that owns the model". Passing them was
-			// the compat surface's requirement, not this call's.
-			const response = await registry.complete(
+			// The provider-neutral API maps/clamps catalog thinking for the chosen
+			// model. Omitting it made Codex send `none`, which always-thinking
+			// reviewers reject. Overrides and older catalogs default to high.
+			const response = await registry.streamSimple(
 				model,
 				{
 					messages: [
@@ -138,6 +124,7 @@ export default function (pi: ExtensionAPI) {
 					],
 				},
 				{
+					reasoning: isThinkingLevel(pick.thinking) ? (pick.thinking === "off" ? undefined : pick.thinking) : "high",
 					maxTokens: ANSWER_MAX_TOKENS,
 					cacheRetention: "none",
 					// `crypto.randomUUID()`, not pi-ai's `uuidv7`: that symbol is root-exported
@@ -148,7 +135,7 @@ export default function (pi: ExtensionAPI) {
 					sessionId: randomUUID(),
 					signal: AbortSignal.any([AbortSignal.timeout(cfg.timeoutMs), ...(signal ? [signal] : [])]),
 				},
-			);
+			).result();
 
 			const advice = response.content
 				.filter((c): c is { type: "text"; text: string } => c.type === "text")
