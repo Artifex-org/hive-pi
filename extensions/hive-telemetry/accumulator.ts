@@ -58,9 +58,11 @@ export interface ModelBucket {
 	 * that saw no timed message must emit null for all four, never 0 — payload.ts
 	 * gates the whole group on `timedTurns !== undefined`.
 	 *
-	 *   generationMs    Σ (message_end − first_output_token): the DECODE interval.
-	 *   generatedTokens Σ output tokens of those SAME timed messages — the matched
-	 *                   numerator, NEVER the bucket's total `output`.
+	 *   generationMs    Σ (last visible delta − first visible delta): the DECODE
+	 *                   interval, text and tool-call deltas only.
+	 *   generatedTokens Σ VISIBLE output tokens (output − reasoning) of those SAME
+	 *                   timed messages — the matched numerator, NEVER the
+	 *                   bucket's total `output`.
 	 *   ttftMs          Σ (first_output_token − message_start); message_start ≈
 	 *                   response-headers-received.
 	 *   timedTurns      count of messages that contributed to the three sums —
@@ -629,9 +631,30 @@ export interface MessageTiming {
 	 * null when the message never streamed (a non-streaming reply emits
 	 * message_start then message_end with no update between). */
 	firstTokenAt: number | null;
+	/** Date.now() at the first and the latest VISIBLE delta — text_delta or
+	 * toolcall_delta, never thinking. The decode interval is between these two,
+	 * not first update to message_end. Absent from a caller that predates them,
+	 * which falls back to the old interval. */
+	visibleFirstAt?: number | null;
+	visibleLastAt?: number | null;
 	/** Date.now() at message_end. */
 	endAt: number;
 }
+
+/**
+ * The smallest turn whose decode rate is worth folding.
+ *
+ * Measured 2026-09-29 on openai-codex/gpt-6-luna: an agent's tool-call turns
+ * average ~120 output tokens, ~40% of it hidden reasoning, and the old interval
+ * (first update → message_end) included the wait for `response.completed`
+ * after the last token. That fixed tail dominated a 70-token turn, so the gauge
+ * read ~40 tok/s whether Fast mode was on or off, while a 1,000-token answer
+ * measured 55 vs 82 tok/s. Below this many visible tokens, or this short an
+ * interval, the chunking of the stream is the measurement, so the turn is left
+ * out rather than averaged in.
+ */
+export const MIN_DECODE_TOKENS = 32;
+export const MIN_DECODE_MS = 250;
 
 /** Stop reasons that mark a COMPLETE decode worth timing. A truncated or failed
  * decode (aborted/error/pending/deferred) would understate ms-per-token, so it
@@ -662,13 +685,24 @@ export function timedTurnContribution(
 	const output = msg.usage?.output ?? 0;
 	if (!(output > 0)) return null;
 	if (!TIMED_STOP_REASONS.has(String(msg.stopReason))) return null;
-	const generationMs = timing.endAt - timing.firstTokenAt;
 	const ttftMs = timing.firstTokenAt - timing.headersAt;
+	if (timing.visibleFirstAt === undefined) {
+		// A caller without visible-delta stamps: the old interval, unchanged.
+		const generationMs = timing.endAt - timing.firstTokenAt;
+		if (generationMs < 0 || ttftMs < 0) return null;
+		return { generationMs, generatedTokens: output, ttftMs };
+	}
+	// Hidden reasoning is decoded before the first visible delta, so it belongs
+	// to neither the interval nor the numerator.
+	const visible = output - Math.max(0, msg.usage?.reasoning ?? 0);
+	if (timing.visibleFirstAt === null || timing.visibleLastAt == null) return null;
+	const generationMs = timing.visibleLastAt - timing.visibleFirstAt;
 	// A non-monotonic wall clock (NTP step, suspend/resume) can invert an
 	// interval; a negative summand would corrupt the cumulative total, so drop
 	// the whole turn rather than fold a lie.
 	if (generationMs < 0 || ttftMs < 0) return null;
-	return { generationMs, generatedTokens: output, ttftMs };
+	if (visible < MIN_DECODE_TOKENS || generationMs < MIN_DECODE_MS) return null;
+	return { generationMs, generatedTokens: visible, ttftMs };
 }
 
 /**
