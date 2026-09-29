@@ -62,6 +62,11 @@ describe("fastApplies — allowlisted OpenAI models only", () => {
 		expect(fastApplies(terra, on)).toBe(true);
 		expect(fastApplies(terra, { ...on, enabled: false })).toBe(false);
 		expect(fastApplies(spark, on)).toBe(false);
+		// Codex lists priority for all three GPT-6 models; a session on gpt-6-luna
+		// had fast mode on and was still sent at the default tier.
+		for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+			expect(fastApplies({ ...terra, id }, on), id).toBe(true);
+		}
 		expect(fastApplies({ ...terra, api: "openai-completions" }, on)).toBe(false);
 		expect(fastApplies(undefined, on)).toBe(false);
 	});
