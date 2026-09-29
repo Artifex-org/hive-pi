@@ -100,6 +100,16 @@ export const SETTINGS: readonly SettingSpec[] = [
 		mode: "opt-out",
 	},
 	{
+		config: "fast",
+		key: "enabled",
+		source: "fast",
+		label: "openai fast mode",
+		group: "session",
+		mode: "opt-in",
+		warning: "priority tier on allowlisted openai models: about 1.5× faster, 2–2.5× the cost or credits",
+		hint: "also /fast, pi --fast, or HIVE_PI_FAST=1 for one session",
+	},
+	{
 		config: "btw",
 		key: "enabled",
 		source: "btw",
