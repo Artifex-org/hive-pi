@@ -35,6 +35,8 @@ import {
 	HIVE_PLAN_CHANNEL,
 	HIVE_SESSION_CHANNEL,
 	HIVE_SESSION_END_CHANNEL,
+	FAST_CONTROL_CHANNEL,
+	FAST_STATE_CHANNEL,
 	OP_MODE_CONTROL_CHANNEL,
 	OP_MODE_STATE_CHANNEL,
 	PLAN_CONTROL_CHANNEL,
@@ -50,6 +52,8 @@ import {
 	type HivePlanEvent,
 	type HiveSessionEndEvent,
 	type HiveSessionEvent,
+	type FastControlEvent,
+	type FastStateEvent,
 	type OpModeControlEvent,
 	type OpModeStateEvent,
 	type PlanGrillEvent,
@@ -572,6 +576,30 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	});
 
 	/**
+	 * OpenAI Fast mode as the `fast` extension reports it — reported, never
+	 * inferred from the last `set_fast` we forwarded, for the opMode reason
+	 * above: the user can flip it at the terminal with `/fast`, and the model
+	 * can change under it, which changes whether the tier applies at all.
+	 * Undefined until the extension announces; absent from the status then.
+	 */
+	let fast: { enabled: boolean; applies: boolean } | undefined;
+	const fastLoaded = (): boolean => fast !== undefined;
+
+	pi.events.on(FAST_STATE_CHANNEL, (data: unknown) => {
+		const event = data as FastStateEvent | undefined;
+		if (typeof event?.enabled !== "boolean" || typeof event.applies !== "boolean") return;
+		if (fast && fast.enabled === event.enabled && fast.applies === event.applies) return;
+		const first = fast === undefined;
+		fast = { enabled: event.enabled, applies: event.applies };
+		// Immediately, not on the status timer: the toggle in the workspace
+		// should settle within a second of being clicked.
+		setTimeout(() => void flushStatus(), 0);
+		// The first announce proves the capability; re-attach so the record
+		// stops saying this client cannot toggle it.
+		if (first) queueConversationRefresh();
+	});
+
+	/**
 	 * Conductor stage transitions, folded as transcript notices.
 	 *
 	 * The event carries a stage name and nothing else (see
@@ -1042,7 +1070,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 		let next: StatusPayload;
 		try {
-			next = buildStatus(latestCtx, pi, quota, opMode, accountRecovery);
+			next = buildStatus(latestCtx, pi, quota, opMode, accountRecovery, fast);
 		} catch {
 			// A ctx replaced mid-read. The next tick has a live one.
 			return;
@@ -1363,6 +1391,13 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				applyOpMode(cmd.payload);
 				return;
 			}
+			case "set_fast": {
+				// The model axis, so the model-switch consent covers it: Fast mode
+				// changes what each turn costs exactly as a model switch does.
+				if (!cfg.allowSetMode) return;
+				applyFast(cmd.payload);
+				return;
+			}
 			case "plan_approve": {
 				// A request only: plan owns the ready-state check and may refuse it.
 				pi.events.emit(PLAN_CONTROL_CHANNEL, { action: "approve" } satisfies PlanControlEvent);
@@ -1586,6 +1621,27 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * a restriction it neither applied nor verified — and if `opmode` is not
 	 * loaded, nothing would have happened at all.
 	 */
+	function applyFast(payload: string): void {
+		let enabled: unknown;
+		try {
+			enabled = (JSON.parse(payload) as { enabled?: unknown })?.enabled;
+		} catch {
+			enabled = undefined;
+		}
+		// A boolean or nothing: a truthy string read as "on" would start paying
+		// the priority price on a payload nobody meant to send.
+		if (typeof enabled !== "boolean") {
+			foldNotice(transcript, "Hive sent a Fast mode switch this client could not read", Date.now(), "hive");
+			kick();
+			return;
+		}
+		try {
+			pi.events.emit(FAST_CONTROL_CHANNEL, { enabled } satisfies FastControlEvent);
+		} catch {
+			/* no bus, or the fast extension is not loaded */
+		}
+	}
+
 	function applyOpMode(payload: string): void {
 		let mode = "";
 		try {
@@ -1673,6 +1729,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// feature can produce, and the reason the capability is gated on the
 				// enforcer rather than on the permission.
 				can_set_op_mode: cfg.allowSetOpMode && opModeLoaded(),
+				...(cfg.allowSetMode && fastLoaded() ? { can_set_fast: true } : {}),
 				// SPREAD ONLY when the enforcer has actually reported its set — same
 				// HIV-1163 rule as `can_add_workspace`. Sending an empty array would
 				// be worse than sending nothing: the server would read it as "this
@@ -1832,6 +1889,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// the selector would vanish from the workspace seconds after the
 						// session appeared.
 						can_set_op_mode: cfg.allowSetOpMode && opModeLoaded(),
+						...(cfg.allowSetMode && fastLoaded() ? { can_set_fast: true } : {}),
 						// SPREAD ONLY when the enforcer has actually reported its set — same
 						// HIV-1163 rule as `can_add_workspace`. Sending an empty array would
 						// be worse than sending nothing: the server would read it as "this

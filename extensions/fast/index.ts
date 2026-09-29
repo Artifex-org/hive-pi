@@ -15,18 +15,24 @@
  * registers `streamSimple` for a built-in provider id replaces the stream for
  * that provider's models on that api, keeping its models and login
  * (provider-composer.js). So this registers `openai-codex` and `openai` with a
- * stream that delegates to pi's own implementation, and only adds the tier
- * when fast mode applies. Off, the request is exactly what pi would send.
+ * stream that delegates to the provider pi had BEFORE the override, and only
+ * adds the tier when fast mode applies. Off, the request is exactly what pi
+ * would send.
+ *
+ * The delegate is captured from `ctx.modelRegistry.getProvider()` before
+ * registering, which is why registration waits for the first session_start:
+ * the registry is only reachable through a ctx. The captured object keeps the
+ * composition it was built with, so calling it cannot re-enter this override.
+ * The alternative — pi-ai's per-api stream factories — lives only in
+ * `@earendil-works/pi-ai/compat`, which test/pi-api-surface.test.ts forbids:
+ * upstream deletes that entry, and nothing would announce the breakage.
  */
 
-// `/compat`, not the package root: pi aliases both to ITS OWN pi-ai for
-// extensions (core/extensions/loader.js), but only the compat entry exports the
-// per-api stream factories. A different copy would mean a second OpenAI client.
-import type { ProviderStreams } from "@earendil-works/pi-ai";
-import { openAICodexResponsesApi, openAIResponsesApi } from "@earendil-works/pi-ai/compat";
+import type { Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { FAST_CONTROL_CHANNEL, FAST_STATE_CHANNEL, type FastControlEvent, type FastStateEvent } from "../hive-common/channels.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
 import {
 	type FastConfig,
@@ -47,23 +53,37 @@ export default function fast(pi: ExtensionAPI): void {
 	let config: FastConfig = resolveFastConfig(readJSON(configPathFor(CONFIG)), process.env);
 
 	const decorate =
-		(api: ProviderStreams): ProviderStreams["streamSimple"] =>
+		(base: Provider): NonNullable<Provider["streamSimple"]> =>
 		(model, context, options) => {
-			if (!fastApplies(model, config)) return api.streamSimple(model, context, options);
-			return api.streamSimple(model, context, {
+			if (!fastApplies(model, config)) return base.streamSimple(model, context, options);
+			return base.streamSimple(model, context, {
 				...options,
 				onPayload: withPriorityTier(options?.onPayload as PayloadHook | undefined),
 			});
 		};
 
-	pi.registerProvider("openai-codex", {
-		api: "openai-codex-responses",
-		streamSimple: decorate(openAICodexResponsesApi()),
-	});
-	pi.registerProvider("openai", {
-		api: "openai-responses",
-		streamSimple: decorate(openAIResponsesApi()),
-	});
+	// Once per process: a later session_start would find THIS override in the
+	// registry, and wrapping it would call itself.
+	let wrapped = false;
+	const wrapProviders = (ctx: ExtensionContext) => {
+		if (wrapped) return;
+		wrapped = true;
+		for (const [id, api] of [
+			["openai-codex", "openai-codex-responses"],
+			["openai", "openai-responses"],
+		] as const) {
+			let base: Provider | undefined;
+			try {
+				base = ctx.modelRegistry?.getProvider?.(id);
+			} catch {
+				base = undefined;
+			}
+			// No provider to wrap (a build without it, or a registry this version
+			// cannot read): leave pi's stream alone rather than guess one.
+			if (!base) continue;
+			pi.registerProvider(id, { api, streamSimple: decorate(base) });
+		}
+	};
 
 	pi.registerFlag("fast", {
 		description: "Use OpenAI Fast mode (priority tier) on supported models for this session",
@@ -71,9 +91,51 @@ export default function fast(pi: ExtensionAPI): void {
 		default: false,
 	});
 
-	const showStatus = (ctx: ExtensionContext) => {
-		ctx.ui.setStatus(STATUS_KEY, fastApplies(ctx.model, config) ? "⚡ fast" : undefined);
+	// The ctx of the newest lifecycle event, for the control channel, which
+	// carries none. It goes stale on session replacement, so every use of it is
+	// guarded and a stale one costs the marker, never the switch.
+	let latestCtx: ExtensionContext | undefined;
+
+	/** Tell hive-remote what is in force, so the workspace toggle can show it. */
+	const announce = (ctx: ExtensionContext | undefined) => {
+		let applies = false;
+		try {
+			applies = fastApplies(ctx?.model, config);
+		} catch {
+			/* stale ctx: report the switch; applies re-derives on the next event */
+		}
+		try {
+			pi.events.emit(FAST_STATE_CHANNEL, { enabled: config.enabled, applies } satisfies FastStateEvent);
+		} catch {
+			/* no bus, or nobody listening */
+		}
 	};
+
+	const showStatus = (ctx: ExtensionContext) => {
+		latestCtx = ctx;
+		ctx.ui.setStatus(STATUS_KEY, fastApplies(ctx.model, config) ? "⚡ fast" : undefined);
+		announce(ctx);
+	};
+
+	// A browser toggle from the Hive workspace, relayed by hive-remote. THIS
+	// SESSION only — no file is written, both because a browser click must not
+	// change what every future session on this machine starts with (the effort
+	// slider beside it does not either) and because this runs inside the agent
+	// loop, where blocking I/O is stalled turns.
+	pi.events.on(FAST_CONTROL_CHANNEL, (data: unknown) => {
+		const enabled = (data as FastControlEvent | undefined)?.enabled;
+		if (typeof enabled !== "boolean") return;
+		config = { ...config, enabled };
+		try {
+			if (latestCtx) {
+				showStatus(latestCtx);
+				return;
+			}
+		} catch {
+			/* stale ctx: fall through and still announce the switch */
+		}
+		announce(undefined);
+	});
 
 	const describe = (ctx: ExtensionContext): string => {
 		const model = modelKey(ctx.model);
@@ -111,6 +173,7 @@ export default function fast(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", (_event, ctx) => {
+		wrapProviders(ctx);
 		if (pi.getFlag("fast") === true) config = { ...config, enabled: true };
 		showStatus(ctx);
 	});
