@@ -45,8 +45,10 @@
  */
 
 import { noulQuestion, type TypesafeClient } from "../typesafe-common/client.ts";
+import type { JevRoute } from "../typesafe-common/config.ts";
+import { routeMetricName } from "../typesafe-common/liveness.ts";
 import { atCap, record } from "./ledger.ts";
-import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
+import type { MetricOutcome, Policy, PolicyContext, PolicyWork } from "./policy.ts";
 import { stripCode } from "./question-guard.ts";
 
 /**
@@ -202,10 +204,16 @@ const ASK_JEV_QUESTION = {
 	),
 };
 
-/** Jev's probability that the ending asks the human, or null when it did not answer. */
-export async function askJevForDecision(client: TypesafeClient, text: string): Promise<number | null> {
+/**
+ * Jev's probability that the ending asks the human (`p`, null when it did not
+ * answer), and the route that answered or last failed (null when none was tried).
+ */
+export async function askJevForDecision(
+	client: TypesafeClient,
+	text: string,
+): Promise<{ p: number | null; route: JevRoute | null }> {
 	const outcome = await client.ask(askTail(text), ASK_JEV_QUESTION);
-	return outcome.kind === "ok" ? outcome.answers.asks.noul : null;
+	return { p: outcome.kind === "ok" ? outcome.answers.asks.noul : null, route: outcome.route };
 }
 
 export interface AskHooks {
@@ -252,13 +260,16 @@ export function createAskPolicy(hooks: AskHooks): Policy {
 				status: "",
 				run: async () => {
 					const started = Date.now();
-					const p = await askJevForDecision(jev, text);
+					const { p, route } = await askJevForDecision(jev, text);
 					const value = Date.now() - started;
 					// No answer is no nudge: Jev failing must never invent a question.
-					if (p === null) return { metric: { outcome: "skip", value, name: ASK_JEV_METRIC } };
-					if (p < ASK_JEV_BAR) return { metric: { outcome: "pass", value, name: ASK_JEV_METRIC } };
+					const outcome: MetricOutcome = p === null ? "skip" : p < ASK_JEV_BAR ? "pass" : "fail";
+					// `ask-jev` stays the aggregate; the route rides beside it.
+					const also = route ? [{ outcome, value, name: routeMetricName(ASK_JEV_METRIC, route) }] : [];
+					if (outcome !== "fail") return { metric: { outcome, value, name: ASK_JEV_METRIC }, also };
 					return {
-						metric: { outcome: "fail", value, name: ASK_JEV_METRIC },
+						metric: { outcome, value, name: ASK_JEV_METRIC },
+						also,
 						inject: ASK_NUDGE,
 						ledger: (state) => record(state, LEDGER_ID),
 					};

@@ -29,26 +29,91 @@ export interface TypesafeConfig {
 	timeoutMs: number;
 	/** The model alias sent in the request body. */
 	model: string;
-	/** Endpoint, overridable so a test or a proxy never has to patch the code. */
+	/**
+	 * The `typesafe` route's endpoint. The field name predates the second route
+	 * and is kept so an existing `typesafe.config.json` means what it meant.
+	 * Overridable so a test or a proxy never has to patch the code.
+	 */
 	endpoint: string;
+	/** The `openrouter` route's endpoint: the same System One API, billed by OpenRouter. */
+	openrouterEndpoint: string;
+	/**
+	 * Which routes to try, in order. A route with no key is skipped, so the
+	 * default order is also the right one on a machine that holds only one key.
+	 * Cutover to OpenRouter only is `["openrouter"]` — config, not code.
+	 */
+	routes: readonly JevRoute[];
+	/**
+	 * Why `routes` could not be read, or null. A bad route list FAILS CLOSED:
+	 * the client reports `disabled` rather than guessing which of an operator's
+	 * typos they meant, because a guess could send data somewhere unintended.
+	 */
+	routeError: string | null;
 }
 
-export const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
-export const DEFAULT_MODEL = "jev-latest";
+/** The two places Jev is served. Nothing else is a route. */
+export type JevRoute = "typesafe" | "openrouter";
+export const JEV_ROUTES: readonly JevRoute[] = ["typesafe", "openrouter"];
 
-/** The pure half: a parsed config object in, a fully-defaulted config out. */
-export function configFrom(raw: unknown): TypesafeConfig {
-	const cfg = (raw && typeof raw === "object" ? raw : {}) as Partial<TypesafeConfig>;
+/** Env override for the route order, a comma list: `JEV_ROUTES=openrouter`. */
+export const JEV_ROUTES_ENV = "JEV_ROUTES";
+
+export const DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
+export const DEFAULT_OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/systemone";
+export const DEFAULT_MODEL = "jev-latest";
+export const DEFAULT_ROUTES: readonly JevRoute[] = JEV_ROUTES;
+
+/** Only https: every route carries a bearer token. Anything else falls back to the default. */
+function httpsOr(value: unknown, fallback: string): string {
+	return typeof value === "string" && value.startsWith("https://") ? value : fallback;
+}
+
+/**
+ * A route list from the config file (array or comma string) or the env (comma
+ * string). Absent is the default order; present-but-wrong is an error, never
+ * a silent default — an operator who wrote `JEV_ROUTES=openruoter` asked for
+ * OpenRouter only and must not quietly get typesafe too.
+ */
+export function parseRoutes(raw: unknown): { routes: readonly JevRoute[]; error: string | null } {
+	if (raw === undefined || raw === null) return { routes: DEFAULT_ROUTES, error: null };
+	const items =
+		typeof raw === "string" ? raw.split(",") : Array.isArray(raw) ? raw : null;
+	if (items === null) return { routes: [], error: "routes must be a list or a comma-separated string" };
+	const routes: JevRoute[] = [];
+	for (const item of items) {
+		const name = typeof item === "string" ? item.trim().toLowerCase() : item;
+		if (name === "") continue;
+		if (!JEV_ROUTES.includes(name as JevRoute)) return { routes: [], error: `unknown route ${JSON.stringify(item)}` };
+		if (routes.includes(name as JevRoute)) return { routes: [], error: `route "${String(name)}" is listed twice` };
+		routes.push(name as JevRoute);
+	}
+	if (routes.length === 0) return { routes: [], error: "routes is empty" };
+	return { routes, error: null };
+}
+
+/**
+ * The pure half: a parsed config object in, a fully-defaulted config out.
+ *
+ * `env` is only consulted for `JEV_ROUTES`, which outranks the file's
+ * `routes` so a launched agent can be cut over without editing a file. It
+ * defaults to empty so a test drives exactly what it hands in.
+ */
+export function configFrom(raw: unknown, env: Record<string, string | undefined> = {}): TypesafeConfig {
+	const cfg = (raw && typeof raw === "object" ? raw : {}) as Partial<Record<keyof TypesafeConfig, unknown>>;
+	const fromEnv = env[JEV_ROUTES_ENV];
+	const { routes, error } = parseRoutes(fromEnv !== undefined && fromEnv.trim() !== "" ? fromEnv : cfg.routes);
 	return {
 		enabled: cfg.enabled === true,
 		timeoutMs: numberOr(cfg.timeoutMs, 3_000, 250, 30_000),
 		model: typeof cfg.model === "string" && cfg.model.length > 0 ? cfg.model : DEFAULT_MODEL,
-		endpoint:
-			typeof cfg.endpoint === "string" && cfg.endpoint.startsWith("https://") ? cfg.endpoint : DEFAULT_ENDPOINT,
+		endpoint: httpsOr(cfg.endpoint, DEFAULT_ENDPOINT),
+		openrouterEndpoint: httpsOr(cfg.openrouterEndpoint, DEFAULT_OPENROUTER_ENDPOINT),
+		routes,
+		routeError: error,
 	};
 }
 
 /** The I/O half. Blocking read — never from an event handler. */
-export function loadConfig(): TypesafeConfig {
-	return configFrom(readJSON<unknown>(configPathFor("typesafe")));
+export function loadConfig(env: Record<string, string | undefined> = process.env): TypesafeConfig {
+	return configFrom(readJSON<unknown>(configPathFor("typesafe")), env);
 }

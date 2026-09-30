@@ -15,7 +15,7 @@ import {
 	worthAskingJev,
 } from "../extensions/agenda/ask.ts";
 import { emptyLedger, record } from "../extensions/agenda/ledger.ts";
-import { TypesafeClient } from "../extensions/typesafe-common/client.ts";
+import { RouteBreaker, TypesafeClient } from "../extensions/typesafe-common/client.ts";
 import { configFrom } from "../extensions/typesafe-common/config.ts";
 
 // Real endings from the 2026-09-18 corpus that the phrase list MISSED and Jev
@@ -35,7 +35,8 @@ function fakeJev(p: number | null) {
 			headers: { "Content-Type": "application/json" },
 		});
 	});
-	return { client: new TypesafeClient({ config: configFrom({ enabled: true }), apiKey: "k", fetchImpl }), fetchImpl, bodies };
+	const breaker = new RouteBreaker({ warn: () => {} });
+	return { client: new TypesafeClient({ config: configFrom({ enabled: true }), apiKey: "k", fetchImpl, breaker }), fetchImpl, bodies };
 }
 
 function ctx(text: string | undefined, ledger = emptyLedger) {
@@ -95,6 +96,15 @@ describe("ask policy with Jev", () => {
 		const out = await createAskPolicy({ attended: () => true, jev: () => client }).decide(ctx(MISSED_ASK))!.run();
 		expect(out.inject).toBeUndefined();
 		expect(out.metric).toMatchObject({ outcome: "skip", name: ASK_JEV_METRIC });
+		// The route that failed is visible, not folded into the aggregate skip.
+		expect(out.also).toMatchObject([{ outcome: "skip", name: "ask-jev.typesafe" }]);
+	});
+
+	it("carries the answering route beside the aggregate ask-jev metric", async () => {
+		const { client } = fakeJev(ASK_JEV_BAR + 0.1);
+		const out = await createAskPolicy({ attended: () => true, jev: () => client }).decide(ctx(MISSED_ASK))!.run();
+		expect(out.metric).toMatchObject({ outcome: "fail", name: ASK_JEV_METRIC });
+		expect(out.also).toEqual([{ outcome: "fail", value: out.metric.value, name: "ask-jev.typesafe" }]);
 	});
 
 	it("does not call Jev for an ending the prefilter skips", () => {

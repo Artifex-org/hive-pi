@@ -23,8 +23,8 @@ import {
 } from "../extensions/agenda/drift.ts";
 import type { GoalItem } from "../extensions/agenda/goal-state.ts";
 import { count, emptyLedger } from "../extensions/agenda/ledger.ts";
-import { TypesafeClient } from "../extensions/typesafe-common/client.ts";
-import { configFrom } from "../extensions/typesafe-common/config.ts";
+import { RouteBreaker, TypesafeClient } from "../extensions/typesafe-common/client.ts";
+import { configFrom, DEFAULT_OPENROUTER_ENDPOINT } from "../extensions/typesafe-common/config.ts";
 
 const goal: GoalItem = {
 	schemaVersion: 1,
@@ -58,7 +58,12 @@ function fakeJev(p: number | null, status = 200) {
 			{ status: 200, headers: { "Content-Type": "application/json" } },
 		);
 	});
-	const client = new TypesafeClient({ config: configFrom({ enabled: true }), apiKey: "k", fetchImpl });
+	const client = new TypesafeClient({
+		config: configFrom({ enabled: true }),
+		apiKey: "k",
+		fetchImpl,
+		breaker: new RouteBreaker({ warn: () => {} }),
+	});
 	return { client, fetchImpl, bodies };
 }
 
@@ -118,6 +123,42 @@ describe("drift probe with Jev", () => {
 		// Counted as the incumbent's answer, not Jev's: this is the liveness split.
 		expect(out.metric.name).toBeUndefined();
 		expect(out.inject).toContain("refactoring CSS");
+	});
+
+	it("carries the route that answered beside the aggregate drift-jev metric", async () => {
+		const { client } = fakeJev(0.9);
+		const out = await probeOnce(client);
+		expect(out.metric.name).toBe(DRIFT_JEV_METRIC);
+		expect(out.also).toEqual([{ outcome: "pass", value: out.metric.value, name: "drift-jev.typesafe" }]);
+	});
+
+	it("an openrouter failover answer is reported on the openrouter route", async () => {
+		const fetchImpl = vi.fn(async (url: string) =>
+			url === DEFAULT_OPENROUTER_ENDPOINT
+				? new Response(
+						JSON.stringify({ model: "typesafe/jev-1.13-20260917", answers: { serves: { type: "noul", noul: 0.1 } }, usage: { cost: 0.00001 } }),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					)
+				: new Response("", { status: 402 }),
+		);
+		const client = new TypesafeClient({
+			config: configFrom({ enabled: true }),
+			apiKey: "k",
+			openrouterApiKey: "or",
+			fetchImpl,
+			breaker: new RouteBreaker({ warn: () => {} }),
+		});
+		const out = await probeOnce(client);
+		expect(out.metric).toMatchObject({ outcome: "fail", name: DRIFT_JEV_METRIC });
+		expect(out.also).toEqual([{ outcome: "fail", value: out.metric.value, name: "drift-jev.openrouter" }]);
+		expect(runOneShot).not.toHaveBeenCalled();
+	});
+
+	it("a Jev miss is reported as skip on its route, even though the pi probe answered", async () => {
+		const { client } = fakeJev(null, 503);
+		const out = await probeOnce(client);
+		expect(out.metric.name).toBeUndefined();
+		expect(out.also).toMatchObject([{ outcome: "skip", name: "drift-jev.typesafe" }]);
 	});
 
 	it("a Jev that is not live is never called", async () => {

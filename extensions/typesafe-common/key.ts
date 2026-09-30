@@ -1,5 +1,5 @@
 /**
- * The TypeSafe ("Jev") API key. Env first, then pi's auth store.
+ * The Jev API keys — one per route. Env first, then pi's auth store.
  *
  * Deliberately a mirror of `compaction/index.ts:readApiKey` rather than a new
  * idea, because the thing it gets right is not obvious: the key that comes back
@@ -30,8 +30,38 @@ export const TYPESAFE_API_KEY_ENV = "TYPESAFE_API_KEY";
 /** pi's credential id for this provider, as `auth.json` keys it. */
 export const TYPESAFE_CREDENTIAL = "typesafe";
 
-export function readApiKey(env: Record<string, string | undefined> = process.env): string | null {
+/**
+ * The OpenRouter key for the `openrouter` Jev route: env first, then this
+ * credential id in `auth.json` (the Hive registry leases it under this name).
+ *
+ * NEVER THE PLAIN `openrouter` ENTRY. In `auth.json` an `openrouter` key is a
+ * pi PROVIDER credential: it makes every `openrouter/*` chat model routable,
+ * and that is how chat turns silently spent on OpenRouter before (HIV-3617).
+ * `typesafe-openrouter` is deliberately not a pi provider name, so leasing the
+ * Jev fallback key cannot re-open that path, and reading the plain entry here
+ * would invite someone to "simplify" the lease back into it.
+ */
+export const TYPESAFE_OPENROUTER_API_KEY_ENV = "TYPESAFE_OPENROUTER_API_KEY";
+export const TYPESAFE_OPENROUTER_CREDENTIAL = "typesafe-openrouter";
+
+/** `readStoredCredential`'s shape, injectable so a test never reads the developer's own auth.json. */
+export type CredentialReader = (credentialId: string) => unknown;
+
+export function readApiKey(
+	env: Record<string, string | undefined> = process.env,
+	readCredential: CredentialReader = readStoredCredential,
+): string | null {
 	const fromEnv = env[TYPESAFE_API_KEY_ENV];
 	if (fromEnv) return fromEnv;
-	return apiKeyFromCredential(readStoredCredential(TYPESAFE_CREDENTIAL));
+	return apiKeyFromCredential(readCredential(TYPESAFE_CREDENTIAL));
+}
+
+/** Same rules as `readApiKey`: a reference (`!op read …`, `$VAR`) is refused, not resolved. */
+export function readOpenrouterApiKey(
+	env: Record<string, string | undefined> = process.env,
+	readCredential: CredentialReader = readStoredCredential,
+): string | null {
+	const fromEnv = env[TYPESAFE_OPENROUTER_API_KEY_ENV];
+	if (fromEnv) return fromEnv;
+	return apiKeyFromCredential(readCredential(TYPESAFE_OPENROUTER_CREDENTIAL));
 }

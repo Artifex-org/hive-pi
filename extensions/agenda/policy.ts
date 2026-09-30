@@ -28,6 +28,14 @@ export interface PolicyOutcome {
 	 * constant, never derived from content.
 	 */
 	metric: { outcome: MetricOutcome; value: number; name?: string };
+	/**
+	 * Further metrics reported beside `metric`, same rules: fixed-constant
+	 * names, numbers and enums only. It exists for a DIMENSION `metric` cannot
+	 * carry — the Jev route (`drift-jev.typesafe` / `drift-jev.openrouter`) —
+	 * without renaming `metric`, so the aggregate `drift-jev` row keeps
+	 * counting every Jev answer whichever route served it.
+	 */
+	also?: ReadonlyArray<{ outcome: MetricOutcome; value: number; name: string }>;
 	/** Text to inject as a follow-up turn. Absent means "nothing to say". */
 	inject?: string;
 	/** Applied to the ledger after the work completes. */

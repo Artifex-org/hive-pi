@@ -46,7 +46,7 @@
  */
 
 import { classify, parseRetryAfterMs, redact, withTimeout } from "../hive-common/http.ts";
-import type { TypesafeConfig } from "./config.ts";
+import type { JevRoute, TypesafeConfig } from "./config.ts";
 
 /** What `state` and `instructions` accept, per the measured request shape. */
 export type JevState = string | Record<string, unknown> | readonly unknown[];
@@ -192,20 +192,40 @@ export function certaintyOf(answer: Answer): number {
 export interface JevUsage {
 	inputTokens: number;
 	outputTokens: number;
+	/**
+	 * USD, when the route reports it. OpenRouter sends `usage.cost`; the direct
+	 * API does not, so absent means "not reported", never "free".
+	 */
+	costUsd?: number;
 }
 
 /**
- * Every way a call can end, as one closed union.
+ * Which route produced an outcome, and whether it was a fallback.
+ *
+ * `route` is the route that answered or, when none did, the last one tried;
+ * null when no route was tried at all (disabled, or refused client-side).
+ * `failover` is true when that route is not the first configured route with a
+ * key — whether the primary failed in this call or its breaker was already
+ * open. Without this dimension the cutover to OpenRouter happens and nobody
+ * can tell (HIV-712's shape again).
+ */
+export interface RouteMeta {
+	route: JevRoute | null;
+	failover: boolean;
+}
+
+/**
+ * Every way ONE attempt can end, as one closed union.
  *
  * `kind` is the liveness surface. A seam that records only "used Jev / used the
  * heuristic" cannot tell a classifier that agreed from a classifier that was
  * never reached — the HIV-712 shape. `liveness.ts` tallies these kinds so the
  * difference is visible without reading a log.
  */
-export type Outcome<T> =
+export type AttemptOutcome<T> =
 	| { kind: "ok"; answers: T; usage: JevUsage; latencyMs: number; model: string }
-	/** Never reached the network, and deliberately so. */
-	| { kind: "disabled"; reason: "config" | "no_key" }
+	/** Never reached the network, and deliberately so. `bad_routes`: the route list did not parse. */
+	| { kind: "disabled"; reason: "config" | "no_key" | "bad_routes" }
 	/** Refused before the network, or refused permanently by the server (4xx). */
 	| { kind: "rejected"; reason: string; status?: number }
 	/** HTTP 200 carrying nothing usable. An ERROR, never an answer. */
@@ -213,20 +233,145 @@ export type Outcome<T> =
 	| { kind: "timeout"; timeoutMs: number }
 	| { kind: "rate_limited"; status: number; retryAfterMs: number | null }
 	| { kind: "auth_failed"; status: number }
+	/**
+	 * 402: the account behind this route cannot pay. Its own kind, not a
+	 * transport error, because it is the likeliest signal that the TypeSafe
+	 * credit ran out — the event the route list exists for. (TypeSafe does not
+	 * document which status that is; 401/403 land in `auth_failed`, which
+	 * fails over the same way.)
+	 */
+	| { kind: "payment_required"; status: number }
 	| { kind: "transport_error"; error: string };
 
-export type OutcomeKind = Outcome<unknown>["kind"];
+/** What `ask` returns: the final attempt's outcome, and which route it came from. */
+export type Outcome<T> = AttemptOutcome<T> & RouteMeta;
 
-export const OUTCOME_KINDS: readonly OutcomeKind[] = [
-	"ok",
-	"disabled",
-	"rejected",
-	"malformed",
-	"timeout",
-	"rate_limited",
-	"auth_failed",
-	"transport_error",
-];
+export type OutcomeKind = AttemptOutcome<unknown>["kind"];
+
+/**
+ * A Record rather than an array literal so the compiler checks it is
+ * EXHAUSTIVE: add a kind to the union without adding it here and this file
+ * stops compiling, instead of the tally silently never counting it.
+ */
+const OUTCOME_KIND_SET: Record<OutcomeKind, true> = {
+	ok: true,
+	disabled: true,
+	rejected: true,
+	malformed: true,
+	timeout: true,
+	rate_limited: true,
+	auth_failed: true,
+	payment_required: true,
+	transport_error: true,
+};
+
+export const OUTCOME_KINDS: readonly OutcomeKind[] = Object.keys(OUTCOME_KIND_SET) as OutcomeKind[];
+
+// ---------------------------------------------------------------------------
+// Failover policy
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an outcome says "this ROUTE is unwell" — so the next route may be
+ * tried and this one's breaker opened — or "this REQUEST is wrong".
+ *
+ * `account`: the route's credentials or credit (401/402/403). Stays broken
+ *   until someone acts, so its breaker holds for an hour.
+ * `transient`: 429, 5xx (529 included), timeout, transport, and a 404/405 —
+ *   the endpoint moved, or OpenRouter's data-policy gate closed. Five minutes.
+ * `none`: 400/422, client-side refusals, `malformed`, `disabled`, `ok`. These
+ *   would fail identically on the other route; retrying them there only
+ *   doubles the bill for the same bug.
+ */
+export type FailureClass = "account" | "transient" | "none";
+
+export function failureClass(outcome: AttemptOutcome<unknown>): FailureClass {
+	switch (outcome.kind) {
+		case "auth_failed":
+		case "payment_required":
+			return "account";
+		case "rate_limited":
+		case "timeout":
+		case "transport_error":
+			return "transient";
+		case "rejected":
+			return outcome.status === 404 || outcome.status === 405 ? "transient" : "none";
+		case "ok":
+		case "disabled":
+		case "malformed":
+			return "none";
+		default: {
+			const unreachable: never = outcome;
+			return unreachable;
+		}
+	}
+}
+
+export const ACCOUNT_TRIP_MS = 60 * 60_000;
+export const TRANSIENT_TRIP_MS = 5 * 60_000;
+
+/**
+ * Below this much remaining deadline a fallback attempt is not started: it
+ * could not complete a cold TLS handshake, so it would only turn one failure
+ * into two. Matches `configFrom`'s floor on `timeoutMs`.
+ */
+export const MIN_ATTEMPT_MS = 250;
+
+/**
+ * Per-route circuit breaker, process-local.
+ *
+ * Its job is to stop paying a failed cold round trip (1.4–2s to us-west-2) on
+ * EVERY call once the TypeSafe credit is gone: the first failure opens the
+ * route, calls go straight to the next one, and after the window the next call
+ * probes the route again (success closes it, failure re-opens it). No shared
+ * store — each process learns on its own first failure, which costs one call.
+ *
+ * The clock is injected so the tests can cross an hour without waiting one.
+ */
+export class RouteBreaker {
+	private readonly openUntil = new Map<JevRoute, number>();
+	private warned = false;
+	private readonly now: () => number;
+	private readonly warn: (message: string) => void;
+
+	constructor(options: { now?: () => number; warn?: (message: string) => void } = {}) {
+		this.now = options.now ?? (() => Date.now());
+		// stderr: in rpc mode that is the agent log, which is where an operator
+		// looking for "why did Jev spend move to OpenRouter" will look.
+		this.warn = options.warn ?? ((message) => console.warn(message));
+	}
+
+	isOpen(route: JevRoute): boolean {
+		const until = this.openUntil.get(route);
+		return until !== undefined && this.now() < until;
+	}
+
+	/** Record one attempt's result. `next` names the route used instead, for the warning. */
+	observe(route: JevRoute, outcome: AttemptOutcome<unknown>, next: JevRoute | null): void {
+		if (outcome.kind === "ok") {
+			this.openUntil.delete(route);
+			return;
+		}
+		const cls = failureClass(outcome);
+		if (cls === "none") return;
+		this.openUntil.set(route, this.now() + (cls === "account" ? ACCOUNT_TRIP_MS : TRANSIENT_TRIP_MS));
+		// ONE loud line per breaker — per process for the shared default — and
+		// for the account class only: that is the "credit ran out, traffic
+		// moved" event. Transient trips are routine and already visible per
+		// route in the tally; warning on each would train the reader to ignore
+		// the one that matters.
+		if (cls === "account" && !this.warned) {
+			this.warned = true;
+			this.warn(`jev: route ${route} tripped (${outcome.kind}); ${next ? `using ${next}` : "no fallback route configured"}`);
+		}
+	}
+}
+
+/**
+ * The default breaker, shared by every client in this process — which is what
+ * "process-local" means here. A test injects its own.
+ */
+const processBreaker = new RouteBreaker();
 
 // ---------------------------------------------------------------------------
 // Validation and decoding
@@ -377,7 +522,12 @@ export function decodeEnvelope(
 			usage: {
 				inputTokens: finite(usage.input_tokens) ? usage.input_tokens : 0,
 				outputTokens: finite(usage.output_tokens) ? usage.output_tokens : 0,
+				// OpenRouter only. Omitted, not zeroed, when absent.
+				...(finite(usage.cost) && usage.cost >= 0 ? { costUsd: usage.cost } : {}),
 			},
+			// Stored, never compared: the direct API says `jev-1.13.0` and
+			// OpenRouter `typesafe/jev-1.13-20260917` for the same model.
+			// Unknown envelope fields (`id`, `provider`) are ignored.
 			model: typeof env.model === "string" ? env.model : "unknown",
 		},
 	};
@@ -391,55 +541,128 @@ export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
 export interface TypesafeClientOptions {
 	config: TypesafeConfig;
-	/** Read once, by the caller, outside any event handler. Null is a supported state. */
+	/**
+	 * The `typesafe` route's key. Read once, by the caller, outside any event
+	 * handler. Null is a supported state: the route is skipped.
+	 */
 	apiKey: string | null;
+	/** The `openrouter` route's key (`key.ts:readOpenrouterApiKey`). Absent or null skips the route. */
+	openrouterApiKey?: string | null;
 	/** Injected so the tests never depend on a socket. Default: global fetch. */
 	fetchImpl?: FetchLike;
+	/** The clock for latency AND the call deadline. */
 	now?: () => number;
+	/** Default: the process-wide breaker. A test injects its own, with its own clock. */
+	breaker?: RouteBreaker;
+}
+
+interface RouteTarget {
+	route: JevRoute;
+	endpoint: string;
+	key: string;
 }
 
 export class TypesafeClient {
 	private readonly config: TypesafeConfig;
-	private readonly apiKey: string | null;
+	private readonly targets: readonly RouteTarget[];
 	private readonly fetchImpl: FetchLike;
 	private readonly now: () => number;
+	private readonly breaker: RouteBreaker;
 
 	constructor(options: TypesafeClientOptions) {
 		this.config = options.config;
-		this.apiKey = options.apiKey;
+		const keys: Record<JevRoute, string | null> = {
+			typesafe: options.apiKey || null,
+			openrouter: options.openrouterApiKey || null,
+		};
+		const endpoints: Record<JevRoute, string> = {
+			typesafe: options.config.endpoint,
+			openrouter: options.config.openrouterEndpoint,
+		};
+		// Configured order, keyless routes dropped: a route with no key is
+		// skipped, not an error.
+		this.targets = options.config.routes.flatMap((route) => {
+			const key = keys[route];
+			return key ? [{ route, endpoint: endpoints[route], key }] : [];
+		});
 		// Bound to globalThis rather than captured bare: an unbound `fetch`
 		// throws "Illegal invocation" on some hosts.
 		this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
 		this.now = options.now ?? (() => Date.now());
+		this.breaker = options.breaker ?? processBreaker;
 	}
 
 	/** True when a call would reach the network. The liveness question, answered cheaply. */
 	get live(): boolean {
-		return this.config.enabled && this.apiKey !== null;
+		return this.config.enabled && this.config.routeError === null && this.targets.length > 0;
+	}
+
+	/** The routes a call would try, in order, keyless ones already dropped. */
+	get routes(): readonly JevRoute[] {
+		return this.targets.map((t) => t.route);
 	}
 
 	async ask<QS extends Record<string, Question>>(
 		state: JevState,
 		questions: QS,
 	): Promise<Outcome<AnswersFor<QS>>> {
-		if (!this.config.enabled) return { kind: "disabled", reason: "config" };
-		if (!this.apiKey) return { kind: "disabled", reason: "no_key" };
+		const none: RouteMeta = { route: null, failover: false };
+		if (!this.config.enabled) return { kind: "disabled", reason: "config", ...none };
+		if (this.config.routeError !== null) return { kind: "disabled", reason: "bad_routes", ...none };
+		if (this.targets.length === 0) return { kind: "disabled", reason: "no_key", ...none };
 
 		const refusal = validateRequest(state, questions);
-		if (refusal) return { kind: "rejected", reason: refusal };
+		if (refusal) return { kind: "rejected", reason: refusal, ...none };
 
+		// Open routes are skipped — unless EVERY route is open, in which case
+		// all are tried in order anyway: breakers exist to save a round trip,
+		// never to take Jev dark on their own say-so.
+		const closed = this.targets.filter((t) => !this.breaker.isOpen(t.route));
+		const order = closed.length > 0 ? closed : this.targets;
+		const primary = this.targets[0].route;
+
+		// ONE deadline for the whole call, however many routes it tries. The
+		// consequence is deliberate: a primary that times out has spent the
+		// budget and the answer is lost for this call — the breaker is what
+		// sends the NEXT call straight to the fallback.
+		const deadline = this.now() + this.config.timeoutMs;
+		const body = JSON.stringify(buildRequestBody(state, questions, this.config.model));
+
+		let last: Outcome<AnswersFor<QS>> | null = null;
+		for (let i = 0; i < order.length; i++) {
+			const target = order[i];
+			const remaining = deadline - this.now();
+			if (last !== null && remaining < MIN_ATTEMPT_MS) break;
+
+			const attempt = await this.attempt<QS>(target, body, questions, Math.max(remaining, MIN_ATTEMPT_MS));
+			const next = order[i + 1]?.route ?? null;
+			this.breaker.observe(target.route, attempt, next);
+			last = { ...attempt, route: target.route, failover: target.route !== primary } as Outcome<AnswersFor<QS>>;
+			if (failureClass(attempt) === "none") break;
+		}
+		// `order` is never empty (targets.length > 0), so the loop ran at least once.
+		return last!;
+	}
+
+	/** One round trip against one route. Never throws. */
+	private async attempt<QS extends Record<string, Question>>(
+		target: RouteTarget,
+		body: string,
+		questions: QS,
+		timeoutMs: number,
+	): Promise<AttemptOutcome<AnswersFor<QS>>> {
 		const started = this.now();
 		let res: Response;
 		try {
-			res = await withTimeout(this.config.timeoutMs, (signal) =>
-				this.fetchImpl(this.config.endpoint, {
+			res = await withTimeout(timeoutMs, (signal) =>
+				this.fetchImpl(target.endpoint, {
 					method: "POST",
 					headers: {
-						Authorization: `Bearer ${this.apiKey}`,
+						Authorization: `Bearer ${target.key}`,
 						"Content-Type": "application/json",
 						Accept: "application/json",
 					},
-					body: JSON.stringify(buildRequestBody(state, questions, this.config.model)),
+					body,
 					signal,
 				}),
 			);
@@ -448,16 +671,14 @@ export class TypesafeClient {
 			// can carry a token. It maps AbortError to "timeout", which is the
 			// only way we learn the deadline fired.
 			const error = redact(err);
-			return error === "timeout"
-				? { kind: "timeout", timeoutMs: this.config.timeoutMs }
-				: { kind: "transport_error", error };
+			return error === "timeout" ? { kind: "timeout", timeoutMs } : { kind: "transport_error", error };
 		}
 
 		if (!res.ok) return this.failure(res);
 
-		let body: unknown;
+		let parsed: unknown;
 		try {
-			body = await res.json();
+			parsed = await res.json();
 		} catch {
 			// A 200 that is not JSON is success-shaped nothing, same as a 200
 			// with no answers map. It is NOT a transport error: the round trip
@@ -465,7 +686,7 @@ export class TypesafeClient {
 			return { kind: "malformed", reason: "200 body is not JSON", latencyMs: this.now() - started };
 		}
 
-		const decoded = decodeEnvelope(body, questions);
+		const decoded = decodeEnvelope(parsed, questions);
 		if (!decoded.ok) return { kind: "malformed", reason: decoded.reason, latencyMs: this.now() - started };
 		return {
 			kind: "ok",
@@ -480,13 +701,18 @@ export class TypesafeClient {
 	 * A non-2xx, classified with `hive-common/http.ts`'s own rules so this
 	 * client and every Hive-facing one agree about what is retryable.
 	 *
+	 * 402 is checked before `classify`, which would otherwise call it a
+	 * permanent 4xx — `rejected`, no failover — and hold every call on a route
+	 * whose credit is gone.
+	 *
 	 * 529 ("overloaded") is NOT in `classify`'s 4xx range and is not an auth or
 	 * rate-limit status, so it lands in `transport_error` — correct, because it
 	 * is the one server status that means "ask again later" without telling us
 	 * when. Folding it into `rate_limited` would imply a Retry-After that is
 	 * not there.
 	 */
-	private failure<T>(res: Response): Outcome<T> {
+	private failure<T>(res: Response): AttemptOutcome<T> {
+		if (res.status === 402) return { kind: "payment_required", status: 402 };
 		const { authFailed, permanent } = classify(res.status);
 		if (authFailed) return { kind: "auth_failed", status: res.status };
 		if (res.status === 429) {

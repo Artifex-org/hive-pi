@@ -82,6 +82,27 @@ describe("driver — metric name", () => {
 		expect((metricEvents()[0].payload as Record<string, unknown>).name).toBe("drift-jev");
 	});
 
+	it("reports `also` metrics beside the main one — the Jev route dimension", async () => {
+		const policy: Policy = {
+			name: "drift",
+			decide: () => ({
+				name: "drift",
+				status: "",
+				run: async () => ({
+					metric: { outcome: "pass", value: 1, name: "drift-jev" },
+					also: [{ outcome: "pass", value: 1, name: "drift-jev.openrouter" }],
+				}),
+			}),
+		};
+		installDriver(pi.api, { policies: [policy] });
+		await pi.emit({ type: "agent_settled" });
+		// The aggregate row is still reported under its own name, first.
+		expect(metricEvents().map((e) => (e.payload as Record<string, unknown>).name)).toEqual([
+			"drift-jev",
+			"drift-jev.openrouter",
+		]);
+	});
+
 	it("falls back to the work's name", async () => {
 		installDriver(pi.api, { policies: [runsButSilent("drift")] });
 		await pi.emit({ type: "agent_settled" });

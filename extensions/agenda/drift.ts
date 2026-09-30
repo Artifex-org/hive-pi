@@ -19,11 +19,12 @@
  */
 
 import { noulQuestion, TypesafeClient } from "../typesafe-common/client.ts";
-import { loadConfig } from "../typesafe-common/config.ts";
-import { readApiKey } from "../typesafe-common/key.ts";
+import { loadConfig, type JevRoute } from "../typesafe-common/config.ts";
+import { readApiKey, readOpenrouterApiKey } from "../typesafe-common/key.ts";
+import { routeMetricName } from "../typesafe-common/liveness.ts";
 import { type GoalItem } from "./goal-state.ts";
 import { atCap, record } from "./ledger.ts";
-import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
+import type { MetricOutcome, Policy, PolicyContext, PolicyWork } from "./policy.ts";
 import { runOneShot } from "./spawn.ts";
 import { parseVerdict } from "./verdict.ts";
 
@@ -119,6 +120,7 @@ export function driftJevClient(): TypesafeClient | null {
 		return new TypesafeClient({
 			config: { ...config, timeoutMs: Math.max(config.timeoutMs, DRIFT_JEV_TIMEOUT_MS) },
 			apiKey: readApiKey(),
+			openrouterApiKey: readOpenrouterApiKey(),
 		});
 	} catch {
 		return null;
@@ -131,8 +133,16 @@ export function jevDriftReason(p: number): string {
 	return `an alignment check rated it ${Math.round(p * 100)}% likely to serve the goal`;
 }
 
+/** What one Jev consultation produced: the probability, and the route that answered or last failed. */
+export interface JevAlignment {
+	/** Null when Jev did not answer. */
+	p: number | null;
+	/** Null when no route was tried (disabled, or refused client-side). */
+	route: JevRoute | null;
+}
+
 /**
- * Ask Jev. Returns the probability the activity serves the goal, or null when
+ * Ask Jev. `p` is the probability the activity serves the goal, or null when
  * Jev did not answer — which sends the caller to the incumbent probe, never to
  * a verdict.
  */
@@ -140,10 +150,10 @@ export async function askJevAlignment(
 	client: TypesafeClient,
 	condition: string,
 	transcript: string,
-): Promise<number | null> {
+): Promise<JevAlignment> {
 	const excerpt = transcript.length > EXCERPT_BUDGET_CHARS ? transcript.slice(-EXCERPT_BUDGET_CHARS) : transcript;
 	const outcome = await client.ask({ goal: condition, recent_activity: excerpt || "(empty)" }, DRIFT_JEV_QUESTION);
-	return outcome.kind === "ok" ? outcome.answers.serves.noul : null;
+	return { p: outcome.kind === "ok" ? outcome.answers.serves.noul : null, route: outcome.route };
 }
 
 /**
@@ -217,21 +227,31 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 					settlesSinceProbe = 0;
 					const startedAt = Date.now();
 
+					// The route dimension, reported beside whichever metric this
+					// probe ends on. A Jev miss that falls through to `pi -p` is
+					// reported as `skip` on its route, so a route that fails every
+					// call is visible even though the incumbent answered.
+					let also: Array<{ outcome: MetricOutcome; value: number; name: string }> = [];
+
 					const jev = hooks.jev?.();
 					if (jev?.live) {
-						const p = await askJevAlignment(jev, goal.condition, transcript);
+						const { p, route } = await askJevAlignment(jev, goal.condition, transcript);
+						const elapsed = Date.now() - startedAt;
 						if (p !== null) {
-							const elapsed = Date.now() - startedAt;
-							if (p >= DRIFT_JEV_BAR) {
-								return { metric: { outcome: "pass", value: elapsed, name: DRIFT_JEV_METRIC } };
+							const outcome: MetricOutcome = p >= DRIFT_JEV_BAR ? "pass" : "fail";
+							also = route ? [{ outcome, value: elapsed, name: routeMetricName(DRIFT_JEV_METRIC, route) }] : [];
+							if (outcome === "pass") {
+								return { metric: { outcome, value: elapsed, name: DRIFT_JEV_METRIC }, also };
 							}
 							return {
-								metric: { outcome: "fail", value: elapsed, name: DRIFT_JEV_METRIC },
+								metric: { outcome, value: elapsed, name: DRIFT_JEV_METRIC },
+								also,
 								inject: realignmentInjection(goal.condition, jevDriftReason(p)),
 								ledger: (state) => record(state, ledgerId),
 							};
 						}
 						// Jev did not answer: fall through to the incumbent probe.
+						if (route) also = [{ outcome: "skip", value: elapsed, name: routeMetricName(DRIFT_JEV_METRIC, route) }];
 					}
 
 					const result = await runOneShot({
@@ -245,17 +265,18 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 
 					// A probe that could not run has told us nothing — never a nag.
 					if (result.timedOut || result.exitCode !== 0) {
-						return { metric: { outcome: "skip", value: elapsed } };
+						return { metric: { outcome: "skip", value: elapsed }, also };
 					}
 					const parsed = parseVerdict(result.text);
 					if (parsed.kind === "error") {
-						return { metric: { outcome: "skip", value: elapsed } };
+						return { metric: { outcome: "skip", value: elapsed }, also };
 					}
 					if (parsed.verdict.ok) {
-						return { metric: { outcome: "pass", value: elapsed } };
+						return { metric: { outcome: "pass", value: elapsed }, also };
 					}
 					return {
 						metric: { outcome: "fail", value: elapsed },
+						also,
 						inject: realignmentInjection(goal.condition, parsed.verdict.reason),
 						ledger: (state) => record(state, ledgerId),
 					};

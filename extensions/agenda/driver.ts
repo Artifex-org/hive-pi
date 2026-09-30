@@ -320,6 +320,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 				// output must never ride this channel, or the bus becomes a path
 				// around payload.ts's allowlist.
 				emitMetric(pi, outcome.metric.name ?? work.name, outcome.metric.outcome, outcome.metric.value);
+				for (const extra of outcome.also ?? []) emitMetric(pi, extra.name, extra.outcome, extra.value);
 
 				if (outcome.ledger) ledger = outcome.ledger(ledger);
 				if (!outcome.inject) continue; // nothing to say — let the next policy try
