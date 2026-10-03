@@ -623,6 +623,62 @@ describe("kill", () => {
 		expect(hive.calls.length).toBeGreaterThan(0);
 	});
 
+	describe("in a TUI session", () => {
+		// A headless kill also exits the process after a fixed grace (see the
+		// kill case), so the wait-for-idle path is only observable where the
+		// process is left to pi: an interactive session.
+		const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		beforeEach(() => {
+			Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		});
+		afterEach(() => {
+			if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+			else delete (process.stdout as { isTTY?: boolean }).isTTY;
+		});
+
+		it("waits for the session to go idle before it shuts down", async () => {
+			// The aborted turn settles inside the grace, and a settle handler starts a
+			// compaction: pi is busy when the first shutdown() would run, and a busy
+			// session's shutdown() is only acted on at an `agent_settled` that never
+			// comes. The kill must keep aborting until pi says idle, then shut down.
+			fakeHive({ commands: [{ id: "c1", kind: "kill", payload: "", source: "operator" }] });
+			let aborts = 0;
+			const ctxOptions: FakeCtxOptions = { idle: false, onAbort: () => aborts++ };
+
+			hiveRemote(fake.api, deps());
+			await fake.emit({ type: "turn_start" }, ctxOptions);
+			await attachAndSettle(fake, ctxOptions);
+			await vi.advanceTimersByTimeAsync(2_500); // poll claims the command
+			await vi.advanceTimersByTimeAsync(2_000);
+
+			expect(fake.shutdowns).toBe(0);
+			const abortsWhileBusy = aborts;
+			expect(abortsWhileBusy).toBeGreaterThan(1); // the kill's own abort, then re-aborts
+
+			ctxOptions.idle = true;
+			await vi.advanceTimersByTimeAsync(500);
+			expect(fake.shutdowns).toBe(1);
+
+			// Stops once it has shut down: no more aborts, no second shutdown.
+			await vi.advanceTimersByTimeAsync(5_000);
+			expect(fake.shutdowns).toBe(1);
+			expect(aborts).toBe(abortsWhileBusy);
+		});
+
+		it("shuts down anyway once the settle deadline passes", async () => {
+			fakeHive({ commands: [{ id: "c1", kind: "kill", payload: "", source: "operator" }] });
+			hiveRemote(fake.api, deps());
+			await fake.emit({ type: "turn_start" }, { idle: false });
+			await attachAndSettle(fake, { idle: false });
+			await vi.advanceTimersByTimeAsync(2_500);
+
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(fake.shutdowns).toBe(0);
+			await vi.advanceTimersByTimeAsync(31_000);
+			expect(fake.shutdowns).toBe(1);
+		});
+	});
+
 	it("ignores a kill the operator has not permitted", async () => {
 		fakeHive({ commands: [{ id: "c1", kind: "kill", payload: "", source: "operator" }] });
 		hiveRemote(fake.api, deps(config({ allowKill: false })));

@@ -149,6 +149,12 @@ const COMMAND_POLL_MS = 2_000;
  */
 const KILL_ABORT_GRACE_MS = 250;
 /**
+ * How long a killed session keeps re-aborting while pi reports it busy before
+ * shutdown() is requested regardless. A turn unwinds in milliseconds; this
+ * covers whatever a settle handler starts in the meantime (see the kill case).
+ */
+const KILL_SETTLE_DEADLINE_MS = 60_000;
+/**
  * How long to wait after hive-telemetry announces a run id before trying to
  * attach to it.
  *
@@ -1344,7 +1350,39 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				//
 				// Via latestCtx, the same route `interrupt` uses for abort():
 				// shutdown() is on ExtensionContext, not ExtensionAPI.
-				setTimeout(() => {
+				//
+				// AND ONLY ONCE THE SESSION IS IDLE. pi's shutdown() on a busy
+				// session only records the request and acts on it at the next
+				// `agent_settled` — and the aborted turn has usually settled
+				// already, inside the grace. Whatever a settle handler started in
+				// that window (a compaction requested by another extension, a
+				// queued follow-up) keeps the session busy, and when it finishes no
+				// second `agent_settled` comes: the request is never acted on.
+				// Measured: a session killed while waiting on a question aborted
+				// its turn, compacted for four minutes, went idle and stayed up for
+				// seven hours with the kill claimed and the notice folded.
+				//
+				// So keep aborting until pi reports idle (abort() also cancels a
+				// running compaction), then shut down. Bounded: past the deadline
+				// shutdown() is called anyway, which is the old behaviour.
+				const killDeadline = Date.now() + KILL_SETTLE_DEADLINE_MS;
+				const shutdownWhenIdle = (): void => {
+					let idle = true;
+					try {
+						idle = latestCtx?.isIdle() ?? true;
+					} catch {
+						// A replaced ctx cannot answer; the shutdown below reports
+						// nothing either way, so treat it as idle and stop retrying.
+					}
+					if (!idle && Date.now() < killDeadline) {
+						try {
+							latestCtx?.abort();
+						} catch {
+							// Same as above: a stale ctx aborts nothing.
+						}
+						setTimeout(shutdownWhenIdle, KILL_ABORT_GRACE_MS).unref?.();
+						return;
+					}
 					try {
 						latestCtx?.shutdown();
 					} catch {
@@ -1352,7 +1390,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// sees no state change and can escalate. Never let it propagate
 						// into the poll loop and kill the downlink for other commands.
 					}
-				}, KILL_ABORT_GRACE_MS).unref?.();
+				};
+				setTimeout(shutdownWhenIdle, KILL_ABORT_GRACE_MS).unref?.();
 				// HEADLESS ONLY: under `--mode rpc` shutdown() ends the SESSION but
 				// the process stays alive on stdin, answering get_state forever —
 				// measured, not assumed. In a TUI the human sees the app close; in a
