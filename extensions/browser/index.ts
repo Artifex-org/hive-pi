@@ -29,7 +29,6 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Browser, BrowserContext, ConsoleMessage, Page } from "playwright-core";
@@ -78,10 +77,6 @@ function truncate(s: string, max: number): { text: string; truncated: boolean } 
 
 export default function (pi: ExtensionAPI) {
 	let state: BrowserState | null = null;
-	// Backed by the on-disk pr-attachments.json manifest, so the record survives
-	// compaction and is visible to extensions/pr-attachments — a separate
-	// entrypoint with its own module cache. See ../pr-attachments/manifest.ts.
-	const ledger = new ScreenshotLedger();
 
 	async function ensurePage(): Promise<BrowserState> {
 		if (state && state.browser.isConnected()) return state;
@@ -217,11 +212,16 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			// Backed by the on-disk pr-attachments.json manifest, so the record
+			// survives compaction and is visible to extensions/pr-attachments — a
+			// separate entrypoint with its own module cache. Keyed by THIS session:
+			// /tmp is shared between sandboxes and every sandboxed pi is pid 2, so a
+			// per-process directory was one directory for all of them. See
+			// ../pr-attachments/manifest.ts. Read from ctx before the first await.
+			const ledger = new ScreenshotLedger(process.env, ctx.sessionManager.getSessionId());
 			const { page } = await ensurePage();
-			// /tmp is writable in every srt profile but shared between sandboxes,
-			// so the directory is per-process.
-			const dir = path.join(os.tmpdir(), `pi-browser-${process.pid}`);
+			const dir = ledger.shotDir;
 			fs.mkdirSync(dir, { recursive: true });
 			const file = path.join(dir, `shot-${Date.now()}.png`);
 			const buf = await page.screenshot({ fullPage: Boolean(params.full_page), path: file });

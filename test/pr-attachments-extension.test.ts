@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import prAttachments, { type VersionProbe } from "../extensions/pr-attachments/index.ts";
-import { ScreenshotLedger } from "../extensions/pr-attachments/manifest.ts";
+import { MANIFEST_FILENAME, ScreenshotLedger, screenshotDir } from "../extensions/pr-attachments/manifest.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 let tmp: string;
@@ -18,7 +18,7 @@ const NEW_GH: VersionProbe = () => ({ major: 2, minor: 99, patch: 0 });
 const OLD_GH: VersionProbe = () => ({ major: 2, minor: 98, patch: 0 });
 
 function load(opts: { probe?: VersionProbe; withShot?: boolean; env?: Record<string, string | undefined> } = {}) {
-	const ledger = new ScreenshotLedger({ HIVE_PR_ATTACHMENTS_DIR: tmp });
+	const ledger = new ScreenshotLedger({ HIVE_PR_ATTACHMENTS_DIR: tmp }, "fake-session");
 	if (opts.withShot) {
 		ledger.record({ path: "/tmp/pi-browser-1/shot-1.png", label: "before", url: "http://127.0.0.1:3000/" });
 	}
@@ -180,5 +180,66 @@ describe("the PR nudge", () => {
 		expect(text).toMatch(/without images/i);
 		expect(text).toContain("2.98.0");
 		expect(text).not.toContain("--attach '");
+	});
+});
+
+// Papercut 2026-10-02T14:21 (and five more): every sandboxed pi is pid 2 in its
+// PID namespace, so a pid-keyed `/tmp/claude/pi-browser-2` was ONE directory for
+// every sandboxed session, and `gh pr create` in a session that never opened a
+// browser listed another session's QIS/treasury screenshots for attachment.
+describe("the ledger is this session's, never the process's", () => {
+	let savedTmp: string | undefined;
+	let savedDir: string | undefined;
+	beforeEach(() => {
+		savedTmp = process.env.TMPDIR;
+		savedDir = process.env.HIVE_PR_ATTACHMENTS_DIR;
+		process.env.TMPDIR = tmp; // os.tmpdir() reads it per call
+		delete process.env.HIVE_PR_ATTACHMENTS_DIR;
+	});
+	afterEach(() => {
+		if (savedTmp === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = savedTmp;
+		if (savedDir === undefined) delete process.env.HIVE_PR_ATTACHMENTS_DIR;
+		else process.env.HIVE_PR_ATTACHMENTS_DIR = savedDir;
+	});
+
+	/** Another live session's shots, wherever a same-pid neighbour would have put them. */
+	function neighbourShots() {
+		for (const dir of [path.join(tmp, `pi-browser-${process.pid}`), screenshotDir("other-session")]) {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, "shot-1790638007736.png"), "png");
+			fs.writeFileSync(
+				path.join(dir, MANIFEST_FILENAME),
+				JSON.stringify([{ path: path.join(dir, "shot-1790638007736.png"), label: "after-final-narrow-treasury", url: "u", taken_at: "t" }]),
+			);
+		}
+	}
+
+	async function prCreateIn(sessionId: string) {
+		const pi = createFakePi();
+		prAttachments(pi.api, { probe: NEW_GH });
+		await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "gh pr create --body-file b.md" } }, { sessionId });
+		const [patch] = (await pi.emit(
+			{ type: "tool_result", toolName: "bash", isError: false, content: [{ type: "text", text: "ok" }] },
+			{ sessionId },
+		)) as ({ content?: { text: string }[] } | undefined)[];
+		return patch?.content?.[0]?.text ?? "ok";
+	}
+
+	it("does not offer a same-pid neighbour session's screenshots", async () => {
+		neighbourShots();
+		expect(await prCreateIn("this-session")).toBe("ok");
+	});
+
+	it("still offers the screenshots THIS session took", async () => {
+		neighbourShots();
+		new ScreenshotLedger(process.env, "this-session").record({
+			path: path.join(screenshotDir("this-session"), "shot-1.png"),
+			label: "before",
+			url: "http://127.0.0.1:3000/",
+		});
+		const text = await prCreateIn("this-session");
+		expect(text).toContain("This session has 1 screenshot(s)");
+		expect(text).not.toContain("treasury");
 	});
 });

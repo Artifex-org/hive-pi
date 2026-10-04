@@ -28,7 +28,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendHint } from "../toolhints/index.ts";
 import { ScreenshotLedger } from "./manifest.ts";
 import {
@@ -84,7 +84,10 @@ export interface WiringOptions {
 export default function (pi: ExtensionAPI, options: WiringOptions = {}) {
 	if (disabled(process.env)) return;
 
-	const ledger = options.ledger ?? new ScreenshotLedger();
+	// THIS session's ledger, resolved per event from its ctx — never one
+	// constructed at load time, which could only key on the pid (see manifest.ts).
+	const ledgerFor = (ctx: ExtensionContext): ScreenshotLedger =>
+		options.ledger ?? new ScreenshotLedger(process.env, ctx.sessionManager.getSessionId());
 	const probe = options.probe ?? realVersionProbe;
 
 	let beforeFired = false;
@@ -118,13 +121,13 @@ export default function (pi: ExtensionAPI, options: WiringOptions = {}) {
 		}
 	});
 
-	pi.on("tool_call", (event) => {
+	pi.on("tool_call", (event, ctx) => {
 		if (event.toolName === "edit" || event.toolName === "write") {
 			if (beforeFired) return;
 			const input = event.input as { path?: string; file_path?: string };
 			const target = input.path ?? input.file_path;
 			if (!isUIVisiblePath(target)) return;
-			if (ledger.all().length > 0) return; // a shot already exists \u2014 too late to nudge
+			if (ledgerFor(ctx).all().length > 0) return; // a shot already exists \u2014 too late to nudge
 			beforeFired = true;
 			if (capturable) {
 				// A screenshot is possible RIGHT NOW and this edit would repaint the
@@ -143,7 +146,7 @@ export default function (pi: ExtensionAPI, options: WiringOptions = {}) {
 			const input = event.input as { command?: string };
 			const segment = ghAttachlessSegment(input.command);
 			if (!segment) return;
-			const records = ledger.all();
+			const records = ledgerFor(ctx).all();
 			if (records.length === 0) return; // nothing to attach
 			const shape = commandShapeKey(segment);
 			if (nudgedShapes.has(shape)) return;

@@ -9,6 +9,7 @@ import {
 	manifestPath,
 	readManifest,
 	reDeriveFromDisk,
+	screenshotDir,
 } from "../extensions/pr-attachments/manifest.ts";
 
 // A real temp dir per test — the ledger's whole point is that disk, not module
@@ -25,24 +26,34 @@ afterEach(() => {
 describe("manifest location", () => {
 	it("prefers $HIVE_PR_ATTACHMENTS_DIR when set", () => {
 		const env = { HIVE_PR_ATTACHMENTS_DIR: "/var/hive/attach" };
-		expect(manifestDir(env, 7)).toBe("/var/hive/attach");
-		expect(manifestPath(env, 7)).toBe(`/var/hive/attach/${MANIFEST_FILENAME}`);
+		expect(manifestDir(env, "s-7")).toBe("/var/hive/attach");
+		expect(manifestPath(env, "s-7")).toBe(`/var/hive/attach/${MANIFEST_FILENAME}`);
 	});
 
-	it("falls back to the per-process screenshot dir", () => {
+	it("falls back to the per-SESSION screenshot dir", () => {
 		const env: NodeJS.ProcessEnv = {};
-		expect(manifestDir(env, 4131)).toBe(path.join(os.tmpdir(), "pi-browser-4131"));
-		expect(manifestPath(env, 4131)).toBe(path.join(os.tmpdir(), "pi-browser-4131", MANIFEST_FILENAME));
+		const id = "019a2b3c-4d5e-7f00-8a9b-0c1d2e3f4a5b";
+		expect(manifestDir(env, id)).toBe(path.join(os.tmpdir(), `pi-browser-${id}`));
+		expect(manifestPath(env, id)).toBe(path.join(os.tmpdir(), `pi-browser-${id}`, MANIFEST_FILENAME));
+	});
+
+	it("gives two sessions of one pid two directories", () => {
+		expect(screenshotDir("session-a")).not.toBe(screenshotDir("session-b"));
+	});
+
+	it("keeps a session id inside one path segment", () => {
+		expect(path.dirname(screenshotDir("../../etc/x"))).toBe(os.tmpdir());
+		expect(() => screenshotDir("///")).toThrow(/unusable session id/);
 	});
 
 	it("treats a blank env var as unset", () => {
-		expect(manifestDir({ HIVE_PR_ATTACHMENTS_DIR: "  " }, 9)).toBe(path.join(os.tmpdir(), "pi-browser-9"));
+		expect(manifestDir({ HIVE_PR_ATTACHMENTS_DIR: "  " }, "s-9")).toBe(path.join(os.tmpdir(), "pi-browser-s-9"));
 	});
 });
 
 describe("ScreenshotLedger.record", () => {
 	function ledgerIn(dir: string) {
-		return new ScreenshotLedger({ HIVE_PR_ATTACHMENTS_DIR: dir });
+		return new ScreenshotLedger({ HIVE_PR_ATTACHMENTS_DIR: dir }, "test-session");
 	}
 
 	it("records path, label, url and a timestamp, and reads them back", () => {
@@ -119,9 +130,8 @@ describe("ScreenshotLedger.all falls back when the manifest is lost", () => {
 		const shotDir = path.join(tmp, "pi-browser-1");
 		fs.mkdirSync(shotDir, { recursive: true });
 		fs.writeFileSync(path.join(shotDir, "shot-500.png"), "x");
-		// The ledger resolves its dir from tmpdir/pi-browser-<pid>; point it at
-		// our shotDir by constructing over an env with a matching pid layout.
-		const led = new ScreenshotLedger({ HIVE_PR_ATTACHMENTS_DIR: shotDir });
+		// Point the ledger's manifest dir at our shotDir.
+		const led = new ScreenshotLedger({ HIVE_PR_ATTACHMENTS_DIR: shotDir }, "test-session");
 		// No manifest written yet -> all() re-derives from disk.
 		const all = led.all();
 		expect(all).toHaveLength(1);
