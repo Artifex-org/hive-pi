@@ -137,7 +137,7 @@ describe("spill — the inline/artifact decision", () => {
 	it("returns a small body unchanged and writes nothing", () => {
 		const dir = scratch();
 		const result = spill("short finding", { dir, kind: "note", previewBytes: PREVIEW_BYTES });
-		expect(result).toEqual({ text: "short finding", ref: null });
+		expect(result).toEqual({ text: "short finding", ref: null, file: null });
 		expect(existsSync(dir) && readdirSync(dir).length).toBe(0);
 	});
 
@@ -147,6 +147,15 @@ describe("spill — the inline/artifact decision", () => {
 		const result = spill(body, { dir, kind: "build", previewBytes: 64 });
 		expect(result.ref).toBe("artifact://1");
 		expect(readArtifact(dir, result.ref!)).toBe(body);
+	});
+
+	// A worker spawned `--no-extensions` has no artifact_read; it needs a path.
+	it("names the file it wrote, for a reader that cannot resolve a ref", () => {
+		const dir = scratch();
+		const body = `${"x".repeat(5_000)}THE-ERROR`;
+		const result = spill(body, { dir, kind: "Orchestrate Input", previewBytes: 64 });
+		expect(result.file).toBe(join(dir, "1.orchestrate-input.log"));
+		expect(readFileSync(result.file!, "utf8")).toBe(body);
 	});
 
 	// Tail, not head — the rule that runs through the whole module. A failing

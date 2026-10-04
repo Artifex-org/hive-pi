@@ -57,15 +57,17 @@ screenshot (see [`manifest.ts`](./manifest.ts) for the implementation).
 1. `$HIVE_PR_ATTACHMENTS_DIR/pr-attachments.json` when that env var is set — the
    funnel's contract. The Go reader sets the var to a directory it controls and
    reads the manifest back from it.
-2. otherwise `<os.tmpdir()>/pi-browser-<pid>/pr-attachments.json`, next to the
-   screenshots themselves.
+2. otherwise `<os.tmpdir()>/pi-browser-<sessionId>/pr-attachments.json`, next to
+   the screenshots themselves. Keyed by the pi session id, never the pid: every
+   sandboxed pi is pid 2 in its own PID namespace while `/tmp/claude` is shared,
+   so a pid-keyed directory handed one session's screenshots to every other.
 
 **Body**: a JSON array, oldest first, rewritten in full on every screenshot:
 
 ```json
 [
   {
-    "path": "/tmp/pi-browser-4131/shot-1725291600000.png",
+    "path": "/tmp/pi-browser-019a2b3c-4d5e-7f00-8a9b-0c1d2e3f4a5b/shot-1725291600000.png",
     "label": "before",
     "url": "http://127.0.0.1:3000/dashboard",
     "taken_at": "2026-09-02T16:40:29.011Z"

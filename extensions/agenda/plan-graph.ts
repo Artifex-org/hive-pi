@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import { dependenciesOf, isAgentBearing, type Plan, type PlanNode, type ResolvedCaps } from "./plan-schema.ts";
 import { getPath } from "./transform.ts";
+import type { UpstreamInput } from "./upstream.ts";
 
 /**
  * Content-derived work id.
@@ -85,6 +86,12 @@ export interface Dispatch {
 	stageIndex?: number;
 	/** Retry budget for this unit of work. */
 	retries?: number;
+	/**
+	 * The results this node `needs`, resolved — forwarded into the worker's
+	 * prompt by `upstream.ts`. Absent when the node needs nothing. Never part
+	 * of the work id: resume matches on the node, not on what fed it.
+	 */
+	inputs?: UpstreamInput[];
 }
 
 export interface BatchResult {
@@ -178,6 +185,7 @@ export function nextBatch(plan: Plan, state: RunState, caps: ResolvedCaps): Batc
 				outputSchema: node.outputSchema,
 				isolation: node.isolation,
 				retries: node.retries,
+				...withInputs(plan, node, state),
 			});
 			slots--;
 			budgetedAgents--;
@@ -203,6 +211,7 @@ export function nextBatch(plan: Plan, state: RunState, caps: ResolvedCaps): Batc
 					item,
 					itemIndex: index,
 					retries: node.retries,
+					...withInputs(plan, node, state),
 				});
 				slots--;
 				budgetedAgents--;
@@ -235,6 +244,7 @@ export function nextBatch(plan: Plan, state: RunState, caps: ResolvedCaps): Batc
 					itemIndex: index,
 					stageIndex,
 					retries: stage.retries,
+					...withInputs(plan, node, state),
 				});
 				slots--;
 				budgetedAgents--;
@@ -243,6 +253,37 @@ export function nextBatch(plan: Plan, state: RunState, caps: ResolvedCaps): Batc
 	}
 
 	return { dispatch, immediate };
+}
+
+/**
+ * The finished results a node `needs`, for forwarding to its worker.
+ *
+ * A bare ref to a BARRIER is expanded into the refs that barrier joined, so a
+ * reconciler behind `join` receives `contract` and `evidence` under their own
+ * names rather than one anonymous array — and the same result is never sent
+ * twice when a node needs both a barrier and one of its members.
+ */
+export function upstreamInputs(plan: Plan, node: PlanNode, state: RunState): UpstreamInput[] {
+	const inputs: UpstreamInput[] = [];
+	const seen = new Set<string>();
+	const visit = (ref: string, trail: ReadonlySet<string>) => {
+		if (seen.has(ref) || trail.has(ref)) return;
+		const target = plan.nodes.find((candidate) => candidate.id === ref);
+		if (target?.kind === "barrier") {
+			const next = new Set(trail).add(ref);
+			for (const member of target.needs) visit(member, next);
+			return;
+		}
+		seen.add(ref);
+		inputs.push({ ref, value: resolveRef(ref, state.results) });
+	};
+	for (const ref of node.needs ?? []) visit(ref, new Set());
+	return inputs;
+}
+
+function withInputs(plan: Plan, node: PlanNode, state: RunState): { inputs?: UpstreamInput[] } {
+	const inputs = upstreamInputs(plan, node, state);
+	return inputs.length > 0 ? { inputs } : {};
 }
 
 /** How far this pipeline item has advanced. */
