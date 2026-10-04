@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import advisor from "../extensions/advisor/index.ts";
 import * as config from "../extensions/advisor/config.ts";
 import * as identity from "../extensions/hive-common/identity.ts";
@@ -36,7 +36,7 @@ describe("advisor completion", () => {
 				getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "t" }),
 				complete, streamSimple,
 			},
-		} as unknown as ExtensionContext;
+		} as unknown as ExtensionToolContext;
 		const result = await tool.execute("call", {}, undefined, undefined, ctx);
 		expect(result.content).toEqual([{ type: "text", text: "reviewed" }]);
 		expect(streamSimple).toHaveBeenCalledWith(model, expect.any(Object), expect.objectContaining({ reasoning: expected }));
