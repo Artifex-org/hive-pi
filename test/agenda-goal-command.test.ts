@@ -150,6 +150,9 @@ describe("looksUnverifiable — advisory only", () => {
 		"`npm run check` succeeds",
 		"src/index.ts compiles",
 		"0 errors remain",
+		// Refused in a live hive session (2026-10-04) although every clause is checkable.
+		"task PR exists and final-head hive/ci succeeded",
+		"the PR is merged",
 	])("recognises a checkable condition: %s", (condition) => {
 		expect(looksUnverifiable(condition)).toBe(false);
 	});

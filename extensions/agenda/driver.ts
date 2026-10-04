@@ -29,6 +29,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-common/channels.ts";
+import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { emptyLedger, type LedgerState } from "./ledger.ts";
 import type { MetricOutcome, Policy } from "./policy.ts";
 import { blocksReentry } from "./question-guard.ts";
@@ -186,6 +187,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	// The most recent ctx, kept so a TIMER has one to work through. It goes
 	// stale on session replacement, which every read below is guarded against.
 	let heldCtx: ExtensionContext | null = null;
+	const settleClaims = trackSettleClaims(pi);
 
 	// Registered UNCONDITIONALLY. The extension factory runs once at startup, so
 	// a registration gated on state can never be un-gated by a later command —
@@ -250,17 +252,14 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 
 		// Someone else already started a turn during this same settle chain.
 		//
-		// This is the mutual exclusion between injectors, and it works because
-		// `sendMessage({triggerTurn:true})` reaches `_runAgentPrompt`, which sets
-		// `_isAgentRunActive = true` SYNCHRONOUSLY before its first await
-		// (agent-session.js:745, reached from :1085 with no await in front of
-		// it). So by the time a later handler in the serial chain runs, `isIdle`
-		// is already false. `@narumitw/pi-goal` gates on exactly this; without
-		// the same check here, agenda would inject on top of whatever it did.
-		//
-		// It also stops us injecting into a streaming agent, where `triggerTurn`
-		// silently degrades to a queued follow-up that lands mid-turn.
-		if (!isIdle()) return;
+		// Two checks, because pi 0.87 changed what the first one can see.
+		// `isIdle()` still stops us injecting into a streaming agent, where
+		// `triggerTurn` silently degrades to a queued follow-up that lands
+		// mid-turn. It no longer separates injectors: a triggerTurn sent from
+		// `agent_settled` is DEFERRED until the whole chain returns, so the
+		// session stays idle throughout. The settle claim (hive-common/
+		// settle-claim.ts) is the mutual exclusion now.
+		if (!isIdle() || settleClaims.claimedBy()) return;
 
 		// The question guard is a PRE-condition on automatic re-entry, not a
 		// filter on the injection. Vetoing here means the policy's expensive work
@@ -327,7 +326,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 				// Re-checked LIVE: the policy's work is slow (a gate can run for
 				// minutes) and the user may well have typed during it. Injecting
 				// then would cut into their turn.
-				if (!isIdle()) return;
+				if (!isIdle() || settleClaims.claimedBy()) return;
 
 				try {
 					pi.sendMessage(
@@ -338,6 +337,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					// doorbell that lets hive-remote show the harness steering as a
 					// distinct row in the workspace transcript (HIV-1242).
 					pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: work.name } satisfies AgendaInjectionEvent);
+					settleClaims.claim("agenda");
 				} catch {
 					/* session went away mid-check — nothing to inject into */
 				}

@@ -36,6 +36,8 @@
  * attempt and the next one is therefore strictly worse than the last.
  */
 
+import { type AssistantMessage, isContextOverflow } from "@earendil-works/pi-ai";
+
 /**
  * The provider strings that mean "your prompt does not fit".
  *
@@ -56,10 +58,24 @@ const OVERFLOW_PATTERNS: readonly RegExp[] = [
 	/request_too_large/i,
 ];
 
-/** True when a provider error message says the prompt did not fit. */
+/**
+ * True when a provider error message says the prompt did not fit.
+ *
+ * Our short list first, then pi-ai's own detector, which IS exported from the
+ * package root (0.86 and 1.0 alike — the "not part of the extension API" note
+ * above predates that). Its list covers shapes ours never saw: z.ai's "Prompt
+ * too long" / "Prompt exceeds max length" (glm-5.3-flash is the fleet's `low`
+ * mode), Mistral, Gemini, Groq and Together — and it skips rate-limit text that
+ * merely mentions a length. Guarded so a pi without it degrades to our list.
+ */
 export function isContextOverflowText(text: unknown): boolean {
 	if (typeof text !== "string" || text === "") return false;
-	return OVERFLOW_PATTERNS.some((p) => p.test(text));
+	if (OVERFLOW_PATTERNS.some((p) => p.test(text))) return true;
+	try {
+		return isContextOverflow({ role: "assistant", stopReason: "error", errorMessage: text } as unknown as AssistantMessage);
+	} catch {
+		return false;
+	}
 }
 
 interface BranchEntry {

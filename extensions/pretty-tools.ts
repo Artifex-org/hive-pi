@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
 	createBashTool,
 	createEditTool,
@@ -422,6 +422,40 @@ function output(text: string, expanded: boolean, theme: { fg(color: string, text
 	return new Text(rendered, 0, 0);
 }
 
+/**
+ * What a re-registration must carry over from the built-in definition besides
+ * description and parameters.
+ *
+ * Registering a tool under a built-in name REPLACES the built-in, and the
+ * overrides below copied only `description` and `parameters`. That silently
+ * dropped bash's `promptSnippet`/`promptGuidelines` (its lines in the system
+ * prompt), edit's `prepareArguments` (pi's normalisation of the argument shapes
+ * models actually send), and the strict-schema `constrainedSampling` hint on
+ * read/edit/write/bash. pi's own example spreads the built-in for exactly this
+ * reason (changelog #10072).
+ *
+ * `outputSchema` is deliberately NOT inherited: an override with its own
+ * execute (bash runs on a pty here) does not promise the built-in's structured
+ * result shape, and declaring a schema it does not honour is worse than none.
+ */
+interface BuiltinMeta<P> {
+	promptSnippet?: ToolDefinition["promptSnippet"];
+	promptGuidelines?: ToolDefinition["promptGuidelines"];
+	prepareArguments?: (args: unknown) => P;
+	constrainedSampling?: ToolDefinition["constrainedSampling"];
+	executionMode?: ToolDefinition["executionMode"];
+}
+
+export function builtinMeta<P>(tool: BuiltinMeta<P>): BuiltinMeta<P> {
+	const meta: BuiltinMeta<P> = {};
+	if (tool.promptSnippet !== undefined) meta.promptSnippet = tool.promptSnippet;
+	if (tool.promptGuidelines !== undefined) meta.promptGuidelines = tool.promptGuidelines;
+	if (tool.prepareArguments !== undefined) meta.prepareArguments = tool.prepareArguments;
+	if (tool.constrainedSampling !== undefined) meta.constrainedSampling = tool.constrainedSampling;
+	if (tool.executionMode !== undefined) meta.executionMode = tool.executionMode;
+	return meta;
+}
+
 export default function prettyTools(pi: ExtensionAPI) {
 	const cwd = process.cwd();
 	const read = createReadTool(cwd);
@@ -434,6 +468,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "read", label: "Read", description: read.description, parameters: read.parameters,
+		...builtinMeta(read),
 		// The two wrappers COMPOSE, and the nesting order matters: the queue is
 		// outermost, so the diagnosis in the catch also runs inside the slot. If it
 		// ran outside, explainPathFailure would stat the path while a concurrent
@@ -488,6 +523,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "bash", label: "Bash", description: bash.description, parameters: bashParameters,
+		...builtinMeta(bash),
 		/**
 		 * Runs the command on a real pty when one is available, so an interactive
 		 * prompt can appear and a human can answer it, and says so when a command
@@ -634,6 +670,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "edit", label: "Edit", description: edit.description, parameters: edit.parameters,
+		...builtinMeta(edit),
 		execute: async (id, params, signal, onUpdate) => {
 			try {
 				return await edit.execute(id, params, signal, onUpdate);
@@ -654,6 +691,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "write", label: "Write", description: write.description, parameters: write.parameters,
+		...builtinMeta(write),
 		execute: (id, params, signal, onUpdate) => write.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "✦ write")} ${theme.fg("toolTitle", args.path)}${theme.fg("dim", ` · ${args.content.split("\n").length} lines`)}`, 0, 0),
 		renderResult: (result, { expanded, isPartial }, theme) => isPartial
@@ -663,6 +701,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "grep", label: "Grep", description: grep.description, parameters: grep.parameters,
+		...builtinMeta(grep),
 		execute: async (id, params, signal, onUpdate) => {
 			let result: Awaited<ReturnType<typeof grep.execute>>;
 			try {
@@ -688,6 +727,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "find", label: "Find", description: find.description, parameters: find.parameters,
+		...builtinMeta(find),
 		execute: (id, params, signal, onUpdate) => find.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "⌕ find")} ${theme.fg("toolTitle", args.pattern)}${theme.fg("dim", ` in ${args.path ?? "."}`)}`, 0, 0),
 		renderResult: (result, { expanded, isPartial }, theme) => isPartial ? new Text(theme.fg("warning", "searching…"), 0, 0) : output(textContent(result), expanded, theme),
@@ -695,6 +735,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "ls", label: "List", description: ls.description, parameters: ls.parameters,
+		...builtinMeta(ls),
 		execute: (id, params, signal, onUpdate) => ls.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "≡ ls")} ${theme.fg("toolTitle", args.path ?? ".")}`, 0, 0),
 		renderResult: (result, { expanded, isPartial }, theme) => isPartial ? new Text(theme.fg("warning", "listing…"), 0, 0) : output(textContent(result), expanded, theme),

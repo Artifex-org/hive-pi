@@ -28,6 +28,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SettleClaims } from "../hive-common/settle-claim.ts";
 import { blocksReentry } from "../agenda/question-guard.ts";
 import { turnFailureOf } from "../agenda/turn-outcome.ts";
 import { itemCounts } from "./lanes.ts";
@@ -203,6 +204,12 @@ export interface AutoContinueDeps {
 	uiPromptOpen: boolean;
 	config?: AutoContinueConfig;
 	env?: NodeJS.ProcessEnv;
+	/**
+	 * Cross-extension "this settle already injected" (hive-common/settle-claim.ts).
+	 * Optional so a unit test can drive the decision without the bus; the
+	 * extension always passes it.
+	 */
+	settleClaims?: SettleClaims;
 }
 
 /** Plain text of the most recent assistant turn, for the question guard. Fails OPEN. */
@@ -289,6 +296,11 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 	}
 
 	if (!idle) return { action: "noop", reason: "not idle — another injector or a live turn" };
+	// Since pi 0.87 a triggerTurn sent from `agent_settled` is deferred until the
+	// chain returns, so `idle` stays true after the agenda driver injects. The
+	// claim is what tells us someone already took this settle.
+	const claimedBy = deps.settleClaims?.claimedBy();
+	if (claimedBy) return { action: "noop", reason: `settle already taken by ${claimedBy}` };
 	// A failed/aborted turn is not evidence: skip WITHOUT charging the cap.
 	if (turnFailed) return { action: "noop", reason: "last turn failed or was aborted" };
 	// A turn that ended by asking the user must not be answered automatically.
@@ -324,6 +336,8 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 		// inject into. Do NOT advance state: no turn was started.
 		return { action: "noop", reason: "session replaced before inject" };
 	}
+
+	deps.settleClaims?.claim("plan-autocontinue");
 
 	// Only NOW is the continuation real; commit the advanced state.
 	deps.state.used = decision.nextState.used;

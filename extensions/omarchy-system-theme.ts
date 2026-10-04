@@ -23,7 +23,18 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.mode !== "tui") return;
 		let currentTheme: "aether-light" | "aether-dark" | undefined;
 		const applyTheme = (nextTheme: "aether-light" | "aether-dark") => {
-			const result = ctx.ui.setTheme(nextTheme);
+			// Apply the Theme INSTANCE, not the name. `setTheme(name)` also writes
+			// the name into settings.json whenever it differs, and on a workstation
+			// that file is a symlink into the git-tracked overlay checkout — so
+			// every Omarchy light/dark flip dirtied a pull-only repository and
+			// stopped its updater ("refusing update: has local changes"). The
+			// instance form only changes what is on screen.
+			const theme = ctx.ui.getTheme(nextTheme);
+			if (!theme) {
+				ctx.ui.notify(`Could not load ${nextTheme}: theme not found`, "error");
+				return;
+			}
+			const result = ctx.ui.setTheme(theme);
 			if (result.success) {
 				currentTheme = nextTheme;
 				return;

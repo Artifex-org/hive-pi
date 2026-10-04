@@ -35,6 +35,12 @@ describe("isContextOverflowText", () => {
 		expect(isContextOverflowText("prompt is too long: 250000 tokens > 200000 maximum")).toBe(true);
 	});
 
+	it("matches z.ai's phrasings through pi-ai's own detector", () => {
+		// glm-5.3-flash is the fleet's `low` mode; our short list never had these.
+		expect(isContextOverflowText("Prompt too long")).toBe(true);
+		expect(isContextOverflowText("Prompt exceeds max length")).toBe(true);
+	});
+
 	it("does not match a transient transport failure", () => {
 		// These recover by waiting; suppressing on them would stop a teammate's
 		// message from ever landing after one WebSocket blip.

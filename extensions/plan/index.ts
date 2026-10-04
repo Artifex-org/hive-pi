@@ -23,11 +23,12 @@
  *     entry with `moduleCache:false`, so state lives in the factory closure.
  *  4. ONE injector lives here — `plan auto-continue` (autocontinue.ts), wired
  *     to a single `agent_settled` handler below. It is a SECOND automatic
- *     injector beside `agenda/driver.ts`, and it composes with it the same way
- *     `@narumitw/pi-goal` does: it reads `ctx.isIdle()` live before injecting,
- *     so whichever injector runs first in pi's serial handler chain flips
- *     `_isAgentRunActive` and the rest stand down — at most one injection per
- *     settle. It reuses the driver's own guards (`turnFailureOf`,
+ *     injector beside `agenda/driver.ts`. Whichever runs first in pi's serial
+ *     handler chain announces a settle claim on `pi.events`
+ *     (hive-common/settle-claim.ts) and the rest stand down — at most one
+ *     injection per settle. (Until pi 0.87 `ctx.isIdle()` did this job; since
+ *     then a triggerTurn sent from `agent_settled` is deferred until the chain
+ *     returns, so the session reads idle throughout.) It reuses the driver's own guards (`turnFailureOf`,
  *     `blocksReentry`) so an error, an abort or a question is never re-driven.
  *     Its cap is per-session and independent of the driver's ledger; the two
  *     caps do not compose, which is by design — see the PR and autocontinue.ts.
@@ -69,6 +70,7 @@ import {
 	runAutoContinue,
 	type AutoContinueState,
 } from "./autocontinue.ts";
+import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { registerFacadeTools } from "./facades.ts";
 import { opsForLane, TEMPLATE_NAMES_TUPLE } from "./templates.ts";
 import {
@@ -1462,13 +1464,16 @@ export default function (pi: ExtensionAPI) {
 		autoContinue = createAutoContinueState();
 	});
 
-	// THE injector. Synchronous, cheap, and idle-gated so it composes with the
-	// agenda driver (at most one injection per settle). See autocontinue.ts.
+	// THE injector. Synchronous, cheap, and claim-gated so it composes with the
+	// agenda driver (at most one injection per settle). See autocontinue.ts and
+	// hive-common/settle-claim.ts.
+	const settleClaims = trackSettleClaims(pi);
 	pi.on("agent_settled", (_event, ctx) => {
 		runAutoContinue(pi, ctx, {
 			loadDoc: (c) => rehydratePlan(branchEntries(c)) ?? emptyPlan(Date.now()),
 			state: autoContinue,
 			uiPromptOpen,
+			settleClaims,
 		});
 	});
 

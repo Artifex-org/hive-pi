@@ -1,8 +1,9 @@
 /**
  * Build-level enforcement of the hardest idiom in README.md:
  *
- *   Never register `context`, `before_provider_request` or
- *   `before_provider_headers`.
+ *   Never register `context`, `context_with_system` (pi 0.87+, the same
+ *   per-request transform with the system prompt included),
+ *   `before_provider_request` or `before_provider_headers`.
  *
  * This is a prompt-cache hazard, not a style rule, and it is the single most
  * expensive silent failure available in this harness — nothing about a
@@ -23,7 +24,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extensionsDir = join(repoRoot, "extensions");
 
-const FORBIDDEN = ["context", "before_provider_request", "before_provider_headers"] as const;
+const FORBIDDEN = ["context", "context_with_system", "before_provider_request", "before_provider_headers"] as const;
 
 function walk(dir: string): string[] {
 	const found: string[] = [];
