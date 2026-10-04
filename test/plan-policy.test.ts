@@ -394,6 +394,10 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 		expect(orchestrated("git -C /repo/wt stash list")).toBe(true);
 		expect(allowed("git stash list")).toBe(true);
 		expect(orchestrated("git stash show -p stash@{0}")).toBe(true);
+		// A reader verb with a writer flag is a writer.
+		expect(allowed("git stash show -p --output=/tmp/x")).toBe(false);
+		expect(allowed("git diff --output=/tmp/x")).toBe(false);
+		expect(orchestrated("git stash show -p --output=/tmp/x")).toBe(false);
 		for (const command of ["git stash", "git stash push", "git stash pop", "git stash drop", "git stash clear", "git stash apply"]) {
 			expect(orchestrated(command), command).toBe(false);
 			expect(allowed(command), command).toBe(false);
@@ -413,9 +417,30 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 	it("deduplicates with sort, which writes only with -o", () => {
 		expect(orchestrated("grep -h foo a b | sort -u")).toBe(true);
 		expect(orchestrated("sort -u -o out f")).toBe(false);
+		expect(orchestrated("sort -uo out f")).toBe(false);
+		expect(allowed("sort -uo out f")).toBe(false);
+		expect(allowed("sort --output=out f")).toBe(false);
 		// GNU sort runs the compressor program when it spills to temp files.
 		expect(orchestrated("sort -S 1K --compress-program=./x.sh big.txt")).toBe(false);
 		expect(allowed("sort --compress-program ./x.sh big.txt")).toBe(false);
+	});
+
+	it("refuses reader flags that RUN a program, in every posture", () => {
+		for (const command of [
+			"rg --pre ./x.sh foo",
+			"rg --pre=./x.sh foo",
+			"bat --pager ./x.sh f",
+			"bat --pager=./x.sh f",
+			"git grep -O./x.sh foo",
+			"git grep --open-files-in-pager=./x.sh foo",
+			"git diff --ext-diff",
+			"git log -p --textconv",
+		]) {
+			expect(allowed(command), command).toBe(false);
+			expect(orchestrated(command), command).toBe(false);
+		}
+		expect(allowed("rg foo")).toBe(true);
+		expect(allowed("git grep -n foo")).toBe(true);
 	});
 
 	it("prints hive's own help, but not a verb's", () => {

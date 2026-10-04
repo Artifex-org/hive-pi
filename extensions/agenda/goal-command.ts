@@ -133,7 +133,9 @@ export function looksUnverifiable(condition: string): boolean {
 		// zero ("no", "zero") is a quantity only directly before an outcome word —
 		// "no confusing issues" and "no longer runs" are prose, not counts.
 		/\b\d+\s+(\w+\s+){0,2}?(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|runs?|findings?|issues?|failures?)\b/i,
-		/\b(zero|no)\s+((failed|failing|open|new|flaky|red|remaining|lint|type)\s+)?(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|findings?|issues?|failures?)\b/i,
+		// Bare "no issues" is a mood, not a count, so a spelled-out zero needs an
+		// outcome qualifier unless the unit is itself a check result.
+		/\b(zero|no)\s+((failed|failing|flaky|red|lint|type|open|new|remaining)\s+(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|findings?|issues?)|(tests? failures?|errors?|warnings?|failures?))\b/i,
 	];
 	return !signals.some((pattern) => pattern.test(condition));
 }

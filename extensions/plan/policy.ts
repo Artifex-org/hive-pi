@@ -883,7 +883,10 @@ function shellWords(segment: string): string[] | undefined {
 /** Flags that turn an otherwise-read-only command into a writer. */
 function hasSafeArguments(command: string, args: string[]): boolean {
 	const universallyForbidden = new Set(["-i", "--in-place", "--fix", "--write", "-delete", "--delete", "-o", "--output"]);
-	if (args.some((arg) => universallyForbidden.has(arg))) return false;
+	// Attached spellings too: `--output=FILE` writes exactly like `--output FILE`
+	// (git diff/show/stash show, sort, many others). A reader name with a writer
+	// flag is a writer.
+	if (args.some((arg) => universallyForbidden.has(arg) || /^--(output|in-place|write|fix|delete)=/.test(arg))) return false;
 
 	if (command === "sed" || command === "perl") {
 		// `-i`, `--in-place=BAK`, and bundled short flags like `-ri`.
@@ -899,8 +902,26 @@ function hasSafeArguments(command: string, args: string[]): boolean {
 	if (command === "date" && args.some((arg) => arg === "-s" || arg.startsWith("--set"))) return false;
 	// `--compress-program` names a program GNU sort RUNS when it spills to
 	// temp files — execution behind a reader.
-	if (command === "sort" && args.some((arg) => arg.startsWith("-o") || arg.startsWith("--output") || arg.startsWith("--compress-program"))) return false;
+	// `-o` may be bundled (`-uo out`), so any short-flag cluster containing `o`
+	// is refused — fail closed even where the `o` would be another flag's value.
+	if (command === "sort" && args.some((arg) => /^-[^-]*o/.test(arg) || arg.startsWith("--output") || arg.startsWith("--compress-program"))) return false;
 	if (command === "tee") return false;
+	// Flags that make a reader EXECUTE something: rg's preprocessor, bat's
+	// pager, git grep's pager, and git's external diff / textconv drivers.
+	if (command === "rg" && args.some((arg) => arg === "--pre" || arg.startsWith("--pre="))) return false;
+	if (command === "bat" && args.some((arg) => arg === "--pager" || arg.startsWith("--pager="))) return false;
+	if (
+		command === "git" &&
+		args.some(
+			(arg) =>
+				arg.startsWith("-O") ||
+				arg.startsWith("--open-files-in-pager") ||
+				arg === "--ext-diff" ||
+				arg === "--textconv",
+		)
+	) {
+		return false;
+	}
 	return true;
 }
 

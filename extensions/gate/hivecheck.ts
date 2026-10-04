@@ -320,7 +320,7 @@ function taskOutcome(state: string): GateCheckProgress["outcome"] {
  *   blocked by failed dependency: <task>   scheduler/progress.go
  *   blocked by failed fan-out: <fan-out>   scheduler/progress.go (HIV-2922)
  *   upstream failed                        scheduler/progress.go, no name known
- *   run already red: <cause>               store.FailFastSkipPrefix (HIV-3579)
+ *   run already red: <key> failed          store.FailFastSkipPrefix (HIV-3579)
  *
  * Anything else — no error at all, or wording this build has never seen — is
  * NOT claimed as blocked: the caller keeps calling it advisory, which is the
@@ -334,7 +334,9 @@ export function blockedBy(error: string | null | undefined): { by: string | null
 	// ("release disqualified after a blocking failure …"), and printing that as
 	// "blocked by failed release disqualified…" would name a step that does not
 	// exist. Still blocked — it followed a blocking failure — just unnamed.
-	if (named) return { by: /^[A-Za-z0-9][\w.-]*$/.test(named[1].trim()) ? named[1].trim() : null };
+	// The fail-fast cause is hive's redRunCause, spelled "<key> failed".
+	const cause = named?.[1].trim().replace(/ failed$/, "");
+	if (cause !== undefined) return { by: /^[A-Za-z0-9][\w.-]*$/.test(cause) ? cause : null };
 	if (reason === "upstream failed") return { by: null };
 	return undefined;
 }

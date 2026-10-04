@@ -161,11 +161,13 @@ describe("looksUnverifiable — advisory only", () => {
 		"at most 1 flaky job",
 		"zero open findings",
 		"no more than 4 issues",
+		"no failing tests",
+		"zero errors",
 	])("recognises a checkable condition: %s", (condition) => {
 		expect(looksUnverifiable(condition)).toBe(false);
 	});
 
-	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely", "the page no longer runs slowly", "users report no confusing issues", "no more manual steps for onboarding"])(
+	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely", "the page no longer runs slowly", "users report no confusing issues", "no more manual steps for onboarding", "no issues", "the users have no issues"])(
 		"flags an ungradeable one: %s",
 		(condition) => {
 			expect(looksUnverifiable(condition)).toBe(true);

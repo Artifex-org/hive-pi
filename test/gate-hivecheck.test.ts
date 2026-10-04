@@ -181,7 +181,8 @@ describe("fold", () => {
 				task("codemetrics", "failed", { error: "exit 1" }),
 				task("test-1", "skipped", { error: "blocked by failed dependency: codemetrics" }),
 				task("test-2", "skipped", { error: "blocked by failed dependency: codemetrics" }),
-				task("web-check", "skipped", { error: "run already red: codemetrics" }),
+				// store.FailFastSkipPrefix + redRunCause, which is "<key> failed".
+				task("web-check", "skipped", { error: "run already red: codemetrics failed" }),
 				task("coverage", "skipped", { error: "blocked by failed fan-out: test" }),
 				task("e2e", "skipped", { error: "upstream failed" }),
 				task("docs", "skipped"),
@@ -204,6 +205,7 @@ describe("fold", () => {
 		expect(text).toContain("not run — blocked by failed test: coverage");
 		expect(text).toContain("not run — blocked by a failed upstream step: e2e, deploy");
 		expect(text).not.toContain("failed release disqualified");
+		expect(text).not.toMatch(/codemetrics failed/);
 		expect(text).toContain("advisory (non-blocking): docs");
 		expect(text).not.toMatch(/advisory \(non-blocking\):.*test-1/);
 		expect(text).toContain("FAIL — 1 failing of 8 step(s), 6 not run, 1 advisory");
