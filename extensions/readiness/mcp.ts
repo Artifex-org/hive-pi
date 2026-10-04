@@ -41,7 +41,8 @@ export function projectKind(cwd: string): string | null {
 export { mcpBelongsHere } from "../profile-common/profile.ts";
 
 export interface McpServerDef {
-	lifecycle?: string;
+	enabled?: boolean;
+	exposure?: string;
 	command?: unknown;
 	args?: unknown;
 	url?: unknown;

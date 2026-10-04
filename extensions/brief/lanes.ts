@@ -85,18 +85,22 @@ export function planLanes(ticketKeys: string[]): BriefLane[] {
  * capabilities are stated. A lane whose partition is empty is not spawned —
  * see `laneIsRunnable`.
  */
+/** Tools that reach MCP — the adapter's names and pi's native gateways. */
+const MCP_GATEWAYS = new Set(["mcp", "mcpScript", "codemode", "tool_search"]);
+
 export function laneTools(role: AgentConfig, lane: BriefLane): string[] {
 	const declared = role.tools ?? [];
 	switch (lane) {
 		case "repo":
-			return declared.filter((t) => !t.startsWith(KNOWLEDGE_PREFIX) && t !== "mcp");
+			return declared.filter((t) => !t.startsWith(KNOWLEDGE_PREFIX) && !MCP_GATEWAYS.has(t));
 		case "knowledge":
 			return declared.filter((t) => t.startsWith(KNOWLEDGE_PREFIX));
 		case "ticket":
-			// `mcp` is granted to this lane and this lane only. It is the one tool
-			// that reaches off the machine, and confining it to the lane whose
-			// entire job is a ticket read keeps that reach auditable.
-			return ["mcp"];
+			// MCP is granted to this lane and this lane only. It is the one reach
+			// off the machine, and confining it to the lane whose entire job is a
+			// ticket read keeps that reach auditable. With pi's native MCP the
+			// gateway is `codemode`: one script fetches every key in parallel.
+			return ["codemode"];
 	}
 }
 
@@ -148,8 +152,9 @@ export function laneInstruction(lane: BriefLane, ticketKeys: string[], cwd = "")
 		}
 		case "ticket":
 			return [
-				`You are the TICKET lane. Fetch each of ${ticketKeys.join(", ")} with the \`mcp\` tool`,
-				"(`mcp__linear__get_issue`) and nothing else.",
+				`You are the TICKET lane. Fetch ${ticketKeys.join(", ")} with ONE \`codemode\` script and nothing else:`,
+				"`return await Promise.allSettled([\"KEY-1\", \"KEY-2\"].map((id) => tools.mcp__linear__get_issue({ id })))`",
+				"(replace the keys). `describeTool(\"mcp__linear__get_issue\")` shows the arguments if that call is rejected.",
 				"",
 				"Fold the title, the state and the parts of the description that CONSTRAIN the work into",
 				"`facts`, each referenced by its ticket key. Do not restate the whole ticket, and do not",

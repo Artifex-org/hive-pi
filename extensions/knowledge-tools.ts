@@ -53,8 +53,8 @@ const TIMEOUT_MS = 45_000;
 /**
  * The session id for `/agents` provenance.
  *
- * `hive-telemetry` already exports this for pi-mcp-adapter's `${PI_HIVE_RUN_ID}`
- * header, and subagent/orchestrate spawn children with `{...process.env}` — so a
+ * `hive-telemetry` already exports this for mcp.json's `${PI_HIVE_RUN_ID}`
+ * header (minted at load, so it exists before any MCP connect), and subagent/orchestrate spawn children with `{...process.env}` — so a
  * worker inherits its parent's run id and its knowledge reads attribute to the
  * session that delegated the work. No extra plumbing, and read per call rather
  * than captured, because telemetry sets it after `/hive-login` mid-session.

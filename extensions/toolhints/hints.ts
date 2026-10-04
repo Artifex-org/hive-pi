@@ -37,7 +37,8 @@
  * not a note telling it to look again.
  */
 
-import { corpusStaleness, rankByAnyToken, type McpToolCorpus } from "../mcp-common/search.ts";
+import { nativeMcpServer } from "../mcp-common/names.ts";
+import { rankByAnyToken, type McpToolCorpus } from "../mcp-common/search.ts";
 
 /**
  * What a hint may know about the session beyond the failing text.
@@ -58,6 +59,8 @@ export interface ToolHint {
 	id: string;
 	/** Tool names this applies to. Empty means any tool. */
 	tools?: readonly string[];
+	/** Also applies to any tool this accepts — for name families such as `mcp__*`. */
+	toolMatch?: (toolName: string) => boolean;
 	/** The signature, matched against the tool's OUTPUT (and its error text). */
 	match: RegExp;
 	/** What to do now. One or two sentences; it lands in the model's context. */
@@ -72,56 +75,30 @@ export interface ToolHint {
 	evidence: string;
 }
 
-/**
- * The adapter's two miss messages, `proxy-modes.ts:528`.
- *
- * BOTH forms. The server suffix is emitted only when the search was scoped to
- * one server, and the first version of this pattern required it — so an
- * unscoped `mcp({search})`, which is how most searches are written, matched
- * nothing and got no hint at all.
- */
-export const MCP_NO_MATCH = /No tools matching "([^"]*)"(?: in "([^"]+)")?/i;
+/** pi's own message for a call to a tool name nothing registered (pi-agent-core). */
+export const UNKNOWN_TOOL = /Tool (\S+) not found/;
 
 /**
- * Name the tools the search should have found.
+ * Name the MCP tools a misspelt `mcp__<server>__<tool>` call probably meant.
  *
- * Two different failures print that one sentence, and they need opposite
- * answers — so this says which one happened. If the named server's cache entry
- * is one the adapter has stopped accepting, the search never saw those tools
- * and no rewording will help; otherwise the query simply failed the coverage
- * gate and the candidates below are what an OR ranking over the same corpus
- * returns. See `mcp-common/search.ts` for both mechanisms.
+ * Native MCP registers each server tool by its exact name, so a guessed name —
+ * often the old adapter form, `hive_get_run`, or a near miss — is simply not
+ * found. The ranker runs over the LIVE registry (`ctx.corpus`, rebuilt from
+ * `pi.getAllTools()` when the hint fires), scoped to the named server when the
+ * guess names one.
  */
-export function mcpMissAmendment(text: string, ctx: HintContext): string | null {
-	const matched = MCP_NO_MATCH.exec(text);
+export function unknownMcpToolAmendment(text: string, ctx: HintContext): string | null {
+	const matched = UNKNOWN_TOOL.exec(text);
 	if (!matched) return null;
-	const query = matched[1] ?? "";
-	const server = matched[2];
 	const corpus = ctx.corpus;
 	if (!corpus || corpus.tools.length === 0) return null;
-
-	const sentences: string[] = [];
-	const stale = server ? corpusStaleness(corpus, server, ctx.now ?? Date.now()) : null;
-	if (server && stale) {
-		sentences.push(
-			`THE SERVER WAS NOT IN THE CORPUS: "${server}" is ${stale}, so the adapter dropped its tools at startup ` +
-				`and this search could not have found them — that is not the same as the tool not existing, and ` +
-				`rewording the query will not help. Run \`mcp({connect:"${server}"})\` and retry, or call the tool ` +
-				`with the server named (\`mcp({server:"${server}", tool:"…"})\`), which connects first.`,
-		);
-	}
-
-	const pool = server ? corpus.tools.filter((tool) => tool.server === server) : corpus.tools;
-	const ranked = rankByAnyToken(pool, query);
-	if (ranked.length > 0) {
-		sentences.push(
-			`Closest in the harness's copy of the tool cache for "${query}"${server ? ` in "${server}"` : ""}: ` +
-				`${ranked.map((r) => r.tool.qualifiedName).join(", ")}. Call one with \`mcp({tool:"<name>"})\` — ` +
-				`the proxy resolves the PREFIXED name shown here, and \`mcp({server:"…", describe:"<name>"})\` reads ` +
-				`its schema.`,
-		);
-	}
-	return sentences.length > 0 ? sentences.join(" ") : null;
+	const guess = matched[1] ?? "";
+	const server = nativeMcpServer(guess);
+	const query = (server ? guess.slice(`mcp__${server}__`.length) : guess).replace(/_/g, " ");
+	const pool = server && corpus.servers[server] ? corpus.tools.filter((t) => t.server === server) : corpus.tools;
+	const ranked = rankByAnyToken(pool, query, 5);
+	if (ranked.length === 0) return null;
+	return `Closest registered MCP tools: ${ranked.map((r) => r.tool.qualifiedName).join(", ")}.`;
 }
 
 export const HINTS: readonly ToolHint[] = [
@@ -259,77 +236,33 @@ export const HINTS: readonly ToolHint[] = [
 			"5 commit timeouts in 24h (2026-08-17/18, 30s/60s/120s ceilings), each followed by an index.lock failure or an unclear commit state; one reported 'Aurora guidance says pre-commit is ~2s' against a 120s timeout",
 	},
 	{
-		// WHAT THIS HINT USED TO SAY WAS FALSE, and agents caught it: it claimed
-		// the search "takes tool-NAME fragments, not a description of what you
-		// want". `FIELD_WEIGHTS` in the adapter includes `description: 5`, and a
-		// live probe over the real corpus proves it — `search("booster")` returns
-		// `get_metering_usage`, whose NAME has no "booster". Two sessions (P0175,
-		// P0556) noticed the contradiction with the adapter's own tool
-		// description and burned turns on it. The real filter is a coverage gate,
-		// which is a different problem with a different answer.
-		id: "mcp-proxy-no-match",
-		tools: ["mcp"],
-		match: MCP_NO_MATCH,
+		// Native MCP (HIV-3745) names a server tool `mcp__<server>__<tool>`. A
+		// call by any other name — the adapter's `hive_get_run`, or a near miss —
+		// fails with pi's bare "Tool X not found". The amendment names the live
+		// registry's closest matches; the static half says how to look one up.
+		id: "mcp-unknown-tool",
+		toolMatch: (name) => name.startsWith("mcp__") || /^(hive|linear|asfam|freecad|filecloud|homectl)_/.test(name),
+		match: UNKNOWN_TOOL,
 		hint:
-			"Do NOT conclude the tool does not exist. The proxy's search reads names AND descriptions, but it keeps a " +
-			"row only when the tool's own words cover almost the whole query — every token of a one- or two-word " +
-			"query, 60% of a longer one (`search-ranking.ts:82`) — so a phrase describing a capability scores zero " +
-			"even when the tool is right there. Retry with the one or two most distinctive words rather than a " +
-			"sentence, or list a server's tools with `mcp({server:\"<name>\"})`. " +
-			"The tools this house uses most are registered DIRECTLY and need no search at all: `hive_wait_for_run`, " +
-			"`hive_get_run`, `hive_get_task_logs`, `hive_get_pull`, `hive_explain_failure`, `hive_message_teammate`.",
-		amend: mcpMissAmendment,
+			"MCP tools are named `mcp__<server>__<tool>` (for example `mcp__hive__get_run`); the older `hive_get_run` " +
+			"form no longer exists. Find the exact name with `tool_search` or, inside `codemode`, " +
+			"`searchTools(\"<words>\")` / `describeNamespace(\"mcp__<server>\")`.",
+		amend: unknownMcpToolAmendment,
 		evidence:
-			"108 sessions / 7d: 697 discovery calls against 3,269 real ones; efb2830c spent 5 round trips finding `linear_list_issues`. " +
-			"Eight papercuts (P0032, P0135, P0175, P0219, P0540, P0556, P0561, P0689) are the coverage gate; two (P0035 asfam `vpm_resync`, " +
-			"P0246 sentry `search events`) are a server whose cache entry had aged past the 7d TTL — both queries score rank 1 once the corpus is present",
+			"HIV-3745: the adapter promoted tools as `<server>_<tool>`; native MCP registers `mcp__<server>__<tool>`, and role files, " +
+			"skills and model habit still carry the old form",
 	},
 	{
 		id: "mcp-schema-rejection",
-		tools: ["mcp"],
+		tools: ["codemode"],
+		toolMatch: (name) => name.startsWith("mcp__"),
 		match: /unexpected additional properties \[|missing properties: \[/i,
 		hint:
 			"That is a schema rejection from the server, not a transport failure: the parameter set is wrong. Read the " +
-			"real schema with `mcp({server:\"<name>\", describe:\"<tool>\"})` before retrying — retrying the same shape " +
-			"is the single most repeated wasted call in this harness (one session sent an identical rejected " +
-			"`hive_wait_for_run` six times).",
+			"real schema first — `describeTool(\"mcp__<server>__<tool>\")` inside `codemode`, or the tool's own " +
+			"declaration when it is direct — before retrying; retrying the same shape is the single most repeated " +
+			"wasted call in this harness (one session sent an identical rejected `wait_for_run` six times).",
 		evidence: "108 sessions / 7d: 292 rejected proxy calls, the top messages all this class",
-	},
-	{
-		// `mcp` with NO recognised mode (no tool/search/server/connect/describe/
-		// instructions/action) falls through to the STATUS listing — the adapter's
-		// `executeStatus`, whose first line is `MCP: <n>/<m> servers, <k> tools`
-		// (`proxy-modes.ts:277`). A low-tier worker that drifts into calling
-		// `mcp {}` reads that listing — with its `not connected` / `cached` lines —
-		// as having LOST access to the tools, and self-blocks. This says the
-		// opposite, at the moment it is misread.
-		//
-		// `[1-9]\d*` on the tool count is load-bearing: `MCP: 0/0 servers, 0 tools`
-		// means nothing is configured, where "the tools ARE available" would be a
-		// lie — and a hint that is wrong is worse than none (see `mcp-proxy-no-match`
-		// above, which shipped a false claim and cost two sessions). No `^` anchor:
-		// `scanTail` keeps only the last 4KB, so the line need not be at the start.
-		//
-		// The empty-args case for `mcpScript` cannot be answered here: `code` is a
-		// REQUIRED parameter, so `mcpScript {}` fails `validateToolArguments`
-		// (pi-agent-core `agent-loop.ts`) BEFORE either the tool_call or tool_result
-		// hook runs — the result is an "immediate" validation error no extension
-		// sees. That error already names `code` as required, so it does not misread
-		// as lost access; the batch shape is included below so the same worker that
-		// just typed `mcp {}` learns it here.
-		id: "mcp-empty-args",
-		tools: ["mcp"],
-		match: /MCP: \d+\/\d+ servers, [1-9]\d* tools/,
-		hint:
-			"This is a SUCCESSFUL status listing, not a failure: `mcp` was called with no mode, so it printed server " +
-			"status. Every server listed with a tool count is reachable and its tools are callable RIGHT NOW — you " +
-			"have NOT lost access. To CALL a tool: `mcp({tool:\"hive_get_board\", args:{...}})` (args takes an object, " +
-			"or a JSON string encoding one). To FIND a tool: `mcp({search:\"keywords\"})`. To run several MCP calls " +
-			"with logic between them: `mcpScript({code:\"emit(await tools.hive_get_board({}))\"})`. Do NOT conclude the " +
-			"tools are unavailable or that you need a different, tool-holding session and hand off — that is the exact " +
-			"misread this note exists to prevent.",
-		evidence:
-			"session f16f86e9: a low-tier worker (meta/muse-spark-1.3-contributor) used mcp/mcpScript correctly for ~60 turns (linking ~13 HIV tickets), then drifted into calling `mcp {}` with no mode, misread the resulting server-status listing as lost tool access, and wrongly self-declared \"blocked, needs a tool-holding session\" and handed off — while the tools worked the whole time",
 	},
 ];
 
@@ -337,7 +270,8 @@ export const HINTS: readonly ToolHint[] = [
 export function matchHint(toolName: string, text: string, hints: readonly ToolHint[] = HINTS): ToolHint | null {
 	if (!text) return null;
 	for (const hint of hints) {
-		if (hint.tools && hint.tools.length > 0 && !hint.tools.includes(toolName)) continue;
+		const scoped = (hint.tools?.length ?? 0) > 0 || hint.toolMatch !== undefined;
+		if (scoped && !(hint.tools?.includes(toolName) || hint.toolMatch?.(toolName))) continue;
 		if (hint.match.test(text)) return hint;
 	}
 	return null;

@@ -24,9 +24,10 @@
  * MCP client, and it is a property of the server: if it ever becomes stateful
  * this breaks loudly on the first call rather than degrading.
  *
- * This is NOT a replacement for `pi-mcp-adapter` (HIV-1226 keeps it). The
- * adapter carries OAuth, a keyring, session recovery and an MCP-UI host for the
- * five other servers. This carries one bearer header to one endpoint.
+ * This is NOT a replacement for pi's MCP client (built-in since 0.99), which
+ * carries OAuth, reconnects and every other server. This carries one bearer
+ * header to one endpoint, for harness code that must reach Hive without a
+ * model-visible tool.
  */
 
 import { redact, withTimeout, type HiveAuth } from "./http.ts";

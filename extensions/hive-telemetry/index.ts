@@ -123,6 +123,29 @@ export default function (pi: ExtensionAPI) {
 	// of any handler at all.
 	let cfg: ResolvedConfig = loadConfig();
 
+	/**
+	 * A run id that EXISTS before any MCP server connects (HIV-3745).
+	 *
+	 * mcp.json sends `X-Hive-Session: ${PI_HIVE_RUN_ID}`. pi-mcp-adapter
+	 * interpolated an unset variable as "", which the server records as a
+	 * failed attribution (HIV-1530). pi's built-in MCP instead THROWS on a
+	 * missing or empty variable (`resolveHeadersOrThrow`), so the whole `hive`
+	 * server — every `mcp__hive__*` tool — fails to connect. Built-in MCP starts
+	 * connecting during session_start, and extension handler order is not ours
+	 * to rely on, so the id is minted HERE, at load, and becomes the first run's
+	 * id. Minted even when telemetry is disabled: the header must resolve
+	 * regardless, and an id that matches no session attributes nothing.
+	 *
+	 * An id already in the environment was inherited from a parent pi; it is
+	 * left for the header and NOT adopted as this process's own run, which would
+	 * merge two accumulators under one id.
+	 */
+	let preMintedRunId: string | null = null;
+	if (!process.env.PI_HIVE_RUN_ID) {
+		preMintedRunId = randomUUID();
+		process.env.PI_HIVE_RUN_ID = preMintedRunId;
+	}
+
 	let run: RunAccumulator | null = null;
 	/**
 	 * Clock readings for the ONE main-turn assistant message currently streaming,
@@ -532,7 +555,9 @@ export default function (pi: ExtensionAPI) {
 		// factory-exec interactive wrapper); "eval" predates it.
 		const envSource = process.env.HIVE_TELEMETRY_SOURCE;
 		const source = envSource === "eval" || envSource === "cloud" ? envSource : "workstation";
-		run = createRun(randomUUID(), sessionId, forkedFrom, source, Date.now());
+		const runId = preMintedRunId ?? randomUUID();
+		preMintedRunId = null; // first run only — a reload or fork restarts at zero and needs a fresh id
+		run = createRun(runId, sessionId, forkedFrom, source, Date.now());
 		// Drop any stale timing slot: session_start can fire again on /reload
 		// without a shutdown, and a slot armed by the previous session must not be
 		// consumed by the next session's first message_end.
@@ -547,8 +572,8 @@ export default function (pi: ExtensionAPI) {
 		// Identifier only; this bus never carries prose.
 		pi.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: current.runId } satisfies HiveSessionEvent);
 
-		// Export the run id for pi-mcp-adapter's ${PI_HIVE_RUN_ID} header
-		// interpolation (mcp.json sends it as X-Hive-Session, HIV-1277): the
+		// Export the run id for the ${PI_HIVE_RUN_ID} header interpolation
+		// (mcp.json sends it as X-Hive-Session, HIV-1277): the
 		// hive server then attributes knowledge_* provenance to this session
 		// without the model having to pass a `session` argument. Headers are
 		// resolved per connection attempt, so a run started before the first

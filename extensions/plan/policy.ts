@@ -1,3 +1,4 @@
+import { canonicalMcpToolName } from "../mcp-common/names.ts";
 import { readOnlyMcpTools } from "../profile-common/profile.ts";
 /**
  * What a session may do while a plan is being written.
@@ -49,6 +50,14 @@ const READ_ONLY_PREFIXES = [
 
 /** Individually allowed non-builtin tools, by exact name. */
 const READ_ONLY_TOOLS = new Set([
+	// pi's native MCP gateways (HIV-3745). Safe in every read-only mode because
+	// they are gateways, not actions: every call a codemode script makes runs
+	// through the session's tool pipeline with `tool_call` hooks
+	// (`agent-session.js` `_executeNestedToolCall` → `_beforeToolCall`), so the
+	// mode classifies `tools.write(...)` inside a script exactly as it would a
+	// direct `write`. `tool_search` only declares tools for the next call.
+	"codemode",
+	"tool_search",
 	"web_search",
 	"web_fetch",
 	"subagent", // read-only roles are enforced by the role, not here
@@ -144,10 +153,14 @@ export function classifyTool(name: string): PlanToolVerdict {
  */
 export function classifyDiscussionTool(name: string, input: unknown): PlanToolVerdict {
 	const base = classifyTool(name);
-	if (base.allowed || DISCUSSION_READ_ONLY_TOOLS.has(name)) return { allowed: true };
+	// Lists are keyed by the adapter form (`hive_get_run`); pi's native MCP
+	// names the same tool `mcp__hive__get_run`. Canonicalised once here so a
+	// rename can never silently fail closed (mcp-common/names.ts).
+	const canonical = canonicalMcpToolName(name);
+	if (base.allowed || DISCUSSION_READ_ONLY_TOOLS.has(canonical)) return { allowed: true };
 	// Same both-envelopes rule as orchestrate below: a promoted MCP tool arrives
 	// under its own name, and a read-only card is read-only either way round.
-	if (discussionReadOnlyMcpTools().has(name)) return { allowed: true };
+	if (discussionReadOnlyMcpTools().has(canonical)) return { allowed: true };
 	if (name !== "mcp") return base;
 	if (!input || typeof input !== "object" || Array.isArray(input)) {
 		return { allowed: false, reason: "Discussion mode requires a structured MCP request." };
@@ -387,6 +400,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
  * purpose: each can perform implementation outside the reviewed team topology.
  */
 export function classifyOrchestrateTool(name: string, input: unknown): PlanToolVerdict {
+	const canonical = canonicalMcpToolName(name);
 	if (["background_bash", "mcpScript", "orchestrate", "orchestrate_result", "subagent", "worker_send"].includes(name)) {
 		return {
 			allowed: false,
@@ -411,7 +425,7 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 	// "refuses native `hive_message_teammate` ... while operating contract
 	// requires messaging supervised workers" and fell back to durable notes,
 	// which reach nobody until someone reads them.
-	if (ORCHESTRATE_MCP_TOOLS.has(name)) return { allowed: true };
+	if (ORCHESTRATE_MCP_TOOLS.has(canonical)) return { allowed: true };
 	if (name === "mcp") {
 		if (!input || typeof input !== "object" || Array.isArray(input)) {
 			return { allowed: false, reason: "Orchestrate mode requires a structured MCP request." };
@@ -435,7 +449,7 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 
 	const base = classifyDiscussionTool(name, input);
 	if (base.allowed || ORCHESTRATE_TOOLS.has(name)) return { allowed: true };
-	if (ORCHESTRATE_MCP_ALIASES[name]) return { allowed: false, reason: orchestrateMcpRefusal(name) };
+	if (ORCHESTRATE_MCP_ALIASES[canonical]) return { allowed: false, reason: orchestrateMcpRefusal(canonical) };
 	return {
 		allowed: false,
 		reason:

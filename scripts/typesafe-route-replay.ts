@@ -36,7 +36,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadToolCorpus } from "../extensions/mcp-common/search.ts";
+import { corpusTool, type McpToolCorpus } from "../extensions/mcp-common/search.ts";
 import { TypesafeClient, estimateTokens } from "../extensions/typesafe-common/client.ts";
 import { configFrom } from "../extensions/typesafe-common/config.ts";
 import { readApiKey } from "../extensions/typesafe-common/key.ts";
@@ -58,6 +58,34 @@ import {
 } from "../extensions/typesafe-common/replay.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * A corpus from a tool-list file: `{servers: {<name>: {tools: [{name, description}]}}}`.
+ *
+ * That is the shape pi-mcp-adapter cached in `~/.pi/agent/mcp-cache.json`.
+ * Native MCP keeps no such cache, so this replay reads an explicit file — an
+ * old adapter cache, or a dump in the same shape — rather than the machine.
+ */
+function loadCorpusFile(path: string | undefined): McpToolCorpus {
+	const empty: McpToolCorpus = { tools: [], servers: {} };
+	if (!path) return empty;
+	let doc: { servers?: Record<string, { tools?: unknown } | undefined> };
+	try {
+		doc = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return empty;
+	}
+	const corpus: McpToolCorpus = { tools: [], servers: {} };
+	for (const [server, entry] of Object.entries(doc?.servers ?? {})) {
+		corpus.servers[server] = {};
+		if (!Array.isArray(entry?.tools)) continue;
+		for (const raw of entry.tools as { name?: unknown; description?: unknown }[]) {
+			if (!raw || typeof raw.name !== "string" || !raw.name) continue;
+			corpus.tools.push(corpusTool({ server, name: raw.name, description: typeof raw.description === "string" ? raw.description : "" }));
+		}
+	}
+	return corpus;
+}
 const DEFAULT_FIXTURE = join(here, "fixtures", "typesafe-route-labels.json");
 
 function flag(argv: readonly string[], name: string): boolean {
@@ -84,13 +112,13 @@ async function main(): Promise<number> {
 		return 2;
 	}
 
-	const corpus = loadToolCorpus(cachePath === undefined ? {} : { cachePath });
+	const corpus = loadCorpusFile(cachePath);
 	console.log(`corpus: ${corpus.tools.length} tools across ${Object.keys(corpus.servers).length} servers`);
 	if (corpus.tools.length === 0) {
 		// Not a failure: a clean checkout on a machine with no MCP cache is a
 		// supported state. Exiting 0 with the reason printed keeps this runnable
 		// in CI without pretending it measured anything.
-		console.log("no MCP cache on this machine — nothing to replay. (Pass --cache <file> to point at one.)");
+		console.log("no tool-list file — nothing to replay. Pass --cache <file> (an adapter mcp-cache.json or a dump in its shape).");
 		return 0;
 	}
 

@@ -1,6 +1,13 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { buildSubagentWorkerArgs, workerExtensionPaths } from "../extensions/subagent/worker.ts";
+import {
+	WORKER_BUILTIN_MCP_EXTENSIONS,
+	buildSubagentWorkerArgs,
+	nativeToolGrants,
+	workerExtensionPaths,
+	workerMcpEnv,
+	workerNeedsMcp,
+} from "../extensions/subagent/worker.ts";
 
 /** The `-e <path>` pairs, flattened away, so the rest can be pinned exactly. */
 function withoutExtensionLoads(args: string[]): string[] {
@@ -21,7 +28,7 @@ describe("subagent worker invocation", () => {
 		// exactly: `--no-extensions` is the isolation contract and a stray flag
 		// re-enabling discovery is what this test exists to catch.
 		expect(
-			withoutExtensionLoads(buildSubagentWorkerArgs("openrouter/deepseek/deepseek-v4-flash", ["read", "grep"], null)),
+			withoutExtensionLoads(buildSubagentWorkerArgs("openrouter/deepseek/deepseek-v4-flash", ["read", "grep"])),
 		).toEqual([
 			"--mode",
 			"json",
@@ -36,19 +43,13 @@ describe("subagent worker invocation", () => {
 	});
 
 	it("passes a role operating mode to the worker", () => {
-		const args = withoutExtensionLoads(buildSubagentWorkerArgs(undefined, [], null, "bugfix"));
+		const args = withoutExtensionLoads(buildSubagentWorkerArgs(undefined, [], "bugfix"));
 		expect(args).toContain("--op-mode");
 		expect(args[args.indexOf("--op-mode") + 1]).toBe("bugfix");
 	});
 
 	it("omits optional flags without re-enabling extensions", () => {
-		// The mcp-config argument is passed EXPLICITLY here (and as null) because
-		// its default reads the machine's real `~/.pi/agent/mcp.json`: once that
-		// file declares an eager server, an implicit call would inject
-		// `--mcp-config` and this exact-list assertion would fail on a developer
-		// machine and pass in CI, or the reverse. A test whose result depends on
-		// the host's config is worse than no test.
-		expect(withoutExtensionLoads(buildSubagentWorkerArgs(undefined, [], null))).toEqual([
+		expect(withoutExtensionLoads(buildSubagentWorkerArgs(undefined, []))).toEqual([
 			"--mode",
 			"json",
 			"-p",
@@ -57,17 +58,39 @@ describe("subagent worker invocation", () => {
 		]);
 	});
 
-	it("passes a derived MCP config when one exists — a worker must not inherit an eager lifecycle", () => {
-		// HIV-1969: `hive` and `linear` are eager for the interactive session, which
-		// removes a stall the human waits through. A worker is one bounded task,
-		// often one of eight, and `linear` spawns an npx subprocess per connection.
-		const args = buildSubagentWorkerArgs(undefined, [], "/tmp/pi-worker-mcp-1.json");
-		expect(args).toContain("--mcp-config");
-		expect(args[args.indexOf("--mcp-config") + 1]).toBe("/tmp/pi-worker-mcp-1.json");
-	});
+	describe("native MCP (HIV-3745)", () => {
+		it("loads pi's MCP built-ins for a worker that can reach MCP", () => {
+			// --no-extensions strips the built-ins too (pi 0.99); without them a
+			// worker granted codemode has no MCP servers to call.
+			const args = buildSubagentWorkerArgs(undefined, ["read", "codemode"]);
+			for (const builtin of WORKER_BUILTIN_MCP_EXTENSIONS) expect(args[args.indexOf(builtin) - 1]).toBe("-e");
+		});
 
-	it("passes no flag when nothing prewarms, so the worker reads what the adapter would", () => {
-		expect(buildSubagentWorkerArgs(undefined, [], null)).not.toContain("--mcp-config");
+		it("loads none for a worker that cannot reach MCP — zero connections", () => {
+			const args = buildSubagentWorkerArgs(undefined, ["read", "grep"]);
+			for (const builtin of WORKER_BUILTIN_MCP_EXTENSIONS) expect(args).not.toContain(builtin);
+			expect(workerMcpEnv(["read", "grep"], () => "/never")).toEqual({});
+		});
+
+		it("an unrestricted worker gets every tool, MCP included", () => {
+			expect(workerNeedsMcp(undefined)).toBe(true);
+			expect(workerNeedsMcp([])).toBe(true);
+		});
+
+		it("translates the adapter's grants, so an old role file keeps its MCP", () => {
+			expect(nativeToolGrants(["read", "mcp", "mcpScript"])).toEqual(["read", "codemode", "tool_search"]);
+			const args = buildSubagentWorkerArgs(undefined, ["read", "mcp"]);
+			expect(args[args.indexOf("--tools") + 1]).toBe("read,codemode,tool_search");
+			expect(args).toContain("builtin:mcp");
+		});
+
+		it("points an MCP-capable worker at the HTTP-only agent-dir mirror", () => {
+			expect(workerMcpEnv(["codemode"], () => "/tmp/pi-worker-agent-1")).toEqual({
+				PI_CODING_AGENT_DIR: "/tmp/pi-worker-agent-1",
+			});
+			// A mirror that could not be built falls back to the parent's config.
+			expect(workerMcpEnv(["codemode"], () => null)).toEqual({});
+		});
 	});
 
 	it("loads exactly the allowlisted extensions, each behind its own -e", () => {
@@ -76,7 +99,7 @@ describe("subagent worker invocation", () => {
 		// registers the tool never loads — measured: a worker granted
 		// `knowledge_search` reported its tools as `read, grep` before this.
 		// Same pattern the Code Factory uses (HIV-887).
-		const args = buildSubagentWorkerArgs(undefined, []);
+		const args = buildSubagentWorkerArgs(undefined, ["read"]);
 		const loaded = args.filter((arg, i) => args[i - 1] === "-e");
 		expect(loaded).toEqual(workerExtensionPaths());
 		expect(args.filter((a) => a === "-e")).toHaveLength(workerExtensionPaths().length);

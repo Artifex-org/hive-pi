@@ -316,9 +316,9 @@ const MAX_DESCRIPTION_CHARS = 160;
 /**
  * Stage-2 criteria: qualifiedName -> a one-line description.
  *
- * The key is the QUALIFIED name because that is what `mcp({tool})` resolves —
- * `mcp-common/search.ts` records the same decision and the same reason: naming
- * a tool the way the proxy cannot resolve it hands the agent a call that fails.
+ * The key is the QUALIFIED name (`mcp__<server>__<tool>`) because that is the
+ * name pi registers — naming a tool any other way hands the agent a call that
+ * fails.
  */
 export function toolCriteria(tools: readonly CorpusTool[]): Record<string, string> {
 	const criteria: Record<string, string> = {};

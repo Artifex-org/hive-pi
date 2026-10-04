@@ -14,10 +14,9 @@ import {
 	delegationProbe,
 	ghProbe,
 	harnessUpdateProbe,
-	mcpCacheStaleness,
 	mcpConfigPath,
 	mcpServerProbes,
-	MCP_CACHE_MAX_AGE_MS,
+	nativeToolCount,
 	openrouterProbe,
 	postgresProbe,
 	repoProbe,
@@ -74,23 +73,17 @@ describe("runProbe", () => {
 	});
 });
 
-describe("mcp probes", () => {
+describe("mcp probes (pi's built-in MCP, HIV-3745)", () => {
 	const config = {
-		mcpServers: { hive: { lifecycle: "eager" }, linear: {}, sentry: { lifecycle: "keep-alive" } },
-	};
-	// `cachedAt` is not decoration: the adapter rejects an entry without one, so
-	// a fixture missing it would describe a cache no session ever has.
-	const cache = {
-		servers: {
-			hive: { cachedAt: NOW - 60_000, tools: [{ name: "get_run" }, { name: "list_runs" }] },
-			linear: { cachedAt: NOW - 60_000, tools: [{ name: "get_issue" }] },
+		mcpServers: {
+			hive: { url: "https://hive.example/mcp", exposure: "codemode" },
+			linear: { url: "https://mcp.linear.app/mcp" },
+			sentry: { url: "https://mcp.sentry.dev/mcp", exposure: "deferred" },
 		},
 	};
-	/** pi routes MCP through ONE proxy tool named `mcp` — measured, see probes.ts. */
-	const base = deps({
-		readJson: ((path: string) => (path.endsWith("mcp-cache.json") ? cache : config)) as never,
-		toolNames: () => ["read", "bash", "mcp"],
-	});
+	/** Native MCP registers `mcp__<server>__<tool>` as each server connects. */
+	const connected = ["read", "bash", "codemode", "mcp__hive__get_run", "mcp__hive__list_runs", "mcp__linear__get_issue"];
+	const base = deps({ readJson: (() => config) as never, toolNames: () => connected });
 
 	it("uses PI_MCP_CONFIG when set, else the pi agent dir", () => {
 		expect(mcpConfigPath(deps())).toBe("/home/test/.pi/agent/mcp.json");
@@ -103,148 +96,57 @@ describe("mcp probes", () => {
 
 	it("reads a launched agent's filtered registry rather than the machine registry", () => {
 		// Hive materializes PI_CODING_AGENT_DIR/mcp.json per launch to remove
-		// ambient servers such as homectl. Readiness must describe that same file:
-		// a row for the machine-wide entry claims an unavailable capability.
+		// ambient servers such as homectl. Readiness must describe that same file.
 		const launchRoot = "/tmp/hive-launch-pi-filtered";
 		const launched = deps({
 			env: { PI_CODING_AGENT_DIR: launchRoot },
-			readJson: ((file: string) => {
-				if (file === `${launchRoot}/mcp.json`) {
-					return { mcpServers: { hive: { lifecycle: "eager" }, linear: {} } };
-				}
-				if (file === `${launchRoot}/mcp-cache.json`) return cache;
-				return { mcpServers: { hive: { lifecycle: "eager" }, homectl: {} } };
-			}) as never,
-			toolNames: () => ["mcp"],
+			readJson: ((file: string) =>
+				file === `${launchRoot}/mcp.json`
+					? { mcpServers: { hive: { url: "u" }, linear: { url: "u" } } }
+					: { mcpServers: { hive: { url: "u" }, homectl: { url: "u" } } }) as never,
 		});
-
 		expect(mcpServerProbes(launched).map((p) => p.id)).toEqual(["mcp.hive", "mcp.linear"]);
 	});
 
-	it("reports an eager server as ready, counting the cached tool list", async () => {
+	it("is ready once the server's tools are registered, naming how they are reached", async () => {
 		const [hive] = mcpServerProbes(base);
 		const out = await hive.probe(base);
 		expect(out.status).toBe("ready");
-		expect(out.detail).toBe("2 tools · eager");
-		expect(out.tool).toBe("mcp");
+		expect(out.detail).toBe("2 tools · codemode");
+		expect(out.tool).toBe("codemode");
+		const linear = await mcpServerProbes(base)[1].probe(base);
+		expect(linear.detail).toBe("1 tools · codemode");
 	});
 
-	it("reports a lazy server as WARMING, and says the first call pays the connect", async () => {
-		// The distinction the whole probe exists for: the adapter knows a server's
-		// tools from its on-disk cache long before anything has connected.
-		const linear = mcpServerProbes(base)[1];
-		const out = await linear.probe(base);
-		expect(out.status).toBe("warming");
-		expect(out.detail).toContain("first call pays the connect");
-		expect(out.hint).toContain("eager");
+	it("is warming while a server has no tools yet — native MCP connects in the background", async () => {
+		const sentry = await mcpServerProbes(base)[2].probe(base);
+		expect(sentry.status).toBe("warming");
+		expect(sentry.hint).toContain("/mcp");
 	});
 
-	describe("a cached tool list the adapter will not use", () => {
-		// The regression this suite exists for. Session `a78c92ef` (2026-08-17)
-		// read "9 tools known · lazy-keep-alive: first call pays the connect" for
-		// `sentry`, believed it, and then paid three turns and 39 s on
-		// bounce → connect → four `describe` calls. The file did hold 9 tools; the
-		// adapter had already discarded the entry.
-		it("names the TTL, and never calls the server ready", async () => {
-			const old = deps({
-				readJson: ((path: string) =>
-					path.endsWith("mcp-cache.json")
-						? { servers: { hive: { cachedAt: NOW - MCP_CACHE_MAX_AGE_MS - 1, tools: [{ name: "get_run" }] } } }
-						: config) as never,
-				toolNames: () => ["mcp"],
-			});
-			const out = await mcpServerProbes(old)[0].probe(old);
-			// `hive` is EAGER — the lifecycle that would otherwise read `ready`.
-			expect(out.status).toBe("warming");
-			expect(out.detail).toContain("the adapter ignores the entry");
-			expect(out.detail).toContain("7d TTL");
-			expect(out.hint).toContain("startup connect rebuilds it");
-		});
-
-		it("catches the config edit that silently rehashes server identity", async () => {
-			// What actually invalidated `sentry`: pinning `@sentry/mcp-server@0.37.0`
-			// changed `args`, so `computeServerHash` no longer matched. The hash is
-			// not recomputable here, so a config newer than the entry stands in.
-			const edited = deps({
-				readJson: ((path: string) => (path.endsWith("mcp-cache.json") ? cache : config)) as never,
-				mtimeMs: () => NOW - 30_000,
-				toolNames: () => ["mcp"],
-			});
-			const out = await mcpServerProbes(edited)[1].probe(edited);
-			expect(out.status).toBe("warming");
-			expect(out.detail).toContain("mcp.json changed after it was cached");
-			// The move the session had to find by trial, stated up front.
-			expect(out.hint).toContain('mcp({ connect: "linear" })');
-		});
-
-		it("stats mcp.json once per pass, not once per server", () => {
-			const stats: string[] = [];
-			const counting = deps({
-				readJson: ((path: string) => (path.endsWith("mcp-cache.json") ? cache : config)) as never,
-				mtimeMs: (path) => {
-					stats.push(path);
-					return null;
-				},
-				toolNames: () => ["mcp"],
-			});
-			mcpServerProbes(counting);
-			expect(stats).toHaveLength(1);
-		});
-
-		it("says nothing when the entry is fresh and the config predates it", () => {
-			expect(mcpCacheStaleness(NOW - 60_000, NOW - 120_000, NOW)).toBeNull();
-			// An entry with no timestamp is one the adapter rejects outright.
-			expect(mcpCacheStaleness(undefined, null, NOW)).toBe("no cache timestamp");
-		});
+	it("counts only the named server's tools, sanitised the way pi names them", () => {
+		expect(nativeToolCount(connected, "hive")).toBe(2);
+		expect(nativeToolCount(["mcp__dev_radius__x"], "dev-radius")).toBe(1);
+		expect(nativeToolCount(connected, "sentry")).toBe(0);
 	});
 
-	it("is unknown for a server with no cached tool list — it has simply never connected", async () => {
-		const sentry = mcpServerProbes(base)[2];
-		const out = await sentry.probe(base);
+	it("says a disabled server is disabled", async () => {
+		const off = deps({ readJson: (() => ({ mcpServers: { hive: { url: "u", enabled: false } } })) as never });
+		const out = await mcpServerProbes(off)[0].probe(off);
 		expect(out.status).toBe("unknown");
-		expect(out.detail).toContain("first call will discover it");
+		expect(out.detail).toBe("disabled in mcp.json");
 	});
 
-	it("does not treat another project's cached MCP as this session being ready", async () => {
-		// HIV-2639: a launch in one project's checkout showed ANOTHER project's
-		// server as 353 tools cached / warming, because the global mcp.json always
-		// registers it. That cache is another project's inventory, not a
-		// capability of this checkout — so there is no row, rather than an
-		// `absent` one every session would then have to ignore.
-		//
-		// Which servers are a product is the house profile's answer, so the test
-		// supplies one. With no profile there is no filtering at all, which the
-		// case below pins.
+	it("does not treat another project's MCP as a capability of this checkout (HIV-2639)", async () => {
 		setHouseProfileForTest({ projects: [{ token: "beta", mcpServers: ["beta-api"] }] });
-		const product = {
-			mcpServers: {
-				"beta-api": {
-					lifecycle: "lazy-keep-alive",
-					command: "bash",
-					args: ["-c", 'exec "$HOME/repos/Beta-Platform/frontend/cli/bin/beta-mcp"'],
-				},
-				hive: { lifecycle: "eager" },
-			},
-		};
-		const productCache = {
-			servers: {
-				"beta-api": { cachedAt: NOW - 60_000, tools: Array.from({ length: 353 }, (_, i) => ({ name: `t${i}` })) },
-				hive: { cachedAt: NOW - 60_000, tools: [{ name: "get_run" }] },
-			},
-		};
+		const product = { mcpServers: { "beta-api": { url: "u" }, hive: { url: "u" } } };
 		const alpha = deps({
 			cwd: "/home/dev/repos/Alpha__worktrees/agents-alpha-32704f29",
-			readJson: ((path: string) => (path.endsWith("mcp-cache.json") ? productCache : product)) as never,
-			exists: () => true,
-			toolNames: () => ["mcp"],
+			readJson: (() => product) as never,
+			toolNames: () => ["mcp__hive__get_run"],
 		});
 		try {
 			expect(mcpServerProbes(alpha).map((p) => p.id)).toEqual(["mcp.hive"]);
-			const [hive] = mcpServerProbes(alpha);
-			const out = await hive.probe(alpha);
-			expect(out.status).toBe("ready");
-
-			// No profile → nothing is a product, so BOTH rows appear.
 			setHouseProfileForTest({});
 			expect(mcpServerProbes(alpha).map((p) => p.id)).toEqual(["mcp.beta-api", "mcp.hive"]);
 		} finally {
@@ -252,13 +154,10 @@ describe("mcp probes", () => {
 		}
 	});
 
-	it("reports an unspawnable stdio MCP as absent, not as a first-call discovery", async () => {
-		// The AuroraSvc row said "no cached tool list — the first call will discover
-		// it" while every connect exited 1: dist/mcp-server.js is gone.
+	it("reports an unspawnable stdio MCP as absent", async () => {
 		const product = {
 			mcpServers: {
 				aurorasvc: {
-					lifecycle: "lazy-keep-alive",
 					command: "bash",
 					args: [
 						"-c",
@@ -269,42 +168,16 @@ describe("mcp probes", () => {
 		};
 		const aurora = deps({
 			cwd: "/home/dev/repos/Aurora__worktrees/agents-aurora-32704f29",
-			readJson: ((path: string) => (path.endsWith("mcp-cache.json") ? { servers: {} } : product)) as never,
+			readJson: (() => product) as never,
 			exists: () => false,
-			toolNames: () => ["mcp"],
 		});
-		const [aurorasvc] = mcpServerProbes(aurora);
-		const out = await aurorasvc.probe(aurora);
+		const out = await mcpServerProbes(aurora)[0].probe(aurora);
 		expect(out.status).toBe("absent");
-		expect(out.detail).toContain("entrypoint missing");
 		expect(out.detail).toContain("mcp-server.js");
-	});
-
-	it("is UNKNOWN for every server when the adapter is not loaded", async () => {
-		// Found by the first headless smoke run (`pi -p -ne`): with no adapter
-		// there is no `mcp` proxy tool, and reporting five servers as missing
-		// would be a false alarm about the harness's most-used tool surface.
-		const cold = deps({ readJson: (() => config) as never, toolNames: () => ["read", "bash"] });
-		const rows = await Promise.all(mcpServerProbes(cold).map((p) => p.probe(cold)));
-		expect(rows.map((r) => r.status)).toEqual(["unknown", "unknown", "unknown"]);
-		expect(rows[0].detail).toBe("mcp adapter not loaded");
 	});
 
 	it("makes no rows when there is no config", () => {
 		expect(mcpServerProbes(deps())).toEqual([]);
-	});
-
-	it("reads the 754 KB cache once per pass, not once per server", () => {
-		const reads: string[] = [];
-		const counting = deps({
-			readJson: ((path: string) => {
-				reads.push(path);
-				return path.endsWith("mcp-cache.json") ? cache : config;
-			}) as never,
-			toolNames: () => ["mcp"],
-		});
-		mcpServerProbes(counting);
-		expect(reads.filter((p) => p.endsWith("mcp-cache.json"))).toHaveLength(1);
 	});
 });
 
@@ -848,5 +721,29 @@ describe("delegation", () => {
 			}),
 		);
 		expect(seen).toContain("/custom/agent/auth.json");
+	});
+});
+
+describe("mcp probes — servers an extension registered", () => {
+	it("gives a registered product server a row, and lets mcp.json win on a name clash", async () => {
+		// No profile: no server is a product, so the row is not filtered by cwd.
+		setHouseProfileForTest({});
+		const d = deps({
+			readJson: (() => ({ mcpServers: { hive: { url: "u" } } })) as never,
+			registeredMcpServers: () => [
+				{ name: "asfam", config: { command: "node", exposure: "deferred" } },
+				{ name: "hive", config: { url: "other", exposure: "direct" } },
+			],
+			toolNames: () => ["mcp__asfam__asfam_health_check", "mcp__hive__get_run"],
+			exists: () => true,
+		});
+		const rows = mcpServerProbes(d);
+		expect(rows.map((r) => r.id)).toEqual(["mcp.asfam", "mcp.hive"]);
+		const asfam = await rows[0].probe(d);
+		expect(asfam.status).toBe("ready");
+		expect(asfam.detail).toBe("1 tools · deferred");
+		const hive = await rows[1].probe(d);
+		expect(hive.detail).toBe("1 tools · codemode"); // the file's entry, not the registration
+		setHouseProfileForTest(null);
 	});
 });

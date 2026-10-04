@@ -105,6 +105,13 @@ export interface HouseProfile {
 	 * with the rest of an organisation's facts, not in shared code.
 	 */
 	headerTitle?: string;
+	/**
+	 * Definitions of PRODUCT MCP servers (same shape as an `mcp.json` entry),
+	 * keyed by the names `projects[].mcpServers` lists. Registered per checkout
+	 * by `mcp-products/` instead of living in `mcp.json`, because pi's built-in
+	 * MCP would otherwise spawn every one in every session (HIV-3745).
+	 */
+	productMcpServers?: Record<string, Record<string, unknown>>;
 }
 
 const EMPTY: HouseProfile = {};

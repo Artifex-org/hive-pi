@@ -572,8 +572,10 @@ export default function background(pi: ExtensionAPI) {
 	 * eight `wait_for_run` calls on one run, ~6 minutes, ~23KB of near-identical
 	 * payload and eight turns of narration saying nothing new. The agent was not
 	 * at fault — it passed `timeout_seconds: 900` every time and Hive answered at
-	 * 45s every time, because `pi-mcp-adapter` sends no MCP progress token and
-	 * the server clamps a wait it cannot keep alive.
+	 * 45s every time, because pi-mcp-adapter sent no MCP progress token and the
+	 * server clamps a wait it cannot keep alive. pi's built-in MCP does send one
+	 * (HIV-3745), so a direct `wait_for_run` may now hold; this stays because a
+	 * background watch also frees the turn while the run finishes.
 	 *
 	 * `hive watch` has no such ceiling: it is a stream, not a request, and it
 	 * ends when the run does. One call, no turns spent waiting, one report.

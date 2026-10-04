@@ -346,3 +346,46 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 		expect(orchestrated("gh api graphql -f query=mutation{x}")).toBe(false);
 	});
 });
+
+describe("native MCP names (HIV-3745)", () => {
+	// pi's built-in MCP names a server tool `mcp__<server>__<tool>`. Every list
+	// here is keyed by the adapter form; a rename that missed one would fail
+	// CLOSED and silently — the mode denying the verb it exists to permit.
+	it("orchestrate permits the native name of every reviewed coordination tool", () => {
+		expect(classifyOrchestrateTool("mcp__hive__message_teammate", {}).allowed).toBe(true);
+		expect(classifyOrchestrateTool("mcp__hive__wait_for_run", {}).allowed).toBe(true);
+		expect(classifyOrchestrateTool("mcp__linear__list_issues", {}).allowed).toBe(true);
+		// …and still denies what was never reviewed.
+		expect(classifyOrchestrateTool("mcp__hive__trigger_run", {}).allowed).toBe(false);
+		expect(classifyOrchestrateTool("mcp__linear__save_issue", {}).allowed).toBe(false);
+	});
+
+	it("orchestrate maps a native misname onto the real coordination tool", () => {
+		const verdict = classifyOrchestrateTool("mcp__hive__interrupt_agent", {});
+		expect(verdict.allowed).toBe(false);
+		expect(verdict.allowed ? "" : verdict.reason).toContain("hive_steer_agent");
+	});
+
+	it("discussion permits its read-only cards under their native names", () => {
+		expect(classifyDiscussionTool("mcp__hive__get_run", {}).allowed).toBe(true);
+		expect(classifyDiscussionTool("mcp__hive__cancel_run", {}).allowed).toBe(false);
+	});
+
+	it("discussion honours the house profile's reviewed tools under native names", () => {
+		setHouseProfileForTest({ readOnlyMcpTools: ["asfam_asfam_deploy_last"] });
+		try {
+			expect(classifyDiscussionTool("mcp__asfam__asfam_deploy_last", {}).allowed).toBe(true);
+			expect(classifyDiscussionTool("mcp__asfam__asfam_strategy_stop", {}).allowed).toBe(false);
+		} finally {
+			setHouseProfileForTest(null);
+		}
+	});
+
+	it("plan mode never allows a native MCP tool by name — only the gateway", () => {
+		expect(classifyTool("mcp__hive__get_run").allowed).toBe(false);
+		// The gateway is allowed because each nested call it makes is classified
+		// by this same policy through the tool_call pipeline.
+		expect(classifyTool("codemode").allowed).toBe(true);
+		expect(classifyTool("tool_search").allowed).toBe(true);
+	});
+});

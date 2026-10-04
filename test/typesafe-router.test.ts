@@ -82,7 +82,7 @@ function corpus(): McpToolCorpus {
 		...HIVE.map((t) => corpusTool({ server: "hive", ...t })),
 		...ASFAM.map((t) => corpusTool({ server: "asfam", ...t })),
 	];
-	return { tools, servers: { hive: {}, asfam: {} }, configMtimeMs: null };
+	return { tools, servers: { hive: {}, asfam: {} } };
 }
 
 describe("categorisation — an unassigned tool is a build error", () => {
@@ -124,7 +124,7 @@ describe("categorisation — an unassigned tool is a build error", () => {
 	it("collapses a group smaller than minMembers into the catch-all rather than dropping it", () => {
 		const cat = categorise(c.tools, { minMembers: 3 });
 		// `asfam_bbg_price` is the only bbg tool; it must still be reachable.
-		const key = cat.assignment.get("asfam_asfam_bbg_price");
+		const key = cat.assignment.get("mcp__asfam__asfam_bbg_price");
 		expect(key).toBe(`asfam/${OTHER_GROUP}`);
 		const other = cat.categories.find((category) => category.key === key);
 		expect(other?.members.map((t) => t.name)).toContain("asfam_bbg_price");
@@ -194,8 +194,8 @@ describe("the structural floor", () => {
 		// This is the measured pilot failure, turned into a guard. Remove the
 		// union from stageTwoOptions and this dies for both queries.
 		const benchmarks: [string, string][] = [
-			["factory settings", "hive_get_scheduler_settings"],
-			["find related work canceled task empty log failed run", "hive_find_related_work"],
+			["factory settings", "mcp__hive__get_scheduler_settings"],
+			["find related work canceled task empty log failed run", "mcp__hive__find_related_work"],
 		];
 		for (const [query, expected] of benchmarks) {
 			for (const category of cat.categories) {
@@ -212,7 +212,7 @@ describe("the structural floor", () => {
 		const options = stageTwoOptions(c.tools, cat, null, "factory settings");
 		expect(options.tools.map((t) => t.qualifiedName)).toEqual(options.floor);
 		expect(options.tools).toContain(
-			c.tools.find((t) => t.qualifiedName === "hive_get_scheduler_settings"),
+			c.tools.find((t) => t.qualifiedName === "mcp__hive__get_scheduler_settings"),
 		);
 	});
 
@@ -255,7 +255,7 @@ describe("the structural floor", () => {
 		// Printing the bare name hands the agent a call that fails —
 		// `mcp-common/search.ts` records the same decision for the same reason.
 		const options = stageTwoOptions(c.tools, cat, "hive/run", "cancel a run");
-		expect(Object.keys(toolCriteria(options.tools))).toContain("hive_cancel_run");
+		expect(Object.keys(toolCriteria(options.tools))).toContain("mcp__hive__cancel_run");
 	});
 });
 
@@ -277,7 +277,7 @@ describe("replay helpers", () => {
 			{ query: "a", expect: { server: "hive", name: "get_run" }, source: "t:1" },
 			{ query: "b", expect: { server: "hive", name: "not_a_tool" }, source: "t:2" },
 		]);
-		expect(resolved.map((r) => r.expectedQualifiedName)).toEqual(["hive_get_run"]);
+		expect(resolved.map((r) => r.expectedQualifiedName)).toEqual(["mcp__hive__get_run"]);
 		// Dropped silently, a missing label would quietly shrink the benchmark.
 		expect(unresolved.map((r) => r.query)).toEqual(["b"]);
 	});
@@ -288,7 +288,7 @@ describe("replay helpers", () => {
 			query: "factory settings",
 			expect: { server: "hive", name: "get_scheduler_settings" },
 			source: "test/mcp-search-fallback.test.ts:89",
-			expectedQualifiedName: "hive_get_scheduler_settings",
+			expectedQualifiedName: "mcp__hive__get_scheduler_settings",
 		});
 		expect(coverage.categoriesMissingExpected).toEqual([]);
 		// +1 for the "stage 1 gave nothing" ballot, which must also be checked.
@@ -300,7 +300,7 @@ describe("replay helpers", () => {
 		const report = summarise("t", [
 			{
 				query: "q",
-				top1: "hive_get_run",
+				top1: "mcp__hive__get_run",
 				correct: true,
 				latencyMs: 300,
 				inputTokens: 900,
