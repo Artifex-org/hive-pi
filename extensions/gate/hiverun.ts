@@ -9,9 +9,9 @@
 import { spawn } from "node:child_process";
 import { access, constants } from "node:fs/promises";
 
+import { repoRoot } from "../hive-common/git.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { type HiveAuth, request, withTimeout } from "../hive-common/http.ts";
-import { ancestors } from "./gate.ts";
 import type { GateProgress } from "./stream.ts";
 import { fold, type HiveRun, type HiveSubstep, type HiveTask, hiveCheckArgs, isQueued, isTerminalRun, type RunRef, parseRunRef } from "./hivecheck.ts";
 
@@ -52,20 +52,31 @@ const MAX_LOG_TASKS = 3;
 /**
  * hivePipelineDir finds the `.hive/` this repo gates through.
  *
- * Presence of the directory is the whole test: it is what `hive check` uploads
- * and evaluates, so a repo that has one can be checked and a repo that has none
- * cannot, regardless of what any config claims.
+ * TWO conditions, both taken from what `hive check` itself does, and both
+ * earned by a misfire:
+ *
+ *   - the directory must hold `main.star`. That file IS the pipeline — hive's
+ *     resolver loads `.hive/main.star` and a snapshot without it is refused
+ *     (internal/dsl/resolver.go, api/check_plan.go). A bare `.hive/` is not
+ *     one: `~/.hive` is the Hive CLI's CONFIG directory, it sits above every
+ *     checkout under $HOME, and testing for the directory alone made every repo
+ *     there look Hive-gated. Papercut 2026-09-29T20:15: quality_gate ran
+ *     `hive check --step lint` on hive-pi, which has no pipeline, and got
+ *     "fetch .hive/main.star@… file not found".
+ *   - it must be THIS repository's, at its root. `hive check` packs the
+ *     checkout's tree and evaluates `.hive/` from the git root, so a pipeline
+ *     in an enclosing directory (or a nested one) is not one it would read. Outside any checkout there
+ *     is nothing for `hive check` to pack, so the answer is null.
  */
 export async function hivePipelineDir(cwd: string): Promise<string | null> {
-	for (const dir of ancestors(cwd)) {
-		try {
-			await access(`${dir}/.hive`, constants.R_OK);
-			return `${dir}/.hive`;
-		} catch {
-			/* not here */
-		}
+	const root = repoRoot(cwd);
+	if (!root) return null;
+	try {
+		await access(`${root}/.hive/main.star`, constants.R_OK);
+		return `${root}/.hive`;
+	} catch {
+		return null;
 	}
-	return null;
 }
 
 /**
@@ -159,9 +170,14 @@ export function staleCLITimedOut(run: Pick<Dispatch, "code"> & Partial<Pick<Disp
  * ("refusing to dispatch the whole pipeline", an unknown step name and the
  * pipeline's actual step list) is the most useful thing the caller can print.
  */
-export async function dispatch(steps: string[], cwd: string, signal: AbortSignal | undefined): Promise<Dispatch> {
+export async function dispatch(
+	steps: string[],
+	cwd: string,
+	signal: AbortSignal | undefined,
+	opts: { project?: string } = {},
+): Promise<Dispatch> {
 	return await new Promise((resolve, reject) => {
-		const child = spawn("hive", hiveCheckArgs(steps), { cwd, signal });
+		const child = spawn("hive", hiveCheckArgs(steps, opts), { cwd, signal });
 		let out = "";
 		const onData = (buf: Buffer) => {
 			out += buf.toString();

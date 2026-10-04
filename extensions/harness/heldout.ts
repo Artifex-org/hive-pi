@@ -20,6 +20,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { GIT_NO_OPTIONAL_LOCKS } from "../hive-common/git.ts";
 
 const GIT_TIMEOUT_MS = 15_000;
 const MAX_FINDINGS = 20;
@@ -36,7 +37,7 @@ function gitOutput(cwd: string, args: string[]): Promise<string | null> {
 			}
 		};
 		try {
-			const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"] });
+			const child = spawn("git", [GIT_NO_OPTIONAL_LOCKS, ...args], { cwd, stdio: ["ignore", "pipe", "ignore"] });
 			const timer = setTimeout(() => {
 				child.kill("SIGKILL");
 				finish(null);
@@ -191,11 +192,11 @@ export async function collectWorkDiff(cwd: string): Promise<string | null> {
 	for (const trunk of ["origin/main", "origin/master", "origin/feature"]) {
 		const base = await gitOutput(cwd, ["merge-base", "HEAD", trunk]);
 		if (base?.trim()) {
-			const diff = await gitOutput(cwd, ["diff", base.trim()]);
+			const diff = await gitOutput(cwd, ["diff-index", "-p", base.trim()]);
 			if (diff !== null) return diff;
 		}
 	}
-	return gitOutput(cwd, ["diff", "HEAD"]);
+	return gitOutput(cwd, ["diff-index", "-p", "HEAD"]);
 }
 
 /** Convenience: collect + scan. Null when the diff could not be taken. */

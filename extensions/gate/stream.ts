@@ -101,6 +101,20 @@ export interface GateProgress {
 	 * is per (project, pipeline) and the queue is what the new run joins.
 	 */
 	defer_reason?: string;
+	/**
+	 * Steps that never ran because an upstream step failed (hive-check path
+	 * only), with the step that blocked each — null when the scheduler did not
+	 * name it.
+	 *
+	 * Kept OUT of `advisories`. A step Hive pruned or marked optional made no
+	 * claim and blocks nothing; a step skipped behind a red dependency is a gate
+	 * that did not execute, and calling it "advisory (non-blocking)" told one
+	 * agent its tests had been waived when none had run (papercut
+	 * 2026-10-04T17:58). Their check rows keep the `advisory` outcome, because
+	 * that is the widget's whole vocabulary for "not a verdict"; this list is
+	 * where the difference lives.
+	 */
+	blocked?: { step: string; by: string | null }[];
 }
 
 export function emptyProgress(mode: string, scope: string): GateProgress {
