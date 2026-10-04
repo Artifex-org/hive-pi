@@ -35,6 +35,7 @@ import type { TSchema } from "typebox";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 import { decide, realProbe } from "./worktree-guard.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /**
  * What a tool does that policy cares about.
@@ -196,7 +197,7 @@ export function registerGuardedTool<TParams extends TSchema, TDetails = unknown,
 	// ToolDefinition (which has no capability concept at all — that is why this
 	// module exists). pi ignores what it does not know; the conformance test
 	// reads it back off the registered definition.
-	pi.registerTool({ ...rest, capability, execute: guarded } as never);
+	pi.registerTool({ ...rest, exposure: exposureFor(rest.name), capability, execute: guarded } as never);
 }
 
 /** Relative paths are resolved against the tool's cwd — the guard judges where

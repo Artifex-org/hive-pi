@@ -14,7 +14,7 @@
 import type { Spawn } from "./executor.ts";
 import { acquireWriterLock, isWriterCapable, noWriterLock } from "../harness/writer.ts";
 import { guardWorkerCwd, workerCwdRefusal } from "../guards-common/capability.ts";
-import { diffStamp, NO_CHANGE_ERROR, writerMadeNoChange } from "../harness/verify.ts";
+import { NO_CHANGE_ERROR, treeStamp, writerMadeNoChange } from "../harness/verify.ts";
 import { runRoleAgent } from "./spawn.ts";
 import { resolveNodeOutput } from "./structured-node.ts";
 import { discoverAgents } from "../harness/roles.ts";
@@ -29,7 +29,7 @@ export interface MakeSpawnOptions {
 
 export function makeSpawn(cwd: string, runId: string, options: MakeSpawnOptions = {}): Spawn {
 	const roles = discoverAgents(cwd, "both").agents;
-	const stamp = options.stamp ?? diffStamp;
+	const stamp = options.stamp ?? treeStamp;
 
 	return async (dispatch, signal) => {
 		const role = roles.find((candidate) => candidate.name === dispatch.role);

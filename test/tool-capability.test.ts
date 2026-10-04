@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
+import { DIRECT_TOOLS, exposureFor, GATED_TOOLS, MODE_TOOLS } from "../extensions/loadout/policy.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 const REPO = join(import.meta.dirname, "..");
@@ -69,6 +70,7 @@ const READ_ONLY: Record<string, string> = {
 	knowledge_multi_get: "hive knowledge read",
 	knowledge_search: "hive knowledge read",
 	list_symbols: "parses a file it reads",
+	load_tools: "changes which registered tools are declared to the model; touches nothing else",
 	list_workspace_catalog: "hive API read",
 	ls: "read-only listing",
 	plan_ask: "returns the question as text",
@@ -93,6 +95,7 @@ const READ_ONLY: Record<string, string> = {
 interface Registered {
 	name: string;
 	capability?: unknown;
+	exposure?: unknown;
 	source: string;
 }
 
@@ -253,6 +256,7 @@ beforeAll(async () => {
 			seen.push({
 				name: tool.name,
 				capability: (tool.definition as { capability?: unknown }).capability,
+				exposure: (tool.definition as { exposure?: unknown }).exposure,
 				source: entry,
 			});
 		}
@@ -337,6 +341,42 @@ describe("tool capability conformance", () => {
 				capability.executes === true ||
 				(typeof exemption === "string" && exemption.trim().length >= 20);
 			expect(meaningful, `${tool.name} declares an empty capability — say what it does, or use READ_ONLY`).toBe(true);
+		}
+	});
+});
+
+describe("tool loadout conformance", () => {
+	it("every registration asks the loadout policy for its exposure", () => {
+		// A site that omits `exposure` is silently always-on (pi's default is
+		// `direct`), which is how 71 tools came to ride on every request.
+		const drift = registered
+			.filter((tool) => tool.exposure !== exposureFor(tool.name))
+			.map((tool) => `${tool.name}: ${String(tool.exposure)} (${tool.source}) — expected ${exposureFor(tool.name)}`);
+		expect([...new Set(drift)].sort(), "register with `exposure: exposureFor(name)` (extensions/loadout/policy.ts)").toEqual([]);
+	});
+
+	it("keeps the policy honest — no entry for a tool that no longer exists", () => {
+		const names = new Set(registered.map((tool) => tool.name));
+		const stale = [...Object.keys(DIRECT_TOOLS), ...Object.keys(GATED_TOOLS), ...Object.keys(MODE_TOOLS)].filter((name) => !names.has(name));
+		expect(stale, "remove these from extensions/loadout/policy.ts, or restore the tools").toEqual([]);
+	});
+
+	it("keeps the always-declared set small", () => {
+		// The budget is the point of the policy. Raising it is allowed, in this
+		// diff, with the reason next to the new entry in DIRECT_TOOLS.
+		// Gated tools are registered direct but kept inactive by their owner, so
+		// nobody declares them by default; they do not count.
+		const direct = [...new Set(registered.filter((tool) => tool.exposure === "direct" && !(tool.name in GATED_TOOLS)).map((tool) => tool.name))];
+		expect(direct.length).toBeLessThanOrEqual(28);
+		expect(registered.filter((tool) => tool.exposure === "deferred").length).toBeGreaterThan(20);
+	});
+
+	it("never defers a consent-gated tool", () => {
+		// A deferred tool is callable from codemode and loadable whether active
+		// or not, so a gate that is only the active set would stop gating.
+		for (const name of Object.keys(GATED_TOOLS)) {
+			const tool = registered.find((entry) => entry.name === name);
+			expect(tool?.exposure, `${name} must be registered direct and kept inactive by its owner`).toBe("direct");
 		}
 	});
 });

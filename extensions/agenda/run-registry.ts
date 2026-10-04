@@ -1,11 +1,15 @@
 import type { RunSummary } from "./executor.ts";
+import type { Plan } from "./plan-schema.ts";
 
 export type DurableRunStatus = "running" | "done" | "failed" | "canceled";
 
 export interface DurableRunResult {
+	/** The WHOLE run text — never pre-cut; `orchestrate_result` pages it. */
 	text: string;
 	details: unknown;
 	summary: RunSummary;
+	/** The plan that ran, so one node's result can be selected by id. */
+	plan: Plan;
 }
 
 export interface DurableRunRecord {
@@ -24,12 +28,14 @@ interface StoredRun extends DurableRunRecord {
 }
 
 /**
- * Session-local background orchestration runs.
+ * Session-local orchestration runs — background (durable) and foreground alike.
  *
  * The tool call that starts a durable run returns immediately, so its result can
  * no longer carry the eventual summary. This registry is the durable-within-the-
  * session rendezvous: completion is pushed once, while `orchestrate_result`
  * remains a pull path when that notification was compacted or needs full detail.
+ * A foreground run is recorded too: its tool result shows one page, and the
+ * rest has to be reachable by the same `orchestrate_result` call.
  */
 export class DurableRunRegistry {
 	private readonly runs = new Map<string, StoredRun>();

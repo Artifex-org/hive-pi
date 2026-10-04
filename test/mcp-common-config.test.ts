@@ -21,6 +21,7 @@ import {
 	oneShotMcpEnv,
 	workerMcpConfig,
 } from "../extensions/mcp-common/config.ts";
+import { processToken } from "../extensions/hive-common/process-token.ts";
 
 const temps: string[] = [];
 function tmpdir(prefix: string): string {
@@ -79,8 +80,8 @@ describe("ensureWorkerAgentDir", () => {
 	it("links every entry but mcp.json, which it writes filtered", () => {
 		const parent = parentDir();
 		const tmp = tmpdir("worker-tmp-");
-		const dir = ensureWorkerAgentDir(parent, tmp, 4242);
-		expect(dir).toBe(path.join(tmp, "pi-worker-agent-4242"));
+		const dir = ensureWorkerAgentDir(parent, tmp, "4242-a");
+		expect(dir).toBe(path.join(tmp, "pi-worker-agent-4242-a"));
 		expect(fs.readlinkSync(path.join(dir as string, "auth.json"))).toBe(path.join(parent, "auth.json"));
 		expect(fs.readlinkSync(path.join(dir as string, "sessions"))).toBe(path.join(parent, "sessions"));
 		const written = JSON.parse(fs.readFileSync(path.join(dir as string, "mcp.json"), "utf8"));
@@ -90,24 +91,44 @@ describe("ensureWorkerAgentDir", () => {
 	it("is idempotent across delegations of one session", () => {
 		const parent = parentDir();
 		const tmp = tmpdir("worker-tmp-");
-		expect(ensureWorkerAgentDir(parent, tmp, 1)).toBe(ensureWorkerAgentDir(parent, tmp, 1));
+		expect(ensureWorkerAgentDir(parent, tmp, "1-a")).toBe(ensureWorkerAgentDir(parent, tmp, "1-a"));
 	});
 
 	it("builds an empty-server mirror for one-shot helpers", () => {
 		const parent = parentDir();
 		const tmp = tmpdir("worker-tmp-");
-		const dir = ensureWorkerAgentDir(parent, tmp, 7, "none");
+		const dir = ensureWorkerAgentDir(parent, tmp, "7-a", "none");
 		expect(JSON.parse(fs.readFileSync(path.join(dir as string, "mcp.json"), "utf8"))).toEqual({ mcpServers: {} });
 		expect(oneShotMcpEnv(() => dir)).toEqual({ PI_CODING_AGENT_DIR: dir });
 	});
 
+	it("keeps two sandboxed sessions apart although both are pid 2", () => {
+		// srt gives every session its own PID namespace (pi is pid 2 in each)
+		// and a shared tmp. Keyed on the pid, the second session's cleanup
+		// deleted the first one's live mirror.
+		const parent = parentDir();
+		const tmp = tmpdir("worker-tmp-");
+		const first = ensureWorkerAgentDir(parent, tmp, "2-aaaa1111") as string;
+		ensureWorkerAgentDir(parent, tmp, "2-bbbb2222");
+		cleanupWorkerAgentDir(tmp, "2-bbbb2222");
+		expect(fs.existsSync(path.join(first, "mcp.json"))).toBe(true);
+	});
+
+	it("names this process the same from every module copy, and differently from its children", () => {
+		const token = processToken();
+		expect(token).toMatch(new RegExp(`^${process.pid}-[0-9a-f]{8}$`));
+		expect(processToken()).toBe(token);
+		// Not exported to the environment, so a spawned worker mints its own.
+		expect(Object.values(process.env)).not.toContain(token);
+	});
+
 	it("returns null without a parent dir, and cleanup removes only the links", () => {
 		const tmp = tmpdir("worker-tmp-");
-		expect(ensureWorkerAgentDir(path.join(tmp, "missing"), tmp, 1)).toBeNull();
+		expect(ensureWorkerAgentDir(path.join(tmp, "missing"), tmp, "1-a")).toBeNull();
 		const parent = parentDir();
-		ensureWorkerAgentDir(parent, tmp, 2);
-		cleanupWorkerAgentDir(tmp, 2);
-		expect(fs.existsSync(path.join(tmp, "pi-worker-agent-2"))).toBe(false);
+		ensureWorkerAgentDir(parent, tmp, "2-a");
+		cleanupWorkerAgentDir(tmp, "2-a");
+		expect(fs.existsSync(path.join(tmp, "pi-worker-agent-2-a"))).toBe(false);
 		expect(fs.existsSync(path.join(parent, "auth.json"))).toBe(true);
 	});
 });

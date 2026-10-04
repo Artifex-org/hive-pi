@@ -81,7 +81,17 @@ const AgentSpecSchema = Type.Object({
 });
 
 /** Every node carries an author-chosen id; the CONTENT hash is derived separately. */
-const Base = { id: Type.String({ pattern: "^[A-Za-z0-9_-]+$" }), needs: Type.Optional(Type.Array(RefSchema)) };
+const Base = {
+	id: Type.String({ pattern: "^[A-Za-z0-9_-]+$" }),
+	needs: Type.Optional(
+		Type.Array(RefSchema, {
+			description:
+				"Nodes (or node fields) this one waits for. Their final outputs are FORWARDED into this node's prompt " +
+				"under a 'Results from the nodes this one needs' section — a barrier is expanded into the results it " +
+				"joined; a result too large to inline is written to a file whose path is given. Do not paste them yourself.",
+		}),
+	),
+};
 
 export const NodeSchema = Type.Union([
 	Type.Object({ ...Base, kind: Type.Literal("agent"), ...AgentSpecSchema.properties }),

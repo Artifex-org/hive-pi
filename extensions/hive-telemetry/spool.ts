@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { spoolDir } from "./identity.ts";
 import { postUsage } from "./transport.ts";
 import type { AgentUsagePayload, ResolvedAuth } from "./types.ts";
+import { processToken } from "../hive-common/process-token.ts";
 
 const MAX_SPOOL_FILES = 500;
 const MAX_SPOOL_BYTES = 8 * 1024 * 1024;
@@ -143,7 +144,7 @@ export async function drainSpool(auth: ResolvedAuth, excludeRunId: string | null
 	for (const entry of entries) {
 		if (excludeRunId && entry.path.endsWith(`${excludeRunId}.json`)) continue;
 
-		const claim = `${entry.path}.claim-${process.pid}`;
+		const claim = `${entry.path}.claim-${processToken()}`;
 		try {
 			renameSync(entry.path, claim);
 		} catch {

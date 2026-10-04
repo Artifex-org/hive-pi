@@ -22,6 +22,7 @@ import {
 	workId,
 } from "./plan-graph.ts";
 import { type Plan, resolveCaps, type ResolvedCaps } from "./plan-schema.ts";
+import { promptWithInputs, renderInputsSection } from "./upstream.ts";
 
 export interface WorkerResult {
 	ok: boolean;
@@ -57,6 +58,13 @@ export interface RunOptions {
 	signal?: AbortSignal;
 	/** Resume: work ids already known to have finished, with their values. */
 	completed?: Record<string, unknown>;
+	/**
+	 * Where an upstream result too large to inline into a dependent node's
+	 * prompt is written (see upstream.ts) — the session's artifact store. When
+	 * a result must spill and this is absent, the dependent node FAILS saying
+	 * so; it is never dispatched with its inputs cut.
+	 */
+	inputsDir?: string;
 }
 
 export interface RunSummary {
@@ -140,6 +148,18 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 	// last, which is a fact about ordering rather than about spending.
 	const nodeSpend = new Map<string, number>();
 	let retrySpawns = 0;
+	// A node's `needs` are all done before its first dispatch, so its inputs —
+	// and any file they spilled to — are fixed for the rest of the run.
+	const inputSections = new Map<string, string>();
+	const inputsSectionFor = (dispatch: Dispatch): string | undefined => {
+		if (!dispatch.inputs || dispatch.inputs.length === 0) return undefined;
+		let section = inputSections.get(dispatch.nodeId);
+		if (section === undefined) {
+			section = renderInputsSection(dispatch.inputs, options.inputsDir);
+			inputSections.set(dispatch.nodeId, section);
+		}
+		return section;
+	};
 
 	// Resume: anything already finished is folded in before the first batch, so
 	// `nextBatch` simply never proposes it again.
@@ -210,10 +230,21 @@ export async function runPlan(options: RunOptions): Promise<RunSummary> {
 		};
 
 		const settled = await Promise.all(
-			batch.dispatch.map(async (dispatch) => ({
-				dispatch,
-				result: await runWithRetries(dispatch, options.spawn, options.signal, takeRetry),
-			})),
+			batch.dispatch.map(async (dispatch) => {
+				// Upstream results are rendered into the prompt HERE, once per
+				// NODE (inputsSectionFor caches) rather than per dispatch or per
+				// retry, so a spilled input is written once however many fanout
+				// items or retries share it. A render failure is the node's failure,
+				// before any worker is admitted.
+				let prepared: Dispatch;
+				try {
+					prepared = { ...dispatch, prompt: promptWithInputs(dispatch.prompt, inputsSectionFor(dispatch)) };
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return { dispatch, result: { ok: false, value: null, tokens: 0, attempts: 0, error: message } satisfies AttemptedResult };
+				}
+				return { dispatch, result: await runWithRetries(prepared, options.spawn, options.signal, takeRetry) };
+			}),
 		);
 
 		for (const { dispatch, result } of settled) {

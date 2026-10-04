@@ -28,13 +28,13 @@ afterEach(() => {
 
 describe("browser_screenshot label recording", () => {
 	it("writes its manifest where the ledger and the Go consumer agree", () => {
-		expect(manifestPath(process.env)).toBe(path.join(tmp, MANIFEST_FILENAME));
+		expect(manifestPath(process.env, "fake-session")).toBe(path.join(tmp, MANIFEST_FILENAME));
 	});
 
 	it("round-trips a labelled record through the tool's ledger", () => {
-		// The tool constructs `new ScreenshotLedger()` with no args, reading
-		// process.env — exactly this, with HIVE_PR_ATTACHMENTS_DIR pointing at tmp.
-		const led = new ScreenshotLedger();
+		// The tool constructs `new ScreenshotLedger(process.env, <session id>)` —
+		// exactly this, with HIVE_PR_ATTACHMENTS_DIR pointing at tmp.
+		const led = new ScreenshotLedger(process.env, "fake-session");
 		const rec = led.record({ path: "/tmp/pi-browser-9/shot-1.png", label: "before", url: "http://127.0.0.1:3000/" });
 		expect(rec.label).toBe("before");
 		const onDisk = JSON.parse(fs.readFileSync(path.join(tmp, MANIFEST_FILENAME), "utf8"));
@@ -42,7 +42,7 @@ describe("browser_screenshot label recording", () => {
 	});
 
 	it("records an empty label when none is passed (the tool's `label ?? \"\"`)", () => {
-		const led = new ScreenshotLedger();
+		const led = new ScreenshotLedger(process.env, "fake-session");
 		const rec = led.record({ path: "/tmp/pi-browser-9/shot-2.png", label: "", url: "u" });
 		expect(rec.label).toBe("");
 	});

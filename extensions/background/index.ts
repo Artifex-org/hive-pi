@@ -79,8 +79,10 @@ import {
 	resolveTimeoutMs,
 	resultHeader,
 	statusForExit,
+	statusForWatchExit,
 	type Job,
 } from "./jobs.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /** Grace period between SIGTERM and SIGKILL when reaping. */
 const KILL_GRACE_MS = 3_000;
@@ -444,9 +446,37 @@ export default function background(pi: ExtensionAPI) {
 		// arrive. Cancelling the grace timer here keeps a normal job from waking a
 		// handler two seconds after it is already over.
 		let exitGrace: NodeJS.Timeout | undefined;
+		/**
+		 * Settle from the process's exit code — unless the job's own clock killed
+		 * it. The timer below kills the tree and THEN settles `timeout` after an
+		 * awaited annotation, so the kill's `close` used to win the race and
+		 * report a job WE stopped as `failed (exit ?)` (HIV-3110).
+		 */
+		let expiring = false;
+		const settleFromExit = (code: number | null): void => {
+			if (expiring) return;
+			if (!spec.runID) {
+				settle(id, statusForExit(code), code ?? undefined);
+				return;
+			}
+			const status = statusForWatchExit(code);
+			if (status !== "unconfirmed") {
+				settle(id, status, code ?? undefined);
+				return;
+			}
+			// The watch ended without the run's verdict. Say what the run is doing
+			// now, so "still running, re-watch it" is the reading and not "red".
+			void (async () => {
+				try {
+					await annotateWatchTimeout(id);
+				} finally {
+					settle(id, status, code ?? undefined);
+				}
+			})();
+		};
 		proc.on("close", (code) => {
 			if (exitGrace) clearTimeout(exitGrace);
-			settle(id, statusForExit(code), code ?? undefined);
+			settleFromExit(code);
 		});
 
 		/**
@@ -483,7 +513,7 @@ export default function background(pi: ExtensionAPI) {
 				// reaper, and we would be leaving exactly the orphan this feature is
 				// written not to industrialise (see the header, and `killTree`).
 				killTree(id);
-				settle(id, statusForExit(code), code ?? undefined);
+				settleFromExit(code);
 			}, EXIT_SETTLE_GRACE_MS);
 			// Unref'd for the same reason as the timeout below: a pending grace must
 			// never be the reason node stays alive.
@@ -491,6 +521,7 @@ export default function background(pi: ExtensionAPI) {
 		});
 
 		const timer = setTimeout(() => {
+			expiring = true;
 			killTree(id);
 			// A watch that hit its clock says nothing about WHY: the tail is
 			// `task.ready` either way, whether the run never started or one step
@@ -648,7 +679,7 @@ export default function background(pi: ExtensionAPI) {
 	// extension's own in-memory registry. Declaring an empty capability instead
 	// would pass the audit while saying nothing, which the audit rejects.
 	pi.registerTool({
-		name: "background_list",
+		name: "background_list", exposure: exposureFor("background_list"),
 		label: "Background",
 		description: "List background jobs in this session with their status and elapsed time.",
 		parameters: Type.Object({}),
@@ -656,7 +687,7 @@ export default function background(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "background_result",
+		name: "background_result", exposure: exposureFor("background_result"),
 		label: "Background",
 		description:
 			"Get the full retained output of a background job. Use this when a completion notification was " +

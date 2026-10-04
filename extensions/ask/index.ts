@@ -47,6 +47,7 @@ import {
 	type AskState,
 } from "./state.ts";
 import { renderAskLines, type AskStyle } from "./view.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 const OptionSchema = Type.Object({
 	label: Type.String({ description: "1-5 words. Put the recommended option FIRST with '(Recommended)' appended." }),
@@ -204,7 +205,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerTool({
-		name: "ask_user_question",
+		name: "ask_user_question", exposure: exposureFor("ask_user_question"),
 		label: "Ask the user",
 		description: [
 			"Ask the user 1-4 structured multiple-choice questions and block until they answer.",

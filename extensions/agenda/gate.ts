@@ -22,7 +22,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { gateStamp } from "../harness/verify.ts";
+import { treeStamp } from "../harness/verify.ts";
 import { repoRoot } from "../hive-common/git.ts";
 import { atCap, clear, record, remaining } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
@@ -185,14 +185,14 @@ export function createGatePolicy(stamps?: GateStampStore): Policy {
 				// Retry throttling (prime-agent's gate-skip): after a failure, do not
 				// re-run the gate until the tree actually changed — a settle where the
 				// model only talked has not earned another (possibly minutes-long)
-				// check. Content-aware stamp (see harness/verify.ts gateStamp); a null
+				// check. Content-aware stamp (see harness/verify.ts treeStamp); a null
 				// stamp on either side disables the skip. The skip is silent — no
 				// injection, no ledger charge — so the pinned three-failures-three-
 				// injections contract holds whenever the model edits between settles.
 				if (stamps) {
 					const failedStamp = stamps.get(id);
 					if (failedStamp !== undefined) {
-						const current = await gateStamp(root);
+						const current = await treeStamp(root);
 						if (current !== null && current === failedStamp) {
 							return { metric: { outcome: "skip", value: 0 } };
 						}
@@ -210,7 +210,7 @@ export function createGatePolicy(stamps?: GateStampStore): Policy {
 						ledger: (state) => clear(state, id),
 					};
 				}
-				stamps?.set(id, (await gateStamp(root)) ?? undefined);
+				stamps?.set(id, (await treeStamp(root)) ?? undefined);
 
 				const header = result.timedOut
 					? `The project gate \`${command}\` TIMED OUT.`

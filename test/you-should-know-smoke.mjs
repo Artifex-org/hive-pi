@@ -36,22 +36,28 @@ env.pop('PI_YOU_SHOULD_KNOW', None)
 proc = subprocess.Popen(['node', ${JSON.stringify(join(repo, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"))}, '--no-extensions', '-e', ${JSON.stringify(provider)}, '-e', ${JSON.stringify(join(repo, "extensions/you-should-know/index.ts"))}, '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-tools', '--no-session', '--provider', 'ysk-smoke', '--model', 'fixture'], stdin=slave, stdout=slave, stderr=slave, cwd=${JSON.stringify(dir)}, env=env)
 os.close(slave)
 raw = b''
-def read_for(seconds):
+# Share one deadline within the existing 30-second process budget. Commands
+# follow observed readiness, not sleeps that can race a loaded host's startup.
+deadline = time.monotonic() + 25
+def read_until(needle, offset=0):
  global raw
- end = time.monotonic() + seconds
- while time.monotonic() < end:
+ while time.monotonic() < deadline:
+  if needle in raw[offset:].decode(errors='replace'): return True
   if select.select([master], [], [], .1)[0]:
    try: raw += os.read(master, 65536)
    except OSError: break
-read_for(2)
+ return False
+ready = read_until('YSK: on')
 before_show = ''
-for command in ['Run the fixture.', '/you-should-know show', '/you-should-know dismiss', '/you-should-know off', '/you-should-know on', '/you-should-know off']:
+for command, expected in [('Run the fixture.', '[caveat] Production-data verification is still missing.'), ('/you-should-know show', 'Source: The migration was not tested against production data.'), ('/you-should-know dismiss', 'Notes dismissed.'), ('/you-should-know off', 'You should know disabled.'), ('/you-should-know on', 'You should know enabled. Future assistant prose'), ('/you-should-know off', 'You should know disabled.')]:
+ if not ready: break
  if command == '/you-should-know show': before_show = raw.decode(errors='replace')
+ offset = len(raw)
  os.write(master, command.encode() + b'\\r')
- read_for(2)
+ ready = read_until(expected, offset)
 text = re.sub(r'\\x1b\\[[0-?]*[ -/]*[@-~]', '', raw.decode(errors='replace'))
 text = re.sub(r'\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)', '', text)
-checks = { 'default_on': 'YSK: on' in before_show, 'widget_before_show': 'earlier output (model notes)' in before_show and '[caveat] Production-data verification is still missing.' in before_show, 'quote': 'Source: The migration was not tested against production data.' in text, 'dismissed': 'Notes dismissed.' in text, 'disabled': 'You should know disabled.' in text }
+checks = { 'commands_confirmed': ready, 'default_on': 'YSK: on' in before_show, 'widget_before_show': 'earlier output (model notes)' in before_show and '[caveat] Production-data verification is still missing.' in before_show, 'quote': 'Source: The migration was not tested against production data.' in text, 'dismissed': 'Notes dismissed.' in text, 'disabled': 'You should know disabled.' in text }
 print(json.dumps(checks, indent=2))
 if not all(checks.values()): print(text)
 os.write(master, b'/quit\\r')

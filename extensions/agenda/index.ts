@@ -119,12 +119,16 @@ import { makeDurableSpawn, WorkerRegistry } from "./rpc-worker.ts";
 import { latestReport, REPORT_STATUSES, REPORT_TOOL } from "./rpc-protocol.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { newInstanceToken, resolveArtifactDir } from "../artifacts/store.ts";
 import { formatCost } from "../harness/usage.ts";
 import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { randomUUID } from "node:crypto";
 import { DurableRunRegistry, type DurableRunResult } from "./run-registry.ts";
+import { nodeResultText, pageText, renderRunResults, RESULT_PAGE_CHARS, selectableNodes } from "./run-output.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /**
  * Set in a spawned worker so a child never re-enters its own loop. Read once at
@@ -146,6 +150,29 @@ const WORKER_SEND_TOOL = "worker_send";
 
 /** Pull status or retained output for a background durable run. */
 const ORCHESTRATE_RESULT_TOOL = "orchestrate_result";
+
+/** What a background run's completion notification volunteers, unasked. */
+const NOTIFY_PAGE_CHARS = 6_000;
+
+/** Failures named one per line in a run's text; the rest are named on one line. */
+const FAILURES_LISTED = 10;
+
+/**
+ * The first page of a run's text, ending in a statement of what was shown and
+ * — when it is not everything — the calls that return the rest: the next page,
+ * or one node (the plan's LAST node is the example, usually its reconciler).
+ */
+function firstPage(runId: string, result: DurableRunResult, limit: number): string {
+	const paged = pageText(result.text, 0, limit, (next) => `orchestrate_result({id:"${runId}", offset:${next}})`);
+	if (paged.nextOffset === undefined) return `${paged.page}\n${paged.footer}`;
+	const ids = result.plan.nodes.map((node) => node.id);
+	const example = ids[ids.length - 1];
+	return (
+		`${paged.page}\n${paged.footer}\n` +
+		`One node's whole result: orchestrate_result({id:"${runId}", node:${JSON.stringify(example)}}) — node ids: ${ids.join(", ")} ` +
+		"(a fanout/pipeline element as <id>#<n>)."
+	);
+}
 
 /** Above this, a run asks before it starts. */
 const CONFIRM_ABOVE_AGENTS = 25;
@@ -599,7 +626,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "compact_schedule",
+		name: "compact_schedule", exposure: exposureFor("compact_schedule"),
 		label: "Schedule compaction",
 		description:
 			"Schedule a context compaction to run when this turn ends. Use when context is filling up and " +
@@ -815,7 +842,7 @@ export default function (pi: ExtensionAPI) {
 	// the registry is built — which is what session_start is, and what pi-lens
 	// already does (dist/index.js:78620-78633).
 	pi.registerTool({
-		name: WAKE_TOOL,
+		name: WAKE_TOOL, exposure: exposureFor(WAKE_TOOL),
 		label: "Loop wake",
 		description:
 			"Schedule when to resume work in a self-paced /loop. Call this before ending your turn to keep the loop alive; call it with stop:true to end the loop.",
@@ -956,7 +983,7 @@ export default function (pi: ExtensionAPI) {
 	 * is never silently replaced.
 	 */
 	pi.registerTool({
-		name: "goal_set",
+		name: "goal_set", exposure: exposureFor("goal_set"),
 		label: "Set goal",
 		description:
 			"Set a machine-checkable finish condition for the current work. A cheap judge evaluates it only when Pi reaches " +
@@ -1476,7 +1503,7 @@ export default function (pi: ExtensionAPI) {
 	 * It confirms receipt so the model does not retry, and nothing else.
 	 */
 	pi.registerTool({
-		name: REPORT_TOOL,
+		name: REPORT_TOOL, exposure: exposureFor(REPORT_TOOL),
 		label: "Report",
 		description: [
 			"Tell the orchestrator how this task is going, without waiting to finish.",
@@ -1517,7 +1544,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", () => syncReportTool());
 
 	pi.registerTool({
-		name: WORKER_SEND_TOOL,
+		name: WORKER_SEND_TOOL, exposure: exposureFor(WORKER_SEND_TOOL),
 		label: "Send to worker",
 		description: [
 			"Supervise a durable worker that is still running (requires caps.durable on the plan).",
@@ -1640,12 +1667,22 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: ORCHESTRATE_RESULT_TOOL,
+		name: ORCHESTRATE_RESULT_TOOL, exposure: exposureFor(ORCHESTRATE_RESULT_TOOL),
 		label: "Orchestration result",
-		description: "List background durable orchestration runs, or retrieve one run's retained status and full result by id.",
-		promptSnippet: "Read status or full output from a background durable orchestration run",
+		description:
+			"List this session's orchestration runs, or page through one run's retained result by id. " +
+			"`node` selects one node's result (a fanout/pipeline element as `<id>#<n>`); `offset`/`limit` page it. " +
+			"Every response ends by stating which characters it showed and the call that returns the rest.",
+		promptSnippet: "Read status or full output from an orchestration run, one node or one page at a time",
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Run id returned by orchestrate; omit to list runs." })),
+			node: Type.Optional(
+				Type.String({ description: "One node's result: a node id, or `<id>#<n>` for element n of a fanout/pipeline." }),
+			),
+			offset: Type.Optional(Type.Integer({ minimum: 0, description: "First character to show (default 0)." })),
+			limit: Type.Optional(
+				Type.Integer({ minimum: 1, description: `Characters per page (default ${RESULT_PAGE_CHARS}).` }),
+			),
 		}),
 		execute: async (_id, params) => {
 			if (IS_WORKER) {
@@ -1654,7 +1691,7 @@ export default function (pi: ExtensionAPI) {
 			if (!params.id) {
 				const records = runs.list();
 				const text = records.length === 0
-					? "No background orchestration runs."
+					? "No orchestration runs in this session."
 					: records.map((run) => `${run.id} — ${run.status} — ${run.name}`).join("\n");
 				return { content: [{ type: "text", text }], details: { runs: records } };
 			}
@@ -1663,7 +1700,33 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `No orchestration run "${params.id}".` }], details: null, isError: true };
 			}
 			if (run.result) {
-				return { content: [{ type: "text", text: run.result.text }], details: run.result.details };
+				const { plan, summary } = run.result;
+				let body = run.result.text;
+				if (params.node !== undefined) {
+					const one = nodeResultText(plan, summary, params.node);
+					if (one === undefined) {
+						return {
+							content: [{ type: "text", text: `No node "${params.node}" in run ${run.id}. Selectable: ${selectableNodes(plan, summary).join(", ")}.` }],
+							details: null,
+							isError: true,
+						};
+					}
+					body = one;
+				}
+				const nodeArg = params.node !== undefined ? `, node:${JSON.stringify(params.node)}` : "";
+				const paged = pageText(body, params.offset ?? 0, params.limit ?? RESULT_PAGE_CHARS, (next) =>
+					`orchestrate_result({id:"${run.id}"${nodeArg}, offset:${next}})`,
+				);
+				// Typed `unknown` like the run's own details: this tool's branches
+				// return differently shaped details, and the tool contract is one type.
+				const details: unknown = {
+					run_id: run.id,
+					...(params.node !== undefined ? { node: params.node } : {}),
+					page: paged.page,
+					total_chars: body.length,
+					...(paged.nextOffset !== undefined ? { next_offset: paged.nextOffset } : {}),
+				};
+				return { content: [{ type: "text", text: `${paged.page}\n${paged.footer}` }], details };
 			}
 			const text = run.error
 				? `Run ${run.id} failed: ${run.error}`
@@ -1708,6 +1771,17 @@ export default function (pi: ExtensionAPI) {
 
 			const runId = `run-${randomUUID()}`;
 			const cwd = ctx.cwd; // capture before a detached run can outlive this tool ctx
+			// Where an upstream result too large to inline into a dependent node's
+			// prompt is written (upstream.ts): this session's artifact store, in
+			// the order artifacts/store.ts owns. The test harness ctx carries no
+			// sessionManager, hence the optional chain.
+			const inputsDir = resolveArtifactDir({
+				envDir: process.env.PI_ARTIFACT_DIR,
+				sessionFile: ctx.sessionManager?.getSessionFile?.(),
+				tmpDir: tmpdir(),
+				pid: process.pid,
+				instanceToken: newInstanceToken(),
+			}).dir;
 			const caps = resolveCaps(plan.caps);
 			const executeRun = async (runSignal: AbortSignal | undefined): Promise<DurableRunResult> => {
 				const events: unknown[] = [];
@@ -1748,6 +1822,7 @@ export default function (pi: ExtensionAPI) {
 						plan,
 						spawn: caps.durable ? makeDurableSpawn(cwd, runId, workers) : makeSpawn(cwd, runId),
 						signal: runSignal,
+						inputsDir,
 						journal: (event) => {
 							events.push(event);
 							view = applyRunEvent(view, event);
@@ -1780,14 +1855,20 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (summary.failures.length > 0) {
 					lines.push(`${summary.failures.length} node(s) failed:`);
-					for (const failure of summary.failures.slice(0, 10)) lines.push(`  ${failure.nodeId}: ${failure.error}`);
+					for (const failure of summary.failures.slice(0, FAILURES_LISTED)) lines.push(`  ${failure.nodeId}: ${failure.error}`);
+					const unlisted = summary.failures.slice(FAILURES_LISTED);
+					if (unlisted.length > 0) {
+						lines.push(`  … and ${unlisted.length} more: ${unlisted.map((failure) => failure.nodeId).join(", ")}`);
+					}
 				}
-				lines.push("", "Results:", JSON.stringify(summary.results, null, 2).slice(0, 24_000));
+				// The WHOLE text, never pre-cut: callers page it (run-output.ts).
+				lines.push("", "Results:", renderRunResults(plan, summary));
 
 				return {
 					text: lines.join("\n"),
 					summary,
-					details: { summary, events, ...contextTreeEnvelope(view, summary.spentCost) },
+					plan,
+					details: { run_id: runId, summary, events, ...contextTreeEnvelope(view, summary.spentCost) },
 				};
 			};
 
@@ -1802,9 +1883,8 @@ export default function (pi: ExtensionAPI) {
 						if (!completed || completed.status === "canceled") return;
 						const notification = [
 							`Background orchestration ${runId} finished.`,
-							result.text.slice(0, 6_000),
-							result.text.length > 6_000 ? `\nFull output: orchestrate_result({id:"${runId}"}).` : "",
-						].filter(Boolean).join("\n");
+							firstPage(runId, result, NOTIFY_PAGE_CHARS),
+						].join("\n");
 						try {
 							pi.sendMessage(
 								{ customType: "orchestrate", content: notification, display: true, details: { run_id: runId, status: "done" } },
@@ -1834,8 +1914,28 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			const result = await executeRun(signal);
-			return { content: [{ type: "text", text: result.text }], details: result.details };
+			// Foreground runs are recorded too, so the page this result shows is
+			// not the only one reachable: `orchestrate_result` serves the rest.
+			const controller = new AbortController();
+			const forwardAbort = () => controller.abort();
+			if (signal?.aborted) controller.abort();
+			else signal?.addEventListener("abort", forwardAbort, { once: true });
+			runs.start(runId, plan.name, () => controller.abort());
+			let result: DurableRunResult;
+			try {
+				result = await executeRun(controller.signal);
+			} catch (error) {
+				runs.fail(runId, error);
+				throw error;
+			} finally {
+				signal?.removeEventListener("abort", forwardAbort);
+			}
+			runs.complete(runId, result);
+			runs.markNotified(runId);
+			return {
+				content: [{ type: "text", text: firstPage(runId, result, RESULT_PAGE_CHARS) }],
+				details: result.details,
+			};
 		},
 	});
 

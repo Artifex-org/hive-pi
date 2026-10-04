@@ -29,6 +29,7 @@ import {
 	type SearchResultItem,
 } from "./search.ts";
 import { assertPublicHttpUrl } from "./ssrf.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 const FETCH_TIMEOUT_MS = 20_000;
 const MAX_REDIRECTS = 5;
@@ -41,7 +42,7 @@ function text(body: string, details: unknown) {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
-		name: "web_search",
+		name: "web_search", exposure: exposureFor("web_search"),
 		label: "Web search",
 		description: [
 			"Search the web (Exa). Returns titles, URLs, dates and text snippets.",
@@ -111,7 +112,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "fetch_content",
+		name: "fetch_content", exposure: exposureFor("fetch_content"),
 		label: "Fetch page",
 		description: [
 			"Fetch a URL and return readable markdown (article-extracted HTML, PDFs, plain text/JSON).",

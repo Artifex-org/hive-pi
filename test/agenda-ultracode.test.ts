@@ -8,6 +8,9 @@
  * build and again on `/reload`.
  */
 
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Dispatch } from "../extensions/agenda/plan-graph.ts";
 import type { WorkerResult } from "../extensions/agenda/executor.ts";
@@ -367,6 +370,131 @@ describe("the orchestrate tool", () => {
 		);
 		expect(result.content[0].text).toContain("failed");
 		expect(result.content[0].text).toContain("exited 2");
+	});
+
+	/** A worker that answers each node with `outputs[nodeId-from-prompt]`. */
+	function answerBy(outputs: Record<string, string>) {
+		runRoleAgent.mockImplementation(async ({ prompt }: { prompt: string }) => {
+			const node = Object.keys(outputs).find((id) => prompt.startsWith(`do ${id}`)) ?? "";
+			return {
+				text: outputs[node] ?? `out ${node}`,
+				tokens: 1,
+				usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+				exitCode: 0,
+				timedOut: false,
+				stderr: "",
+			};
+		});
+	}
+
+	// Papercuts 2026-10-02T14:14, 10-02T22:5x, 10-03T00:1x: the result was
+	// `JSON.stringify(results).slice(0, 24_000)` — it "ended mid-string in
+	// reviews#2 ('disappe')", the reconciler's verdict past the cut was
+	// unreachable, and orchestrate_result took only an id.
+	it("never cuts the result silently: it says what was cut and pages the rest by node and offset", async () => {
+		const long = `BEGIN-REVIEW\n${"a finding that matters\n".repeat(1_500)}VERDICT: disappears without paging`;
+		answerBy({ review: long, reconcile: "RECONCILED: ship it" });
+		agenda(pi.api);
+
+		const result = await orchestrate().execute(
+			"paged",
+			{
+				name: "p",
+				description: "d",
+				nodes: [
+					{ id: "review", kind: "agent", role: "research", prompt: "do review", retries: 0 },
+					{ id: "reconcile", kind: "agent", role: "research", prompt: "do reconcile", retries: 0, needs: ["review"] },
+				],
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		const runId = result.details.run_id as string;
+		expect(runId).toMatch(/^run-/);
+		const shown = result.content[0].text;
+		expect(shown).toMatch(/showing characters 0–\d+ of \d+/);
+		expect(shown).toContain(`orchestrate_result({id:"${runId}", offset:`);
+		expect(shown).toContain('node:"reconcile"');
+
+		// One node, whole, across pages.
+		const pages: string[] = [];
+		let offset = 0;
+		for (let guard = 0; guard < 10; guard++) {
+			const page = await tool("orchestrate_result").execute("r", { id: runId, node: "review", offset, limit: 10_000 });
+			expect(page.isError).toBeFalsy();
+			pages.push(page.details.page as string);
+			if (page.details.next_offset === undefined) break;
+			offset = page.details.next_offset as number;
+		}
+		expect(pages.join("")).toBe(long);
+
+		const reconciled = await tool("orchestrate_result").execute("r", { id: runId, node: "reconcile" });
+		expect(reconciled.content[0].text).toContain("RECONCILED: ship it");
+		expect(reconciled.content[0].text).toContain("complete");
+	});
+
+	it("selects one element of a fanout by its slot id, and names the selectable ids for an unknown one", async () => {
+		runRoleAgent.mockImplementation(async ({ prompt }: { prompt: string }) => ({
+			text: prompt.startsWith("do reviews") ? `reviewed ${prompt.split(" ").at(-1)}` : prompt === "do a" ? "alpha" : "beta",
+			tokens: 1,
+			usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+			exitCode: 0,
+			timedOut: false,
+			stderr: "",
+		}));
+		agenda(pi.api);
+		const result = await orchestrate().execute(
+			"fan",
+			{
+				name: "p",
+				description: "d",
+				nodes: [
+					{ id: "a", kind: "agent", role: "research", prompt: "do a", retries: 0 },
+					{ id: "b", kind: "agent", role: "research", prompt: "do b", retries: 0 },
+					{ id: "files", kind: "barrier", needs: ["a", "b"] },
+					{ id: "reviews", kind: "fanout", over: "files", role: "research", prompt: "do reviews {item}", retries: 0 },
+				],
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		const runId = result.details.run_id as string;
+		const second = await tool("orchestrate_result").execute("r", { id: runId, node: "reviews#1" });
+		expect(second.content[0].text).toContain("reviewed beta");
+		expect(second.content[0].text).not.toContain("reviewed alpha");
+
+		const unknown = await tool("orchestrate_result").execute("r", { id: runId, node: "nope" });
+		expect(unknown.isError).toBe(true);
+		expect(unknown.content[0].text).toContain("reviews#0");
+		expect(unknown.content[0].text).toContain("files");
+	});
+
+	it("forwards an upstream result too large to inline as a file the dependent worker can read", async () => {
+		const store = mkdtempSync(join(tmpdir(), "hive-pi-orch-inputs-"));
+		vi.stubEnv("PI_ARTIFACT_DIR", store);
+		const big = `${"evidence line\n".repeat(3_000)}END-OF-EVIDENCE`;
+		answerBy({ evidence: big });
+		agenda(pi.api);
+		await orchestrate().execute(
+			"fwd",
+			{
+				name: "p",
+				description: "d",
+				nodes: [
+					{ id: "evidence", kind: "agent", role: "research", prompt: "do evidence", retries: 0 },
+					{ id: "reconcile", kind: "agent", role: "research", prompt: "do reconcile", retries: 0, needs: ["evidence"] },
+				],
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		const reconcilePrompt = runRoleAgent.mock.calls.map(([options]) => options.prompt as string).find((prompt) => prompt.startsWith("do reconcile"));
+		const file = /written in full to (\S+?) —/.exec(reconcilePrompt ?? "")?.[1];
+		expect(file?.startsWith(store), reconcilePrompt).toBe(true);
+		expect(readFileSync(file!, "utf8")).toBe(big);
 	});
 
 	it("refuses to nest — depth 1 only", async () => {

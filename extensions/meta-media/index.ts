@@ -18,6 +18,7 @@ import { Type } from "typebox";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { describeRequestBody, inferKind, reportHeader, type MediaKind } from "./logic.ts";
 import registerMetaProvider from "./provider-only.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 const DESCRIBE_TIMEOUT_MS = 4 * 60_000;
 
@@ -62,7 +63,7 @@ export default function metaMedia(pi: ExtensionAPI) {
 	// map (like fetch_content). Egress is governed server-side by /media/describe's
 	// trigger scope, not here.
 	pi.registerTool({
-		name: "watch_media",
+		name: "watch_media", exposure: exposureFor("watch_media"),
 		label: "Watch media",
 		promptSnippet: "Have a video-capable model watch a media URL and return a timeline, transcript and triage verdict",
 		description: [

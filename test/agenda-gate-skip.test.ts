@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import agenda from "../extensions/agenda/index.ts";
-import { gateStamp } from "../extensions/harness/verify.ts";
+import { treeStamp } from "../extensions/harness/verify.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 import { ensureBash } from "./bash-shim.ts";
 import { gitAvailable } from "./require-tools.ts";
@@ -87,10 +87,10 @@ describe.runIf(hasGit)("gate-skip on unchanged worktree", () => {
 		// Dirty BEFORE the first gate run: status shows ` M code.txt` both before
 		// and after the "fix" below — only the diff hash can tell them apart.
 		writeFileSync(join(cwd, "code.txt"), "still broken");
-		const before = await gateStamp(cwd);
+		const before = await treeStamp(cwd);
 
 		writeFileSync(join(cwd, "code.txt"), "fixed now");
-		const after = await gateStamp(cwd);
+		const after = await treeStamp(cwd);
 
 		expect(before).not.toBeNull();
 		expect(after).not.toBeNull();

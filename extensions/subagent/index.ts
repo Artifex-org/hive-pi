@@ -73,6 +73,7 @@ import {
 	diffStamp,
 	missingCitedPaths,
 	NO_CHANGE_ERROR,
+	treeStamp,
 	VERIFY_FOOTER,
 	writerMadeNoChange,
 } from "../harness/verify.ts";
@@ -100,7 +101,7 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
-import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, reviewTaskWithDiff } from "./reviewdiff.ts";
+import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, reviewScopeFiles, reviewTaskWithDiff } from "./reviewdiff.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -892,10 +893,10 @@ async function runSingleAgent(
 		// left to find it, a worker reviewed files that were not in the diff.
 		let effectiveTask = task;
 		if (isReviewRole(agent.name)) {
-			const diff = captureReviewDiff(executionCwd);
+			const diff = captureReviewDiff(executionCwd, task);
 			if (diff) {
-				effectiveTask = reviewTaskWithDiff(task, diff, executionCwd);
-				currentResult.reviewFiles = diff.files;
+				effectiveTask = reviewTaskWithDiff(task, diff);
+				currentResult.reviewFiles = reviewScopeFiles(diff);
 			}
 		}
 		args.push(`Task: ${effectiveTask}`);
@@ -905,7 +906,7 @@ async function runSingleAgent(
 		// Writer verification, free tier: stamp the tree before and after. A
 		// writer that "succeeded" without touching anything is folded to a
 		// failure — see harness/verify.ts.
-		const stampBefore = writerLock ? await diffStamp(executionCwd) : null;
+		const stampBefore = writerLock ? await treeStamp(executionCwd) : null;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
@@ -1044,7 +1045,7 @@ async function runSingleAgent(
 
 		currentResult.exitCode = exitCode;
 		if (wasAborted) throw new Error("Subagent was aborted");
-		if (writerLock && !isFailedResult(currentResult) && writerMadeNoChange(stampBefore, await diffStamp(executionCwd))) {
+		if (writerLock && !isFailedResult(currentResult) && writerMadeNoChange(stampBefore, await treeStamp(executionCwd))) {
 			currentResult.stopReason = "error";
 			currentResult.errorMessage = NO_CHANGE_ERROR;
 		}

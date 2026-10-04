@@ -63,6 +63,8 @@ export interface Capabilities {
 	 * `op_modes`: a server that predates the field receives today's body.
 	 */
 	can_set_fast?: boolean;
+	/** Scanner listener exists and transcript/status/spend controls are permitted. */
+	can_control_you_should_know?: boolean;
 	/** Receive teammate messages. The server refuses to enqueue a team_message
 	 *  to a client that did not declare it. */
 	can_message: boolean;
@@ -259,6 +261,8 @@ export interface AttachRequest extends Capabilities {
 export interface AttachResponse {
 	session_id: string;
 	last_seq: number;
+	/** Present (even false) only on servers that understand scanner snapshots. */
+	can_control_you_should_know?: boolean;
 }
 
 /**
@@ -415,6 +419,7 @@ export interface RemoteCommand {
 		| "team_message"
 		| "set_op_mode"
 		| "set_fast"
+		| "you_should_know"
 		| "plan_approve"
 		| "plan_grill"
 		| "question_answer"
