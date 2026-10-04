@@ -84,7 +84,8 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 			...state.notes.slice(-3).map(n => `[${n.kind}] ${n.text}`),
 		] : undefined);
 		ctx.ui.setStatus(KEY, !state.enabled ? undefined :
-			active ? "YSK: scanning…" : failure ? `YSK: scan failed · /you-should-know status` :
+			active ? "YSK: scanning…" : transportBusy ? "YSK: awaiting canceled provider · /you-should-know status" :
+			failure ? `YSK: scan failed · /you-should-know status` :
 			state.scans >= cfg.maxScans ? "YSK: scan budget reached" : `YSK: on · ${state.scans}/${cfg.maxScans}`);
 	};
 	const cancel = () => {
@@ -138,7 +139,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 			transportBusy = true;
 			const release = () => {
 				transportBusy = false;
-				try { if (latestCtx) schedule(latestCtx); } catch { /* replaced runtime */ }
+				try { if (latestCtx) { paint(latestCtx); schedule(latestCtx); } } catch { /* replaced runtime */ }
 			};
 			// Cancellation is provider-dependent. An abandoned request must settle
 			// before another starts, even across off/on or session replacement.
@@ -161,7 +162,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 				"scanner returned an invalid note", "scanner returned an invalid or ungrounded note",
 				"scanner could not finish its response", "scan canceled or timed out"];
 			const reason = error instanceof Error && known.includes(error.message) ? error.message : "provider request failed";
-			failure = `Scan failed: ${reason}; this excerpt was not checked. Future output can still be scanned.`;
+			failure = `Scan failed: ${reason}; this excerpt was not checked.`;
 			save();
 		} finally {
 			if (deadline) clearTimeout(deadline);
@@ -231,7 +232,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 					ctx.ui.notify(state.notes.length ? "Earlier output — model interpretations, not current verified blockers:\n\n" + state.notes.map(n => `[${n.kind}] ${n.text}\nSource: ${n.quote}`).join("\n\n") : "No notes. Silence does not mean the work was verified.");
 					return;
 				case "": case "status":
-					ctx.ui.notify(`You should know: ${state.enabled ? "on" : "off"} · ${state.scans}/${cfg.maxScans} scans · ${state.tokens} side-call tokens · $${state.cost.toFixed(4)} reported cost.\n${failure || "Only future assistant prose is scanned; no independent verification."}\n/you-should-know on | off | show | dismiss`);
+					ctx.ui.notify(`You should know: ${state.enabled ? "on" : "off"} · ${state.scans}/${cfg.maxScans} scans · ${state.tokens} side-call tokens · $${state.cost.toFixed(4)} reported cost.\n${failure || "Only future assistant prose is scanned; no independent verification."}${transportBusy && !active ? "\nFurther calls wait for the canceled provider request to settle." : ""}\n/you-should-know on | off | show | dismiss`);
 					return;
 				default: ctx.ui.notify("Usage: /you-should-know on | off | status | show | dismiss", "warning");
 			}

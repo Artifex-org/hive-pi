@@ -43,12 +43,14 @@ def read_for(seconds):
    try: raw += os.read(master, 65536)
    except OSError: break
 read_for(2)
+before_show = ''
 for command in ['/you-should-know on', 'Run the fixture.', '/you-should-know show', '/you-should-know dismiss', '/you-should-know off']:
+ if command == '/you-should-know show': before_show = raw.decode(errors='replace')
  os.write(master, command.encode() + b'\\r')
  read_for(2)
 text = re.sub(r'\\x1b\\[[0-?]*[ -/]*[@-~]', '', raw.decode(errors='replace'))
 text = re.sub(r'\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)', '', text)
-checks = { 'enabled': 'You should know enabled.' in text, 'widget': '[caveat] Production-data verification is still missing.' in text, 'quote': 'Source: The migration was not tested against production data.' in text, 'dismissed': 'Notes dismissed.' in text, 'disabled': 'You should know disabled.' in text }
+checks = { 'enabled': 'You should know enabled.' in text, 'widget_before_show': 'earlier output (model notes)' in before_show and '[caveat] Production-data verification is still missing.' in before_show, 'quote': 'Source: The migration was not tested against production data.' in text, 'dismissed': 'Notes dismissed.' in text, 'disabled': 'You should know disabled.' in text }
 print(json.dumps(checks, indent=2))
 if not all(checks.values()): print(text)
 os.write(master, b'/quit\\r')

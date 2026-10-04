@@ -93,6 +93,16 @@ describe("consent and delivery", () => {
 		expect(h.fake.notifications.at(-1)?.message).toContain(`Source: ${quote}`);
 		expect(h.fake.messages).toEqual([]); expect(h.fake.userMessages).toEqual([]); expect(h.fake.tools).toEqual([]);
 	});
+	it.each(["dismiss", "off"])("%s clears an already-visible widget", async command => {
+		const h = harness(); await prose(h.fake);
+		expect(h.fake.widgets.at(-1)?.lines?.join("\n")).toContain("earlier output (model notes)");
+		await h.fake.runCommand("you-should-know", command);
+		expect(h.fake.widgets.at(-1)?.cleared).toBe(true);
+		if (command === "off") {
+			await prose(h.fake); await vi.advanceTimersByTimeAsync(10_000);
+			expect(h.scanner).toHaveBeenCalledTimes(1);
+		}
+	});
 	it("routine progress produces no widget with a silent model verdict", async () => {
 		const h = harness(async () => reply('{"notes":[]}'));
 		await prose(h.fake, "Reading the files and checking the test names.");
@@ -144,8 +154,9 @@ describe("asynchronous lifecycle", () => {
 	it("hard timeout works even when provider ignores the signal, without retry", async () => {
 		const h = harness(vi.fn<Scanner>(() => new Promise<AssistantMessage>(() => {}))); await prose(h.fake);
 		await vi.advanceTimersByTimeAsync(501);
-		expect(h.fake.statuses.at(-1)?.text).toContain("failed");
+		expect(h.fake.statuses.at(-1)?.text).toContain("awaiting canceled provider");
 		await h.fake.runCommand("you-should-know", "status");
+		expect(h.fake.notifications.at(-1)?.message).toContain("Further calls wait");
 		expect(h.fake.notifications.at(-1)?.message).toContain("not checked");
 		await h.fake.runCommand("you-should-know", "off");
 		await h.fake.runCommand("you-should-know", "on");
@@ -194,6 +205,7 @@ describe("asynchronous lifecycle", () => {
 			sessionId: "another-session", branch: [{ type: "custom", ...saved }],
 		});
 		await prose(h.fake, quote, { sessionId: "another-session" });
+		await vi.advanceTimersByTimeAsync(10_000);
 		expect(h.scanner).not.toHaveBeenCalled();
 		await h.fake.runCommand("you-should-know", "status");
 		expect(h.fake.notifications.at(-1)?.message).toContain("off");
