@@ -33,7 +33,7 @@ export interface ReviewDiff {
 	/** Tracked changed paths, relative to the repo root, as `git diff --name-only` prints them. */
 	files: string[];
 	/**
-	 * New files git does not track yet (`ls-files --others --exclude-standard`).
+	 * New files git does not track yet (`??` in status: not ignored).
 	 * `git diff HEAD` never lists them, and new files are routinely the bulk of
 	 * a change: a review handed only the tracked list declared the new
 	 * implementation "not among the files authorized for this review".
@@ -59,9 +59,21 @@ export const UNTRACKED_LIST_CAP = 100;
 
 export type GitRunner = (args: string[], cwd: string) => string | null;
 
+/**
+ * Every git read here is LOCK-FREE, and this runner is the one place that is
+ * guaranteed. `--no-optional-locks` (inlined: the shared constant in
+ * hive-common/git.ts lands with a separate PR) stops `git status` writing back
+ * a refreshed index; the harness runs these beside the agent's own `git add` /
+ * `git commit`, and a status killed mid-refresh leaves a stale `index.lock`
+ * that fails them. `git diff HEAD` rewrites the index EVEN WITH that flag, so
+ * the working-tree diff is `diff-index -p HEAD` (never touches the index) and
+ * the changed-file list comes from status, which refreshes in memory only.
+ */
+const LOCK_FREE = "--no-optional-locks";
+
 const runGit: GitRunner = (args, cwd) => {
 	try {
-		return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
+		return execFileSync("git", [LOCK_FREE, ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
 	} catch {
 		return null;
 	}
@@ -101,12 +113,15 @@ export function reviewRepoFor(cwd: string, task: string, git: GitRunner = runGit
 export function captureReviewDiff(cwd: string, task: string, git: GitRunner = runGit): ReviewDiff | null {
 	const repo = reviewRepoFor(cwd, task, git);
 	if (repo === null) return null;
-	const working = git(["diff", "HEAD", "--name-only"], repo);
-	if (working === null) return null;
-	let files = splitLines(working);
-	const untracked = splitLines(git(["ls-files", "--others", "--exclude-standard", "--full-name"], repo) ?? "");
+	// Status, not `diff-index --name-only`: diff-index compares raw stat data
+	// and lists a file whose mtime moved but whose bytes did not.
+	const status = git(["status", "--porcelain", "-z", "--untracked-files=all"], repo);
+	if (status === null) return null;
+	const changed = parseStatusZ(status);
+	let files = changed.tracked;
+	const untracked = changed.untracked;
 	let scope: ReviewDiff["scope"] = "working tree vs HEAD";
-	let range = ["diff", "HEAD"];
+	let range = ["diff-index", "-p", "HEAD"];
 	if (files.length === 0) {
 		// No tracked edit: a committed change, the branch against where it left
 		// its base — even with a stray untracked file lying around, which must
@@ -130,6 +145,27 @@ export function captureReviewDiff(cwd: string, task: string, git: GitRunner = ru
 		.map((path) => (isAbsolute(path) && !relative(repo, path).startsWith("..") ? relative(repo, path) : path))
 		.filter((path) => !known.some((file) => samePath(file, path)));
 	return { repo, files, untracked, callerNamed, text, scope, truncatedBytes: Math.max(0, bytes - Buffer.byteLength(text, "utf8")) };
+}
+
+/**
+ * Split `status --porcelain -z` into tracked changes and untracked files,
+ * paths relative to the repo root. A rename/copy entry carries its ORIGINAL
+ * path as the next NUL field, which is skipped.
+ */
+export function parseStatusZ(out: string): { tracked: string[]; untracked: string[] } {
+	const tracked: string[] = [];
+	const untracked: string[] = [];
+	const fields = out.split("\0");
+	for (let i = 0; i < fields.length; i++) {
+		const entry = fields[i];
+		if (entry.length < 4) continue;
+		const code = entry.slice(0, 2);
+		const path = entry.slice(3);
+		if (code === "??") untracked.push(path);
+		else if (code !== "!!") tracked.push(path);
+		if (code[0] === "R" || code[0] === "C" || code[1] === "R" || code[1] === "C") i++;
+	}
+	return { tracked, untracked };
 }
 
 function branchChange(repo: string, git: GitRunner): { files: string[]; range: string[] } | null {

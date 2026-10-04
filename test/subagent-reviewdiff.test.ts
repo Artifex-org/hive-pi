@@ -13,6 +13,7 @@ import {
 	DIFF_CAP_BYTES,
 	isReviewRole,
 	outsideDiffWarning,
+	parseStatusZ,
 	reviewScopeFiles,
 	reviewTaskWithDiff,
 	type GitRunner,
@@ -40,7 +41,7 @@ describe("captureReviewDiff", () => {
 		const diff = captureReviewDiff(
 			"/repo",
 			"Review the current diff.",
-			git({ "rev-parse --show-toplevel": "/repo\n", "diff HEAD --name-only": "a/b.py\nc.ts\n", "diff HEAD": "--- a/a/b.py\n+++ b/a/b.py\n+x\n" }),
+			git({ "rev-parse --show-toplevel": "/repo\n", "status --porcelain -z --untracked-files=all": " M a/b.py\0 M c.ts\0", "diff-index -p HEAD": "--- a/a/b.py\n+++ b/a/b.py\n+x\n" }),
 		);
 		expect(diff).toEqual({
 			repo: "/repo",
@@ -56,7 +57,7 @@ describe("captureReviewDiff", () => {
 	it("falls back to the branch against its base when the tree is clean, and only when the remote names a HEAD", () => {
 		const scripted = {
 			"rev-parse --show-toplevel": "/repo\n",
-			"diff HEAD --name-only": "",
+			"status --porcelain -z --untracked-files=all": "",
 			"symbolic-ref --short refs/remotes/origin/HEAD": "origin/feature\n",
 			"merge-base HEAD origin/feature": "abc123\n",
 			"diff abc123...HEAD --name-only": "x.go\n",
@@ -66,7 +67,7 @@ describe("captureReviewDiff", () => {
 		expect(captureReviewDiff("/repo", "Review.", git(scripted))?.files).toEqual(["x.go"]);
 		// No published HEAD: guessing `main` on a repo whose default is `feature`
 		// would diff against the wrong branch, so: nothing.
-		expect(captureReviewDiff("/repo", "Review.", git({ "rev-parse --show-toplevel": "/repo\n", "diff HEAD --name-only": "" }))).toBeNull();
+		expect(captureReviewDiff("/repo", "Review.", git({ "rev-parse --show-toplevel": "/repo\n", "status --porcelain -z --untracked-files=all": "" }))).toBeNull();
 	});
 
 	it("is null outside a repo", () => {
@@ -75,7 +76,7 @@ describe("captureReviewDiff", () => {
 
 	it("caps the diff and says how much was cut", () => {
 		const big = "+".repeat(DIFF_CAP_BYTES + 500);
-		const diff = captureReviewDiff("/repo", "review", git({ "rev-parse --show-toplevel": "/repo\n", "diff HEAD --name-only": "f.ts", "diff HEAD": big }));
+		const diff = captureReviewDiff("/repo", "review", git({ "rev-parse --show-toplevel": "/repo\n", "status --porcelain -z --untracked-files=all": " M f.ts\0", "diff-index -p HEAD": big }));
 		expect(diff?.truncatedBytes).toBe(500);
 		expect(reviewTaskWithDiff("review", diff!)).toContain("diff truncated: 500 bytes omitted");
 	});
@@ -157,9 +158,8 @@ function gitAt(answers: Record<string, string | null>): GitRunner {
 describe("the review scope never narrows what the caller asked for", () => {
 	const repo = {
 		"/repo: rev-parse --show-toplevel": "/repo\n",
-		"/repo: diff HEAD --name-only": "src/App.tsx\n",
-		"/repo: ls-files --others --exclude-standard --full-name": "src/timeframe.ts\nsrc/TimeframeSelect.tsx\n",
-		"/repo: diff HEAD": "+app\n",
+		"/repo: status --porcelain -z --untracked-files=all": " M src/App.tsx\0?? src/timeframe.ts\0?? src/TimeframeSelect.tsx\0",
+		"/repo: diff-index -p HEAD": "+app\n",
 	};
 
 	it("hands over untracked new files with the tracked change", () => {
@@ -174,7 +174,7 @@ describe("the review scope never narrows what the caller asked for", () => {
 		const diff = captureReviewDiff(
 			"/repo",
 			"Review.",
-			gitAt({ ...repo, "/repo: diff HEAD --name-only": "", "/repo: diff HEAD": "" }),
+			gitAt({ ...repo, "/repo: status --porcelain -z --untracked-files=all": "?? src/timeframe.ts\0?? src/TimeframeSelect.tsx\0", "/repo: diff-index -p HEAD": "" }),
 		);
 		expect(diff?.scope).toBe("working tree vs HEAD");
 		expect(reviewScopeFiles(diff!)).toEqual(["src/timeframe.ts", "src/TimeframeSelect.tsx"]);
@@ -199,11 +199,10 @@ describe("the review scope never narrows what the caller asked for", () => {
 			task,
 			gitAt({
 				"/tooling: rev-parse --show-toplevel": "/tooling\n",
-				"/tooling: diff HEAD --name-only": "tools/unrelated.py\n",
+				"/tooling: status --porcelain -z --untracked-files=all": " M tools/unrelated.py\0",
 				"/home/x/projects/fork/scripts: rev-parse --show-toplevel": "/home/x/projects/fork\n",
-				"/home/x/projects/fork: diff HEAD --name-only": "",
-				"/home/x/projects/fork: ls-files --others --exclude-standard --full-name": "scripts/apply_light.py\n",
-				"/home/x/projects/fork: diff HEAD": "",
+				"/home/x/projects/fork: status --porcelain -z --untracked-files=all": "?? scripts/apply_light.py\0",
+				"/home/x/projects/fork: diff-index -p HEAD": "",
 			}),
 		);
 		expect(diff?.repo).toBe("/home/x/projects/fork");
@@ -216,8 +215,7 @@ describe("the review scope never narrows what the caller asked for", () => {
 			"Review the branch.",
 			gitAt({
 				"/repo: rev-parse --show-toplevel": "/repo\n",
-				"/repo: diff HEAD --name-only": "",
-				"/repo: ls-files --others --exclude-standard --full-name": ".playwright-mcp/shot.png\n",
+				"/repo: status --porcelain -z --untracked-files=all": "?? .playwright-mcp/shot.png\0",
 				"/repo: symbolic-ref --short refs/remotes/origin/HEAD": "origin/main\n",
 				"/repo: merge-base HEAD origin/main": "abc\n",
 				"/repo: diff abc...HEAD --name-only": "src/real.ts\n",
@@ -234,9 +232,8 @@ describe("the review scope never narrows what the caller asked for", () => {
 			"/repo: rev-parse --show-toplevel": "/repo\n",
 			"/repo/src: rev-parse --show-toplevel": "/repo\n",
 			"/home/x/kb: rev-parse --show-toplevel": "/home/x/kb\n",
-			"/repo: diff HEAD --name-only": "src/x.ts\n",
-			"/repo: ls-files --others --exclude-standard --full-name": "",
-			"/repo: diff HEAD": "+x\n",
+			"/repo: status --porcelain -z --untracked-files=all": " M src/x.ts\0",
+			"/repo: diff-index -p HEAD": "+x\n",
 		};
 		const scratch = captureReviewDiff("/repo", "Review /repo/src/x.ts per /tmp/scratch/notes.md.", gitAt(answers));
 		expect(scratch?.repo).toBe("/repo");
@@ -247,7 +244,7 @@ describe("the review scope never narrows what the caller asked for", () => {
 	it("does not scope at all when the named files are in no repo (a non-git model workspace)", () => {
 		const task = "Review /home/x/projects/portdelaselva/model.py.";
 		expect(
-			captureReviewDiff("/tooling", task, gitAt({ "/tooling: rev-parse --show-toplevel": "/tooling\n", "/tooling: diff HEAD --name-only": "tools/unrelated.py\n" })),
+			captureReviewDiff("/tooling", task, gitAt({ "/tooling: rev-parse --show-toplevel": "/tooling\n", "/tooling: status --porcelain -z --untracked-files=all": " M tools/unrelated.py\0" })),
 		).toBeNull();
 	});
 });
@@ -261,5 +258,14 @@ describe("an unignored build directory does not become the prompt", () => {
 		expect(text).not.toContain(`- dist/chunk-${UNTRACKED_LIST_CAP}.js`);
 		expect(text).toContain("7 more untracked file(s) not listed");
 		expect(text).not.toContain("```diff");
+	});
+});
+
+describe("parseStatusZ", () => {
+	it("splits tracked from untracked and skips a rename's original path", () => {
+		expect(parseStatusZ(" M a.ts\0R  new.ts\0old.ts\0A  b.ts\0?? c.ts\0")).toEqual({
+			tracked: ["a.ts", "new.ts", "b.ts"],
+			untracked: ["c.ts"],
+		});
 	});
 });

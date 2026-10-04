@@ -57,10 +57,13 @@ function gitOutput(cwd: string, args: string[]): Promise<string | null> {
 }
 
 /**
- * Every git call here is lock-free: `--no-optional-locks` stops `git status`
- * from opportunistically rewriting the index. These run around (and during)
- * other agents' work in the same worktree, and an index refresh is exactly the
- * background `index.lock` a concurrent `git add`/`commit` then trips over.
+ * Every git call here is lock-free, and must stay so: `gitOutput` SIGKILLs a
+ * call that overruns its timeout, and a `git status` killed mid-refresh leaves
+ * a stale `index.lock` that fails the agent's next `git add`/`commit` (20 of 20
+ * reproductions). `--no-optional-locks` stops status writing the index; the
+ * tracked diff is `diff-index`, because `git diff HEAD` writes it regardless.
+ * Inlined rather than imported: the shared constant in hive-common/git.ts
+ * arrives with a separate PR.
  */
 const LOCK_FREE = "--no-optional-locks";
 
@@ -89,7 +92,7 @@ export function diffStamp(cwd: string): Promise<string | null> {
  *      file inside an untracked directory listed individually. The default
  *      collapses a whole new directory to `?? dir/`, so a writer adding a file
  *      inside it changed nothing the stamp could see.
- *   2. a hash of `git diff HEAD` — tracked content, staged and unstaged. An edit
+ *   2. a hash of `git diff-index -p HEAD` — tracked content, staged and unstaged. An edit
  *      to an ALREADY-modified file leaves the status line ` M a.ts` unchanged.
  *   3. size + mtime of every untracked, non-ignored file — an edit to an
  *      ALREADY-untracked file changes neither the status nor the diff. Metadata
@@ -103,7 +106,10 @@ export function diffStamp(cwd: string): Promise<string | null> {
 export async function treeStamp(cwd: string): Promise<string | null> {
 	const [status, diff, root] = await Promise.all([
 		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
-		gitOutput(cwd, [LOCK_FREE, "diff", "HEAD"]),
+		// `diff-index`, never `diff HEAD`: the latter rewrites a stat-dirty
+		// index even under --no-optional-locks. diff-index reads the index and
+		// the working tree and writes nothing (a stat-only change patches empty).
+		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"]),
 		// Porcelain paths are relative to the repo ROOT, not to cwd.
 		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"]),
 	]);
