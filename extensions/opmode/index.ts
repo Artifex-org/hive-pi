@@ -292,9 +292,25 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	const restoreTools = () => {
+	/**
+	 * `keepModeTools`: the root-cause unlock restores the editors while the mode
+	 * is still bugfix, and the protocol's last phase (`bugfix_evidence
+	 * {phase:"reverify"}`) still needs the evidence tool. They are deferred, so
+	 * a restore that dropped them would leave that phase uncallable.
+	 */
+	const restoreTools = (keepModeTools = false) => {
 		try {
-			if (toolsBeforeMode) pi.setActiveTools(restoredLoadout(toolsBeforeMode, pi.getActiveTools(), OP_MODE_TOOLS));
+			if (toolsBeforeMode) {
+				const restored = restoredLoadout(toolsBeforeMode, pi.getActiveTools(), OP_MODE_TOOLS);
+				pi.setActiveTools(keepModeTools ? [...new Set([...restored, ...OP_MODE_TOOLS])] : restored);
+			} else if (!keepModeTools) {
+				// Leaving bugfix after the unlock: the snapshot is already spent,
+				// and only the mode tools the unlock kept are left to withdraw.
+				const current = pi.getActiveTools();
+				if (current.some((name) => OP_MODE_TOOLS.includes(name))) {
+					pi.setActiveTools(current.filter((name) => !OP_MODE_TOOLS.includes(name)));
+				}
+			}
 		} catch {
 			/* nothing to restore into */
 		} finally {
@@ -483,8 +499,9 @@ export default function (pi: ExtensionAPI) {
 			// set from the whole registry and activate tools that were deliberately
 			// inactive before this mode — agenda's consent-gated `orchestrate` is
 			// the one that has already been resurrected this way once. The snapshot
-			// is exactly the set that was live before bugfix withheld the editors.
-			restoreTools();
+			// is exactly the set that was live before bugfix withheld the editors,
+			// plus this mode's own tools: the reverify phase is still ahead.
+			restoreTools(true);
 			paint();
 			return text(
 				`Root cause recorded — file edits are unlocked.\n\n` +

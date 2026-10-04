@@ -262,11 +262,10 @@ describe("/loop command", () => {
 });
 
 describe("agenda_wake tool activation", () => {
-	it("is registered deferred, so registration does not activate it, and session_start keeps it out", async () => {
+	it("is registered, but pi force-activates it — so session_start must remove it", async () => {
 		agenda(pi.api);
-		// The loadout policy defers it: pi activates only `direct` registrations.
-		expect(pi.tools.map((t) => t.name)).toContain("agenda_wake");
-		expect(pi.activeTools).not.toContain("agenda_wake");
+		// pi activates every registered extension tool at session build.
+		expect(pi.activeTools).toContain("agenda_wake");
 
 		await pi.emit({ type: "session_start", reason: "startup" });
 		expect(pi.activeTools).not.toContain("agenda_wake");

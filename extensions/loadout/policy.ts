@@ -18,11 +18,20 @@
  * A deferred tool is still:
  *   - callable from `codemode` scripts, active or not (pi's contract);
  *   - activated by naming it in a role's `tools:` list or `--tools`;
- *   - found by `tool_search` (the `loadout` extension lists the names in the
- *     system prompt, so the model searches for an exact name, not a guess).
+ *   - loaded by exact name with the `loadout` extension's `load_tools`, whose
+ *     system-prompt section lists the names. (`tool_search` ranks with BM25:
+ *     measured, `artifact_read` loads `artifact_list` first.)
  *
- * Mode tools (plan, bugfix) are deferred too: the mode activates them when it
- * starts. Outside the mode they would be dead weight on every request.
+ * Two kinds of tool must NOT be deferred, because deferring is not "hidden":
+ *   - GATED tools, which their owner keeps inactive until consent. Their only
+ *     gate is the active set, and a deferred tool is callable from codemode
+ *     and loadable whether active or not — deferring `orchestrate` would let a
+ *     script start a worker fleet without /ultracode.
+ *   - tools the harness tells the model to call at a moment it cannot search
+ *     first (a reply, a status update during execution).
+ *
+ * Mode tools are deferred and their mode activates them: bugfix's for the
+ * mode, `plan_write` for as long as a plan exists.
  */
 
 import type { ToolExposure } from "@earendil-works/pi-coding-agent";
@@ -59,6 +68,23 @@ export const DIRECT_TOOLS: Readonly<Record<string, string>> = {
 	handoff: "60 calls; how a session ends cleanly",
 	ask_user_question: "51 calls; asking must never depend on a search succeeding",
 	report: "a worker's only channel back to its parent",
+	plan_ready: "plan approval; Hive build-mode sessions call it outside plan mode",
+	plan_ask: "plan-mode questions; 600 characters",
+	agmsg_send: "the harness says 'Reply with agmsg_send' when a message arrives",
+	load_tools: "how the model loads every deferred tool by exact name",
+};
+
+/**
+ * Registered `direct` and kept INACTIVE by their owner until the operator
+ * consents (/ultracode, a self-paced /loop). Their gate is the active set, so
+ * they must never be `deferred`. Not counted against the declared budget: by
+ * default nobody declares them.
+ */
+export const GATED_TOOLS: Readonly<Record<string, string>> = {
+	orchestrate: "agenda: /ultracode consent",
+	worker_send: "agenda: /ultracode consent",
+	orchestrate_result: "agenda: /ultracode consent",
+	agenda_wake: "agenda: a self-paced /loop",
 };
 
 /**
@@ -66,15 +92,13 @@ export const DIRECT_TOOLS: Readonly<Record<string, string>> = {
  * conformance test can tell a mode tool from one that was simply forgotten.
  */
 export const MODE_TOOLS: Readonly<Record<string, string>> = {
-	plan_write: "plan mode (14k-character schema; the largest single definition)",
-	plan_ask: "plan mode",
-	plan_ready: "plan mode",
+	plan_write: "plan mode, and while a plan exists (14k-character schema; the largest single definition)",
 	bugfix_evidence: "bugfix mode",
 	bugfix_root_cause: "bugfix mode",
 };
 
 export function exposureFor(name: string): ToolExposure {
-	return name in DIRECT_TOOLS ? "direct" : "deferred";
+	return name in DIRECT_TOOLS || name in GATED_TOOLS ? "direct" : "deferred";
 }
 
 /**

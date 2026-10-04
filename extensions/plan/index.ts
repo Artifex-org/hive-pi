@@ -87,6 +87,7 @@ import {
 	toEntry,
 	type PlanDoc,
 	type PlanOp,
+	hasPlan,
 } from "./state.ts";
 import { exposureFor, restoredLoadout } from "../loadout/policy.ts";
 
@@ -633,7 +634,29 @@ export default function (pi: ExtensionAPI) {
 	 * reason they are left out of the counts: a delivery lane's five pending
 	 * observations are not five things to do next.
 	 */
+	/**
+	 * `plan_write` is deferred (its 14k-character schema is the largest
+	 * definition in the harness) and declared exactly while it is useful: in
+	 * plan mode, and while a plan exists — approval tells the model to keep step
+	 * status current with it, which it cannot do with a tool it cannot see.
+	 * Runs from `paint`, which every doc and mode change already reaches.
+	 * Changes the active set only on a real transition, because each change
+	 * re-declares tools to the provider.
+	 */
+	const syncPlanWrite = () => {
+		try {
+			const want = active || hasPlan(doc);
+			const current = pi.getActiveTools();
+			const has = current.includes("plan_write");
+			if (want && !has) pi.setActiveTools([...current, "plan_write"]);
+			else if (!want && has) pi.setActiveTools(current.filter((name) => name !== "plan_write"));
+		} catch {
+			/* tool introspection unavailable before the session exists */
+		}
+	};
+
 	const paint = () => {
+		syncPlanWrite();
 		try {
 			const lane = currentLane(doc) ?? targetLane(doc);
 			const rows = (lane?.steps ?? [])
