@@ -125,6 +125,7 @@ import { registerGuardedTool } from "../guards-common/capability.ts";
 import { randomUUID } from "node:crypto";
 import { DurableRunRegistry, type DurableRunResult } from "./run-registry.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /**
  * Set in a spawned worker so a child never re-enters its own loop. Read once at
@@ -599,7 +600,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "compact_schedule",
+		name: "compact_schedule", exposure: exposureFor("compact_schedule"),
 		label: "Schedule compaction",
 		description:
 			"Schedule a context compaction to run when this turn ends. Use when context is filling up and " +
@@ -815,7 +816,7 @@ export default function (pi: ExtensionAPI) {
 	// the registry is built — which is what session_start is, and what pi-lens
 	// already does (dist/index.js:78620-78633).
 	pi.registerTool({
-		name: WAKE_TOOL,
+		name: WAKE_TOOL, exposure: exposureFor(WAKE_TOOL),
 		label: "Loop wake",
 		description:
 			"Schedule when to resume work in a self-paced /loop. Call this before ending your turn to keep the loop alive; call it with stop:true to end the loop.",
@@ -956,7 +957,7 @@ export default function (pi: ExtensionAPI) {
 	 * is never silently replaced.
 	 */
 	pi.registerTool({
-		name: "goal_set",
+		name: "goal_set", exposure: exposureFor("goal_set"),
 		label: "Set goal",
 		description:
 			"Set a machine-checkable finish condition for the current work. A cheap judge evaluates it only when Pi reaches " +
@@ -1476,7 +1477,7 @@ export default function (pi: ExtensionAPI) {
 	 * It confirms receipt so the model does not retry, and nothing else.
 	 */
 	pi.registerTool({
-		name: REPORT_TOOL,
+		name: REPORT_TOOL, exposure: exposureFor(REPORT_TOOL),
 		label: "Report",
 		description: [
 			"Tell the orchestrator how this task is going, without waiting to finish.",
@@ -1517,7 +1518,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", () => syncReportTool());
 
 	pi.registerTool({
-		name: WORKER_SEND_TOOL,
+		name: WORKER_SEND_TOOL, exposure: exposureFor(WORKER_SEND_TOOL),
 		label: "Send to worker",
 		description: [
 			"Supervise a durable worker that is still running (requires caps.durable on the plan).",
@@ -1640,7 +1641,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: ORCHESTRATE_RESULT_TOOL,
+		name: ORCHESTRATE_RESULT_TOOL, exposure: exposureFor(ORCHESTRATE_RESULT_TOOL),
 		label: "Orchestration result",
 		description: "List background durable orchestration runs, or retrieve one run's retained status and full result by id.",
 		promptSnippet: "Read status or full output from a background durable orchestration run",

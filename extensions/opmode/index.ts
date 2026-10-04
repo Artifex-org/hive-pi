@@ -37,6 +37,7 @@ import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "
 import { classifyCommand, classifyDiscussionTool, classifyOrchestrateCommand, classifyOrchestrateTool } from "../plan/policy.ts";
 import { BUGFIX_WITHHELD_TOOLS, DEFAULT_OP_MODE, isOpMode, OP_MODES, OP_MODE_ENFORCES, type OpMode } from "./modes.ts";
 import { buildOpModePrompt } from "./prompt.ts";
+import { exposureFor, restoredLoadout } from "../loadout/policy.ts";
 
 /** Tools this extension owns; they stay callable in every mode it gates. */
 const OP_MODE_TOOLS = ["bugfix_evidence", "bugfix_root_cause"];
@@ -278,23 +279,38 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const narrowTools = () => {
 		try {
-			const all = pi.getAllTools().map((tool) => tool.name);
 			// Snapshot the ACTIVE set, not the registry: restoring from getAllTools()
 			// resurrects tools other extensions keep deliberately inactive — the bug
 			// plan/index.ts hit with agenda's consent-gated `orchestrate`.
 			if (toolsBeforeMode === null) toolsBeforeMode = pi.getActiveTools();
 			// Empty MCP parameters mean a read-only status query and let the gateway
 			// remain visible; actual calls are classified again with their input.
-			const permitted = all.filter((name) => toolVerdict(name, {}).allowed);
+			const permitted = pi.getActiveTools().filter((name) => toolVerdict(name, {}).allowed);
 			pi.setActiveTools([...new Set([...permitted, ...OP_MODE_TOOLS])]);
 		} catch {
 			/* tool introspection unavailable; the deny hook still enforces */
 		}
 	};
 
-	const restoreTools = () => {
+	/**
+	 * `keepModeTools`: the root-cause unlock restores the editors while the mode
+	 * is still bugfix, and the protocol's last phase (`bugfix_evidence
+	 * {phase:"reverify"}`) still needs the evidence tool. They are deferred, so
+	 * a restore that dropped them would leave that phase uncallable.
+	 */
+	const restoreTools = (keepModeTools = false) => {
 		try {
-			if (toolsBeforeMode) pi.setActiveTools(toolsBeforeMode);
+			if (toolsBeforeMode) {
+				const restored = restoredLoadout(toolsBeforeMode, pi.getActiveTools(), OP_MODE_TOOLS);
+				pi.setActiveTools(keepModeTools ? [...new Set([...restored, ...OP_MODE_TOOLS])] : restored);
+			} else if (!keepModeTools) {
+				// Leaving bugfix after the unlock: the snapshot is already spent,
+				// and only the mode tools the unlock kept are left to withdraw.
+				const current = pi.getActiveTools();
+				if (current.some((name) => OP_MODE_TOOLS.includes(name))) {
+					pi.setActiveTools(current.filter((name) => !OP_MODE_TOOLS.includes(name)));
+				}
+			}
 		} catch {
 			/* nothing to restore into */
 		} finally {
@@ -395,7 +411,7 @@ export default function (pi: ExtensionAPI) {
 	/* ---------------------------------------------------------------------- */
 
 	pi.registerTool({
-		name: "bugfix_evidence",
+		name: "bugfix_evidence", exposure: exposureFor("bugfix_evidence"),
 		label: "Record bugfix evidence",
 		description: `Bind a bugfix phase to a completed tool result. The phases run in one order: ${PHASE_ORDER}. The tool-call id must name an actual result from this session; reproduction_key is required by the reproduce and reverify phases, the same value on both, which is what binds one failing baseline to a distinct passing re-verification. If you do not know the id, call with the phase alone — the refusal lists the recent result ids to pass.`,
 		parameters: Type.Object({
@@ -446,7 +462,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "bugfix_root_cause",
+		name: "bugfix_root_cause", exposure: exposureFor("bugfix_root_cause"),
 		label: "Record root cause",
 		description:
 			"Record the root cause of the bug under investigation, with the evidence that establishes it. " +
@@ -483,8 +499,9 @@ export default function (pi: ExtensionAPI) {
 			// set from the whole registry and activate tools that were deliberately
 			// inactive before this mode — agenda's consent-gated `orchestrate` is
 			// the one that has already been resurrected this way once. The snapshot
-			// is exactly the set that was live before bugfix withheld the editors.
-			restoreTools();
+			// is exactly the set that was live before bugfix withheld the editors,
+			// plus this mode's own tools: the reverify phase is still ahead.
+			restoreTools(true);
 			paint();
 			return text(
 				`Root cause recorded — file edits are unlocked.\n\n` +

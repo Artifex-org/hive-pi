@@ -46,6 +46,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { resolveAuth } from "./hive-common/identity.ts";
 import { callMcpTool } from "./hive-common/mcp.ts";
+import { exposureFor } from "./loadout/policy.ts";
 
 /** Generous: a knowledge search crosses the tailnet and fans out server-side. */
 const TIMEOUT_MS = 45_000;
@@ -86,7 +87,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerTool({
-		name: "knowledge_search",
+		name: "knowledge_search", exposure: exposureFor("knowledge_search"),
 		label: "Knowledge search",
 		promptSnippet: "Hybrid search over the knowledge base",
 		description:
@@ -108,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "knowledge_grep",
+		name: "knowledge_grep", exposure: exposureFor("knowledge_grep"),
 		label: "Knowledge grep",
 		promptSnippet: "Regex over the knowledge base's raw markdown",
 		description:
@@ -123,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "knowledge_get",
+		name: "knowledge_get", exposure: exposureFor("knowledge_get"),
 		label: "Knowledge get",
 		promptSnippet: "Read one knowledge document",
 		description:
@@ -137,7 +138,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "knowledge_multi_get",
+		name: "knowledge_multi_get", exposure: exposureFor("knowledge_multi_get"),
 		label: "Knowledge multi-get",
 		promptSnippet: "Read several knowledge documents at once",
 		description:
@@ -152,7 +153,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "knowledge_collections",
+		name: "knowledge_collections", exposure: exposureFor("knowledge_collections"),
 		label: "Knowledge collections",
 		promptSnippet: "List visible knowledge collections",
 		description:

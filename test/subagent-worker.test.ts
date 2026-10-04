@@ -142,13 +142,23 @@ describe("subagent worker invocation", () => {
 		expect(source, "a worker provider module must not add tools").not.toMatch(/\bregisterTool\(/);
 	});
 
+	it("loads the loadout module, whose only hook appends the on-demand tool index", () => {
+		const loadout = workerExtensionPaths().find((path) => path.endsWith("/extensions/loadout/index.ts"));
+		expect(loadout, "worker must load the loadout module").toBeDefined();
+		const source = readFileSync(loadout as string, "utf8");
+		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map((m) => m[1])).toEqual(["before_agent_start"]);
+	});
+
 	it("only reviewed protocol extensions register worker event hooks", () => {
 		// `workflow/index.ts` was the second entry until HIV-2904 merged that
 		// document into the plan. It is deliberately NOT replaced by
 		// `plan/index.ts`: that extension carries plan-mode enforcement, and a
 		// worker inheriting a read-only posture nobody reviewed it for is a
 		// worse trade than losing the projection. See worker.ts.
-		const allowedHooks = new Set(["opmode/index.ts", "fast/worker.ts"]);
+		// `loadout/index.ts` appends the on-demand tool index to the system prompt
+		// and nothing else (pinned below): without it a worker spawned with no
+		// `--tools` list could not reach any deferred harness tool.
+		const allowedHooks = new Set(["opmode/index.ts", "fast/worker.ts", "loadout/index.ts"]);
 		const ours = workerExtensionPaths().filter((path) => path.includes("/extensions/"));
 		expect(ours.length, "expected at least one in-repo worker extension").toBeGreaterThan(0);
 		for (const path of ours) {

@@ -28,6 +28,7 @@ import { isThinkingLevel, splitModelSpec } from "../hive-remote/status.ts";
 import { loadAdvisorConfig } from "./config.ts";
 import { advisorFailureMessage, fetchAgentModeOutcome, pickConfiguredAdvisor, type ConfiguredAdvisorPick } from "./modes.ts";
 import { buildAdvisorPrompt, capTranscript } from "./prompt.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /** Answer budget. Advice is prose, not code — 16k tokens is a long memo. */
 const ANSWER_MAX_TOKENS = 16_384;
@@ -37,7 +38,7 @@ export default function (pi: ExtensionAPI) {
 	if (cfg.disabled) return;
 
 	pi.registerTool({
-		name: "advisor",
+		name: "advisor", exposure: exposureFor("advisor"),
 		label: "Advisor",
 		promptSnippet: "Consult a stronger model for advice (forwards the full conversation)",
 		description: [

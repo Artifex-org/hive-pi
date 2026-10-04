@@ -356,10 +356,12 @@ export function createFakePi(): FakePi {
 		},
 		registerTool(tool: { name: string } & Record<string, unknown>) {
 			tools.push({ name: tool.name, definition: tool });
-			// pi force-activates every registered extension tool at session build
-			// (agent-session.js:157/:2003) — the fake must do the same or an
-			// opt-in gate looks like it works when it does not.
-			activeTools.push(tool.name);
+			// pi activates a registered `direct` or `model-only` tool (the default
+			// exposure is `direct`) and never a `codemode`/`deferred`/`hidden` one —
+			// the fake must do the same or an opt-in gate looks like it works when
+			// it does not.
+			const exposure = tool.exposure ?? "direct";
+			if (exposure === "direct" || exposure === "model-only") activeTools.push(tool.name);
 		},
 		registerCommand(name: string, options: { description?: string; handler: RecordedCommand["handler"] }) {
 			commands.set(name, { name, description: options.description, handler: options.handler });
@@ -395,7 +397,7 @@ export function createFakePi(): FakePi {
 		setLabel() {},
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 		getActiveTools: () => [...activeTools],
-		getAllTools: () => tools.map((t) => ({ name: t.name })),
+		getAllTools: () => tools.map((t) => ({ name: t.name, exposure: (t.definition.exposure as string | undefined) ?? "direct" })),
 		setActiveTools(names: string[]) {
 			activeTools = [...names];
 			activeToolsHistory.push([...names]);

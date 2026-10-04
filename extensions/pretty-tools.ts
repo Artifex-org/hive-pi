@@ -23,6 +23,7 @@ import { HIVE_STDIN_WAIT_CHANNEL, type HiveStdinWaitEvent } from "./hive-common/
 import { blockedNote, ptyAvailable, ptyBashOperations } from "./pty-exec/ops.ts";
 import type { BlockedVerdict } from "./pty-exec/stdinWatch.ts";
 import { TerminalSurfaceBridge } from "./pty-exec/terminalSurface.ts";
+import { exposureFor } from "./loadout/policy.ts";
 
 const PREVIEW_LINES = 4;
 
@@ -467,7 +468,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 	const ls = createLsTool(cwd);
 
 	pi.registerTool({
-		name: "read", label: "Read", description: read.description, parameters: read.parameters,
+		name: "read", exposure: exposureFor("read"), label: "Read", description: read.description, parameters: read.parameters,
 		...builtinMeta(read),
 		// The two wrappers COMPOSE, and the nesting order matters: the queue is
 		// outermost, so the diagnosis in the catch also runs inside the slot. If it
@@ -522,7 +523,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "bash", label: "Bash", description: bash.description, parameters: bashParameters,
+		name: "bash", exposure: exposureFor("bash"), label: "Bash", description: bash.description, parameters: bashParameters,
 		...builtinMeta(bash),
 		/**
 		 * Runs the command on a real pty when one is available, so an interactive
@@ -669,7 +670,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "edit", label: "Edit", description: edit.description, parameters: edit.parameters,
+		name: "edit", exposure: exposureFor("edit"), label: "Edit", description: edit.description, parameters: edit.parameters,
 		...builtinMeta(edit),
 		execute: async (id, params, signal, onUpdate) => {
 			try {
@@ -690,7 +691,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "write", label: "Write", description: write.description, parameters: write.parameters,
+		name: "write", exposure: exposureFor("write"), label: "Write", description: write.description, parameters: write.parameters,
 		...builtinMeta(write),
 		execute: (id, params, signal, onUpdate) => write.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "✦ write")} ${theme.fg("toolTitle", args.path)}${theme.fg("dim", ` · ${args.content.split("\n").length} lines`)}`, 0, 0),
@@ -700,7 +701,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "grep", label: "Grep", description: grep.description, parameters: grep.parameters,
+		name: "grep", exposure: exposureFor("grep"), label: "Grep", description: grep.description, parameters: grep.parameters,
 		...builtinMeta(grep),
 		execute: async (id, params, signal, onUpdate) => {
 			let result: Awaited<ReturnType<typeof grep.execute>>;
@@ -726,7 +727,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "find", label: "Find", description: find.description, parameters: find.parameters,
+		name: "find", exposure: exposureFor("find"), label: "Find", description: find.description, parameters: find.parameters,
 		...builtinMeta(find),
 		execute: (id, params, signal, onUpdate) => find.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "⌕ find")} ${theme.fg("toolTitle", args.pattern)}${theme.fg("dim", ` in ${args.path ?? "."}`)}`, 0, 0),
@@ -734,7 +735,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "ls", label: "List", description: ls.description, parameters: ls.parameters,
+		name: "ls", exposure: exposureFor("ls"), label: "List", description: ls.description, parameters: ls.parameters,
 		...builtinMeta(ls),
 		execute: (id, params, signal, onUpdate) => ls.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "≡ ls")} ${theme.fg("toolTitle", args.path ?? ".")}`, 0, 0),
