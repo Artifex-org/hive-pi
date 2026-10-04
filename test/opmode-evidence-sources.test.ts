@@ -135,14 +135,60 @@ describe("b) a read of a run that already failed", () => {
 		expect(stage(await record("e1", { phase: "reproduce", tool_call_id: "call-1", reproduction_key: "k" }))).toBe("hypothesize");
 	});
 
-	it("re-verifies with the green rerun's run record", async () => {
+	const runRecord = (id: string, state: string, branch = "fix-x") =>
+		JSON.stringify({ run: { id, state, project: "pyERP", pipeline: "ci", branch }, tasks: [] });
+
+	it("re-verifies with a NEW run of the same project, pipeline and branch", async () => {
+		const pi = await startBugfix();
+		const record = evidence(pi);
+		await result(pi, "call-1", "hive_get_run", runRecord("r1", "failed"));
+		await result(pi, "call-2", "bash", "instrumented");
+		await throughConfirm(record, "call-1", "call-2");
+		await result(pi, "call-3", "mcp__hive__get_run", runRecord("r2", "succeeded"));
+		expect(stage(await record("e5", { phase: "reverify", tool_call_id: "call-3", reproduction_key: "k" }))).toBe("done");
+	});
+
+	it("refuses an unrelated green run as re-verification (review of #104)", async () => {
+		const pi = await startBugfix();
+		const record = evidence(pi);
+		await result(pi, "call-1", "hive_get_run", runRecord("r1", "failed"));
+		await result(pi, "call-2", "bash", "instrumented");
+		await throughConfirm(record, "call-1", "call-2");
+		await result(pi, "call-3", "hive_get_run", runRecord("r9", "succeeded", "some-other-branch"));
+		const out = await record("e5", { phase: "reverify", tool_call_id: "call-3", reproduction_key: "k" });
+		expect(stage(out)).toBeUndefined();
+		expect(out.content[0]?.text).toContain("pyERP|ci|fix-x");
+	});
+
+	it("refuses the reproduced run itself, read again", async () => {
+		const pi = await startBugfix();
+		const record = evidence(pi);
+		await result(pi, "call-1", "hive_get_run", runRecord("r1", "failed"));
+		await result(pi, "call-2", "bash", "instrumented");
+		await throughConfirm(record, "call-1", "call-2");
+		// Same id — e.g. a retried task turned the same run green.
+		await result(pi, "call-3", "hive_get_run", runRecord("r1", "succeeded"));
+		expect(stage(await record("e5", { phase: "reverify", tool_call_id: "call-3", reproduction_key: "k" }))).toBeUndefined();
+	});
+
+	it("cannot tie a task-log reproduction to a later run, and says what to bind instead", async () => {
 		const pi = await startBugfix();
 		const record = evidence(pi);
 		await result(pi, "call-1", "hive_get_task_logs", taskLogs("failed"));
 		await result(pi, "call-2", "bash", "instrumented");
 		await throughConfirm(record, "call-1", "call-2");
-		await result(pi, "call-3", "mcp__hive__get_run", JSON.stringify({ run: { id: "r2", state: "succeeded" }, tasks: [] }));
-		expect(stage(await record("e5", { phase: "reverify", tool_call_id: "call-3", reproduction_key: "k" }))).toBe("done");
+		await result(pi, "call-3", "mcp__hive__get_run", runRecord("r2", "succeeded"));
+		const out = await record("e5", { phase: "reverify", tool_call_id: "call-3", reproduction_key: "k" });
+		expect(stage(out)).toBeUndefined();
+		expect(out.content[0]?.text).toContain("bind the reproduction to a run record");
+	});
+
+	it("does not tag results of calls made inside a codemode script", async () => {
+		const pi = await startBugfix();
+		const [own] = (await pi.emit({ type: "tool_result", toolCallId: "c1", toolName: "bash", isError: false, content: [{ type: "text", text: "{}" }] })) as Array<{ content?: Array<{ text: string }> } | undefined>;
+		expect(own?.content?.at(-1)?.text).toContain("[bugfix evidence id:");
+		const nested = (await pi.emit({ type: "tool_result", toolCallId: "c2", parentToolCallId: "c0", toolName: "bash", isError: false, content: [{ type: "text", text: "{}" }] })) as Array<unknown>;
+		expect(nested.filter(Boolean)).toEqual([]);
 	});
 
 	it("reads the tool's own JSON even when another extension appended a note after it", async () => {

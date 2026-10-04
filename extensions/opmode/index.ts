@@ -61,7 +61,20 @@ export type Verdict = "failed" | "passed" | "indeterminate";
  * through a different scheduler is the same evidence; every Hive run record is
  * another. Any other tool is its own family.
  */
-export type ObservedResult = { name: string; family: string; verdict: Verdict; text: string };
+export type ObservedResult = {
+	name: string;
+	family: string;
+	verdict: Verdict;
+	text: string;
+	/**
+	 * For a Hive run record: WHICH work it judged (`project|pipeline|branch`)
+	 * and which run. Without them a reverify could read any green run — an old
+	 * failure reproduced, an unrelated pass "re-verified" (review of #104).
+	 * get_task_logs carries neither (only task_id and attempt).
+	 */
+	subject?: string;
+	runId?: string;
+};
 
 /** The family every shell execution belongs to, however it was scheduled. */
 const SHELL_FAMILY = "shell";
@@ -90,6 +103,28 @@ const RUN_RECORD_READERS: Record<string, (body: Record<string, unknown>) => unkn
 	hive_get_run: (body) => runState(body),
 	hive_wait_for_run: (body) => runState(body),
 };
+
+/** `project|pipeline|branch` and the run id of a run record, when it names them. */
+function runIdentity(body: Record<string, unknown> | undefined): { subject?: string; runId?: string } {
+	const run = body?.run;
+	if (!run || typeof run !== "object") return {};
+	const r = run as Record<string, unknown>;
+	const parts = [r.project, r.pipeline, r.branch];
+	const subject = parts.every((part) => typeof part === "string" && part.length > 0) ? parts.join("|") : undefined;
+	const runId = typeof r.id === "string" && r.id.length > 0 ? r.id : undefined;
+	return { ...(subject ? { subject } : {}), ...(runId ? { runId } : {}) };
+}
+
+/**
+ * Is `observed` the same Hive work as the reproduction, run again? Only for the
+ * run-record family: the same project, pipeline and branch, a different run.
+ * A reproduction read from task logs names no run, so nothing can be shown to
+ * be its rerun — the caller is told to bind a run record instead.
+ */
+export function sameHiveWorkRerun(repro: { subject?: string; runId?: string }, observed: { subject?: string; runId?: string }): boolean {
+	if (!repro.subject || !observed.subject || repro.subject !== observed.subject) return false;
+	return !!observed.runId && observed.runId !== repro.runId;
+}
 
 function runState(body: Record<string, unknown>): unknown {
 	const run = body.run;
@@ -135,8 +170,9 @@ export function observe(
 		// as a further part, toolhints/guards-bridge INTO the last text part —
 		// so neither the joined text nor the whole part is guaranteed to parse.
 		const body = structured && typeof structured === "object" ? structured : leadingJSON(ownText);
-		const state = body && typeof body === "object" && !Array.isArray(body) ? reader(body as Record<string, unknown>) : undefined;
-		return { name, family: HIVE_RUN_FAMILY, verdict: hiveStateVerdict(state), text };
+		const record = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+		const state = record ? reader(record) : undefined;
+		return { name, family: HIVE_RUN_FAMILY, verdict: hiveStateVerdict(state), text, ...runIdentity(record) };
 	}
 	// `background_bash` returns "started bg-N"; the run has not happened yet.
 	if (name === "background_bash") return { name, family: SHELL_FAMILY, verdict: "indeterminate", text };
@@ -310,7 +346,7 @@ function orderingRefusal(requested: string, state: ProtocolState, detail: string
 }
 
 /** A reproduction: one model-supplied key bound to one observed failing run. */
-type Reproduction = { key: string; failingCallID: string; toolName: string; family: string };
+type Reproduction = { key: string; failingCallID: string; toolName: string; family: string; subject?: string; runId?: string };
 
 /**
  * Why a call whose phase WAS the expected one still could not be recorded.
@@ -347,6 +383,18 @@ function payloadFault(
 	}
 	if (observed.family !== reproduction.family) {
 		faults.push(`the result came from ${observed.name}, not ${reproduction.toolName} — rerun the tool that reproduced it`);
+	}
+	if (observed.family === HIVE_RUN_FAMILY && reproduction.family === HIVE_RUN_FAMILY && !sameHiveWorkRerun(reproduction, observed)) {
+		if (!reproduction.subject) {
+			faults.push(
+				"the reproduction was read from task logs, which name no project, pipeline or branch, so no later run can be " +
+					"shown to rerun it — bind the reproduction to a run record (get_run / explain_failure) instead",
+			);
+		} else if (observed.subject !== reproduction.subject) {
+			faults.push(`that run is ${observed.subject ?? "unidentified"}, not ${reproduction.subject} — re-verify the same project, pipeline and branch`);
+		} else {
+			faults.push(`that is the reproduced run ${reproduction.runId} itself — re-verification needs a new run`);
+		}
 	}
 	if (observed.verdict === "failed") faults.push("that run still failed");
 	if (observed.verdict === "indeterminate") faults.push("that run reached no verdict (still running, timed out or cancelled)");
@@ -543,6 +591,10 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function evidenceTag(event: ToolResultEvent, key: string): ToolResultEventResult | undefined {
 		if (mode !== "bugfix" || phase === "done" || phase === "blocked") return undefined;
+		// Not inside a codemode script: its value is the tool's text, and a tag
+		// there breaks `JSON.parse(await bash(...))` or lands in a file a
+		// read-modify-write round trip writes back (review of #104).
+		if (event.parentToolCallId) return undefined;
 		const tag = { type: "text" as const, text: `[bugfix evidence id: ${key}]` };
 		return {
 			content: [...(event.content ?? []), tag],
@@ -606,13 +658,13 @@ export default function (pi: ExtensionAPI) {
 			if (p.phase === "reproduce") {
 				const key = p.reproduction_key?.trim();
 				if (observed.verdict !== "failed" || !key) return text(reproduceRefusal(p.tool_call_id!, observed, key));
-				reproduction = { key, failingCallID: p.tool_call_id!, toolName: observed.name, family: observed.family }; phase = "hypothesize";
+				reproduction = { key, failingCallID: p.tool_call_id!, toolName: observed.name, family: observed.family, subject: observed.subject, runId: observed.runId }; phase = "hypothesize";
 				return protocolResult("hypothesize", `Reproduction failed via ${observed.name}; state a falsifiable mechanism.`);
 			}
 			if (p.phase === "hypothesize" && phase === "hypothesize" && p.hypothesis?.trim()) { phase = "instrument"; return protocolResult("instrument", "Hypothesis recorded; run an instrument that can distinguish it."); }
 			if (p.phase === "instrument" && phase === "instrument" && p.tool_call_id !== reproduction?.failingCallID) { phase = "confirm"; return protocolResult("confirm", "Instrumentation recorded; confirm the mechanism it established."); }
 			if (p.phase === "confirm" && phase === "confirm" && p.hypothesis?.trim()) { phase = "fix"; return protocolResult("fix", "Hypothesis confirmed; record the root cause, fix it, then rerun the same reproduction."); }
-			if (p.phase === "reverify" && phase === "fix" && reproduction && p.reproduction_key === reproduction.key && p.tool_call_id !== reproduction.failingCallID && observed.family === reproduction.family && observed.verdict === "passed") { phase = "done"; return protocolResult("done", "The same reproduction now passes."); }
+			if (p.phase === "reverify" && phase === "fix" && reproduction && p.reproduction_key === reproduction.key && p.tool_call_id !== reproduction.failingCallID && observed.family === reproduction.family && observed.verdict === "passed" && (observed.family !== HIVE_RUN_FAMILY || sameHiveWorkRerun(reproduction, observed))) { phase = "done"; return protocolResult("done", "The same reproduction now passes."); }
 			// Two questions, answered separately: was this the wrong PHASE, or the
 			// right phase with the wrong payload? The machine has always known
 			// both — `phase` is the state and `p.phase` is what was asked for —

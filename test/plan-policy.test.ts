@@ -408,13 +408,13 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 		expect(orchestrated("git -C /repo/wt branch --show-current")).toBe(true);
 		expect(orchestrated("git branch -r --list 'origin/feature/asf-3883' 'origin/feature/asf-3435'")).toBe(true);
 		expect(orchestrated("git branch -vv")).toBe(true);
-		for (const command of ["git branch new-thing", "git branch -D old", "git branch -m a b", "git branch --set-upstream-to=origin/x", "git branch -f main HEAD~1", "git branch --format=%(refname) newb", "git branch --sort=refname newb"]) {
+		for (const command of ["git branch new-thing", "git branch -D old", "git branch -m a b", "git branch --set-upstream-to=origin/x", "git branch -f main HEAD~1", "git branch --format='%(refname)' newb", "git branch --sort=refname newb"]) {
 			expect(orchestrated(command), command).toBe(false);
 			expect(allowed(command), command).toBe(false);
 		}
 	});
 
-	it("deduplicates with sort, which writes only with -o", () => {
+	it("deduplicates with sort, and refuses every way sort writes or executes", () => {
 		expect(orchestrated("grep -h foo a b | sort -u")).toBe(true);
 		expect(orchestrated("sort -u -o out f")).toBe(false);
 		expect(orchestrated("sort -uo out f")).toBe(false);
@@ -458,6 +458,109 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 		const verdict = classifyOrchestrateCommand("git fetch origin main");
 		expect(verdict.allowed).toBe(false);
 		expect(verdict.allowed === false && verdict.reason).toMatch(/git ls-remote/);
+	});
+});
+
+describe("independent review of #104: bypasses verified under bash -c and git 2.55", () => {
+	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
+	const refusedEverywhere = (commands: string[]) => {
+		for (const command of commands) {
+			expect(allowed(command), `plan: ${command}`).toBe(false);
+			expect(orchestrated(command), `orchestrate: ${command}`).toBe(false);
+		}
+	};
+
+	it("C1/C2: a unique PREFIX of a refused long option is the option (GNU getopt, git parse-options)", () => {
+		refusedEverywhere([
+			"sort --o=/tmp/pwn in.txt",
+			"sort --out /tmp/pwn in.txt",
+			"sort --compress=/path/prog -S 64k big.txt",
+			"sort --comp /path/prog big.txt",
+			"git grep --open='touch X' b",
+			"git diff --out=/tmp/x",
+			"git log -p --ext",
+			"git show --textc HEAD",
+		]);
+		expect(allowed("date --se='2001-01-01'")).toBe(false);
+		// A long option that is NOT a prefix of a refused one still reads.
+		expect(allowed("grep --only-matching foo f")).toBe(true);
+		expect(allowed("git log --oneline")).toBe(true);
+		expect(allowed("date --utc")).toBe(true);
+	});
+
+	it("C3: unquoted brace expansion is refused, @{…} reflog syntax is not", () => {
+		refusedEverywhere([
+			"sort {-o,/tmp/pwn} in.txt",
+			"git diff {--output=/tmp/x,HEAD}",
+			"find . -maxdepth 0 {-exec,touch,F,\\;}",
+			"cat f{1..3}",
+		]);
+		expect(orchestrated("git stash show -p stash@{0}")).toBe(true);
+		expect(allowed("git log -1 HEAD@{1}")).toBe(true);
+		expect(allowed("jq -r '{a: .b}' f.json")).toBe(true);
+	});
+
+	it("tmux: a `;` argument chains a second command", () => {
+		refusedEverywhere(["tmux -L x list-panes \\; run-shell 'touch F'", "tmux list-panes ';' kill-server", "tmux ls\\;"]);
+	});
+
+	it("uniq: a second operand is an OUTPUT file", () => {
+		refusedEverywhere(["uniq in out"]);
+		expect(allowed("uniq -c in")).toBe(true);
+		expect(orchestrated("sort f | uniq -c")).toBe(true);
+	});
+
+	it("git ls-remote: --upload-pack / -u run a program", () => {
+		refusedEverywhere(["git ls-remote --upload-pack='touch X' .", "git ls-remote --upl='touch X' .", "git ls-remote -u 'touch X' .", "git ls-remote -u'touch X' ."]);
+		expect(orchestrated("git ls-remote origin main")).toBe(true);
+	});
+
+	it("git remote: only listing and show/get-url", () => {
+		for (const command of ["git remote add x /tmp/r", "git remote remove origin", "git remote set-url origin /tmp/r", "git remote update", "git remote prune origin", "git remote rename origin x"]) {
+			expect(allowed(command), command).toBe(false);
+		}
+		expect(allowed("git remote -v")).toBe(true);
+		expect(allowed("git remote get-url origin")).toBe(true);
+		expect(allowed("git remote show origin")).toBe(true);
+	});
+
+	it("git config: only explicit reads", () => {
+		for (const command of ["git config user.name user.name", "git config -e", "git config --edit", "git config --ed", "git config edit", "git config set user.name x", "git config --unset user.name", "git config --add a.b c"]) {
+			expect(allowed(command), command).toBe(false);
+		}
+		expect(allowed("git config user.name")).toBe(true);
+		expect(allowed("git config --get user.name")).toBe(true);
+		expect(allowed("git config --get-regexp '^remote\\.'")).toBe(true);
+		expect(allowed("git config --list --show-origin")).toBe(true);
+		expect(allowed("git config get user.name")).toBe(true);
+	});
+
+	it("awk, fd and yq: their execute and in-place forms", () => {
+		for (const command of [
+			"awk 'BEGIN{system(\"touch F\")}'",
+			"awk '{print > \"out\"}' f",
+			"awk '{print | \"sh\"}' f",
+			"awk '{ \"date\" | getline d }' f",
+			"fd -x touch",
+			"fd --exec touch",
+			"fd -X rm",
+			"fd --exec-batch rm",
+			"yq --inplace '.a = 1' f.yaml",
+			"yq -Pi '.a = 1' f.yaml",
+			"sed -n 'w /tmp/x' f",
+			"sed 's/a/b/w /tmp/x' f",
+			"sed 'e touch F' f",
+			"sed '1e touch F' f",
+			"file -C -m x",
+		]) {
+			expect(allowed(command), command).toBe(false);
+		}
+		expect(allowed("awk '{print $1}' f")).toBe(true);
+		expect(allowed("fd -e ts src")).toBe(true);
+		expect(allowed("yq '.a' f.yaml")).toBe(true);
+		expect(allowed("sed -n '1,100p' f")).toBe(true);
+		expect(allowed("sed -n '/start/,/end/p' f")).toBe(true);
+		expect(allowed("sed 's/a/b/g' f")).toBe(true);
 	});
 });
 
