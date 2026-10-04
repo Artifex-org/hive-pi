@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
 /**
  * The global flag every harness-initiated git READ carries.
  *
@@ -41,3 +44,22 @@
  * parser). test/git-no-optional-locks.test.ts holds both halves.
  */
 export const GIT_NO_OPTIONAL_LOCKS = "--no-optional-locks";
+
+/**
+ * The nearest enclosing git checkout of `cwd`, or null outside any.
+ *
+ * `.git` may be a directory (a clone) or a FILE (a linked worktree, which every
+ * `hive worktrees create` checkout is); `existsSync` accepts both. A filesystem
+ * walk rather than `git rev-parse` because its callers sit on paths that must
+ * not spend a subprocess to answer a yes/no.
+ */
+export function repoRoot(cwd: string): string | null {
+	let dir = cwd;
+	for (let i = 0; i < 64; i++) {
+		if (existsSync(join(dir, ".git"))) return dir;
+		const parent = join(dir, "..");
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return null;
+}

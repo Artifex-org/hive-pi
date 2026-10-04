@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { gateStamp } from "../harness/verify.ts";
+import { repoRoot } from "../hive-common/git.ts";
 import { atCap, clear, record, remaining } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
 
@@ -45,16 +46,7 @@ export interface HarnessConfig {
 }
 
 /** `.pi/harness.json` is read from the git root, not cwd — pi's own `.pi/` is cwd-only. */
-export function repoRoot(cwd: string): string | null {
-	let dir = cwd;
-	for (let i = 0; i < 64; i++) {
-		if (existsSync(join(dir, ".git"))) return dir;
-		const parent = join(dir, "..");
-		if (parent === dir) break;
-		dir = parent;
-	}
-	return null;
-}
+export { repoRoot };
 
 export function loadHarnessConfig(cwd: string): { config: HarnessConfig; root: string } | null {
 	return loadConfig(cwd);

@@ -341,7 +341,7 @@ function publishDeck(pi: ExtensionAPI, progress: GateProgress | null): void {
  */
 async function runHiveCheck(
 	pi: ExtensionAPI,
-	params: { only?: string; mode?: string; scope?: string; skip?: string; stopEarly?: boolean },
+	params: { only?: string; mode?: string; scope?: string; skip?: string; stopEarly?: boolean; project?: string },
 	cwd: string,
 	signal: AbortSignal | undefined,
 	onUpdate?: (u: { content: { type: "text"; text: string }[]; details: unknown }) => void,
@@ -373,7 +373,7 @@ async function runHiveCheck(
 
 	let run;
 	try {
-		run = await dispatch(steps, cwd, signal);
+		run = await dispatch(steps, cwd, signal, { project: params.project });
 	} catch (err) {
 		return text(
 			`This repo gates through Hive, but the \`hive\` CLI could not be started (${err instanceof Error ? err.name : "error"}). ` +
@@ -391,7 +391,7 @@ async function runHiveCheck(
 		recovered = recoveryFor(params.only, run.out);
 		if (recovered) {
 			try {
-				run = await dispatch(recovered.steps, cwd, signal);
+				run = await dispatch(recovered.steps, cwd, signal, { project: params.project });
 				ranSteps = recovered.steps;
 			} catch {
 				/* fall through to the verbatim refusal below */
@@ -551,6 +551,14 @@ export default function (pi: ExtensionAPI) {
 						"a DIFFERENT checkout than the one the session started in (a second worktree, or a " +
 						"clone under ~/.hive/scratch/), or the gate examines the wrong tree and reports " +
 						"nothing to check.",
+				}),
+			),
+			project: Type.Optional(
+				Type.String({
+					description:
+						"Hive path only: the Hive project to check against, passed as `hive check --project`. Omit it " +
+						"and the CLI derives the project from the origin remote; pass it when that fails " +
+						"(\"cannot derive the project from the origin remote\") — a fork, a mirror, a renamed repo.",
 				}),
 			),
 		}),

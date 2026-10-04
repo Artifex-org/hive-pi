@@ -58,7 +58,14 @@ export function isTerminalRun(state: string): boolean {
  * of the same run, and only one of them can own the abort. It packs and uploads
  * the snapshot, prints the run reference, and gets out of the way.
  */
-export function hiveCheckArgs(steps: string[]): string[] {
+export function hiveCheckArgs(steps: string[], opts: { project?: string } = {}): string[] {
+	// `--project` only when the caller named one. The CLI derives the project
+	// from the origin remote, and that is right for almost every checkout — but
+	// not for one whose remote does not name the Hive project (a fork, a mirror,
+	// a renamed repo), where the CLI refuses with "pass --project" and this tool
+	// used to have no way to (papercut 2026-10-03T13:16).
+	const project = opts.project?.trim();
+	const projectArgs = project ? ["--project", project] : [];
 	// One `--step` per step, though the CLI takes both spellings.
 	//
 	// `--step a,b` is valid — hive's flag appends AND splits on commas, and its
@@ -73,7 +80,7 @@ export function hiveCheckArgs(steps: string[]): string[] {
 	// Nothing was ever broken. But every one of those agents spent a turn
 	// deciding whether the tool had malformed its own command, and the repeated
 	// form cannot be misread. Cheaper to be unambiguous than to be right.
-	return ["check", ...steps.flatMap((step) => ["--step", step]), "--no-wait"];
+	return ["check", ...projectArgs, ...steps.flatMap((step) => ["--step", step]), "--no-wait"];
 }
 
 /**
