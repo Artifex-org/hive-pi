@@ -15,7 +15,7 @@
  * per the writer.ts consolidation rule (HIV-1132).
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -97,35 +97,32 @@ export function diffStamp(cwd: string): Promise<string | null> {
  *
  * A stamp that cannot be taken is null, which DISABLES the check rather than
  * failing the worker: a verifier that could not run must never report as a
- * verifier that ran and failed (the gate's bashAvailable rule).
+ * verifier that ran and failed (the gate's bashAvailable rule). That includes
+ * a repo with no commit yet — `git diff HEAD` has nothing to diff against.
  */
 export async function treeStamp(cwd: string): Promise<string | null> {
-	const [status, diff] = await Promise.all([
+	const [status, diff, root] = await Promise.all([
 		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
 		gitOutput(cwd, [LOCK_FREE, "diff", "HEAD"]),
+		// Porcelain paths are relative to the repo ROOT, not to cwd.
+		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"]),
 	]);
-	if (status === null || diff === null) return null;
-	const untracked = untrackedFingerprint(cwd, status);
-	if (untracked === null) return null;
+	if (status === null || diff === null || root === null) return null;
+	const untracked = untrackedFingerprint(root.trim(), status);
 	const hash = createHash("sha256").update(diff).update("\0").update(untracked).digest("hex");
 	return `${status}\n#content:${hash}`;
 }
 
 /**
- * `path size mtime` for each `??` entry of a `-z` porcelain listing, or null
- * when the repo root cannot be resolved. A file that vanished between the
- * listing and the stat is recorded as gone — that is itself a change.
+ * `path size mtime` for each `??` entry of a `-z` porcelain listing. A file
+ * that vanished between the listing and the stat is recorded as gone — that
+ * is itself a change.
  */
-function untrackedFingerprint(cwd: string, porcelainZ: string): string | null {
-	const paths = porcelainZ
+function untrackedFingerprint(root: string, porcelainZ: string): string {
+	return porcelainZ
 		.split("\0")
 		.filter((entry) => entry.startsWith("?? "))
-		.map((entry) => entry.slice(3));
-	if (paths.length === 0) return "";
-	// Porcelain paths are relative to the repo ROOT, not to cwd.
-	const root = gitRootSync(cwd);
-	if (root === null) return null;
-	return paths
+		.map((entry) => entry.slice(3))
 		.map((rel) => {
 			try {
 				const stats = statSync(join(root, rel));
@@ -135,19 +132,6 @@ function untrackedFingerprint(cwd: string, porcelainZ: string): string | null {
 			}
 		})
 		.join("\n");
-}
-
-function gitRootSync(cwd: string): string | null {
-	try {
-		return execFileSync("git", [LOCK_FREE, "rev-parse", "--show-toplevel"], {
-			cwd,
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-			timeout: GIT_TIMEOUT_MS,
-		}).trim();
-	} catch {
-		return null;
-	}
 }
 
 export const NO_CHANGE_ERROR =
