@@ -34,7 +34,7 @@ We do not fork pi. The short version:
 | `prompts/` | slash commands | user-facing only; their descriptions are **not** visible to the model |
 | `themes/` | themes | `aether-dark` / `aether-light` (default) and `kanagawa` |
 | `agents/` | subagent roles | pi has no `agents` package resource, so `extensions/subagent/agents.ts` resolves this dir relative to itself |
-| `skills/` | skills | `craft-ui` |
+| `skills/` | skills | `craft-ui`, `app-analytics-dashboard` |
 | `types/` | ambient declarations | hand-written types for runtime deps that ship none |
 | `workstation/` | machine skeleton | defaults, the self-updater and its timer — **stowed, not installed**; see [workstation/README.md](workstation/README.md) |
 | `agmsg/` | agmsg driver | the `pi` agent type for [agmsg](https://agmsg.cc/) — see [agmsg/README.md](agmsg/README.md) |
