@@ -42,6 +42,7 @@ import { Type } from "typebox";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { compilePattern, DEFAULTS, renderOutcome, searchSessions, type SessionInfoLike } from "./search.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /** A worker must not get this; belt to `WORKER_EXTENSIONS`' braces. */
 const IS_WORKER = process.env.PI_AGENDA_WORKER === "1";
@@ -54,7 +55,7 @@ export default function (pi: ExtensionAPI) {
 	if (IS_WORKER) return;
 
 	pi.registerTool({
-		name: "session_grep",
+		name: "session_grep", exposure: exposureFor("session_grep"),
 		label: "Search past sessions",
 		promptSnippet: "Regex over the transcripts of past sessions in this directory",
 		description:

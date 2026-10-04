@@ -3,6 +3,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import asciichart from "asciichart";
 import { Type } from "typebox";
+import { exposureFor } from "./loadout/policy.ts";
 
 const MAX_SERIES = 8;
 const MAX_POINTS_PER_SERIES = 100;
@@ -169,7 +170,7 @@ function chartComponent(details: ChartDetails, expanded: boolean, theme: { fg(co
 
 export default function inlineCharts(pi: ExtensionAPI) {
 	pi.registerTool({
-		name: "render_chart",
+		name: "render_chart", exposure: exposureFor("render_chart"),
 		label: "Render chart",
 		description: "Render validated numeric data as an inline terminal line or bar chart. This is display-only: obtain data with another tool first.",
 		promptSnippet: "Render inline terminal line or bar charts from small, already-available numeric datasets",

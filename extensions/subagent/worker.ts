@@ -74,6 +74,7 @@ import { ensureWorkerAgentDir } from "../mcp-common/config.ts";
  *   the parent's wrapped provider lives in the parent's process.
  */
 const WORKER_EXTENSIONS = [
+	"../loadout/index.ts",
 	"../knowledge-tools.ts",
 	"../edit-common/rowtool.ts",
 	"../opmode/index.ts",
