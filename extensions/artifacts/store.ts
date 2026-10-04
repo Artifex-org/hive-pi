@@ -335,8 +335,17 @@ export function writeArtifact(dir: string, id: number, kind: string, body: strin
 		dropped > 0
 			? `[artifact truncated: ${dropped} bytes dropped from the head, tail kept]\n${text}`
 			: text;
-	writeFileSync(join(dir, `${id}.${slug}.log`), contents, "utf8");
+	writeFileSync(artifactFile(dir, id, slug), contents, "utf8");
 	return refFor(id);
+}
+
+/**
+ * Where artifact `id` of `kind` lives on disk. For a reader that has no
+ * `artifact_read` — a worker spawned `--no-extensions` gets a path it can
+ * `read`, because a ref is meaningless to it.
+ */
+export function artifactFile(dir: string, id: number, kind: string): string {
+	return join(dir, `${id}.${sanitizeKind(kind)}.log`);
 }
 
 /**
@@ -366,6 +375,8 @@ export interface SpillResult {
 	text: string;
 	/** The artifact reference, or null when nothing was written. */
 	ref: string | null;
+	/** The file the bytes were written to, or null when nothing was written. */
+	file: string | null;
 }
 
 /**
@@ -387,7 +398,7 @@ export function spill(
 	opts: { dir: string; kind: string; previewBytes: number },
 ): SpillResult {
 	const total = Buffer.byteLength(body, "utf8");
-	if (total <= opts.previewBytes) return { text: body, ref: null };
+	if (total <= opts.previewBytes) return { text: body, ref: null, file: null };
 
 	const preview = keepTail(body, opts.previewBytes);
 	// Counted in BYTES, not in string length: `total` is a byte count and a
@@ -403,6 +414,7 @@ export function spill(
 		return {
 			text: `[artifact store full: ${existing.length} artifacts this session, cap ${MAX_ARTIFACTS_PER_SESSION}. Showing the last ${shown} of ${total} bytes; ${preview.dropped} bytes were NOT retained]\n${preview.text}`,
 			ref: null,
+			file: null,
 		};
 	}
 
@@ -418,6 +430,7 @@ export function spill(
 		return {
 			text: `[artifact write failed: ${reason}. Showing the last ${shown} of ${total} bytes; the rest is lost]\n${preview.text}`,
 			ref: null,
+			file: null,
 		};
 	}
 
@@ -426,6 +439,7 @@ export function spill(
 	return {
 		text: `[${ref} · ${total} bytes${truncated} · showing the last ${shown}. Use artifact_read to see more]\n${preview.text}`,
 		ref,
+		file: artifactFile(opts.dir, id, opts.kind),
 	};
 }
 

@@ -9,7 +9,7 @@
  *     { "path": string, "label": string, "url": string, "taken_at": string }
  *
  *   - `path`     absolute path to the PNG on this sandbox's disk, e.g.
- *                `/tmp/pi-browser-4131/shot-1725291600000.png`.
+ *                `/tmp/pi-browser-<sessionId>/shot-1725291600000.png`.
  *   - `label`    the free-text label the agent passed (`before` / `after` by
  *                convention); the empty string when none was given.
  *   - `url`      the page URL the shot was taken against (NOT the uploaded
@@ -22,7 +22,15 @@
  *      this is the funnel's contract: the hive-side Go reader sets the var to a
  *      directory it controls and reads the manifest back from it.
  *   2. otherwise next to the screenshots, at
- *      `<os.tmpdir()>/pi-browser-<pid>/pr-attachments.json`.
+ *      `<os.tmpdir()>/pi-browser-<sessionId>/pr-attachments.json`.
+ *
+ * Keyed by the pi SESSION id, never by pid. Every sandboxed pi is pid 2 in its
+ * own PID namespace while `/tmp/claude` is shared, so a pid-keyed directory was
+ * ONE directory for every sandboxed session: `gh pr create` in a session that
+ * never opened a browser offered another session's QIS/treasury screenshots
+ * for attachment (papercuts 2026-10-01..03, six of them). A session id is also
+ * what separates `/new` from its predecessor in one long-lived process, which
+ * a pid never could.
  *
  * The array is REWRITTEN in full on every screenshot (append-then-write), so a
  * consumer that reads it at any time sees every shot taken so far. It is never
@@ -63,22 +71,29 @@ export interface ScreenshotRecord {
 
 export const MANIFEST_FILENAME = "pr-attachments.json";
 
-/** The per-process screenshot directory, matching extensions/browser. */
-export function screenshotDir(env: NodeJS.ProcessEnv = process.env, pid: number = process.pid): string {
-	return path.join(os.tmpdir(), `pi-browser-${pid}`);
+/** A session id reduced to something safe inside one path segment. */
+function sessionSlug(sessionId: string): string {
+	const slug = sessionId.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+	if (!slug) throw new Error(`pr-attachments: unusable session id ${JSON.stringify(sessionId)}`);
+	return slug;
+}
+
+/** This session's screenshot directory — where extensions/browser writes its shots. */
+export function screenshotDir(sessionId: string): string {
+	return path.join(os.tmpdir(), `pi-browser-${sessionSlug(sessionId)}`);
 }
 
 /**
  * The directory the manifest is written to: `$HIVE_PR_ATTACHMENTS_DIR` when
- * set (the funnel's contract), else the per-process screenshot directory.
+ * set (the funnel's contract), else this session's screenshot directory.
  */
-export function manifestDir(env: NodeJS.ProcessEnv = process.env, pid: number = process.pid): string {
+export function manifestDir(env: NodeJS.ProcessEnv, sessionId: string): string {
 	const configured = env.HIVE_PR_ATTACHMENTS_DIR?.trim();
-	return configured ? configured : screenshotDir(env, pid);
+	return configured ? configured : screenshotDir(sessionId);
 }
 
-export function manifestPath(env: NodeJS.ProcessEnv = process.env, pid: number = process.pid): string {
-	return path.join(manifestDir(env, pid), MANIFEST_FILENAME);
+export function manifestPath(env: NodeJS.ProcessEnv, sessionId: string): string {
+	return path.join(manifestDir(env, sessionId), MANIFEST_FILENAME);
 }
 
 function isRecord(value: unknown): value is ScreenshotRecord {
@@ -141,17 +156,20 @@ export function reDeriveFromDisk(dir: string): ScreenshotRecord[] {
 /**
  * The screenshot ledger, backed by the on-disk manifest.
  *
- * Constructed over an env so two entrypoints (and two tests) resolve the same
- * file. No in-memory cache: every `all()` re-reads disk, which is what makes it
+ * Constructed over an env and a session id so two entrypoints (and two tests)
+ * resolve the same file — and two sessions never do. No in-memory cache: every `all()` re-reads disk, which is what makes it
  * correct across extension isolation and compaction. The files are tiny.
  */
 export class ScreenshotLedger {
 	private readonly file: string;
 	private readonly dir: string;
+	/** Where this session's shots are written — the browser saves PNGs here. */
+	readonly shotDir: string;
 
-	constructor(env: NodeJS.ProcessEnv = process.env, pid: number = process.pid) {
-		this.file = manifestPath(env, pid);
-		this.dir = manifestDir(env, pid);
+	constructor(env: NodeJS.ProcessEnv, sessionId: string) {
+		this.file = manifestPath(env, sessionId);
+		this.dir = manifestDir(env, sessionId);
+		this.shotDir = screenshotDir(sessionId);
 	}
 
 	/** Append one screenshot and rewrite the manifest. Returns the record. */

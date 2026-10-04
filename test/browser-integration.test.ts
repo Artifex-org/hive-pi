@@ -17,7 +17,7 @@ const enabled = process.env.PI_BROWSER_IT === "1";
 
 interface RegisteredTool {
 	name: string;
-	execute: (id: string, params: Record<string, unknown>) => Promise<{
+	execute: (id: string, params: Record<string, unknown>, signal?: AbortSignal, onUpdate?: unknown, ctx?: unknown) => Promise<{
 		content: Array<{ type: string; text?: string; data?: string }>;
 		details: unknown;
 	}>;
@@ -39,6 +39,9 @@ function loadTools(): { tools: Map<string, RegisteredTool>; shutdown: () => void
 	(browserExtension as unknown as (pi: typeof fakePi) => void)(fakePi);
 	return { tools, shutdown: () => onShutdown?.() };
 }
+
+/** What browser_screenshot reads from its ctx: the session its ledger is keyed by. */
+const SHOT_CTX = { sessionManager: { getSessionId: () => "browser-it" } };
 
 describe.skipIf(!enabled)("extensions/browser integration", () => {
 	let srv: http.Server;
@@ -82,19 +85,20 @@ describe.skipIf(!enabled)("extensions/browser integration", () => {
 	}, 30_000);
 
 	it("screenshots to an inline image + file", async () => {
-		const out = await harness.tools.get("browser_screenshot")!.execute("t4", {});
+		const out = await harness.tools.get("browser_screenshot")!.execute("t4", {}, undefined, undefined, SHOT_CTX);
 		expect(out.content[0]?.type).toBe("image");
 		expect((out.content[0]?.data ?? "").length).toBeGreaterThan(1000);
 	}, 30_000);
 
 	it("records the label and writes the pr-attachments manifest (HIV-3240)", async () => {
-		const out = await harness.tools.get("browser_screenshot")!.execute("t4b", { label: "before" });
+		const out = await harness.tools.get("browser_screenshot")!.execute("t4b", { label: "before" }, undefined, undefined, SHOT_CTX);
 		const details = out.details as { path: string; label?: string; url: string; taken_at?: string };
 		expect(details.label).toBe("before");
 		expect(details.taken_at).toBeTruthy();
 		// The manifest sits next to the shot (no $HIVE_PR_ATTACHMENTS_DIR here) and
 		// carries this record.
 		const dir = path.dirname(details.path);
+		expect(path.basename(dir)).toBe("pi-browser-browser-it");
 		const manifest = JSON.parse(fs.readFileSync(path.join(dir, "pr-attachments.json"), "utf8"));
 		expect(manifest.some((r: { path: string; label: string }) => r.path === details.path && r.label === "before")).toBe(true);
 	}, 30_000);
