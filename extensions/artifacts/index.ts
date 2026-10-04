@@ -103,12 +103,13 @@ export function formatAge(ms: number): string {
  */
 export function renderList(records: readonly ArtifactRecord[], nowMs: number): string {
 	if (records.length === 0) {
-		// Names the ONE producer rather than implying every tool spills. There is
-		// exactly one `spill(` call site in the tree today (the kernel), and a
-		// model told "large tool output is spilled here automatically" would stop
-		// asking for output that was never retained — the store promising a
-		// recovery it cannot perform is worse than an empty store.
-		return "No artifacts spilled in this session yet. The `kernel` tool spills output above its preview size; other tools do not spill yet.";
+		// Names the producers rather than implying every tool spills. There are
+		// exactly two `spill(` call sites in the tree today (the kernel, and
+		// orchestrate's upstream-result forwarding), and a model told "large tool
+		// output is spilled here automatically" would stop asking for output that
+		// was never retained — the store promising a recovery it cannot perform
+		// is worse than an empty store.
+		return "No artifacts spilled in this session yet. The `kernel` tool spills output above its preview size, and `orchestrate` spills upstream results too large to forward inline; other tools do not spill yet.";
 	}
 	const rows = records.map(
 		(record) =>
