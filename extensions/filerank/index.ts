@@ -45,6 +45,7 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { isFindToolResult } from "@earendil-works/pi-coding-agent";
 
+import { GIT_NO_OPTIONAL_LOCKS } from "../hive-common/git.ts";
 import { configPathFor, numberOr, readJSON } from "../hive-common/identity.ts";
 import { MAX_RANKABLE_LINES, parseGitStatus, rankPaths, reorderFindOutput, type GitState } from "./rank.ts";
 import { MAX_PATHS, flushStore, loadStore, recordAccess, recordSelection, storePath } from "./store.ts";
@@ -155,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 	function refreshGit(): void {
 		if (gitInFlight) return;
 		gitInFlight = true;
-		execFile("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: GIT_TIMEOUT_MS }, (rootErr, rootOut) => {
+		execFile("git", [GIT_NO_OPTIONAL_LOCKS, "rev-parse", "--show-toplevel"], { cwd, timeout: GIT_TIMEOUT_MS }, (rootErr, rootOut) => {
 			const root = rootErr ? "" : rootOut.trim();
 			if (!root) {
 				gitInFlight = false;
@@ -165,7 +166,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			execFile(
 				"git",
-				["status", "--porcelain"],
+				[GIT_NO_OPTIONAL_LOCKS, "status", "--porcelain"],
 				{ cwd: root, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
 				(statusErr, statusOut) => {
 					gitInFlight = false;

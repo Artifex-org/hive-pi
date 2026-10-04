@@ -36,6 +36,7 @@ import {
 import { cancelRun, dispatch, dispatchUnconfirmed, failedTaskLogs, follow, hivePipelineDir, QUEUED_FOLLOW_MINUTES, resolveCheckAuth } from "./hiverun.ts";
 import { DECK_SECTION_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { GIT_NO_OPTIONAL_LOCKS } from "../hive-common/git.ts";
 
 /**
  * Timeout, scaled by mode — and only when progress is actually flowing.
@@ -132,7 +133,7 @@ export async function uncommittedCount(cwd: string, signal?: AbortSignal): Promi
 			// that is a file gives a synchronous ENOTDIR, which would escape this
 			// promise entirely and turn a diagnostic into the failure it was
 			// explaining. `error` alone does not cover it; both paths are needed.
-			const child = spawn("git", ["status", "--porcelain"], { cwd, signal });
+			const child = spawn("git", [GIT_NO_OPTIONAL_LOCKS, "status", "--porcelain"], { cwd, signal });
 			// A bounded wait: this runs on a path the agent is already waiting on,
 			// and `git status` on a very large tree is not worth stalling the answer.
 			timer = setTimeout(() => {

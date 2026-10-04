@@ -29,6 +29,7 @@ import { mcpConfigPath as sharedConfigPath } from "../mcp-common/config.ts";
 import { baseDirCandidates, pgPaths } from "../devservices/pg.ts";
 import { DIR_PREFIX, HEARTBEAT_FILE, STALE_AFTER_MS } from "../devservices/reap.ts";
 import { mcpBelongsHere, stdioMissing, type McpServerDef } from "./mcp.ts";
+import { GIT_NO_OPTIONAL_LOCKS } from "../hive-common/git.ts";
 import { nativeMcpServer } from "../mcp-common/names.ts";
 import { mcpLauncherFor } from "../profile-common/profile.ts";
 import type { ProbeResult, ProbeStatus } from "./state.ts";
@@ -702,12 +703,12 @@ export const browserProbe: Probe = async (deps) => {
  * workspace evaluation, and duplicating it here would pay for it twice.
  */
 export const repoProbe: Probe = async (deps) => {
-	const branch = await deps.exec("git", ["-C", deps.cwd, "rev-parse", "--abbrev-ref", "HEAD"], PROBE_TIMEOUT_MS);
+	const branch = await deps.exec("git", [GIT_NO_OPTIONAL_LOCKS, "-C", deps.cwd, "rev-parse", "--abbrev-ref", "HEAD"], PROBE_TIMEOUT_MS);
 	if (branch.code !== 0) {
 		return { id: "repo", label: "repo", status: "unknown", detail: "not a git checkout" };
 	}
 	const name = branch.stdout.trim();
-	const status = await deps.exec("git", ["-C", deps.cwd, "status", "--porcelain"], PROBE_TIMEOUT_MS);
+	const status = await deps.exec("git", [GIT_NO_OPTIONAL_LOCKS, "-C", deps.cwd, "status", "--porcelain"], PROBE_TIMEOUT_MS);
 	const dirty = status.code === 0 ? status.stdout.split("\n").filter((line) => line.trim()).length : 0;
 	return {
 		id: "repo",
