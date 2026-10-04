@@ -311,6 +311,29 @@ function taskOutcome(state: string): GateCheckProgress["outcome"] {
 	return "error";
 }
 
+/**
+ * Why the scheduler skipped a task, when the reason is a FAILED UPSTREAM — or
+ * undefined for any other skip.
+ *
+ * Read from `task.error`, the only reason on the wire, in hive's own words:
+ *
+ *   blocked by failed dependency: <task>   scheduler/progress.go
+ *   blocked by failed fan-out: <fan-out>   scheduler/progress.go (HIV-2922)
+ *   upstream failed                        scheduler/progress.go, no name known
+ *   run already red: <cause>               store.FailFastSkipPrefix (HIV-3579)
+ *
+ * Anything else — no error at all, or wording this build has never seen — is
+ * NOT claimed as blocked: the caller keeps calling it advisory, which is the
+ * pre-existing reading, rather than inventing a blocker.
+ */
+export function blockedBy(error: string | null | undefined): { by: string | null } | undefined {
+	const reason = (error ?? "").trim();
+	const named = /^(?:blocked by failed (?:dependency|fan-out)|run already red): (.+)$/.exec(reason);
+	if (named) return { by: named[1].trim() };
+	if (reason === "upstream failed") return { by: null };
+	return undefined;
+}
+
 function durationMs(from?: string | null, to?: string | null): number | undefined {
 	if (!from || !to) return undefined;
 	const a = Date.parse(from);
@@ -363,6 +386,7 @@ export function fold(input: FoldInput): GateProgress {
 	const checks: GateCheckProgress[] = [];
 	const failures: string[] = [];
 	const advisories: string[] = [];
+	const blocked: { step: string; by: string | null }[] = [];
 	const running: string[] = [];
 	let done = 0;
 
@@ -401,7 +425,9 @@ export function fold(input: FoldInput): GateProgress {
 				message: task.error || (task.state === "skipped" ? "skipped — made no claim" : undefined),
 			});
 			if (outcome === "failed" || outcome === "error") failures.push(task.key);
-			if (outcome === "advisory") advisories.push(task.key);
+			const blocker = task.state === "skipped" ? blockedBy(task.error) : undefined;
+			if (blocker) blocked.push({ step: task.key, by: blocker.by });
+			else if (outcome === "advisory") advisories.push(task.key);
 		}
 	}
 
@@ -419,6 +445,7 @@ export function fold(input: FoldInput): GateProgress {
 		checks,
 		failures,
 		advisories,
+		...(blocked.length > 0 ? { blocked } : {}),
 		// Hive has no equivalent signal: a missing tool inside a step fails that
 		// step's own check. Always empty here, and honestly so.
 		missing_tools: [],
@@ -562,7 +589,8 @@ function runStatus(state: string): GateProgress["status"] {
 export function renderReport(p: GateProgress, opts: { logs?: { task: string; tail: string }[] } = {}): string {
 	const out: string[] = [];
 	const secs = p.duration_ms !== undefined ? ` in ${(p.duration_ms / 1000).toFixed(1)}s` : "";
-	const advisory = p.advisories.length ? `, ${p.advisories.length} advisory` : "";
+	const blocked = p.blocked ?? [];
+	const advisory = `${blocked.length ? `, ${blocked.length} not run` : ""}${p.advisories.length ? `, ${p.advisories.length} advisory` : ""}`;
 	const steps = p.total !== undefined ? `${p.total} step(s)` : "the run";
 	const checked = p.checks.length ? `, ${p.checks.length} check(s)` : "";
 
@@ -612,6 +640,12 @@ export function renderReport(p: GateProgress, opts: { logs?: { task: string; tai
 	// so a real run listed fifteen advisories that were all "blocked by failed
 	// dependency: lint" — a wall of names above the two that matter.
 	if (p.failures.length) out.push(`failed: ${named(p.failures)}`);
+	// Grouped by blocker: the useful sentence is "codemetrics stopped these",
+	// once, not the same cause repeated per step.
+	for (const [by, steps] of groupBlocked(blocked)) {
+		const cause = by === null ? "a failed upstream step" : `failed ${by}`;
+		out.push(`not run — blocked by ${cause}: ${named(steps)}`);
+	}
 	if (p.advisories.length) out.push(`advisory (non-blocking): ${named(p.advisories)}`);
 	if (p.url) out.push(`run: ${p.url}`);
 
@@ -619,6 +653,17 @@ export function renderReport(p: GateProgress, opts: { logs?: { task: string; tai
 		out.push("", `── ${log.task} ──`, log.tail);
 	}
 	return out.join("\n");
+}
+
+/** Blocked steps by the step that blocked them, in first-seen order. */
+function groupBlocked(blocked: { step: string; by: string | null }[]): Map<string | null, string[]> {
+	const groups = new Map<string | null, string[]>();
+	for (const { step, by } of blocked) {
+		const list = groups.get(by);
+		if (list) list.push(step);
+		else groups.set(by, [step]);
+	}
+	return groups;
 }
 
 /**
@@ -655,6 +700,9 @@ export function deckLines(p: GateProgress): string[] {
 		lines.push(`${"▍".repeat(filled)}${"░".repeat(METER_WIDTH - filled)} ${p.done}/${p.total}`);
 	}
 	for (const f of p.failures.slice(0, 6)) lines.push(`✗ ${f}`);
+	for (const [by, steps] of groupBlocked(p.blocked ?? [])) {
+		lines.push(`⊘ ${steps.length} not run (blocked by ${by ?? "upstream failure"})`);
+	}
 	for (const a of p.advisories.slice(0, 3)) lines.push(`▲ ${a}`);
 	if (p.running.length) lines.push(`… ${p.running.slice(0, 4).join(", ")}`);
 	return lines;

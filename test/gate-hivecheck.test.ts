@@ -169,6 +169,42 @@ describe("fold", () => {
 		expect(p.advisories).toEqual(["web-check"]);
 	});
 
+	// Papercut 2026-10-04T17:58: six steps skipped because `codemetrics` failed
+	// were reported "advisory (non-blocking)", which hid that no test or web gate
+	// ran at all. The scheduler says why it skipped a task in `error`
+	// (hive scheduler/progress.go, store FailFastSkipPrefix); read it.
+	it("reports dependency-blocked steps as NOT RUN, naming the step that blocked them", () => {
+		const p = fold({
+			...base,
+			run: { state: "failed" },
+			tasks: [
+				task("codemetrics", "failed", { error: "exit 1" }),
+				task("test-1", "skipped", { error: "blocked by failed dependency: codemetrics" }),
+				task("test-2", "skipped", { error: "blocked by failed dependency: codemetrics" }),
+				task("web-check", "skipped", { error: "run already red: codemetrics" }),
+				task("coverage", "skipped", { error: "blocked by failed fan-out: test" }),
+				task("e2e", "skipped", { error: "upstream failed" }),
+				task("docs", "skipped"),
+			],
+			substeps: [],
+		});
+		expect(p.advisories).toEqual(["docs"]);
+		expect(p.blocked).toEqual([
+			{ step: "test-1", by: "codemetrics" },
+			{ step: "test-2", by: "codemetrics" },
+			{ step: "web-check", by: "codemetrics" },
+			{ step: "coverage", by: "test" },
+			{ step: "e2e", by: null },
+		]);
+		const text = renderReport(p);
+		expect(text).toContain("not run — blocked by failed codemetrics: test-1, test-2, web-check");
+		expect(text).toContain("not run — blocked by failed test: coverage");
+		expect(text).toContain("not run — blocked by a failed upstream step: e2e");
+		expect(text).toContain("advisory (non-blocking): docs");
+		expect(text).not.toMatch(/advisory \(non-blocking\):.*test-1/);
+		expect(text).toContain("FAIL — 1 failing of 7 step(s), 5 not run, 1 advisory");
+	});
+
 	// The emitters report a warning as outcome "passed" with the truth in the
 	// message, because a red substep inside a green step reads as a broken UI.
 	it("recovers an advisory from the message the emitter hides it in", () => {
