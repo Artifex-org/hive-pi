@@ -153,11 +153,19 @@ describe("looksUnverifiable — advisory only", () => {
 		// Refused in a live hive session (2026-10-04) although every clause is checkable.
 		"task PR exists and final-head hive/ci succeeded",
 		"the PR is merged",
+		// Refused [blocking] 2026-10-02T12:26: `fail(s|ing)?` missed "failed", and
+		// the count pattern only knew tests/errors/warnings.
+		"exactly 2 failed steps (IDs 3 and 6)",
+		"the run failed",
+		"3 failing checks remain",
+		"at most 1 flaky job",
+		"zero open findings",
+		"no more than 4 issues",
 	])("recognises a checkable condition: %s", (condition) => {
 		expect(looksUnverifiable(condition)).toBe(false);
 	});
 
-	it.each(["make the code better", "improve performance", "tidy things up"])(
+	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely"])(
 		"flags an ungradeable one: %s",
 		(condition) => {
 			expect(looksUnverifiable(condition)).toBe(true);
