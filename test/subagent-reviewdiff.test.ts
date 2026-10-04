@@ -210,6 +210,40 @@ describe("the review scope never narrows what the caller asked for", () => {
 		expect(reviewScopeFiles(diff!)).toEqual(["scripts/apply_light.py"]);
 	});
 
+	it("still hands over a committed branch when a stray untracked file is lying around", () => {
+		const diff = captureReviewDiff(
+			"/repo",
+			"Review the branch.",
+			gitAt({
+				"/repo: rev-parse --show-toplevel": "/repo\n",
+				"/repo: diff HEAD --name-only": "",
+				"/repo: ls-files --others --exclude-standard --full-name": ".playwright-mcp/shot.png\n",
+				"/repo: symbolic-ref --short refs/remotes/origin/HEAD": "origin/main\n",
+				"/repo: merge-base HEAD origin/main": "abc\n",
+				"/repo: diff abc...HEAD --name-only": "src/real.ts\n",
+				"/repo: diff abc...HEAD": "+real\n",
+			}),
+		);
+		expect(diff?.scope).toBe("branch vs its base");
+		expect(diff?.files).toEqual(["src/real.ts"]);
+		expect(diff?.text).toBe("+real\n");
+	});
+
+	it("keeps the session's repo when the task also names a file in no repo or in another repo", () => {
+		const answers = {
+			"/repo: rev-parse --show-toplevel": "/repo\n",
+			"/repo/src: rev-parse --show-toplevel": "/repo\n",
+			"/home/x/kb: rev-parse --show-toplevel": "/home/x/kb\n",
+			"/repo: diff HEAD --name-only": "src/x.ts\n",
+			"/repo: ls-files --others --exclude-standard --full-name": "",
+			"/repo: diff HEAD": "+x\n",
+		};
+		const scratch = captureReviewDiff("/repo", "Review /repo/src/x.ts per /tmp/scratch/notes.md.", gitAt(answers));
+		expect(scratch?.repo).toBe("/repo");
+		const kb = captureReviewDiff("/repo", "Review /repo/src/x.ts per /home/x/kb/CLAUDE.md.", gitAt(answers));
+		expect(kb?.repo).toBe("/repo");
+	});
+
 	it("does not scope at all when the named files are in no repo (a non-git model workspace)", () => {
 		const task = "Review /home/x/projects/portdelaselva/model.py.";
 		expect(

@@ -16,20 +16,41 @@
  */
 
 import type { RunSummary } from "./executor.ts";
-import type { Plan } from "./plan-schema.ts";
+import type { Plan, PlanNode } from "./plan-schema.ts";
 import { renderInputValue } from "./upstream.ts";
 
 /** What one page of run output shows by default. */
 export const RESULT_PAGE_CHARS = 24_000;
+
+/**
+ * The finished elements of a fanout/pipeline, read from their own result
+ * slots — NOT from the node's aggregate, which exists only once every element
+ * finished. A fanout of 10 with one failure still has 9 results worth reading.
+ * A pipeline element's result is its furthest finished stage.
+ */
+function elementResults(node: PlanNode, summary: RunSummary): Array<{ id: string; value: unknown }> {
+	const latest = new Map<number, { stage: number; value: unknown }>();
+	const pattern = node.kind === "pipeline" ? /^(.+)#(\d+)@(\d+)$/ : /^(.+)#(\d+)$/;
+	for (const [key, value] of Object.entries(summary.results)) {
+		const match = pattern.exec(key);
+		if (!match || match[1] !== node.id) continue;
+		const index = Number(match[2]);
+		const stage = match[3] === undefined ? 0 : Number(match[3]);
+		const seen = latest.get(index);
+		if (!seen || stage > seen.stage) latest.set(index, { stage, value });
+	}
+	return [...latest.entries()]
+		.sort(([a], [b]) => a - b)
+		.map(([index, { value }]) => ({ id: `${node.id}#${index}`, value }));
+}
 
 /** Every id `orchestrate_result({node})` accepts for this run, in plan order. */
 export function selectableNodes(plan: Plan, summary: RunSummary): string[] {
 	const ids: string[] = [];
 	for (const node of plan.nodes) {
 		ids.push(node.id);
-		const value = summary.results[node.id];
-		if ((node.kind === "fanout" || node.kind === "pipeline") && Array.isArray(value)) {
-			value.forEach((_, index) => ids.push(`${node.id}#${index}`));
+		if (node.kind === "fanout" || node.kind === "pipeline") {
+			for (const element of elementResults(node, summary)) ids.push(element.id);
 		}
 	}
 	return ids;
@@ -43,15 +64,20 @@ export function nodeResultText(plan: Plan, summary: RunSummary, id: string): str
 	if (!selectableNodes(plan, summary).includes(id)) return undefined;
 	const slot = /^(.+)#(\d+)$/.exec(id);
 	if (slot) {
-		const items = summary.results[slot[1]];
-		return renderInputValue(Array.isArray(items) ? items[Number(slot[2])] : undefined);
+		const owner = plan.nodes.find((candidate) => candidate.id === slot[1]);
+		const element = owner ? elementResults(owner, summary).find((candidate) => candidate.id === id) : undefined;
+		return renderInputValue(element?.value);
 	}
 	const node = plan.nodes.find((candidate) => candidate.id === id);
 	const status = summary.state.status[id];
-	if (!(id in summary.results)) return `(no result: ${status ?? "never ran"})`;
-	if (node?.kind === "barrier") {
+	if (node?.kind === "barrier" && id in summary.results) {
 		return `(barrier — joins ${node.needs.join(", ")}; each result is under its own node)`;
 	}
+	if ((node?.kind === "fanout" || node?.kind === "pipeline") && !(id in summary.results)) {
+		const finished = elementResults(node, summary).length;
+		return `(no combined result: ${status ?? "never ran"}; ${finished} element(s) finished, each under <id>#<n>)`;
+	}
+	if (!(id in summary.results)) return `(no result: ${status ?? "never ran"})`;
 	return renderInputValue(summary.results[id]);
 }
 
@@ -59,12 +85,11 @@ export function nodeResultText(plan: Plan, summary: RunSummary, id: string): str
 export function renderRunResults(plan: Plan, summary: RunSummary): string {
 	const sections: string[] = [];
 	for (const node of plan.nodes) {
-		const value = summary.results[node.id];
-		if ((node.kind === "fanout" || node.kind === "pipeline") && Array.isArray(value)) {
-			value.forEach((_, index) => {
-				const id = `${node.id}#${index}`;
-				sections.push(`### ${id}\n${nodeResultText(plan, summary, id)}`);
-			});
+		if (node.kind === "fanout" || node.kind === "pipeline") {
+			if (!(node.id in summary.results)) sections.push(`### ${node.id}\n${nodeResultText(plan, summary, node.id)}`);
+			for (const element of elementResults(node, summary)) {
+				sections.push(`### ${element.id}\n${renderInputValue(element.value)}`);
+			}
 			continue;
 		}
 		sections.push(`### ${node.id}\n${nodeResultText(plan, summary, node.id)}`);

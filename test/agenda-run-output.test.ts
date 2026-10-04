@@ -86,3 +86,57 @@ describe("pageText", () => {
 		expect(joined).toBe(text);
 	});
 });
+
+describe("finished elements of an unfinished fanout stay reachable", () => {
+	it("renders and selects the elements that finished when one failed", async () => {
+		const fan: Plan = {
+			name: "p",
+			description: "d",
+			nodes: [
+				{ id: "items", kind: "agent", role: "research", prompt: "do items" },
+				{ id: "reviews", kind: "fanout", over: "items", role: "research", prompt: "review {item}", retries: 0 },
+			],
+		};
+		const summary = await runPlan({
+			plan: fan,
+			spawn: async (dispatch) =>
+				dispatch.nodeId === "items"
+					? { ok: true, value: ["x", "y", "z"], tokens: 1 }
+					: dispatch.item === "y"
+						? { ok: false, value: null, tokens: 1, error: "boom" }
+						: { ok: true, value: `reviewed ${String(dispatch.item)}`, tokens: 1 },
+		});
+		expect(selectableNodes(fan, summary)).toEqual(["items", "reviews", "reviews#0", "reviews#2"]);
+		expect(nodeResultText(fan, summary, "reviews#2")).toBe("reviewed z");
+		const text = renderRunResults(fan, summary);
+		expect(text).toContain("### reviews\n(no combined result: failed; 2 element(s) finished");
+		expect(text).toContain("### reviews#0\nreviewed x");
+	});
+
+	it("reads a pipeline element at its furthest finished stage", async () => {
+		const pipe: Plan = {
+			name: "p",
+			description: "d",
+			nodes: [
+				{ id: "items", kind: "agent", role: "research", prompt: "do items" },
+				{
+					id: "chain",
+					kind: "pipeline",
+					over: "items",
+					stages: [
+						{ role: "research", prompt: "one {item}" },
+						{ role: "research", prompt: "two {item}" },
+					],
+				},
+			],
+		};
+		const summary = await runPlan({
+			plan: pipe,
+			spawn: async (dispatch) =>
+				dispatch.nodeId === "items"
+					? { ok: true, value: ["x"], tokens: 1 }
+					: { ok: true, value: `stage ${dispatch.stageIndex}`, tokens: 1 },
+		});
+		expect(nodeResultText(pipe, summary, "chain#0")).toBe("stage 1");
+	});
+});

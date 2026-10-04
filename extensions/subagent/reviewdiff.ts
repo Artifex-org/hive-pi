@@ -80,12 +80,17 @@ const runGit: GitRunner = (args, cwd) => {
  */
 export function reviewRepoFor(cwd: string, task: string, git: GitRunner = runGit): string | null {
 	const topOf = (dir: string) => git(["rev-parse", "--show-toplevel"], dir)?.trim() || null;
+	const cwdTop = topOf(cwd);
 	const named = citedPaths(task).filter((path) => isAbsolute(path));
-	if (named.length === 0) return topOf(cwd);
-	const tops = new Set(named.map((path) => topOf(dirname(path))));
-	if (tops.size !== 1) return null;
-	const [only] = tops;
-	return only ?? null;
+	if (named.length === 0) return cwdTop;
+	// A path in no repo (a scratch note, a conventions file elsewhere, a
+	// deleted file's vanished directory) does not decide anything on its own…
+	const tops = new Set(named.map((path) => topOf(dirname(path))).filter((top): top is string => top !== null));
+	// …unless EVERY named path is in no repo: a non-git workspace, nothing to diff.
+	if (tops.size === 0) return null;
+	if (tops.size === 1) return [...tops][0];
+	// Several repos named: the session's own repo when it is one of them.
+	return cwdTop !== null && tops.has(cwdTop) ? cwdTop : null;
 }
 
 /**
@@ -102,18 +107,20 @@ export function captureReviewDiff(cwd: string, task: string, git: GitRunner = ru
 	const untracked = splitLines(git(["ls-files", "--others", "--exclude-standard", "--full-name"], repo) ?? "");
 	let scope: ReviewDiff["scope"] = "working tree vs HEAD";
 	let range = ["diff", "HEAD"];
-	if (files.length === 0 && untracked.length === 0) {
-		// A committed change: the branch against where it left its base. Only
-		// when the remote publishes a HEAD; guessing a base name would diff
-		// against the wrong branch on a repo whose default is `feature`.
-		const head = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo)?.trim();
-		if (!head) return null;
-		const base = git(["merge-base", "HEAD", head], repo)?.trim();
-		if (!base) return null;
-		files = splitLines(git(["diff", `${base}...HEAD`, "--name-only"], repo) ?? "");
-		if (files.length === 0) return null;
-		scope = "branch vs its base";
-		range = ["diff", `${base}...HEAD`];
+	if (files.length === 0) {
+		// No tracked edit: a committed change, the branch against where it left
+		// its base — even with a stray untracked file lying around, which must
+		// not hide the real (committed) change. Only when the remote publishes
+		// a HEAD; guessing a base name would diff against the wrong branch on a
+		// repo whose default is `feature`.
+		const branch = branchChange(repo, git);
+		if (branch) {
+			files = branch.files;
+			scope = "branch vs its base";
+			range = branch.range;
+		} else if (untracked.length === 0) {
+			return null;
+		}
 	}
 	const full = files.length > 0 ? (git(range, repo) ?? "") : "";
 	const bytes = Buffer.byteLength(full, "utf8");
@@ -123,6 +130,15 @@ export function captureReviewDiff(cwd: string, task: string, git: GitRunner = ru
 		.map((path) => (isAbsolute(path) && !relative(repo, path).startsWith("..") ? relative(repo, path) : path))
 		.filter((path) => !known.some((file) => samePath(file, path)));
 	return { repo, files, untracked, callerNamed, text, scope, truncatedBytes: Math.max(0, bytes - Buffer.byteLength(text, "utf8")) };
+}
+
+function branchChange(repo: string, git: GitRunner): { files: string[]; range: string[] } | null {
+	const head = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo)?.trim();
+	if (!head) return null;
+	const base = git(["merge-base", "HEAD", head], repo)?.trim();
+	if (!base) return null;
+	const files = splitLines(git(["diff", `${base}...HEAD`, "--name-only"], repo) ?? "");
+	return files.length > 0 ? { files, range: ["diff", `${base}...HEAD`] } : null;
 }
 
 /** Everything in scope for the review: git's change plus whatever the caller named. */
