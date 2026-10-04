@@ -37,7 +37,7 @@
  * code at all — one is our limit, the other is a human — and treating either as
  * a test failure sends the model debugging a phantom.
  */
-export type JobStatus = "running" | "done" | "failed" | "timeout" | "canceled";
+export type JobStatus = "running" | "done" | "failed" | "timeout" | "canceled" | "unconfirmed";
 
 /**
  * `watch` is a bash job by mechanism and a different thing by intent: it holds
@@ -206,6 +206,22 @@ export function statusForExit(code: number | null): Exclude<JobStatus, "running"
 	return code === 0 ? "done" : "failed";
 }
 
+/**
+ * The verdict of a `hive watch` job, which is NOT the verdict of its exit code.
+ *
+ * `hive watch` exits with the run's result: 0 succeeded, 1 the run did not
+ * pass. Every other ending says nothing about the run — 4 is the CLI's own
+ * "the stream was lost and the outcome is unknown" (cmd/hive/exitcode.go), 3
+ * is "never got as far as watching", and no code at all means the watcher was
+ * killed. Reporting those as `failed` turned a dropped HTTP/2 stream on a run
+ * that was still going into a red gate (HIV-3110).
+ */
+export function statusForWatchExit(code: number | null): Exclude<JobStatus, "running" | "canceled" | "timeout"> {
+	if (code === 0) return "done";
+	if (code === 1) return "failed";
+	return "unconfirmed";
+}
+
 export function formatDuration(ms: number): string {
 	if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
 	const seconds = Math.floor(ms / 1000);
@@ -228,6 +244,7 @@ const STATUS_ICON: Record<JobStatus, string> = {
 	failed: "✗",
 	timeout: "⏱",
 	canceled: "⊘",
+	unconfirmed: "?",
 };
 
 /** The tail of a job's output, for the notification. */
@@ -284,6 +301,8 @@ function verbFor(job: Job): string {
 			return `failed (exit ${job.exitCode ?? "?"})`;
 		case "timeout":
 			return "was stopped at its time limit";
+		case "unconfirmed":
+			return `ended without a verdict (exit ${job.exitCode ?? "?"}): the watch lost the run before it finished, so this is NOT a failure`;
 		case "canceled":
 			return "was canceled";
 		default:
@@ -296,7 +315,7 @@ export function renderList(jobs: readonly Job[], nowMs: number): string {
 	if (jobs.length === 0) return "No background jobs.";
 	const rows = jobs.map((job) => {
 		const took = formatDuration(elapsedMs(job, nowMs));
-		const exit = job.status === "failed" ? ` exit ${job.exitCode ?? "?"}` : "";
+		const exit = job.status === "failed" || job.status === "unconfirmed" ? ` exit ${job.exitCode ?? "?"}` : "";
 		return `${STATUS_ICON[job.status]} ${job.id}  ${job.status}${exit}  ${took}  ${job.what}`;
 	});
 	return rows.join("\n");
@@ -402,7 +421,7 @@ export function resultHeader(job: Job, nowMs: number): string {
 export function parseResultHeader(text: string): { id: string; status: JobStatus } | null {
 	const lines = text.split("\n");
 	const id = /^(bg-\d+) — /.exec(lines[0] ?? "")?.[1];
-	const status = /^status (running|done|failed|timeout|canceled)[ ,]/.exec(lines[1] ?? "")?.[1];
+	const status = /^status (running|done|failed|timeout|canceled|unconfirmed)[ ,]/.exec(lines[1] ?? "")?.[1];
 	if (!id || !status) return null;
 	return { id, status: status as JobStatus };
 }
