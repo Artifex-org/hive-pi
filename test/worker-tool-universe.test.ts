@@ -19,14 +19,20 @@
  * exactly the way the role grants did.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { join, sep } from "node:path";
 import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { createFakePi } from "./fake-pi.ts";
-import { packageExtensionPath, workerExtensionPaths, workerPackageExtensions } from "../extensions/subagent/worker.ts";
+import {
+	NATIVE_MCP_TOOLS,
+	WORKER_BUILTIN_MCP_EXTENSIONS,
+	nativeToolGrants,
+	workerExtensionPaths,
+} from "../extensions/subagent/worker.ts";
 
 const REPO = join(import.meta.dirname, "..");
 
@@ -38,8 +44,22 @@ const REPO = join(import.meta.dirname, "..");
 const IMPLICIT = ["parallel"];
 
 let universe: Set<string>;
-const verifiedPackages: { spec: string; declared: readonly string[]; actual: string[] }[] = [];
-const unresolvedPackages: string[] = [];
+
+/**
+ * The source of pi's MCP built-ins, as installed for this repo. Read rather than
+ * loaded: they need a live session runtime to register anything.
+ */
+function builtinSource(): string {
+	// The package exports no `./package.json`; resolve its entry and walk to dist/.
+	const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	const root = join(entry.slice(0, entry.lastIndexOf(`${sep}dist${sep}`)), "dist", "extensions");
+	let source = "";
+	for (const builtin of WORKER_BUILTIN_MCP_EXTENSIONS) {
+		const dir = join(root, builtin.replace(/^builtin:/, ""));
+		for (const file of readdirSync(dir)) if (file.endsWith(".js")) source += readFileSync(join(dir, file), "utf8");
+	}
+	return source;
+}
 
 beforeAll(async () => {
 	// `knowledge-tools` registers nothing without hive auth, so on a CI container
@@ -76,20 +96,10 @@ beforeAll(async () => {
 		for (const tool of pi.tools) names.add(tool.name);
 	}
 
-	// Package extensions live in pi's agent dir, which does not exist in a CI
-	// container. Where the package IS there, read it — the source is ground
-	// truth. Where it is not, use its DECLARED `provides`, and record that the
-	// declaration went unverified so a test below can say so out loud.
-	for (const pkg of workerPackageExtensions()) {
-		const path = packageExtensionPath(pkg.spec);
-		if (path) {
-			verifiedPackages.push({ spec: pkg.spec, declared: pkg.provides, actual: registeredToolNames(readFileSync(path, "utf8")) });
-			for (const name of registeredToolNames(readFileSync(path, "utf8"))) names.add(name);
-		} else {
-			unresolvedPackages.push(pkg.spec);
-			for (const name of pkg.provides) names.add(name);
-		}
-	}
+	// pi's MCP built-ins, which buildSubagentWorkerArgs loads for an MCP-capable
+	// worker (HIV-3745). Their tools are part of the universe; a test below
+	// checks the names against pi's own source.
+	for (const name of NATIVE_MCP_TOOLS) names.add(name);
 	universe = names;
 }, 60_000);
 
@@ -139,51 +149,16 @@ describe("the worker tool universe", () => {
 		expect(universe.size).toBeGreaterThan(8);
 	});
 
-	it("contains the MCP adapter tools, which is what HIV-1581 restored", () => {
-		// The six affected roles grant these. If the adapter is dropped from
-		// WORKER_PACKAGE_EXTENSIONS entirely, they vanish from the universe and
-		// the role-grant assertion below fails; this one says WHY, rather than
-		// leaving a reader to infer it from six role names.
-		for (const tool of ["mcp", "mcpScript"]) {
-			expect(
-				universe.has(tool),
-				`${tool} is missing — pi-mcp-adapter is not among the worker's extensions, so six roles are silently MCP-less again`,
-			).toBe(true);
-		}
+	it("contains the native MCP tools — codemode and tool_search reach every server", () => {
+		for (const tool of ["codemode", "tool_search"]) expect(universe.has(tool), `${tool} missing`).toBe(true);
 	});
 
-	it("verifies each package's DECLARED tools against its source, wherever the package exists", () => {
-		// The declaration exists so CI (no pi agent dir, no adapter) can still
-		// evaluate role grants. It is a contract, not an article of faith: on any
-		// machine that actually runs workers the package is present and this
-		// compares the declaration to what it really registers.
-		for (const pkg of verifiedPackages) {
-			for (const tool of pkg.declared) {
-				expect(
-					pkg.actual,
-					`${pkg.spec} is declared to provide ${tool} in WORKER_PACKAGE_EXTENSIONS, but its source does not register it`,
-				).toContain(tool);
-			}
-		}
-	});
-
-	it("accounts for every package extension as either verified or explicitly unresolved", () => {
-		// A package that is neither would mean the derivation loop skipped it, and
-		// its tools would be missing from the universe with no reason recorded —
-		// the shape that made this whole ticket necessary.
-		//
-		// Deliberately NOT a console warning about the unresolved ones: vitest's
-		// default reporter does not surface console output on a passing file, so a
-		// message here would be a notice nobody receives. Where the trust matters
-		// it is in the code — `WORKER_PACKAGE_EXTENSIONS[].provides` carries the
-		// reason — and the assertion above reads the source wherever it exists.
-		expect(verifiedPackages.length + unresolvedPackages.length).toBe(workerPackageExtensions().length);
-		for (const pkg of unresolvedPackages) {
-			expect(
-				workerPackageExtensions().map((entry) => entry.spec),
-				`${pkg} was unresolved but is not a declared package extension`,
-			).toContain(pkg);
-		}
+	it("names only tools pi's MCP built-ins actually register", () => {
+		// NATIVE_MCP_TOOLS is a declaration; pi's own source is ground truth. A
+		// pi release that renames one of these fails here instead of silently
+		// stripping MCP from every worker role that grants it.
+		const source = builtinSource();
+		for (const tool of NATIVE_MCP_TOOLS) expect(source, `pi's MCP built-ins do not mention ${tool}`).toContain(`"${tool}"`);
 	});
 });
 
@@ -191,7 +166,9 @@ describe("role grants are satisfiable in a worker", () => {
 	it("no role grants a tool a worker will not have", () => {
 		const offenders: string[] = [];
 		for (const role of roles()) {
-			const missing = role.tools.filter((tool) => !universe.has(tool));
+			// Judged AFTER the translation buildSubagentWorkerArgs applies, so a role
+			// still granting the adapter's `mcp` is satisfied by `codemode`.
+			const missing = nativeToolGrants(role.tools).filter((tool) => !universe.has(tool));
 			if (missing.length > 0) offenders.push(`${role.name}: ${missing.join(", ")}`);
 		}
 		expect(

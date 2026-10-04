@@ -1,9 +1,11 @@
 /**
- * The shared MCP-config seam (HIV-1969).
+ * The worker's view of MCP under pi's built-in support (HIV-1969, HIV-3745).
  *
- * The property under test is a COUPLING: `readiness/` reports a server's
- * lifecycle and `subagent/worker.ts` strips it, and if those two ever resolve
- * different files the report describes one config while workers run another.
+ * Native MCP has no lazy lifecycle and no `--mcp-config`: every enabled server
+ * in `<agent dir>/mcp.json` connects when a session starts. A worker therefore
+ * reads a MIRROR of the parent's agent dir whose `mcp.json` keeps only HTTP
+ * servers — one request each — and never spawns a stdio process tree per
+ * delegation.
  */
 
 import fs from "node:fs";
@@ -12,152 +14,100 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-	cleanupWorkerMcpConfig,
-	ensureWorkerMcpConfig,
-	lazyVariant,
-	mcpCachePath,
+	agentDir,
+	cleanupWorkerAgentDir,
+	ensureWorkerAgentDir,
 	mcpConfigPath,
-	readMcpConfig,
-	type McpConfigDoc,
+	oneShotMcpEnv,
+	workerMcpConfig,
 } from "../extensions/mcp-common/config.ts";
 
-const dirs: string[] = [];
-
-function tmpDir(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-common-test-"));
-	dirs.push(dir);
+const temps: string[] = [];
+function tmpdir(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	temps.push(dir);
 	return dir;
 }
-
 afterEach(() => {
-	for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-describe("mcpConfigPath", () => {
-	it("prefers --mcp-config, exactly as the adapter does", () => {
-		expect(mcpConfigPath({}, ["pi", "--mcp-config", "/etc/mcp.json"], "/home/x")).toBe("/etc/mcp.json");
+const CONFIG = {
+	_note: "comment keys are not servers",
+	mcpServers: {
+		hive: { url: "https://hive.example/mcp", lifecycle: "eager", directTools: ["get_run"], timeout: 960 },
+		linear: { url: "https://mcp.linear.app/mcp", lifecycle: "eager" },
+		asfam: { command: "bash", args: ["-c", "exec asfam-mcp"], lifecycle: "lazy-keep-alive" },
+	},
+};
+
+describe("agentDir / mcpConfigPath", () => {
+	it("follows PI_CODING_AGENT_DIR with pi's ~ expansion", () => {
+		expect(agentDir({ PI_CODING_AGENT_DIR: "~/x" }, "/home/u")).toBe("/home/u/x");
+		expect(agentDir({}, "/home/u")).toBe("/home/u/.pi/agent");
+		expect(mcpConfigPath({ PI_CODING_AGENT_DIR: "/a" }, "/home/u")).toBe("/a/mcp.json");
 	});
 
-	it("falls back to the agent dir", () => {
-		expect(mcpConfigPath({}, ["pi"], "/home/x")).toBe("/home/x/.pi/agent/mcp.json");
-	});
-
-	it("uses the adapter's session-specific agent root", () => {
-		const env = { PI_CODING_AGENT_DIR: "/tmp/hive-launch-pi-123" };
-		expect(mcpConfigPath(env, ["pi"], "/home/x")).toBe("/tmp/hive-launch-pi-123/mcp.json");
-		expect(mcpCachePath("/home/x", env)).toBe("/tmp/hive-launch-pi-123/mcp-cache.json");
-		expect(mcpConfigPath({ PI_CODING_AGENT_DIR: "~/launch" }, ["pi"], "/home/x")).toBe("/home/x/launch/mcp.json");
-	});
-
-	it("checks our own env escape LAST, so it can never mask the adapter's choice", () => {
-		const argv = ["pi", "--mcp-config", "/from/argv.json"];
-		const env = { PI_CODING_AGENT_DIR: "/tmp/launch", PI_MCP_CONFIG: "/from/env.json" };
-		expect(mcpConfigPath(env, argv, "/home/x")).toBe("/from/argv.json");
-		expect(mcpConfigPath(env, ["pi"], "/home/x")).toBe("/from/env.json");
-	});
-
-	it("locates the adapter's tool cache", () => {
-		expect(mcpCachePath("/home/x", {})).toBe("/home/x/.pi/agent/mcp-cache.json");
-		expect(mcpCachePath("/home/x", { PI_MCP_CACHE: "/tmp/cache.json" })).toBe("/tmp/cache.json");
+	it("honours our PI_MCP_CONFIG seam first", () => {
+		expect(mcpConfigPath({ PI_MCP_CONFIG: "/seam.json", PI_CODING_AGENT_DIR: "/a" }, "/home/u")).toBe("/seam.json");
 	});
 });
 
-describe("lazyVariant", () => {
-	const config: McpConfigDoc = {
-		_comment: "preserved",
-		mcpServers: {
-			hive: { lifecycle: "eager", url: "https://hive" },
-			linear: { lifecycle: "eager", command: "bash" },
-			sentry: { lifecycle: "lazy-keep-alive", command: "bash" },
-			borealis: { command: "bash" },
-		},
-	};
-
-	it("strips only the lifecycles that make the adapter connect unasked", () => {
-		const { config: next, changed } = lazyVariant(config);
-		expect(changed).toEqual(["hive", "linear"]);
-		expect(next.mcpServers?.hive).toEqual({ url: "https://hive" });
-		// `lazy-keep-alive` connects on FIRST USE, not at startup — a worker that
-		// never calls `mcp` still pays nothing, so it is left alone.
-		expect(next.mcpServers?.sentry).toEqual({ lifecycle: "lazy-keep-alive", command: "bash" });
-		expect(next.mcpServers?.borealis).toEqual({ command: "bash" });
+describe("workerMcpConfig", () => {
+	it("keeps HTTP servers only and drops adapter-only keys", () => {
+		const out = workerMcpConfig(CONFIG);
+		expect(Object.keys(out.mcpServers ?? {})).toEqual(["hive", "linear"]);
+		expect(out.mcpServers?.hive).toEqual({ url: "https://hive.example/mcp", timeout: 960 });
 	});
 
-	it("removes the key rather than writing \"lazy\" — absence is the adapter's default", () => {
-		const { config: next } = lazyVariant(config);
-		expect("lifecycle" in (next.mcpServers?.hive ?? {})).toBe(false);
-	});
-
-	it("preserves everything else in the document", () => {
-		expect(lazyVariant(config).config._comment).toBe("preserved");
-	});
-
-	it("does not copy when nothing prewarms — an unchanged config is returned as-is", () => {
-		const plain: McpConfigDoc = { mcpServers: { a: { command: "x" } } };
-		const result = lazyVariant(plain);
-		expect(result.changed).toEqual([]);
-		expect(result.config).toBe(plain);
-	});
-
-	it("tolerates a config with no servers at all", () => {
-		expect(lazyVariant({}).changed).toEqual([]);
+	it("does not mutate its input", () => {
+		const input = structuredClone(CONFIG);
+		workerMcpConfig(input);
+		expect(input).toEqual(CONFIG);
 	});
 });
 
-describe("ensureWorkerMcpConfig", () => {
-	it("writes a derived config and returns its path", () => {
-		const dir = tmpDir();
-		const source = path.join(dir, "mcp.json");
-		fs.writeFileSync(source, JSON.stringify({ mcpServers: { hive: { lifecycle: "eager", url: "u" } } }));
+describe("ensureWorkerAgentDir", () => {
+	function parentDir(): string {
+		const dir = tmpdir("parent-agent-");
+		fs.writeFileSync(path.join(dir, "mcp.json"), JSON.stringify(CONFIG));
+		fs.writeFileSync(path.join(dir, "auth.json"), "{}");
+		fs.mkdirSync(path.join(dir, "sessions"));
+		return dir;
+	}
 
-		const target = ensureWorkerMcpConfig(source, dir, 4242);
-		expect(target).toBe(path.join(dir, "pi-worker-mcp-4242.json"));
-		const written = readMcpConfig(target!);
-		expect(written?.mcpServers?.hive).toEqual({ url: "u" });
+	it("links every entry but mcp.json, which it writes filtered", () => {
+		const parent = parentDir();
+		const tmp = tmpdir("worker-tmp-");
+		const dir = ensureWorkerAgentDir(parent, tmp, 4242);
+		expect(dir).toBe(path.join(tmp, "pi-worker-agent-4242"));
+		expect(fs.readlinkSync(path.join(dir as string, "auth.json"))).toBe(path.join(parent, "auth.json"));
+		expect(fs.readlinkSync(path.join(dir as string, "sessions"))).toBe(path.join(parent, "sessions"));
+		const written = JSON.parse(fs.readFileSync(path.join(dir as string, "mcp.json"), "utf8"));
+		expect(Object.keys(written.mcpServers)).toEqual(["hive", "linear"]);
 	});
 
-	it("returns null when nothing prewarms — no flag beats a redundant copy", () => {
-		// The worker then reads exactly what the adapter would have read, which is
-		// one fewer thing that can drift.
-		const dir = tmpDir();
-		const source = path.join(dir, "mcp.json");
-		fs.writeFileSync(source, JSON.stringify({ mcpServers: { hive: { url: "u" } } }));
-		expect(ensureWorkerMcpConfig(source, dir, 1)).toBeNull();
+	it("is idempotent across delegations of one session", () => {
+		const parent = parentDir();
+		const tmp = tmpdir("worker-tmp-");
+		expect(ensureWorkerAgentDir(parent, tmp, 1)).toBe(ensureWorkerAgentDir(parent, tmp, 1));
 	});
 
-	it("returns null when there is no config to derive from", () => {
-		expect(ensureWorkerMcpConfig(path.join(tmpDir(), "absent.json"), tmpDir(), 1)).toBeNull();
+	it("builds an empty-server mirror for one-shot helpers", () => {
+		const parent = parentDir();
+		const tmp = tmpdir("worker-tmp-");
+		const dir = ensureWorkerAgentDir(parent, tmp, 7, "none");
+		expect(JSON.parse(fs.readFileSync(path.join(dir as string, "mcp.json"), "utf8"))).toEqual({ mcpServers: {} });
+		expect(oneShotMcpEnv(() => dir)).toEqual({ PI_CODING_AGENT_DIR: dir });
 	});
 
-	it("returns null on a malformed config rather than failing the delegation", () => {
-		const dir = tmpDir();
-		const source = path.join(dir, "mcp.json");
-		fs.writeFileSync(source, "{ not json");
-		expect(ensureWorkerMcpConfig(source, dir, 1)).toBeNull();
-	});
-
-	it("writes once and reuses it for every worker of the session", () => {
-		const dir = tmpDir();
-		const source = path.join(dir, "mcp.json");
-		fs.writeFileSync(source, JSON.stringify({ mcpServers: { hive: { lifecycle: "eager" } } }));
-
-		const first = ensureWorkerMcpConfig(source, dir, 7)!;
-		fs.writeFileSync(first, JSON.stringify({ marker: "untouched" }));
-		const second = ensureWorkerMcpConfig(source, dir, 7)!;
-		expect(second).toBe(first);
-		// A file per delegation would be litter proportional to fan-out.
-		expect(readMcpConfig(second)).toEqual({ marker: "untouched" });
-	});
-
-	it("cleans up after itself", () => {
-		const dir = tmpDir();
-		const source = path.join(dir, "mcp.json");
-		fs.writeFileSync(source, JSON.stringify({ mcpServers: { hive: { lifecycle: "keep-alive" } } }));
-		const target = ensureWorkerMcpConfig(source, dir, 9)!;
-		expect(fs.existsSync(target)).toBe(true);
-		cleanupWorkerMcpConfig(dir, 9);
-		expect(fs.existsSync(target)).toBe(false);
-		// Idempotent: shutdown may run twice.
-		expect(() => cleanupWorkerMcpConfig(dir, 9)).not.toThrow();
+	it("returns null without a parent dir, and cleanup removes only the links", () => {
+		const tmp = tmpdir("worker-tmp-");
+		expect(ensureWorkerAgentDir(path.join(tmp, "missing"), tmp, 1)).toBeNull();
+		const parent = parentDir();
+		ensureWorkerAgentDir(parent, tmp, 2);
+		cleanupWorkerAgentDir(tmp, 2);
+		expect(fs.existsSync(path.join(tmp, "pi-worker-agent-2"))).toBe(false);
+		expect(fs.existsSync(path.join(parent, "auth.json"))).toBe(true);
 	});
 });

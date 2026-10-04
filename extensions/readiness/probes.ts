@@ -25,14 +25,11 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 
 import { hiveBaseURL, readJSON } from "../hive-common/identity.ts";
-import {
-	mcpCacheStaleness,
-	mcpCachePath as sharedCachePath,
-	mcpConfigPath as sharedConfigPath,
-} from "../mcp-common/config.ts";
+import { mcpConfigPath as sharedConfigPath } from "../mcp-common/config.ts";
 import { baseDirCandidates, pgPaths } from "../devservices/pg.ts";
 import { DIR_PREFIX, HEARTBEAT_FILE, STALE_AFTER_MS } from "../devservices/reap.ts";
 import { mcpBelongsHere, stdioMissing, type McpServerDef } from "./mcp.ts";
+import { nativeMcpServer } from "../mcp-common/names.ts";
 import { mcpLauncherFor } from "../profile-common/profile.ts";
 import type { ProbeResult, ProbeStatus } from "./state.ts";
 
@@ -119,96 +116,45 @@ interface McpConfig {
 	mcpServers?: Record<string, McpServerDef | undefined>;
 }
 
-interface McpCache {
-	servers?: Record<string, { tools?: unknown[]; cachedAt?: number } | undefined>;
-}
-
 /**
- * The adapter's cache TTL and the "the adapter is ignoring this entry" test.
+ * One row per configured MCP server, from pi's built-in MCP (HIV-3745).
  *
- * Both MOVED to `mcp-common/config.ts`, which is where the cache path already
- * lives, when `mcp-common/search.ts` became a second consumer: the search
- * fallback has to tell an agent that a server is missing from the corpus for
- * the same two reasons this probe reports it as `warming`. Re-exported so this
- * module's public surface is unchanged — the reasoning, and the measurement
- * that produced it, travelled with the code.
- */
-export { MCP_CACHE_MAX_AGE_MS, mcpCacheStaleness } from "../mcp-common/config.ts";
-
-/**
- * One row per configured MCP server.
- *
- * TWO FACTS ABOUT PI, both measured rather than assumed, and both of which the
- * first draft of this probe got wrong:
- *
- * 1. **pi does not name MCP tools `mcp__server__tool`.** That is Claude Code's
- *    shape. `pi-mcp-adapter` registers ONE proxy tool called `mcp` and routes
- *    through it unless a server opts into `directTools` (index.ts:140 vs :623).
- *    A headless run measured 63 tools and zero starting with `mcp__`, so a probe
- *    counting that prefix reports every server missing, forever.
- * 2. **The tool inventory is on disk, not in the tool registry.** The adapter
- *    writes `~/.pi/agent/mcp-cache.json` (754 KB here) with a `tools` array per
- *    server, and populates deferred handles from it before any connection
- *    exists. That file is therefore the honest source for "what can this server
- *    do", and it answers with no connection and no cost — but only while the
- *    adapter still accepts the entry. See `mcpCacheStaleness` for the two ways
- *    it stops, and for what a row that ignores them cost in practice.
- *
- * The distinction the row exists to draw is still the important one: **tools
- * known ≠ server connected**. The adapter's default lifecycle is `lazy`
- * (`init.ts:231`), so a session can know 37 hive tools while nothing has
- * connected and the first call pays the whole spin-up. Calling that `ready`
- * would be a flattering lie, so lazy reads `warming` and says what the first
- * call costs.
+ * Native MCP registers every tool of a connected server as
+ * `mcp__<server>__<tool>`, so the LIVE REGISTRY answers "is it connected and
+ * what can it do" directly — no cache file, no TTL to second-guess. Servers
+ * connect in the background at session start (`direct`-tool servers are
+ * awaited up to 10 s before the first prompt), so a server with no tools yet
+ * reads `warming`; the delayed re-probe in `index.ts` turns that into the real
+ * answer, and a server that never connects keeps saying where to look.
  */
 export function mcpConfigPath(deps: ProbeDeps): string {
-	// Resolved the way the adapter resolves it — `--mcp-config` first — so the
-	// row describes the file that is actually loaded, not the default. Shared
-	// with `subagent/worker.ts`, which has to strip the lifecycle this reports.
-	return sharedConfigPath(deps.env, process.argv, deps.home);
+	return sharedConfigPath(deps.env, deps.home);
 }
 
-export function mcpCachePath(deps: ProbeDeps): string {
-	// `deps.env`, not ambient `process.env`: every other probe reads the world
-	// through the injected seam, and a default that reached around it would make
-	// the row describe a file the test never wrote.
-	return sharedCachePath(deps.home, deps.env);
-}
-
-/** True once the adapter is loaded: it registers a single proxy tool, `mcp`. */
-export function adapterLoaded(deps: ProbeDeps): boolean {
-	return deps.toolNames().includes("mcp");
+/** How many tools pi has registered for `server`. */
+export function nativeToolCount(toolNames: readonly string[], server: string): number {
+	return toolNames.filter((name) => nativeMcpServer(name) === server.replace(/[^A-Za-z0-9_]/g, "_")).length;
 }
 
 export function mcpServerProbes(deps: ProbeDeps): { id: string; label: string; probe: Probe }[] {
 	const config = deps.readJson<McpConfig>(mcpConfigPath(deps));
 	const servers = Object.keys(config?.mcpServers ?? {});
 	if (servers.length === 0) return [];
-	// Read the cache ONCE per pass, not once per server: the measured file is
-	// 754 KB, and five servers would otherwise mean five full parses per probe
-	// run — a cost this extension exists to remove, not to add.
-	const cache = deps.readJson<McpCache>(mcpCachePath(deps));
-	// Same discipline as the cache read: one stat per pass, not one per server.
-	const configMtimeMs = deps.mtimeMs(mcpConfigPath(deps));
 	// Product servers stay in the global file so a session that actually needs
 	// the other product can still connect. They are not a capability of THIS
-	// checkout, so they do not get a row — a launch that listed another
-	// product's server as 353-tools-warming (HIV-2639) was the card inventing a
-	// problem, and an `absent` row in every other repo would be the same
-	// invention the other way. Which servers are a product comes from the house
-	// profile; with none configured, every server is reported everywhere.
+	// checkout, so they do not get a row (HIV-2639). Which servers are a product
+	// comes from the house profile; with none configured, every server is
+	// reported everywhere.
 	return servers.filter((name) => mcpBelongsHere(name, deps.cwd)).map((name) => ({
 		id: `mcp.${name}`,
 		label: `mcp ${name}`,
 		probe: async (d: ProbeDeps) => {
 			const id = `mcp.${name}`;
 			const label = `mcp ${name}`;
-			if (!adapterLoaded(d)) {
-				// A `--no-extensions` run, or a machine without the adapter. Not a
-				// verdict about the server.
-				return { id, label, status: "unknown" as ProbeStatus, detail: "mcp adapter not loaded" };
-			}
 			const def = config?.mcpServers?.[name] ?? {};
+			if (def.enabled === false) {
+				return { id, label, status: "unknown" as ProbeStatus, detail: "disabled in mcp.json" };
+			}
 			const missing = stdioMissing(def, d.home, d.exists);
 			if (missing) {
 				return {
@@ -217,52 +163,25 @@ export function mcpServerProbes(deps: ProbeDeps): { id: string; label: string; p
 					status: "absent" as ProbeStatus,
 					detail: `entrypoint missing (${missing[0]})`,
 					hint: `the stdio spawn cannot start until ${missing[0]} exists — build the project CLI (or stage ~/.local/share/${mcpLauncherFor(name) ?? name}/current.js)`,
-					tool: "mcp",
 				};
 			}
-			const tools = cache?.servers?.[name]?.tools;
-			const count = Array.isArray(tools) ? tools.length : 0;
-			const lifecycle = def.lifecycle ?? "lazy";
-			const prewarmed = lifecycle === "eager" || lifecycle === "keep-alive";
+			const count = nativeToolCount(d.toolNames(), name);
 			if (count === 0) {
 				return {
 					id,
 					label,
-					status: "unknown" as ProbeStatus,
-					detail: "no cached tool list — the first call will discover it",
-					tool: "mcp",
-				};
-			}
-			const stale = mcpCacheStaleness(cache?.servers?.[name]?.cachedAt, configMtimeMs, d.now());
-			if (stale) {
-				// Never `ready`, whatever the lifecycle: nothing about this server is
-				// usable from cache. An eager server recovers on its own — the
-				// startup connect rewrites the entry — so the two differ only in
-				// what the reader has to DO about it, which is what the hint says.
-				return {
-					id,
-					label,
 					status: "warming" as ProbeStatus,
-					detail: `${count} tools cached but the adapter ignores the entry — ${stale}`,
-					hint: prewarmed
-						? "the startup connect rebuilds it; direct tools appear a few seconds in"
-						: `\`mcp({ server: "${name}" })\` will answer "configured but not connected" until something connects — call a tool directly, or \`mcp({ connect: "${name}" })\` first`,
-					tool: "mcp",
+					detail: "connecting — no tools registered yet",
+					hint: "`/mcp` shows the connection state and the last error; servers connect in the background",
 				};
 			}
+			const exposure = typeof def.exposure === "string" ? def.exposure : "codemode";
 			return {
 				id,
 				label,
-				status: prewarmed ? ("ready" as ProbeStatus) : ("warming" as ProbeStatus),
-				detail: prewarmed
-					? `${count} tools · ${lifecycle}`
-					// Name the CONFIGURED lifecycle rather than the word "lazy": the
-					// two non-prewarming modes differ in what the SECOND call costs
-					// (`lazy` reconnects, `lazy-keep-alive` does not), and a row that
-					// calls both "lazy" hides the difference the operator set.
-					: `${count} tools known · ${lifecycle}: first call pays the connect`,
-				...(prewarmed ? {} : { hint: `set "lifecycle": "eager" in mcp.json to prewarm it` }),
-				tool: "mcp",
+				status: "ready" as ProbeStatus,
+				detail: `${count} tools · ${exposure}`,
+				tool: exposure === "direct" ? `mcp__${name}__*` : exposure === "deferred" ? "tool_search" : "codemode",
 			};
 		},
 	}));

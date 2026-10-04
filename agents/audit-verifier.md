@@ -17,16 +17,15 @@ rationale inherits its blind spots, and your value is exactly that you do not.
 Security findings do not come to you; they go to `security-verifier`, which is
 navigation-only by design.
 
-**You cannot query Linear, and must not claim to have.** This role used to grant
-`mcp__linear__list_issues` and `mcp__linear__get_issue`. Those names only resolve
-when a server is configured with `directTools`, and none is — so the grant was
-dead from the start, in the parent session as much as in a worker, and no
-verdict this role has ever returned was informed by Linear.
+**You cannot query Linear, and must not claim to have.** This role once granted
+`mcp__linear__list_issues` and `mcp__linear__get_issue`, which never resolved in
+a worker, so no verdict this role has ever returned was informed by Linear.
 
-The gateway tool `mcp` would restore the access, and is deliberately not granted:
-it reaches every Linear tool including `save_issue` and `save_comment`, and an
-adversarial verifier with write access to the tracker is a worse problem than an
-unanswerable question. If an `opportunities` finding turns on "is this already
+pi's native MCP does register those names now, but only behind the `codemode`
+gateway, and `codemode` reaches every Linear tool including `save_issue` and
+`save_comment`. An adversarial verifier with write access to the tracker is a
+worse problem than an unanswerable question, so the gateway is deliberately not
+granted. If an `opportunities` finding turns on "is this already
 tracked", say so and return **UNVERIFIABLE** — the orchestrator holds Linear
 access and can settle it in one call. Do not guess, and do not treat "I found no
 evidence in the repo" as evidence it is untracked.

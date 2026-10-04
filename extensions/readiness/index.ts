@@ -4,8 +4,8 @@
  *
  * THE PROBLEM, MEASURED. Capabilities in this harness announce themselves by
  * failing. `dev_db_start` reports missing Postgres binaries on first call;
- * `pi-mcp-adapter` defaults every server to `lifecycle: "lazy"` so the first
- * `mcp__*` call pays connect + handshake mid-task; a delegation dies on an
+ * an MCP server that cannot connect is discovered by the first `mcp__*` call
+ * that needs it; a delegation dies on an
  * OpenRouter 402 that was true before the session began. Three of those cost a
  * turn each on 2026-08-16 alone (`~/.pi/agent/papercuts.md`).
  *
@@ -137,11 +137,12 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * ONE delayed re-probe, and it exists for a measured reason.
 	 *
-	 * `pi-mcp-adapter` starts its initialization from `session_start` without
-	 * awaiting it, so at the moment the first probe runs there is usually not a
-	 * single `mcp__*` tool registered yet. The first pass therefore reports every
-	 * server as `unknown`; this second pass, after the adapter has had time to
-	 * register, is what turns that into the real answer.
+	 * pi's built-in MCP connects servers in the background after
+	 * `session_start` (only `direct`-tool servers are awaited, and only before
+	 * the first prompt), so at the moment the first probe runs there is usually
+	 * not a single `mcp__*` tool registered yet. The first pass therefore reports
+	 * servers as `warming`; this second pass is what turns that into the real
+	 * answer.
 	 *
 	 * It is a settle, not a poll: exactly one follow-up, unref'd so it can never
 	 * hold the process open, and it publishes only if something actually moved

@@ -56,8 +56,8 @@ import {
 	silenceError,
 	shouldStopForSilence,
 } from "./lifecycle.ts";
-import { cleanupWorkerMcpConfig } from "../mcp-common/config.ts";
-import { buildSubagentWorkerArgs } from "./worker.ts";
+import { cleanupWorkerAgentDir } from "../mcp-common/config.ts";
+import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 import { backgroundRefusal, backgroundStartedMessage } from "./background.ts";
 import { MAX_CONCURRENT } from "../background/jobs.ts";
 import {
@@ -837,7 +837,7 @@ async function runSingleAgent(
 	// A worker needs only the requested tools. Loading the interactive extension
 	// set lets extension-owned handles survive agent_settled, so the child never
 	// exits even after returning its final JSON result.
-	const args = buildSubagentWorkerArgs(model, agent.tools, undefined, agent.opMode);
+	const args = buildSubagentWorkerArgs(model, agent.tools, agent.opMode);
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
@@ -925,7 +925,11 @@ async function runSingleAgent(
 				// The writer token goes down too: a writer subagent that delegates
 				// again in the same worktree is still one running writer, since this
 				// frame is blocked awaiting it.
-				env: { ...process.env, PI_AGENDA_WORKER: "1", ...(writerLock?.childEnv ?? {}) },
+				//
+				// workerMcpEnv points a worker that can reach MCP at the HTTP-only
+				// agent-dir mirror (mcp-common/config.ts): native MCP has no lazy
+				// lifecycle, so this is what keeps a fan-out cheap.
+				env: { ...process.env, PI_AGENDA_WORKER: "1", ...workerMcpEnv(agent.tools), ...(writerLock?.childEnv ?? {}) },
 			});
 			let buffer = "";
 			let closed = false;
@@ -1430,9 +1434,9 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", () => {
 		for (const toolCallId of [...ACTIVE_SUBAGENT_RUNS.keys()]) stopSubagentWidget(pi, toolCallId);
-		// The derived worker MCP config, if this session wrote one (HIV-1969).
+		// The worker agent-dir mirror, if this session built one (HIV-1969).
 		// Idempotent, and a failure here is never worth surfacing at shutdown.
-		cleanupWorkerMcpConfig();
+		cleanupWorkerAgentDir();
 	});
 	pi.events.on(DECK_SYNC_CHANNEL, () => publishSubagents(pi));
 

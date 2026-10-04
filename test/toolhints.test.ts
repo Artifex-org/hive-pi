@@ -108,36 +108,10 @@ describe("matchHint", () => {
 		expect(hint?.hint).toMatch(/flat name|tes-NNNN/);
 	});
 
-	it("tells the proxy searcher what its search actually matches", () => {
-		const hint = matchHint("mcp", REAL_ERRORS.mcpNoMatch);
-		expect(hint?.id).toBe("mcp-proxy-no-match");
-		// And names the direct tools, which is the fix that removes the search.
-		expect(hint?.hint).toContain("hive_wait_for_run");
-		// AND IT MUST BE TRUE. This hint shipped asserting the search "takes
-		// tool-NAME fragments, not a description of what you want". The adapter's
-		// FIELD_WEIGHTS include `description: 5`, and a probe over the real corpus
-		// proves it — `search("booster")` returns `get_metering_usage`, which has
-		// "booster" only in its description. Two sessions (P0175, P0556) caught
-		// the contradiction with the adapter's own tool description and burned
-		// turns reconciling it. A hint that is wrong is worse than no hint.
-		expect(renderHint(hint!)).not.toMatch(/not a description/);
-	});
-
-	it("names a schema rejection as a schema rejection", () => {
-		expect(matchHint("mcp", REAL_ERRORS.mcpSchema)?.id).toBe("mcp-schema-rejection");
-	});
-
-	it("tells a worker that read `mcp {}` status as lost access that it has not (f16f86e9)", () => {
-		const hint = matchHint("mcp", REAL_ERRORS.mcpStatus);
-		expect(hint?.id).toBe("mcp-empty-args");
-		// The load-bearing negative: the status is not a failure and nothing is lost.
-		expect(hint?.hint).toMatch(/have NOT lost access/);
-		expect(hint?.hint).toMatch(/Do NOT conclude the tools are unavailable/);
-		// And it must hand back the shapes the worker drifted away from — including
-		// the batch tool, which cannot be answered from its own empty-args error.
-		expect(hint?.hint).toContain("mcp({tool:");
-		expect(hint?.hint).toContain("mcp({search:");
-		expect(hint?.hint).toContain("mcpScript({code:");
+	it("names a schema rejection as a schema rejection, from codemode or a direct MCP tool", () => {
+		expect(matchHint("codemode", REAL_ERRORS.mcpSchema)?.id).toBe("mcp-schema-rejection");
+		expect(matchHint("mcp__hive__wait_for_run", REAL_ERRORS.mcpSchema)?.id).toBe("mcp-schema-rejection");
+		expect(matchHint("bash", REAL_ERRORS.mcpSchema)).toBeNull();
 	});
 
 	it("does NOT claim tools exist when none are configured — 0 tools gets no hint", () => {
@@ -257,35 +231,6 @@ describe("the extension", () => {
 			content: [{ type: "text", text: REAL_ERRORS.ghLogin }],
 		});
 		expect(patch).toBeUndefined();
-	});
-
-	it("still annotates the mcp proxy's non-error failure", async () => {
-		// The proxy reports "found nothing" as an ordinary result, which is the
-		// exact case this extension exists for: a search that failed silently.
-		const pi = load();
-		const [patch] = (await pi.emit({
-			type: "tool_result",
-			toolName: "mcp",
-			isError: false,
-			content: [{ type: "text", text: REAL_ERRORS.mcpNoMatch }],
-		})) as ({ content?: { text: string }[] } | undefined)[];
-		expect(patch?.content?.[0].text).toContain("mcp-proxy-no-match");
-	});
-
-	it("annotates the empty-args status listing without touching isError", async () => {
-		const pi = load();
-		const [patch] = (await pi.emit({
-			type: "tool_result",
-			toolName: "mcp",
-			isError: false,
-			input: {},
-			content: [{ type: "text", text: REAL_ERRORS.mcpStatus }],
-		})) as ({ content?: { text: string }[] } | undefined)[];
-		expect(patch?.content?.[0].text).toContain("mcp-empty-args");
-		// The original status is kept — the hint interprets it, never replaces it.
-		expect(patch?.content?.[0].text.startsWith(REAL_ERRORS.mcpStatus)).toBe(true);
-		// A hint is not a verdict: content only, isError left alone.
-		expect(Object.keys(patch ?? {})).toEqual(["content"]);
 	});
 
 	it("leaves a real mcp tool-call result alone", async () => {

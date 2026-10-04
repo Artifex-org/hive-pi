@@ -22,12 +22,9 @@
  * else in `extensions/` loads.
  */
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { ensureWorkerMcpConfig } from "../mcp-common/config.ts";
+import { ensureWorkerAgentDir } from "../mcp-common/config.ts";
 
 /**
  * Extensions a worker loads explicitly.
@@ -37,9 +34,8 @@ import { ensureWorkerMcpConfig } from "../mcp-common/config.ts";
  * tools) would put that hook in the worker's loop, which `--no-extensions`
  * exists to prevent.
  *
- * - `knowledge-tools.ts` — registers tools only, no hooks. It is the sole
- *   knowledge path a worker has: the `mcp` adapter is itself an extension that
- *   `--no-extensions` strips.
+ * - `knowledge-tools.ts` — registers tools only, no hooks. A worker's knowledge
+ *   path that does not depend on MCP being granted or connected.
  * - `edit-common/rowtool.ts` (HIV-1884) — the row-script `edit` override. THIS
  *   LIST IS THE WORKER-SCOPING MECHANISM: because `--no-extensions` strips
  *   everything else, naming it here is what makes the format reach workers
@@ -86,80 +82,77 @@ const WORKER_EXTENSIONS = [
 ];
 
 /**
- * Extensions that are installed PACKAGES rather than files in this repo.
+ * pi's built-in MCP support, loaded explicitly into workers that can reach MCP.
  *
- * `pi-mcp-adapter` provides `mcp` and `mcpScript`. Six roles grant them and
- * name `mcp__<server>__<tool>` calls in their bodies, and every one of those
- * grants was silently dropped: the adapter is an extension, `--no-extensions`
- * strips it, and pi discards an unknown `--tools` name without a word. A
- * delegated `incident-responder` could not reach sentry — it proceeded without
- * the data (HIV-1581).
+ * Since pi 0.99, `--no-extensions` also strips the built-in extensions, so a
+ * worker has no MCP unless these are named. Together they replace what
+ * `pi-mcp-adapter` gave workers (HIV-1581, HIV-3745):
  *
- * The cost is real and accepted rather than hidden: the adapter registers
- * `session_start`, `session_shutdown` and `tool_result` hooks, so those now run
- * in every delegated worker, which is the sort of thing `--no-extensions`
- * exists to prevent. What makes it tolerable is that connections are LAZY —
- * `startLoadTimeInitialization` returns immediately unless a server declares
- * `lifecycle: eager|keep-alive`. A worker that never calls `mcp` pays for a
- * config parse and a metadata-cache read, not for five MCP servers.
- *
- * REVISITED 2026-08-16 (HIV-1969), on precisely the trigger this comment named.
- * `hive` and `linear` are now `eager` in the workstation config, because a
- * prewarmed connection removes a mid-task stall the human waits through. That
- * is right for an interactive session and wrong for a worker: one bounded task,
- * often eight at once, and `linear` spawns an `npx` subprocess per connection.
- * So the lifecycle is a property of the session KIND, not of the server, and
- * workers are handed a derived config with every prewarming lifecycle stripped
- * (`mcp-common/config.ts`). If that derivation returns null the worst case is
- * the behaviour this comment warned about — never a failed delegation.
+ * - `builtin:mcp` — connects the servers in the worker's `mcp.json`. That file
+ *   is the HTTP-only mirror `mcp-common/config.ts` builds (no lazy lifecycle
+ *   exists natively, so the mirror is what keeps a fan-out of eight from
+ *   spawning eight copies of every stdio server).
+ * - `builtin:codemode` — the `codemode` tool: scripts call MCP tools (default
+ *   exposure) and built-ins, in parallel, and every nested call still passes the
+ *   `tool_call` pipeline.
+ * - `builtin:tool-search` — `tool_search`, for servers with `deferred` exposure.
  */
-const WORKER_PACKAGE_EXTENSIONS = [
-	{
-		spec: "pi-mcp-adapter/index.ts",
-		/**
-		 * The tools this package contributes, DECLARED — because the package is
-		 * installed into pi's agent dir and is absent from a CI container, where
-		 * the tool-universe test would otherwise derive a smaller universe and
-		 * blame six roles for it.
-		 *
-		 * This is not taken on trust. Wherever the package IS resolvable — any
-		 * machine that actually runs workers — the test reads its source and
-		 * fails if this list and the registrations disagree. The declaration is
-		 * the contract in the one environment that cannot check it, and checked
-		 * everywhere it can be.
-		 */
-		provides: ["mcp", "mcpScript"],
-	},
-];
+export const WORKER_BUILTIN_MCP_EXTENSIONS = ["builtin:mcp", "builtin:codemode", "builtin:tool-search"] as const;
+
+/** The tools the built-ins contribute: what a role must grant to reach MCP. */
+export const NATIVE_MCP_TOOLS = ["codemode", "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"] as const;
+
+/**
+ * pi-mcp-adapter's tool names, still granted by role files written for it.
+ * `mcp` was the proxy (search, describe, call) and `mcpScript` ran a script —
+ * `codemode` is the native form of both, and `tool_search` of the discovery
+ * half. Translated rather than rejected so a role file and this package can be
+ * updated in either order without silently stripping a worker's MCP.
+ */
+const LEGACY_MCP_GRANTS: Record<string, readonly string[]> = {
+	mcp: ["codemode", "tool_search"],
+	mcpScript: ["codemode"],
+};
+
+/** A role's `--tools` list in native terms: legacy MCP grants translated, order kept, no duplicates. */
+export function nativeToolGrants(tools: readonly string[]): string[] {
+	const out: string[] = [];
+	for (const tool of tools) {
+		for (const name of LEGACY_MCP_GRANTS[tool] ?? [tool]) if (!out.includes(name)) out.push(name);
+	}
+	return out;
+}
+
+/**
+ * Does this worker need MCP at all? An unrestricted worker (no `--tools`) gets
+ * every tool, so yes; a restricted one only when it grants a native MCP tool
+ * (after translation). A worker that cannot reach MCP gets no built-in and no
+ * mirror — zero connections, which is the cheapest correct answer.
+ */
+export function workerNeedsMcp(tools: readonly string[] | undefined): boolean {
+	if (!tools || tools.length === 0) return true;
+	const grants = nativeToolGrants(tools);
+	return grants.some((t) => (NATIVE_MCP_TOOLS as readonly string[]).includes(t) || t.startsWith("mcp__"));
+}
 
 /**
  * Absolute paths, resolved from this module rather than from cwd — a worker is
  * spawned with the TARGET repo as cwd, which is not where hive-pi lives.
- *
- * A package extension that is not installed is SKIPPED rather than passed to
- * `-e`, because pi treats an unresolvable `-e` as a hard error and that would
- * break every delegation on a machine without the adapter. The tool-universe
- * test asserts the adapter is present here, so its absence cannot pass
- * unnoticed on a machine that does have it.
  */
 export function workerExtensionPaths(): string[] {
-	const paths = WORKER_EXTENSIONS.map((relative) => fileURLToPath(new URL(relative, import.meta.url)));
-	for (const pkg of WORKER_PACKAGE_EXTENSIONS) {
-		const resolved = packageExtensionPath(pkg.spec);
-		if (resolved) paths.push(resolved);
-	}
-	return paths;
+	return WORKER_EXTENSIONS.map((relative) => fileURLToPath(new URL(relative, import.meta.url)));
 }
 
-/** Where an installed package extension lives, or null when it is not installed. */
-export function packageExtensionPath(spec: string): string | null {
-	const resolved = join(getAgentDir(), "npm", "node_modules", spec);
-	return existsSync(resolved) ? resolved : null;
-}
-
-/** What each package extension contributes, for environments that cannot read it. */
-export function workerPackageExtensions(): readonly { spec: string; provides: readonly string[] }[] {
-	return WORKER_PACKAGE_EXTENSIONS;
+/**
+ * The environment a worker needs on top of the parent's: an agent dir whose
+ * `mcp.json` is the HTTP-only mirror. Empty when the worker has no MCP or the
+ * mirror could not be built (the worker then reads the parent's config — some
+ * extra connects, never a failed delegation).
+ */
+export function workerMcpEnv(tools: readonly string[] | undefined, mirror: () => string | null = ensureWorkerAgentDir): Record<string, string> {
+	if (!workerNeedsMcp(tools)) return {};
+	const dir = mirror();
+	return dir ? { PI_CODING_AGENT_DIR: dir } : {};
 }
 
 /**
@@ -172,26 +165,20 @@ export function workerPackageExtensions(): readonly { spec: string; provides: re
  * and the failure mode is silence in both directions.
  *
  * That test is the reason this file has no runtime guard. One was written and
- * removed: with the adapter restored there is no known parent-only tool, so a
+ * removed: with the MCP built-ins loaded there is no known parent-only tool, so a
  * dispatch-time check would have been an empty list behind a branch that could
  * never fire — the "declared but inert" shape this wave exists to delete.
  */
 export function buildSubagentWorkerArgs(
 	model: string | undefined,
 	tools: string[] | undefined,
-	/**
-	 * A config with every prewarming lifecycle stripped (HIV-1969). Null when
-	 * nothing prewarms, in which case no flag is passed and the worker reads
-	 * exactly what the adapter would have read on its own.
-	 */
-	mcpConfigPath: string | null = ensureWorkerMcpConfig(),
 	opMode?: string,
 ): string[] {
 	const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
 	for (const path of workerExtensionPaths()) args.push("-e", path);
-	if (mcpConfigPath) args.push("--mcp-config", mcpConfigPath);
+	if (workerNeedsMcp(tools)) for (const builtin of WORKER_BUILTIN_MCP_EXTENSIONS) args.push("-e", builtin);
 	if (model) args.push("--model", model);
 	if (opMode) args.push("--op-mode", opMode);
-	if (tools && tools.length > 0) args.push("--tools", tools.join(","));
+	if (tools && tools.length > 0) args.push("--tools", nativeToolGrants(tools).join(","));
 	return args;
 }

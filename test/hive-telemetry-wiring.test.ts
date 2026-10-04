@@ -484,3 +484,46 @@ describe("generation speed", () => {
 		expect(luna?.ttft_ms).toBe(100);
 	});
 });
+
+describe("PI_HIVE_RUN_ID exists before any MCP server connects (HIV-3745)", () => {
+	// pi's built-in MCP throws on a missing or empty `${PI_HIVE_RUN_ID}` in the
+	// `X-Hive-Session` header, which takes the whole hive server down. Built-in
+	// MCP connects during session_start; the id must already be set at LOAD.
+	let saved: string | undefined;
+	beforeEach(() => {
+		saved = process.env.PI_HIVE_RUN_ID;
+		delete process.env.PI_HIVE_RUN_ID;
+		dir = mkdtempSync(join(tmpdir(), "hive-telemetry-runid-"));
+	});
+	afterEach(() => {
+		if (saved === undefined) delete process.env.PI_HIVE_RUN_ID;
+		else process.env.PI_HIVE_RUN_ID = saved;
+		rmSync(dir, { recursive: true, force: true });
+		vi.unstubAllGlobals();
+	});
+
+	it("is set at load — even with telemetry disabled — and becomes the first run's id", async () => {
+		cfg = config({ enabled: false });
+		hiveTelemetry(createFakePi().api);
+		expect(process.env.PI_HIVE_RUN_ID).toMatch(/^[0-9a-f-]{36}$/);
+
+		delete process.env.PI_HIVE_RUN_ID;
+		cfg = config();
+		fakeHive();
+		const fake = createFakePi();
+		const announced: string[] = [];
+		fake.api.events.on("hive.session", (data: unknown) => void announced.push((data as { clientRunID: string }).clientRunID));
+		hiveTelemetry(fake.api);
+		const minted = process.env.PI_HIVE_RUN_ID;
+		await fake.emit({ type: "session_start", reason: "new" });
+		expect(process.env.PI_HIVE_RUN_ID).toBe(minted);
+		expect(announced[0]).toBe(minted);
+	});
+
+	it("leaves an id inherited from a parent pi in place for the header", () => {
+		process.env.PI_HIVE_RUN_ID = "parent-run";
+		cfg = config({ enabled: false });
+		hiveTelemetry(createFakePi().api);
+		expect(process.env.PI_HIVE_RUN_ID).toBe("parent-run");
+	});
+});

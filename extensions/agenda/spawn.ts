@@ -19,7 +19,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { addUsage, budgetTokens, emptyUsage, type Usage, type WireUsage } from "../harness/usage.ts";
-import { ensureWorkerMcpConfig } from "../mcp-common/config.ts";
+import { oneShotMcpEnv } from "../mcp-common/config.ts";
+import { nativeToolGrants, workerMcpEnv } from "../subagent/worker.ts";
 
 export function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	// Explicit override, checked first.
@@ -106,7 +107,9 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 			cwd: options.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, ...options.env },
+			// One-shots load the full extension set, built-in MCP included; the
+			// no-server mirror keeps a --no-tools helper from connecting anything.
+			env: { ...process.env, ...oneShotMcpEnv(), ...options.env },
 		});
 
 		const texts: string[] = [];
@@ -216,17 +219,14 @@ export interface RoleAgentResult {
 export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult> {
 	const args = ["--mode", "json", "-p", "--no-session"];
 	// A role agent loads the caller's FULL extension set (see `extraArgs` above),
-	// which includes `pi-mcp-adapter` reading the real config — so unlike a
-	// subagent worker it would honour an eager lifecycle and connect to every
-	// prewarmed server on spawn. Same reasoning as `subagent/worker.ts`: the
-	// lifecycle belongs to the session kind, and a bounded child is not the kind
-	// that benefits (HIV-1969). Null when nothing prewarms, in which case no flag
-	// is passed and the child reads exactly what the adapter would.
-	const workerMcpConfig = ensureWorkerMcpConfig();
-	if (workerMcpConfig) args.push("--mcp-config", workerMcpConfig);
+	// which includes pi's built-in MCP — and native MCP connects every enabled
+	// server on start, with no lazy lifecycle. Same remedy as
+	// `subagent/worker.ts`: the child reads the HTTP-only agent-dir mirror, so a
+	// bounded child does not spawn the stdio servers (HIV-1969, HIV-3745).
+	const roleEnv = workerMcpEnv(options.role.tools);
 	const model = options.model ?? options.role.model;
 	if (model) args.push("--model", model);
-	if (options.role.tools && options.role.tools.length > 0) args.push("--tools", options.role.tools.join(","));
+	if (options.role.tools && options.role.tools.length > 0) args.push("--tools", nativeToolGrants(options.role.tools).join(","));
 	if (options.extraArgs && options.extraArgs.length > 0) args.push(...options.extraArgs);
 
 	let promptFile: string | null = null;
@@ -243,7 +243,7 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 			cwd: options.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, ...options.env },
+			env: { ...process.env, ...roleEnv, ...options.env },
 		});
 
 		const texts: string[] = [];

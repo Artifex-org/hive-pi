@@ -15,7 +15,7 @@
  *     cannot ship an `agents/briefer.md` that runs automatically against every
  *     prompt typed in it. `subagent` gates project roles behind a trust
  *     confirmation; this path has nobody to ask, so it declines instead.
- *  3. `mcp` reaches only the ticket lane, and that lane only exists when the
+ *  3. MCP (`codemode`) reaches only the ticket lane, and that lane only exists when the
  *     prompt names a key. The one tool that leaves the machine is confined to
  *     the one job that needs it.
  *  4. THE WALL IS PER LANE, NOT PER PASS. Each worker gets the full timeout and
@@ -27,7 +27,7 @@
 
 import { discoverAgents, resolveAgent, type AgentConfig } from "../harness/roles.ts";
 import { runRoleAgent } from "../agenda/spawn.ts";
-import { workerExtensionPaths } from "../subagent/worker.ts";
+import { WORKER_BUILTIN_MCP_EXTENSIONS, workerExtensionPaths, workerNeedsMcp } from "../subagent/worker.ts";
 import { addTotals, emptyUsage, type Usage } from "../harness/usage.ts";
 import { parseBriefDraft, draftIsEmpty, type BriefDraft } from "./compile.ts";
 import { laneInstruction, laneIsRunnable, laneTools, mergeDrafts, planLanes, type BriefLane, type LaneDraft } from "./lanes.ts";
@@ -193,7 +193,7 @@ async function runLane(lane: BriefLane, role: AgentConfig, model: string, keys: 
 			model,
 			timeoutMs: options.timeoutMs,
 			signal: options.signal,
-			extraArgs: isolationArgs(),
+			extraArgs: isolationArgs(laneTools(role, lane)),
 			// PI_BRIEF_WORKER cuts the recursion even if the isolation flags above
 			// ever stop working; PI_AGENDA_WORKER keeps agenda policies out of the
 			// child, the same reason subagent sets it.
@@ -223,9 +223,14 @@ async function runLane(lane: BriefLane, role: AgentConfig, model: string, keys: 
 	};
 }
 
-/** `--no-extensions` plus the worker allowlist, flattened into argv. */
-export function isolationArgs(): string[] {
+/**
+ * `--no-extensions` plus the worker allowlist, flattened into argv — and pi's
+ * MCP built-ins for a lane that reaches MCP, since `--no-extensions` strips
+ * those too (pi 0.99). The ticket lane is the only one that does.
+ */
+export function isolationArgs(tools: readonly string[] = []): string[] {
 	const args = ["--no-extensions"];
 	for (const path of workerExtensionPaths()) args.push("-e", path);
+	if (tools.length > 0 && workerNeedsMcp(tools)) for (const builtin of WORKER_BUILTIN_MCP_EXTENSIONS) args.push("-e", builtin);
 	return args;
 }

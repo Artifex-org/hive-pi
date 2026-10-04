@@ -1,31 +1,24 @@
 /**
- * The MCP config, read the way `pi-mcp-adapter` reads it — in one place.
+ * The MCP config, read the way pi's built-in MCP support reads it — in one place.
  *
- * TWO CONSUMERS, and they must agree or both are wrong: `readiness/` reports
- * per-server lifecycle to the operator, and `subagent/worker.ts` has to
- * NEUTRALISE that lifecycle for delegated workers. A second, drifting copy of
- * "where is the config and what does it say" would let the report describe one
- * file while the workers read another.
+ * pi 0.99 ships MCP natively (`builtin:mcp`): it reads `<agent dir>/mcp.json`
+ * (plus a trusted project's `.pi/mcp.json`) and connects every ENABLED server in
+ * the background when a session starts. There is no per-server lifecycle and no
+ * `--mcp-config` flag; the agent dir (`PI_CODING_AGENT_DIR`) is the only lever
+ * on which file a process reads.
  *
- * ## Why a worker needs a different config at all (HIV-1969)
+ * ## Why a worker gets its own agent dir (HIV-1969, HIV-3745)
  *
- * `worker.ts` restores `pi-mcp-adapter` into every worker (HIV-1581), and its
- * header states the condition that makes that affordable:
- *
- *   > connections are LAZY — `startLoadTimeInitialization` returns immediately
- *   > unless a server declares `lifecycle: eager|keep-alive`, and none do.
- *   > If a server is ever given an eager lifecycle, revisit this: it would
- *   > spawn that server on EVERY delegation.
- *
- * Making `hive` and `linear` eager is exactly that change, and it is worth
- * making for the interactive session: a prewarmed connection removes a
- * mid-task stall the human waits through. A worker is the opposite case — it
- * lives for one bounded task, is often one of eight spawned at once, and
- * `linear` spawns an `npx` subprocess per connection. Eight workers × two eager
- * servers is sixteen connections nobody asked for.
- *
- * So the lifecycle is a property of the SESSION KIND, not of the server, and
- * `lazyVariant` is how the two kinds read the same file differently.
+ * A delegated worker lives for one bounded task and is often one of eight
+ * spawned at once. Under the adapter we kept workers cheap by stripping
+ * prewarming lifecycles, so nothing connected until called. Native MCP has no
+ * lazy mode, so the same goal is reached by changing WHAT a worker reads: a
+ * mirror of the parent's agent dir — every entry symlinked, so auth, models and
+ * settings are the parent's own — whose `mcp.json` keeps only HTTP servers.
+ * An HTTP connect is a request; a stdio server is a process tree (asfam's node
+ * bundle, freecad's `uv run`), and eight of each per fan-out is the cost
+ * HIV-1969 removed. This is the same mirror shape hive-agent uses for every
+ * launch (`cmd/hive-agent/workstation_pi_auth.go`, `mcp_launch.go`).
  */
 
 import fs from "node:fs";
@@ -33,7 +26,8 @@ import os from "node:os";
 import path from "node:path";
 
 export interface McpServerDef {
-	lifecycle?: string;
+	url?: string;
+	command?: string;
 	[key: string]: unknown;
 }
 
@@ -42,28 +36,14 @@ export interface McpConfigDoc {
 	[key: string]: unknown;
 }
 
-/** Lifecycles that make the adapter connect without being asked. */
-export const PREWARMING_LIFECYCLES: readonly string[] = ["eager", "keep-alive"];
-
 /**
- * The CLI/environment lookup this helper models: `--mcp-config <path>` on the
- * command line, else `PI_CODING_AGENT_DIR/mcp.json`. `PI_MCP_CONFIG` is OURS
- * — a test and escape seam, checked last so it can never mask what the adapter
- * would use.
+ * Keys pi-mcp-adapter understood and pi's native validator ignores. Stripped
+ * from a worker's copy so the file a worker reads says only what is true of it.
  */
-export function mcpConfigPath(
-	env: Record<string, string | undefined> = process.env,
-	argv: readonly string[] = process.argv,
-	home: string = os.homedir(),
-): string {
-	const idx = argv.indexOf("--mcp-config");
-	if (idx >= 0 && idx + 1 < argv.length) return argv[idx + 1];
-	if (env.PI_MCP_CONFIG) return env.PI_MCP_CONFIG;
-	return path.join(mcpAgentDir(env, home), "mcp.json");
-}
+const ADAPTER_ONLY_KEYS = ["lifecycle", "directTools"] as const;
 
-/** The adapter's session-specific config root, with its `~` expansion rules. */
-function mcpAgentDir(env: Record<string, string | undefined>, home: string): string {
+/** The agent dir pi uses, with its `~` expansion rules. */
+export function agentDir(env: Record<string, string | undefined> = process.env, home: string = os.homedir()): string {
 	const configured = env.PI_CODING_AGENT_DIR?.trim();
 	if (!configured) return path.join(home, ".pi", "agent");
 	if (configured === "~") return home;
@@ -72,106 +52,12 @@ function mcpAgentDir(env: Record<string, string | undefined>, home: string): str
 }
 
 /**
- * The adapter's own tool-list cache — a server's tools, with no connection.
- *
- * `PI_MCP_CACHE` is OURS, exactly as `PI_MCP_CONFIG` is above: a test and
- * escape seam, checked before the default because there is no adapter flag it
- * could mask.
+ * The user-level `mcp.json` pi reads. `PI_MCP_CONFIG` is OURS — a test and
+ * escape seam, not something pi understands.
  */
-export function mcpCachePath(
-	home: string = os.homedir(),
-	env: Record<string, string | undefined> = process.env,
-): string {
-	if (env.PI_MCP_CACHE) return env.PI_MCP_CACHE;
-	return path.join(mcpAgentDir(env, home), "mcp-cache.json");
-}
-
-/**
- * The adapter's cache TTL (`metadata-cache.ts`, `CACHE_MAX_AGE_MS`).
- *
- * Duplicated rather than imported: `pi-mcp-adapter` exports only `.` and
- * `./types`, so `metadata-cache.ts` is unreachable by subpath even though it
- * ships. A constant hand-synced to someone else's pin drifts, so treat a
- * mismatch as this file's bug and re-check it on an adapter bump — the failure
- * mode is a row that is merely less accurate, never a crash.
- *
- * It lives HERE, with `mcpCachePath`, because two consumers now need it —
- * `readiness/probes.ts` reports it to the operator and `mcp-common/search.ts`
- * tells the agent why a search found nothing — and a third hand-copied 7d
- * would be the drift this comment is warning about.
- */
-export const MCP_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
-
-/**
- * Why a cached tool list can be present and still unusable.
- *
- * TOOLS KNOWN ≠ TOOLS USABLE, and the gap is the whole point of this function.
- * `init.ts:244` seeds `state.toolMetadata` from the cache only when
- * `isServerCacheValid(entry, definition)` passes, which checks two things: the
- * entry is younger than the TTL, and `computeServerHash(definition)` still
- * matches the stored `configHash`. Fail either and the adapter behaves as if it
- * had never heard of the server — `mcp({ server: "sentry" })` answers
- * `Server "sentry" is configured but not connected` (`proxy-modes.ts:610`), a
- * search answers `No tools matching …`, and the agent has to
- * `mcp({ connect: … })` by hand before it can even list.
- *
- * Measured on session `a78c92ef` (2026-08-17): `sentry`'s entry had been
- * invalidated the day before, when pinning `@sentry/mcp-server@0.37.0` changed
- * `args` and therefore the identity hash. The readiness probe reported "9 tools
- * known · lazy-keep-alive: first call pays the connect", the agent believed it,
- * and then spent three turns and 39 s on bounce → connect → four `describe`
- * calls before its first real Sentry query. The row was not wrong about the
- * file; it was wrong about what the adapter would do with it, which is the only
- * thing the reader cares about.
- *
- * We can see the TTL exactly. We cannot recompute the identity hash without
- * reimplementing `computeServerHash` (env interpolation, path resolution,
- * stable key order) — which would be precisely the drift this file must not
- * take on — so the hash case is approximated by "`mcp.json` was written after
- * this entry was cached". That over-reports: editing one server's entry flags
- * every server cached before the edit. Over-reporting is the right direction
- * here, because the cost of the false alarm is one extra sentence, and the cost
- * of the miss is what session `a78c92ef` paid.
- */
-export function mcpCacheStaleness(
-	cachedAt: number | undefined,
-	configMtimeMs: number | null,
-	now: number,
-): string | null {
-	if (typeof cachedAt !== "number") return "no cache timestamp";
-	if (now - cachedAt > MCP_CACHE_MAX_AGE_MS) {
-		return `cached ${Math.floor((now - cachedAt) / (24 * 60 * 60 * 1_000))}d ago, past the adapter's 7d TTL`;
-	}
-	if (configMtimeMs !== null && configMtimeMs > cachedAt) return "mcp.json changed after it was cached";
-	return null;
-}
-
-/**
- * The same config with every prewarming lifecycle removed.
- *
- * Removed rather than rewritten to `"lazy"`: `lazy` IS the adapter's default
- * (`init.ts:231`), so an absent key and an explicit `"lazy"` mean the same
- * thing, and absence cannot drift if that default is ever renamed.
- *
- * Pure, and it copies rather than mutates — the caller usually holds the
- * parsed config for its own reporting.
- */
-export function lazyVariant(config: McpConfigDoc): { config: McpConfigDoc; changed: string[] } {
-	const servers = config.mcpServers;
-	if (!servers) return { config, changed: [] };
-	const changed: string[] = [];
-	const nextServers: Record<string, McpServerDef> = {};
-	for (const [name, def] of Object.entries(servers)) {
-		if (def && typeof def === "object" && typeof def.lifecycle === "string" && PREWARMING_LIFECYCLES.includes(def.lifecycle)) {
-			const { lifecycle: _dropped, ...rest } = def;
-			nextServers[name] = rest;
-			changed.push(name);
-			continue;
-		}
-		nextServers[name] = def;
-	}
-	if (changed.length === 0) return { config, changed: [] };
-	return { config: { ...config, mcpServers: nextServers }, changed };
+export function mcpConfigPath(env: Record<string, string | undefined> = process.env, home: string = os.homedir()): string {
+	if (env.PI_MCP_CONFIG) return env.PI_MCP_CONFIG;
+	return path.join(agentDir(env, home), "mcp.json");
 }
 
 export function readMcpConfig(file: string): McpConfigDoc | null {
@@ -179,48 +65,101 @@ export function readMcpConfig(file: string): McpConfigDoc | null {
 		if (!fs.existsSync(file)) return null;
 		return JSON.parse(fs.readFileSync(file, "utf8")) as McpConfigDoc;
 	} catch {
-		// A malformed config is the adapter's problem to report, not ours to
-		// crash a delegation over.
+		// A malformed config is pi's to report (it skips invalid entries), not
+		// ours to crash a delegation over.
 		return null;
 	}
+}
+
+/** True for an entry pi connects over streamable HTTP. */
+export function isHttpServer(def: McpServerDef | undefined): boolean {
+	return !!def && typeof def === "object" && typeof def.url === "string" && def.url !== "";
 }
 
 /**
- * Materialise the worker's config, once per process, and return its path.
- *
- * Returns null when there is nothing to change — no config, or no server
- * prewarming — because passing no flag is strictly better than passing a
- * redundant copy: the worker then reads exactly what the adapter would have.
- *
- * Written once and reused by every worker of this session. A file per
- * delegation would be litter proportional to fan-out, and the content is
- * identical by construction.
+ * A worker's view of the config: HTTP servers only, adapter-only keys removed.
+ * Pure; copies rather than mutates.
  */
-export function ensureWorkerMcpConfig(
-	sourcePath: string = mcpConfigPath(),
-	dir: string = os.tmpdir(),
+export function workerMcpConfig(config: McpConfigDoc): McpConfigDoc {
+	const servers: Record<string, McpServerDef> = {};
+	for (const [name, def] of Object.entries(config.mcpServers ?? {})) {
+		if (!isHttpServer(def)) continue;
+		const copy: McpServerDef = { ...def };
+		for (const key of ADAPTER_ONLY_KEYS) delete copy[key];
+		servers[name] = copy;
+	}
+	return { mcpServers: servers };
+}
+
+/**
+ * Which servers a mirror keeps. `http` is a delegated worker's view; `none` is
+ * for one-shot helpers (recap, judge, drift probe) that run with `--no-tools`
+ * and can reach no tool at all — connecting anything there is pure waste, and
+ * those helpers outnumber real sessions roughly 20:1.
+ */
+export type MirrorKind = "http" | "none";
+
+function workerAgentDirPath(tmp: string, pid: number, kind: MirrorKind = "http"): string {
+	return path.join(tmp, kind === "http" ? `pi-worker-agent-${pid}` : `pi-oneshot-agent-${pid}`);
+}
+
+/**
+ * Materialise the worker agent dir, once per process, and return its path.
+ *
+ * Every entry of the parent's agent dir is symlinked EXCEPT `mcp.json`, which
+ * is written filtered. Symlinks rather than copies: a token a worker refreshes
+ * (`auth.json`, `mcp-auth.json`) must land where the parent reads it.
+ *
+ * Returns null when the parent has no agent dir — the worker then reads the
+ * same nothing the parent does. Never throws: a worker that falls back to the
+ * parent's full config pays some connects; a failed delegation pays the task.
+ */
+export function ensureWorkerAgentDir(
+	sourceDir: string = agentDir(),
+	tmp: string = os.tmpdir(),
 	pid: number = process.pid,
+	kind: MirrorKind = "http",
 ): string | null {
-	const source = readMcpConfig(sourcePath);
-	if (!source) return null;
-	const { config, changed } = lazyVariant(source);
-	if (changed.length === 0) return null;
-	const target = path.join(dir, `pi-worker-mcp-${pid}.json`);
 	try {
-		if (!fs.existsSync(target)) fs.writeFileSync(target, JSON.stringify(config, null, 2));
+		if (!fs.existsSync(sourceDir)) return null;
+		const target = workerAgentDirPath(tmp, pid, kind);
+		fs.mkdirSync(target, { recursive: true });
+		for (const entry of fs.readdirSync(sourceDir)) {
+			if (entry === "mcp.json") continue;
+			const link = path.join(target, entry);
+			if (fs.existsSync(link) || isSymlink(link)) continue;
+			fs.symlinkSync(path.join(sourceDir, entry), link);
+		}
+		const source = readMcpConfig(path.join(sourceDir, "mcp.json")) ?? {};
+		const config = kind === "http" ? workerMcpConfig(source) : { mcpServers: {} };
+		fs.writeFileSync(path.join(target, "mcp.json"), `${JSON.stringify(config, null, 2)}\n`);
 		return target;
 	} catch {
-		// Falling back to the parent's config costs a worker one eager connect;
-		// failing the delegation would cost the whole task.
 		return null;
 	}
 }
 
-/** Remove this process's derived worker config, if it wrote one. */
-export function cleanupWorkerMcpConfig(dir: string = os.tmpdir(), pid: number = process.pid): void {
+function isSymlink(p: string): boolean {
 	try {
-		fs.rmSync(path.join(dir, `pi-worker-mcp-${pid}.json`), { force: true });
+		return fs.lstatSync(p).isSymbolicLink();
 	} catch {
-		/* best effort; it is one small file in tmp */
+		return false;
 	}
+}
+
+/** Remove this process's worker agent dir. Links only — never their targets. */
+export function cleanupWorkerAgentDir(tmp: string = os.tmpdir(), pid: number = process.pid): void {
+	for (const kind of ["http", "none"] as const) {
+		try {
+			fs.rmSync(workerAgentDirPath(tmp, pid, kind), { recursive: true, force: true });
+		} catch {
+			/* best effort; it is a directory of links in tmp */
+		}
+	}
+}
+
+/** The agent-dir env for a one-shot helper: same auth and models, no MCP servers. */
+export function oneShotMcpEnv(mirror: () => string | null = () => ensureWorkerAgentDir(agentDir(), os.tmpdir(), process.pid, "none")): Record<string, string> {
+	const dir = mirror();
+	return dir ? { PI_CODING_AGENT_DIR: dir } : {};
 }

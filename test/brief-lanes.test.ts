@@ -13,6 +13,7 @@ import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts"
 import type { AgentConfig } from "../extensions/harness/roles.ts";
 import type { BriefDraft } from "../extensions/brief/compile.ts";
 import { interleaveBy, knowledgeCollections, laneIsRunnable, laneInstruction, laneTools, mergeDrafts, normalizeRef, planLanes } from "../extensions/brief/lanes.ts";
+import { isolationArgs } from "../extensions/brief/run.ts";
 
 const ROLE = {
 	name: "briefer",
@@ -49,11 +50,19 @@ describe("laneTools", () => {
 	// `mcp` is the one tool that leaves the machine. It is granted to the lane
 	// whose entire job is a ticket read, and to nothing else — including when the
 	// role file itself declares it.
-	it("confines mcp to the ticket lane", () => {
-		const withMcp = { ...ROLE, tools: [...(ROLE.tools ?? []), "mcp"] } as AgentConfig;
-		expect(laneTools(withMcp, "repo")).not.toContain("mcp");
-		expect(laneTools(withMcp, "knowledge")).not.toContain("mcp");
-		expect(laneTools(withMcp, "ticket")).toEqual(["mcp"]);
+	it("confines MCP to the ticket lane, through pi's native codemode gateway", () => {
+		const withMcp = { ...ROLE, tools: [...(ROLE.tools ?? []), "mcp", "codemode"] } as AgentConfig;
+		for (const lane of ["repo", "knowledge"] as const) {
+			expect(laneTools(withMcp, lane)).not.toContain("mcp");
+			expect(laneTools(withMcp, lane)).not.toContain("codemode");
+		}
+		expect(laneTools(withMcp, "ticket")).toEqual(["codemode"]);
+	});
+
+	it("loads pi's MCP built-ins for the ticket lane only — --no-extensions strips them", () => {
+		expect(isolationArgs(["codemode"])).toContain("builtin:mcp");
+		expect(isolationArgs(["read", "grep"])).not.toContain("builtin:mcp");
+		expect(isolationArgs()).not.toContain("builtin:mcp");
 	});
 
 	it("reports a lane with no tools as unrunnable rather than spawning it", () => {
