@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { assistantText } from "../btw/thread.ts";
+import { YSK_CONTROL_CHANNEL, YSK_REMOTE_CHANNEL, YSK_STATE_CHANNEL, readYouShouldKnowAction, type YouShouldKnowAction, type YouShouldKnowState } from "../hive-common/you-should-know.ts";
 import { excerpt, fingerprint, outputText, parseNotes, SCAN_SYSTEM, type Note } from "./scan.ts";
 
 const KEY = "you-should-know";
@@ -75,10 +76,19 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	let generation = 0;
 	let lastStart = -Infinity;
 	let failure = "";
+	let remoteAvailable = false;
+	let appliedCommandId: string | undefined;
 
 	const save = () => pi.appendEntry(KEY, { ...state, notes: [...state.notes], seen: [...state.seen] });
 	const paint = (ctx: ExtensionContext) => {
-		if (!ctx.hasUI) return;
+		latestCtx = ctx;
+		pi.events.emit(YSK_STATE_CHANNEL, {
+			version: 1, command_id: appliedCommandId, enabled: state.enabled,
+			phase: !state.enabled ? "idle" : active ? "scanning" : transportBusy ? "waiting" : failure ? "failed" : state.scans >= cfg.maxScans ? "budget" : "idle",
+			scans: state.scans, max_scans: cfg.maxScans, tokens: state.tokens, cost: state.cost,
+			failure, notes: state.notes.map(n => ({ ...n })),
+		} satisfies YouShouldKnowState);
+		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		ctx.ui.setWidget(KEY, state.enabled && state.notes.length ? [
 			`You should know · earlier output (model notes) · /you-should-know show · dismiss`,
 			...state.notes.slice(-3).map(n => `[${n.kind}] ${n.text}`),
@@ -97,7 +107,37 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 		pending = "";
 		latestCtx = undefined;
 	};
-	const eligible = (ctx: ExtensionContext) => state.enabled && ctx.mode === "tui" && state.scans < cfg.maxScans;
+	const supported = (ctx: ExtensionContext) => ctx.mode === "tui" || (ctx.mode === "rpc" && remoteAvailable);
+	const eligible = (ctx: ExtensionContext) => state.enabled && supported(ctx) && state.scans < cfg.maxScans;
+
+	const apply = (action: YouShouldKnowAction, ctx: ExtensionContext) => {
+		if (action === "on") {
+			state.sessionId = ctx.sessionManager.getSessionId();
+			state.enabled = true;
+		} else {
+			cancel();
+			if (action === "off") state.enabled = false;
+			else state.notes = [];
+		}
+		save(); paint(ctx);
+	};
+	pi.events.on(YSK_CONTROL_CHANNEL, (data: unknown) => {
+		const action = readYouShouldKnowAction(data);
+		if (action && remoteAvailable && latestCtx && supported(latestCtx)) {
+			const id = (data as { command_id?: unknown }).command_id;
+			if (typeof id !== "string" || id.length > 64 || !id) return;
+			appliedCommandId = id;
+			apply(action, latestCtx);
+		}
+	});
+	pi.events.on(YSK_REMOTE_CHANNEL, (data: unknown) => {
+		if (!data || typeof data !== "object" || !("available" in data) || typeof data.available !== "boolean") return;
+		remoteAvailable = data.available;
+		const ctx = latestCtx;
+		// Losing the conversation revokes RPC spending, not the user's saved setting.
+		if (!remoteAvailable && ctx?.mode === "rpc") cancel();
+		if (ctx) paint(ctx);
+	});
 
 	const schedule = (ctx: ExtensionContext, settle = false) => {
 		latestCtx = ctx;
@@ -176,6 +216,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	const load = (ctx: ExtensionContext) => {
 		cancel();
 		state = fresh(cfg.enabled);
+		appliedCommandId = undefined;
 		state.sessionId = ctx.sessionManager.getSessionId();
 		failure = "";
 		lastStart = -Infinity;
@@ -207,25 +248,21 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 		description: "Flag buried caveats, blockers, actions and decisions: on | off | status | show | dismiss (default-on side model calls)",
 		getArgumentCompletions: prefix => ["on", "off", "status", "show", "dismiss"].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value })),
 		handler: async (args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("You should know is terminal-only; no scans run in RPC, print or JSON mode.");
+			if (!supported(ctx)) {
+				ctx.ui.notify("You should know needs a terminal or an attached Hive conversation; no scans run in standalone RPC, print or JSON mode.");
 				return;
 			}
 			switch (args.trim().toLowerCase()) {
 				case "on":
-					state.sessionId = ctx.sessionManager.getSessionId();
-					state.enabled = true;
-					save(); paint(ctx);
+					apply("on", ctx);
 					ctx.ui.notify(`You should know enabled. Future assistant prose goes to ${ctx.model?.provider}/${ctx.model?.id} in tool-less side calls (max ${cfg.maxScans} per session). No Claude files are read.`);
 					return;
 				case "off":
-					cancel(); state.enabled = false;
-					save(); paint(ctx);
+					apply("off", ctx);
 					ctx.ui.notify("You should know disabled.");
 					return;
 				case "dismiss":
-					cancel(); state.notes = [];
-					save(); paint(ctx);
+					apply("dismiss", ctx);
 					ctx.ui.notify("Notes dismissed. Repeated source quotes stay suppressed.");
 					return;
 				case "show":

@@ -22,6 +22,7 @@
  */
 
 import { rehydratePlan, toEntry } from "../plan/state.ts";
+import { YSK_CONTROL_CHANNEL, YSK_STATE_CHANNEL, YSK_REMOTE_CHANNEL, readYouShouldKnowAction, type YouShouldKnowState } from "../hive-common/you-should-know.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -552,9 +553,11 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * It is therefore driven by the attach lifecycle — a live session id — and not
 	 * by the config, which only says the operator would permit it.
 	 */
+	let scannerServerSupported = false;
 	const announceRemoteAnswers = (available: boolean) => {
 		try {
 			pi.events.emit(QUESTION_REMOTE_CHANNEL, { available } satisfies QuestionRemoteEvent);
+			pi.events.emit(YSK_REMOTE_CHANNEL, { available: available && cfg.reportStatus && scannerServerSupported });
 		} catch {
 			/* no bus, or nothing waiting */
 		}
@@ -588,6 +591,18 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * can change under it, which changes whether the tier applies at all.
 	 * Undefined until the extension announces; absent from the status then.
 	 */
+	// Content, not metrics: scanner quotes ride ONLY transcript-sharing consent.
+	let youShouldKnow: YouShouldKnowState | undefined;
+	const canControlYouShouldKnow = () => cfg.streamDeltas && cfg.reportStatus && cfg.allowSetMode && youShouldKnow !== undefined;
+	pi.events.on(YSK_STATE_CHANNEL, (data: unknown) => {
+		const event = data as YouShouldKnowState | undefined;
+		if (event?.version !== 1 || typeof event.enabled !== "boolean" || !Array.isArray(event.notes) || event.notes.length > 10) return;
+		const first = youShouldKnow === undefined;
+		youShouldKnow = event;
+		if (cfg.streamDeltas && cfg.reportStatus) setTimeout(() => void flushStatus(), 0);
+		if (first) queueConversationRefresh();
+	});
+
 	let fast: { enabled: boolean; applies: boolean } | undefined;
 	const fastLoaded = (): boolean => fast !== undefined;
 
@@ -1076,7 +1091,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 		let next: StatusPayload;
 		try {
-			next = buildStatus(latestCtx, pi, quota, opMode, accountRecovery, fast);
+			next = buildStatus(latestCtx, pi, quota, opMode, accountRecovery, fast, cfg.streamDeltas ? youShouldKnow : undefined);
 		} catch {
 			// A ctx replaced mid-read. The next tick has a live one.
 			return;
@@ -1084,12 +1099,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		if (!changed(lastStatus, next)) return;
 
 		sendingStatus = true;
+		const generation = lifecycle.generation;
+		const targetSession = sessionID;
 		try {
-			const res = await postStatus(auth, sessionID, next);
+			const res = await postStatus(auth, targetSession, next);
 			// Only remember what the server accepted. Recording an optimistic copy
 			// would suppress every subsequent send until the reading moved again,
 			// so one rejected request would silently freeze the bar.
-			if (res.ok) lastStatus = next;
+			if (res.ok && sessionID === targetSession && isCurrentRemoteLifecycle(lifecycle, generation)) lastStatus = next;
 		} catch {
 			/* the next tick re-derives and re-sends */
 		} finally {
@@ -1428,6 +1445,13 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			case "set_op_mode": {
 				if (!cfg.allowSetOpMode) return;
 				applyOpMode(cmd.payload);
+				return;
+			}
+			case "you_should_know": {
+				if (!canControlYouShouldKnow()) return;
+				let action;
+				try { action = readYouShouldKnowAction(JSON.parse(cmd.payload)); } catch { return; }
+				if (action) pi.events.emit(YSK_CONTROL_CHANNEL, { action, command_id: cmd.id });
 				return;
 			}
 			case "set_fast": {
@@ -1769,6 +1793,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// enforcer rather than on the permission.
 				can_set_op_mode: cfg.allowSetOpMode && opModeLoaded(),
 				...(cfg.allowSetMode && fastLoaded() ? { can_set_fast: true } : {}),
+				...(canControlYouShouldKnow() ? { can_control_you_should_know: true } : {}),
 				// SPREAD ONLY when the enforcer has actually reported its set — same
 				// HIV-1163 rule as `can_add_workspace`. Sending an empty array would
 				// be worse than sending nothing: the server would read it as "this
@@ -1830,6 +1855,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// the operator is never shown the question, so a blocking `plan_ask`
 				// would wait out its full window for an answer nobody could give —
 				// re-creating, precisely, the stuck chat this feature exists to end.
+				scannerServerSupported = typeof res.body?.can_control_you_should_know === "boolean";
 				announceRemoteAnswers(cfg.streamDeltas);
 				// RESUME FROM THE SERVER'S WATERMARK, before anything can be sent.
 				//
@@ -1929,6 +1955,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// session appeared.
 						can_set_op_mode: cfg.allowSetOpMode && opModeLoaded(),
 						...(cfg.allowSetMode && fastLoaded() ? { can_set_fast: true } : {}),
+						...(canControlYouShouldKnow() ? { can_control_you_should_know: true } : {}),
 						// SPREAD ONLY when the enforcer has actually reported its set — same
 						// HIV-1163 rule as `can_add_workspace`. Sending an empty array would
 						// be worse than sending nothing: the server would read it as "this
@@ -1976,6 +2003,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		journal?.close();
 		journal = null;
 		announceRemoteAnswers(false);
+		scannerServerSupported = false;
 		lastAttachError = "";
 		auth = null;
 		latestCtx = null;
