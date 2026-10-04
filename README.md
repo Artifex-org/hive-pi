@@ -53,11 +53,12 @@ supported, tested state, not an accident.
 
 ## You should know
 
-`/you-should-know on` enables a tool-less side scanner for important caveats,
-blockers, actions and decisions buried in pi's output. It surfaces source-backed
-notes above the prompt without steering the main agent. Off by default; bounded
-calls use the selected model/provider and consume its quota. `show` includes the
-quotes; `dismiss` clears notes; `off` stops scanning.
+You Should Know runs by default in terminal sessions: a tool-less side scanner
+for important caveats, blockers, actions and decisions buried in pi's output.
+It surfaces source-backed notes above the prompt without steering the main
+agent. Bounded calls use the selected model/provider and consume its quota.
+`/you-should-know off` stops scanning; `PI_YOU_SHOULD_KNOW=0` makes new sessions
+default off. `show` includes the quotes; `dismiss` clears notes; `on` re-enables.
 [Behavior, privacy and limits](extensions/you-should-know/README.md).
 
 ## Advisor reasoning

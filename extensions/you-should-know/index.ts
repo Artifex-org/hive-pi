@@ -12,10 +12,10 @@ export interface ScanConfig {
 	maxScans: number;
 }
 export const DEFAULT_CONFIG: ScanConfig = {
-	enabled: false, intervalMs: 30_000, timeoutMs: 60_000, maxScans: 20,
+	enabled: true, intervalMs: 30_000, timeoutMs: 60_000, maxScans: 20,
 };
 interface State {
-	/** Consent is not inherited by a fork/clone/import with a new session id. */
+	/** Session-specific overrides are not inherited by a fork/clone/import. */
 	sessionId: string;
 	enabled: boolean;
 	scans: number;
@@ -60,7 +60,7 @@ function restore(data: unknown): State | null {
 }
 
 export default function (pi: ExtensionAPI): void {
-	wireYouShouldKnow(pi, { ...DEFAULT_CONFIG, enabled: process.env.PI_YOU_SHOULD_KNOW === "1" }, scanOutput);
+	wireYouShouldKnow(pi, { ...DEFAULT_CONFIG, enabled: process.env.PI_YOU_SHOULD_KNOW !== "0" }, scanOutput);
 }
 
 /** Lifecycle handlers only buffer/schedule. All slow work lives on a detached timer. */
@@ -204,7 +204,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	pi.on("agent_settled", (_e, ctx) => schedule(ctx, true));
 
 	pi.registerCommand(KEY, {
-		description: "Flag buried caveats, blockers, actions and decisions: on | off | status | show | dismiss (opt-in side model calls)",
+		description: "Flag buried caveats, blockers, actions and decisions: on | off | status | show | dismiss (default-on side model calls)",
 		getArgumentCompletions: prefix => ["on", "off", "status", "show", "dismiss"].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value })),
 		handler: async (args, ctx) => {
 			if (ctx.mode !== "tui") {
