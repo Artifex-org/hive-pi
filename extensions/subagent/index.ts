@@ -73,6 +73,7 @@ import {
 	diffStamp,
 	missingCitedPaths,
 	NO_CHANGE_ERROR,
+	treeStamp,
 	VERIFY_FOOTER,
 	writerMadeNoChange,
 } from "../harness/verify.ts";
@@ -905,7 +906,7 @@ async function runSingleAgent(
 		// Writer verification, free tier: stamp the tree before and after. A
 		// writer that "succeeded" without touching anything is folded to a
 		// failure — see harness/verify.ts.
-		const stampBefore = writerLock ? await diffStamp(executionCwd) : null;
+		const stampBefore = writerLock ? await treeStamp(executionCwd) : null;
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
@@ -1044,7 +1045,7 @@ async function runSingleAgent(
 
 		currentResult.exitCode = exitCode;
 		if (wasAborted) throw new Error("Subagent was aborted");
-		if (writerLock && !isFailedResult(currentResult) && writerMadeNoChange(stampBefore, await diffStamp(executionCwd))) {
+		if (writerLock && !isFailedResult(currentResult) && writerMadeNoChange(stampBefore, await treeStamp(executionCwd))) {
 			currentResult.stopReason = "error";
 			currentResult.errorMessage = NO_CHANGE_ERROR;
 		}

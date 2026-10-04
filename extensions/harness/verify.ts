@@ -5,7 +5,7 @@
  * is byte-identical to when it started has, mechanically, done nothing. That
  * is the "success-shaped nothing" class (an empty factory run reported green,
  * a `tasks_summary.total == 0` treated as success), and it is caught here with
- * two `git status` spawns rather than a model call.
+ * a before/after `treeStamp` (a few git spawns) rather than a model call.
  *
  * The comparison is before/after, never "is the diff empty": a worktree is
  * routinely dirty before the worker starts, and grading absolute cleanliness
@@ -15,9 +15,9 @@
  * per the writer.ts consolidation rule (HIV-1132).
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 const GIT_TIMEOUT_MS = 10_000;
@@ -57,38 +57,97 @@ function gitOutput(cwd: string, args: string[]): Promise<string | null> {
 }
 
 /**
- * A stamp of the working tree's mutation state: `git status --porcelain`
- * output (covers tracked modifications, staged changes and untracked files).
- * Returns null when the stamp cannot be taken — a missing git, a non-repo cwd
- * — and a null stamp DISABLES the check rather than failing the worker: a
- * verifier that could not run must never report as a verifier that ran and
- * failed (the gate's bashAvailable rule).
+ * Every git call here is lock-free: `--no-optional-locks` stops `git status`
+ * from opportunistically rewriting the index. These run around (and during)
+ * other agents' work in the same worktree, and an index refresh is exactly the
+ * background `index.lock` a concurrent `git add`/`commit` then trips over.
+ */
+const LOCK_FREE = "--no-optional-locks";
+
+/**
+ * The working tree's `git status --porcelain`, as TEXT for a reader — the
+ * handoff seed and the verifier's task print it.
+ *
+ * NOT a change detector: it names paths and status codes only, so an edit to
+ * an already-modified or already-untracked file leaves it byte-identical. The
+ * writer guard and the gate throttle use `treeStamp`. Null when git cannot run
+ * here (missing git, non-repo cwd).
  */
 export function diffStamp(cwd: string): Promise<string | null> {
-	return gitOutput(cwd, ["status", "--porcelain"]);
+	return gitOutput(cwd, [LOCK_FREE, "status", "--porcelain"]);
 }
 
 /**
- * A CONTENT-AWARE stamp for gate-retry throttling: `git status --porcelain`
- * plus a hash of `git diff HEAD` (tracked content, staged and unstaged).
+ * A CONTENT-AWARE stamp of the working tree — the one change detector, shared
+ * by the writer guard ("did this writer change anything?") and the gate-retry
+ * throttle ("has anything changed since the red gate?").
  *
- * `diffStamp` alone is the wrong key here, and the failure is subtle: it sees
- * paths and status codes only, so a model that edits an ALREADY-DIRTY file to
- * fix a red gate produces a byte-identical status — and a status-keyed skip
- * would then never re-run the gate on the very settle where the fix landed.
- * Hashing the diff content catches that; untracked-file content is left to the
- * status half (a new untracked file changes the status output).
+ * Three parts, each closing a hole the measured false "writer produced no
+ * working-tree change" fell through (papercuts 2026-10-02T03:38, 10-03T03:27):
  *
- * Same null discipline as `diffStamp`: a stamp that cannot be taken DISABLES
- * the skip rather than producing one.
+ *   1. `status --porcelain --untracked-files=all` — paths and codes, with every
+ *      file inside an untracked directory listed individually. The default
+ *      collapses a whole new directory to `?? dir/`, so a writer adding a file
+ *      inside it changed nothing the stamp could see.
+ *   2. a hash of `git diff HEAD` — tracked content, staged and unstaged. An edit
+ *      to an ALREADY-modified file leaves the status line ` M a.ts` unchanged.
+ *   3. size + mtime of every untracked, non-ignored file — an edit to an
+ *      ALREADY-untracked file changes neither the status nor the diff. Metadata
+ *      rather than content so a large untracked asset costs a stat, not a read.
+ *
+ * A stamp that cannot be taken is null, which DISABLES the check rather than
+ * failing the worker: a verifier that could not run must never report as a
+ * verifier that ran and failed (the gate's bashAvailable rule).
  */
-export async function gateStamp(cwd: string): Promise<string | null> {
+export async function treeStamp(cwd: string): Promise<string | null> {
 	const [status, diff] = await Promise.all([
-		gitOutput(cwd, ["status", "--porcelain"]),
-		gitOutput(cwd, ["diff", "HEAD"]),
+		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
+		gitOutput(cwd, [LOCK_FREE, "diff", "HEAD"]),
 	]);
 	if (status === null || diff === null) return null;
-	return `${status}\n#diff:${createHash("sha256").update(diff).digest("hex")}`;
+	const untracked = untrackedFingerprint(cwd, status);
+	if (untracked === null) return null;
+	const hash = createHash("sha256").update(diff).update("\0").update(untracked).digest("hex");
+	return `${status}\n#content:${hash}`;
+}
+
+/**
+ * `path size mtime` for each `??` entry of a `-z` porcelain listing, or null
+ * when the repo root cannot be resolved. A file that vanished between the
+ * listing and the stat is recorded as gone — that is itself a change.
+ */
+function untrackedFingerprint(cwd: string, porcelainZ: string): string | null {
+	const paths = porcelainZ
+		.split("\0")
+		.filter((entry) => entry.startsWith("?? "))
+		.map((entry) => entry.slice(3));
+	if (paths.length === 0) return "";
+	// Porcelain paths are relative to the repo ROOT, not to cwd.
+	const root = gitRootSync(cwd);
+	if (root === null) return null;
+	return paths
+		.map((rel) => {
+			try {
+				const stats = statSync(join(root, rel));
+				return `${rel} ${stats.size} ${stats.mtimeMs}`;
+			} catch {
+				return `${rel} gone`;
+			}
+		})
+		.join("\n");
+}
+
+function gitRootSync(cwd: string): string | null {
+	try {
+		return execFileSync("git", [LOCK_FREE, "rev-parse", "--show-toplevel"], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: GIT_TIMEOUT_MS,
+		}).trim();
+	} catch {
+		return null;
+	}
 }
 
 export const NO_CHANGE_ERROR =
