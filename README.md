@@ -51,6 +51,15 @@ to the workspace, and is steerable from it.
 session behaves as plain pi. Running this package outside a Hive fleet is a
 supported, tested state, not an accident.
 
+## You should know
+
+`/you-should-know on` enables a tool-less side scanner for important caveats,
+blockers, actions and decisions buried in pi's output. It surfaces source-backed
+notes above the prompt without steering the main agent. Off by default; bounded
+calls use the selected model/provider and consume its quota. `show` includes the
+quotes; `dismiss` clears notes; `off` stops scanning.
+[Behavior, privacy and limits](extensions/you-should-know/README.md).
+
 ## Advisor reasoning
 
 `advisor` uses the chosen Hive mode's thinking level through pi's
