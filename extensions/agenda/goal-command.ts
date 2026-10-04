@@ -115,6 +115,13 @@ export function looksUnverifiable(condition: string): boolean {
 		/\bpass(es|ing|ed)?\b/i,
 		/\bgreen\b/i,
 		/\bfail(s|ing)?\b/i,
+		// A CI verdict or a PR's state is as checkable as an exit code — `gh pr
+		// checks`, `gh pr view` — and an agent naming its delivery that way was
+		// refused ("task PR exists and final-head hive/ci succeeded").
+		/\bsucceed(s|ed)?\b/i,
+		/\bmerged\b/i,
+		/\b(PR|pull request) (exists|is open|opened|created)\b/i,
+		/\b[\w-]+\/(ci|checks?|build)\b/i, // a status-check name, e.g. hive/ci
 		/`[^`]+`/, // a quoted command
 		/\b[\w./-]+\.(ts|tsx|js|py|go|rs|json|md|yaml|yml)\b/i, // a path
 		/\b\d+\s*(tests?|errors?|warnings?)\b/i,

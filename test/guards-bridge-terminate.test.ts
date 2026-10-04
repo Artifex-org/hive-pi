@@ -112,3 +112,27 @@ describe("a denial the GUARD issued", () => {
 		expect(verdict).toBeUndefined();
 	});
 });
+
+describe("a hook that allows by saying nothing", () => {
+	it("allows silently — exit 0 with no output is the contract's ALLOW, not a failure", async () => {
+		const dir = join(home, ".claude", "hooks");
+		mkdirSync(dir, { recursive: true });
+		const path = join(dir, "pre-bash-dispatch.sh");
+		writeFileSync(path, "#!/bin/sh\ncat >/dev/null\nexit 0\n", "utf8");
+		chmodSync(path, 0o755);
+		guards(fake.api);
+
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+		try {
+			const [verdict] = await fake.emit({ type: "tool_call", toolName: "bash", input: { command: "git status" } });
+			expect(verdict).toBeUndefined();
+		} finally {
+			console.warn = originalWarn;
+		}
+		// pre-bash-dispatch.sh answers every permitted command this way; a warning
+		// here sat above the pi 1.0 footer for the whole session.
+		expect(warnings.filter((w) => w.includes("guards-bridge"))).toEqual([]);
+	});
+});

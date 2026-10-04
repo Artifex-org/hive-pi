@@ -92,7 +92,7 @@ interface HookVerdict {
 }
 
 /**
- * Fail-open is deliberate (Claude parity), but the five ways it happens are not
+ * Fail-open is deliberate (Claude parity), but the ways it happens are not
  * equally expected, and until now they were indistinguishable.
  *
  * ABSENT is normal: `~/.claude/hooks/` does not exist in a container, which is
@@ -135,10 +135,12 @@ function runHook(script: string, payload: Record<string, unknown>): HookVerdict 
 		return null;
 	}
 	const out = (res.stdout ?? "").trim();
-	if (!out) {
-		warnOnce("empty", "returned no output");
-		return null;
-	}
+	// Exit 0 with no output is the hook contract's ALLOW (see the header), and
+	// pre-bash-dispatch.sh answers every permitted command that way. Warning
+	// here fired on the first ordinary bash call of every session; pi 1.0's
+	// fullscreen TUI pins extension warnings above the footer, so the false
+	// "commands are being ALLOWED without it" stayed on screen all session.
+	if (!out) return null;
 	try {
 		return JSON.parse(out) as HookVerdict;
 	} catch {
