@@ -445,8 +445,18 @@ export function createFakePi(): FakePi {
 			// (`{block, reason, terminate}`), so a fake that swallowed it could
 			// only ever test that a guard ran, never WHAT it decided.
 			const results: unknown[] = [];
+			const turnsBefore = messages.filter((m) => m.options?.triggerTurn).length;
 			for (const handler of handlers.get(event.type) ?? []) {
 				results.push(await handler(event, ctx));
+			}
+			// pi 0.87+: a triggerTurn sent from `agent_settled` is deferred and run
+			// once every handler has returned — and running it emits `agent_start`.
+			// Modelled here so per-settle state that resets on agent_start (the
+			// settle claim) behaves in tests the way it does in pi.
+			if (event.type === "agent_settled" && messages.filter((m) => m.options?.triggerTurn).length > turnsBefore) {
+				for (const handler of handlers.get("agent_start") ?? []) {
+					await handler({ type: "agent_start" }, ctx);
+				}
 			}
 			return results;
 		},
