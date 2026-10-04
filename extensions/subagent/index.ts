@@ -101,7 +101,7 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
-import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, reviewTaskWithDiff } from "./reviewdiff.ts";
+import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, reviewScopeFiles, reviewTaskWithDiff } from "./reviewdiff.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -893,10 +893,10 @@ async function runSingleAgent(
 		// left to find it, a worker reviewed files that were not in the diff.
 		let effectiveTask = task;
 		if (isReviewRole(agent.name)) {
-			const diff = captureReviewDiff(executionCwd);
+			const diff = captureReviewDiff(executionCwd, task);
 			if (diff) {
-				effectiveTask = reviewTaskWithDiff(task, diff, executionCwd);
-				currentResult.reviewFiles = diff.files;
+				effectiveTask = reviewTaskWithDiff(task, diff);
+				currentResult.reviewFiles = reviewScopeFiles(diff);
 			}
 		}
 		args.push(`Task: ${effectiveTask}`);
