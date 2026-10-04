@@ -276,6 +276,19 @@ const ORCHESTRATE_TOOLS = new Set([
 //   permitted.
 // - hive_watch_ticket is the supervision subscription described above.
 //
+// Fourth pass, 2026-09-28..10-04, same method:
+//
+// - hive_list_clusters / hive_get_test_pg_health are fleet reads. The first
+//   was refused three times while a lead read agent_lane capacity BEFORE a
+//   launch — the vetting this mode exists to do.
+// - hive_report_issue files a Hive product bug: a statement about the tool,
+//   never a change to the code under supervision. Refusing it left a
+//   controller that had watched a factory failure unable to report it.
+// - linear_save_comment is the Linear twin of hive_comment_ticket, already
+//   permitted. It is the one `save_*` admitted: a comment adds a statement to a
+//   ticket and changes none of its state, owner or scope, whereas save_issue
+//   (create/edit) and every delete stay a visible teammate's decision.
+//
 // Names that are not tools (hive_list_pending_launches, hive_interrupt_agent,
 // hive_list_team_notes) stay denied. The refusal names the real coordination
 // tool instead of saying "delegate implementation".
@@ -338,11 +351,13 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_get_run_reports",
 	"hive_get_run_tests",
 	"hive_get_task_logs",
+	"hive_get_test_pg_health",
 	"hive_get_ticket",
 	"hive_get_work_context",
 	"hive_launch_teammate",
 	"hive_list_agent_launches",
 	"hive_list_agent_sessions",
+	"hive_list_clusters",
 	"hive_list_communications",
 	"hive_list_credential_catalog",
 	"hive_list_projects",
@@ -364,6 +379,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_remove_teammate",
 	"hive_rename_squad",
 	"hive_reply_communication",
+	"hive_report_issue",
 	"hive_retry_run",
 	"hive_search_tickets",
 	"hive_set_run_priority",
@@ -388,6 +404,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"linear_list_projects",
 	"linear_list_teams",
 	"linear_list_users",
+	"linear_save_comment",
 	"linear_search_documentation",
 ]);
 
@@ -480,8 +497,59 @@ const READ_ONLY_COMMANDS = new Set([
 const SAFE_GIT_SUBCOMMANDS = new Set([
 	"status", "log", "diff", "show", "branch", "remote", "ls-files", "grep",
 	"rev-parse", "blame", "describe", "merge-base", "ls-tree", "cat-file",
-	"shortlog", "config", "worktree", "ls-remote",
+	"shortlog", "config", "worktree", "ls-remote", "stash",
 ]);
+
+/**
+ * `git stash` verbs that only read. `git stash` alone PUSHES, and pop/drop/
+ * clear/apply rewrite the tree or the stash list — so, like `worktree`, the
+ * verb is safe only with its listing sub-verb (papercut 2026-10-0x: a lead
+ * refused `git stash list` while inventorying a worker's checkout).
+ */
+const SAFE_GIT_STASH_VERBS = new Set(["list", "show"]);
+
+/** `git branch` flags that only shape a LISTING. Everything else may write. */
+const GIT_BRANCH_READ_FLAGS = new Set([
+	"--show-current", "--list", "-l", "-r", "--remotes", "-a", "--all", "-v", "-vv",
+	"--verbose", "--color", "--no-color", "--column", "--no-column", "--merged",
+	"--no-merged", "--contains", "--no-contains", "--points-at", "--sort", "--format",
+	"--omit-empty", "-i", "--ignore-case", "--abbrev", "--no-abbrev",
+]);
+
+/**
+ * Flags that put `git branch` in list mode, where positionals are PATTERNS.
+ * `--sort` and `--format` are NOT among them: they only shape a listing, and
+ * with a positional `git branch --format=x newb` still CREATES newb (verified
+ * on git 2.55).
+ */
+const GIT_BRANCH_LIST_MODE = new Set([
+	"--list", "-l", "--merged", "--no-merged", "--contains", "--no-contains", "--points-at",
+]);
+
+/**
+ * Is this `git branch` invocation a read?
+ *
+ * The verb both lists and writes: `git branch x` CREATES x, and -d/-m/-c/-f/
+ * --set-upstream-to change refs. It reads when every flag is a listing flag
+ * and any positional word is a pattern — which git only takes it to be in list
+ * mode (`--list` or a filter). With no positional it lists. `--show-current`
+ * prints one name. Papercuts 262 and 877 were exactly these two reads.
+ */
+function isReadOnlyGitBranch(args: string[]): boolean {
+	const flags = args.filter((arg) => arg.startsWith("-"));
+	if (!flags.every((flag) => GIT_BRANCH_READ_FLAGS.has(flag.split("=")[0]))) return false;
+	const positional = args.length - flags.length;
+	if (positional === 0) return true;
+	return flags.some((flag) => GIT_BRANCH_LIST_MODE.has(flag.split("=")[0]));
+}
+
+/** The verb-specific half of a git read, shared by every posture. */
+function gitVerbArgsReadOnly(verb: string, rest: string[]): boolean {
+	if (verb === "stash") return SAFE_GIT_STASH_VERBS.has(rest[0] ?? "");
+	if (verb === "branch") return isReadOnlyGitBranch(rest);
+	if (verb === "worktree") return rest[0] === "list";
+	return true;
+}
 
 /**
  * `tmux` verbs that only READ the server's state.
@@ -583,6 +651,22 @@ function envReadHint(blocked: string): string {
 	return name ? `\nTo read one variable without an expansion, use:  printenv ${name}` : "";
 }
 
+/**
+ * `git fetch` stays refused, and the refusal says why and what reads instead.
+ *
+ * It is not a pure read: it writes FETCH_HEAD and the remote-tracking refs,
+ * and a `hive worktrees` checkout shares its git dir with every other worktree
+ * of the repository — so a lead's fetch moves `origin/*` under its workers
+ * mid-task (papercut 2026-10-03, a lead wanting current source). The remote's
+ * state is readable without touching the local repository.
+ */
+function gitFetchHint(blocked: string): string {
+	return /(^|\s)git(\s+-\S+(\s+\S+)?)*\s+fetch\b/.test(blocked)
+		? "\ngit fetch writes refs shared by every worktree of this repository. Read the remote instead: " +
+				"`git ls-remote origin <ref>` for a sha, `gh api repos/<o>/<r>/contents/<path>?ref=<sha>` for a file."
+		: "";
+}
+
 export function classifyCommand(command: string, posture = "Plan"): PlanToolVerdict {
 	const blocked = findBlockedSegment(command);
 	if (blocked === undefined) return { allowed: true };
@@ -591,7 +675,8 @@ export function classifyCommand(command: string, posture = "Plan"): PlanToolVerd
 		reason:
 			`${posture} mode allows only read-only shell commands, and this one is not on the list:\n  ${blocked}\n` +
 			`Redirects, subshells, backgrounding, command substitution and variable assignment are refused outright.` +
-			envReadHint(blocked),
+			envReadHint(blocked) +
+			gitFetchHint(blocked),
 	};
 }
 
@@ -604,13 +689,13 @@ const ORCHESTRATE_SHELL_READERS = new Set([
 	"basename", "bat", "cat", "column", "comm", "cut", "date", "df", "diff",
 	"dirname", "du", "echo", "eza", "file", "find", "grep", "head", "id",
 	"jq", "join", "ls", "nl", "printenv", "printf", "ps", "pwd", "readlink", "realpath",
-	"rg", "seq", "stat", "tail", "true", "type", "uname", "uniq", "uptime",
+	"rg", "seq", "sort", "stat", "tail", "true", "type", "uname", "uniq", "uptime",
 	"wc", "which", "whoami",
 ]);
 
 const ORCHESTRATE_GIT_READERS = new Set([
 	"blame", "describe", "diff", "grep", "log", "ls-files", "ls-remote", "ls-tree",
-	"merge-base", "rev-parse", "shortlog", "show", "status",
+	"merge-base", "rev-parse", "shortlog", "show", "status", "branch", "stash",
 ]);
 
 export function classifyOrchestrateCommand(command: string): PlanToolVerdict {
@@ -636,7 +721,7 @@ export function classifyOrchestrateCommand(command: string): PlanToolVerdict {
 			const unsafeGitFlag = args.slice(i + 1).some((arg) =>
 				arg === "-o" || arg.startsWith("--output") || arg === "--ext-diff" || arg === "--textconv",
 			);
-			if (safeGlobals && verb && ORCHESTRATE_GIT_READERS.has(verb) && !unsafeGitFlag) continue;
+			if (safeGlobals && verb && ORCHESTRATE_GIT_READERS.has(verb) && !unsafeGitFlag && gitVerbArgsReadOnly(verb, args.slice(i + 1))) continue;
 		}
 		if (executable === "gh" || executable === "hive" || executable === "tmux") {
 			if (isSafeStructured(executable, args)) continue;
@@ -702,14 +787,27 @@ function splitSegments(command: string): string[] | undefined {
 
 	if (quote || escaped) return undefined;
 	const last = trimmed.slice(start).trim();
-	if (!last) return undefined;
+	if (!last) {
+		// ONE trailing `;` terminates the last command and runs nothing more —
+		// `date; gh pr view …;` is two reads. A trailing `|`, `&&`, `||` or `;;`
+		// is an incomplete or malformed command and stays refused.
+		const tail = trimmed.slice(0, start).trimEnd();
+		if (segments.length > 0 && tail.endsWith(";") && !tail.endsWith(";;")) return segments;
+		return undefined;
+	}
 	segments.push(last);
 	return segments;
 }
 
 function isSafeSegment(segment: string): boolean {
 	// `$(…)`, `${…}`, globs and `VAR=value` prefixes all defeat token inspection.
-	if (hasExpansion(segment) || /(^|\s)[A-Za-z_][A-Za-z0-9_]*=/.test(segment)) return false;
+	//
+	// The assignment check is anchored to the segment's START, which is the only
+	// place the shell reads `NAME=value` as an assignment (an env prefix such as
+	// `PAGER=… git log`, or a bare `X=1`). Scanning the whole text matched inside
+	// QUOTED arguments too — jq's `length==2` read as an assignment to `length`,
+	// refusing a pure read (papercut 2026-09-30T08:54).
+	if (hasExpansion(segment) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(segment)) return false;
 
 	const tokens = shellWords(segment);
 	if (!tokens || tokens.length === 0) return false;
@@ -785,7 +883,10 @@ function shellWords(segment: string): string[] | undefined {
 /** Flags that turn an otherwise-read-only command into a writer. */
 function hasSafeArguments(command: string, args: string[]): boolean {
 	const universallyForbidden = new Set(["-i", "--in-place", "--fix", "--write", "-delete", "--delete", "-o", "--output"]);
-	if (args.some((arg) => universallyForbidden.has(arg))) return false;
+	// Attached spellings too: `--output=FILE` writes exactly like `--output FILE`
+	// (git diff/show/stash show, sort, many others). A reader name with a writer
+	// flag is a writer.
+	if (args.some((arg) => universallyForbidden.has(arg) || /^--(output|in-place|write|fix|delete)=/.test(arg))) return false;
 
 	if (command === "sed" || command === "perl") {
 		// `-i`, `--in-place=BAK`, and bundled short flags like `-ri`.
@@ -799,8 +900,28 @@ function hasSafeArguments(command: string, args: string[]): boolean {
 		if (args.some((arg) => writers.includes(arg))) return false;
 	}
 	if (command === "date" && args.some((arg) => arg === "-s" || arg.startsWith("--set"))) return false;
-	if (command === "sort" && args.some((arg) => arg.startsWith("-o") || arg.startsWith("--output"))) return false;
+	// `--compress-program` names a program GNU sort RUNS when it spills to
+	// temp files — execution behind a reader.
+	// `-o` may be bundled (`-uo out`), so any short-flag cluster containing `o`
+	// is refused — fail closed even where the `o` would be another flag's value.
+	if (command === "sort" && args.some((arg) => /^-[^-]*o/.test(arg) || arg.startsWith("--output") || arg.startsWith("--compress-program"))) return false;
 	if (command === "tee") return false;
+	// Flags that make a reader EXECUTE something: rg's preprocessor, bat's
+	// pager, git grep's pager, and git's external diff / textconv drivers.
+	if (command === "rg" && args.some((arg) => arg === "--pre" || arg.startsWith("--pre="))) return false;
+	if (command === "bat" && args.some((arg) => arg === "--pager" || arg.startsWith("--pager="))) return false;
+	if (
+		command === "git" &&
+		args.some(
+			(arg) =>
+				arg.startsWith("-O") ||
+				arg.startsWith("--open-files-in-pager") ||
+				arg === "--ext-diff" ||
+				arg === "--textconv",
+		)
+	) {
+		return false;
+	}
 	return true;
 }
 
@@ -851,9 +972,15 @@ function isReadOnlyGhApi(args: string[]): boolean {
 function isSafeStructured(command: string, args: string[]): boolean {
 	if (command === "git") {
 		// Skip global flags (`-C path`, `--no-pager`) to reach the verb.
+		//
+		// `-c key=value` is REFUSED, not skipped: it sets any config for this one
+		// command, and `core.pager`, `diff.external` or `core.fsmonitor` name a
+		// program git then runs — arbitrary execution behind an allowed reader.
+		// The old blanket VAR= scan never saw it either (`core.pager=` has a dot).
 		let i = 0;
 		while (i < args.length && args[i].startsWith("-")) {
-			i += args[i] === "-C" || args[i] === "-c" ? 2 : 1;
+			if (args[i] === "-c" || args[i].startsWith("--config-env") || args[i].startsWith("--exec-path")) return false;
+			i += args[i] === "-C" ? 2 : 1;
 		}
 		const verb = args[i];
 		if (!verb || !SAFE_GIT_SUBCOMMANDS.has(verb)) return false;
@@ -861,8 +988,7 @@ function isSafeStructured(command: string, args: string[]): boolean {
 		if (verb === "config" && args.slice(i + 1).some((arg) => !arg.startsWith("-") && args.indexOf(arg) > i + 1)) {
 			return false;
 		}
-		if (verb === "worktree" && args[i + 1] !== "list") return false;
-		return true;
+		return gitVerbArgsReadOnly(verb, args.slice(i + 1));
 	}
 
 	if (command === "gh") {
@@ -878,11 +1004,16 @@ function isSafeStructured(command: string, args: string[]): boolean {
 
 	if (command === "hive") {
 		// Positional words only: `hive --json get 4928` and `hive get 4928
-		// --project hive` must reach the same decision, and an invocation with no
-		// verb at all (`hive`, `hive --help`) is not a read this policy approved.
+		// --project hive` must reach the same decision. A bare `hive` commits to
+		// nothing and is not approved.
 		const words = args.filter((arg) => !arg.startsWith("-"));
 		const verb = words[0];
-		if (!verb) return false;
+		// hive's OWN usage: `hive --help`, `-h` and `help` print it from the
+		// top-level dispatch and return (cmd/hive/main.go) before any command
+		// runs. A VERB's `--help` is not approved by extension: each verb parses
+		// its own argv, and this policy cannot prove every one stops at the flag.
+		if (!verb) return args.length > 0 && args.every((arg) => arg === "--help" || arg === "-h");
+		if (verb === "help") return args.length === 1;
 		// `hive linear get HIV-1` reads a ticket; `hive linear report` FILES one.
 		// The nested verb decides, and the group itself is never safe on its own.
 		if (verb === "linear") return words[1] === "get";

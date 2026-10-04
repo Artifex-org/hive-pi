@@ -14,7 +14,7 @@ import {
 	stepsFrom,
 } from "../extensions/gate/hivecheck.ts";
 import { hivePipelineDir, resolveCheckAuth, tailLines } from "../extensions/gate/hiverun.ts";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -70,6 +70,19 @@ describe("hiveCheckArgs", () => {
 
 	it("still passes a single step unchanged", () => {
 		expect(hiveCheckArgs(["lint"])).toEqual(["check", "--step", "lint", "--no-wait"]);
+	});
+
+	// Papercut 2026-10-03T13:16: "cannot derive the project from the origin
+	// remote; pass --project … the quality-gate tool has no project argument."
+	it("passes an explicit project through as --project", () => {
+		expect(hiveCheckArgs(["lint"], { project: "pyERP" })).toEqual([
+			"check", "--project", "pyERP", "--step", "lint", "--no-wait",
+		]);
+	});
+
+	it("omits --project when none was given, leaving the CLI's origin-remote default", () => {
+		expect(hiveCheckArgs(["lint"], {})).not.toContain("--project");
+		expect(hiveCheckArgs(["lint"], { project: "  " })).not.toContain("--project");
 	});
 });
 
@@ -154,6 +167,48 @@ describe("fold", () => {
 		expect(p.checks[0].outcome).toBe("advisory");
 		expect(p.checks[0].message).toMatch(/made no claim/);
 		expect(p.advisories).toEqual(["web-check"]);
+	});
+
+	// Papercut 2026-10-04T17:58: six steps skipped because `codemetrics` failed
+	// were reported "advisory (non-blocking)", which hid that no test or web gate
+	// ran at all. The scheduler says why it skipped a task in `error`
+	// (hive scheduler/progress.go, store FailFastSkipPrefix); read it.
+	it("reports dependency-blocked steps as NOT RUN, naming the step that blocked them", () => {
+		const p = fold({
+			...base,
+			run: { state: "failed" },
+			tasks: [
+				task("codemetrics", "failed", { error: "exit 1" }),
+				task("test-1", "skipped", { error: "blocked by failed dependency: codemetrics" }),
+				task("test-2", "skipped", { error: "blocked by failed dependency: codemetrics" }),
+				// store.FailFastSkipPrefix + redRunCause, which is "<key> failed".
+				task("web-check", "skipped", { error: "run already red: codemetrics failed" }),
+				task("coverage", "skipped", { error: "blocked by failed fan-out: test" }),
+				task("e2e", "skipped", { error: "upstream failed" }),
+				task("docs", "skipped"),
+				// hive's ReleaseDrainSkipPrefix: the cause is prose, not a step key.
+				task("deploy", "skipped", { error: "run already red: release disqualified after a blocking failure because a newer branch generation exists" }),
+			],
+			substeps: [],
+		});
+		expect(p.advisories).toEqual(["docs"]);
+		expect(p.blocked).toEqual([
+			{ step: "test-1", by: "codemetrics" },
+			{ step: "test-2", by: "codemetrics" },
+			{ step: "web-check", by: "codemetrics" },
+			{ step: "coverage", by: "test" },
+			{ step: "e2e", by: null },
+			{ step: "deploy", by: null },
+		]);
+		const text = renderReport(p);
+		expect(text).toContain("not run — blocked by failed codemetrics: test-1, test-2, web-check");
+		expect(text).toContain("not run — blocked by failed test: coverage");
+		expect(text).toContain("not run — blocked by a failed upstream step: e2e, deploy");
+		expect(text).not.toContain("failed release disqualified");
+		expect(text).not.toMatch(/codemetrics failed/);
+		expect(text).toContain("advisory (non-blocking): docs");
+		expect(text).not.toMatch(/advisory \(non-blocking\):.*test-1/);
+		expect(text).toContain("FAIL — 1 failing of 8 step(s), 6 not run, 1 advisory");
 	});
 
 	// The emitters report a warning as outcome "passed" with the truth in the
@@ -407,16 +462,55 @@ describe("isTerminalRun", () => {
 });
 
 describe("hivePipelineDir", () => {
-	it("finds the .hive of an ANCESTOR, not only of the cwd", async () => {
-		const root = mkdtempSync(join(tmpdir(), "gate-hive-"));
-		mkdirSync(join(root, ".hive"));
+	/** A git checkout at `dir`: a `.git` DIRECTORY, as a plain clone has. */
+	function repoAt(dir: string): string {
+		mkdirSync(join(dir, ".git"), { recursive: true });
+		return dir;
+	}
+	function pipelineAt(dir: string): void {
+		mkdirSync(join(dir, ".hive"), { recursive: true });
+		writeFileSync(join(dir, ".hive", "main.star"), "hive.pipeline()\n");
+	}
+
+	it("finds the repo's pipeline from a subdirectory of the checkout", async () => {
+		const root = repoAt(mkdtempSync(join(tmpdir(), "gate-hive-")));
+		pipelineAt(root);
 		mkdirSync(join(root, "internal", "api"), { recursive: true });
 		expect(await hivePipelineDir(join(root, "internal", "api"))).toBe(`${root}/.hive`);
+	});
+
+	it("accepts a linked worktree, whose .git is a FILE", async () => {
+		const root = mkdtempSync(join(tmpdir(), "gate-hive-wt-"));
+		writeFileSync(join(root, ".git"), "gitdir: /elsewhere/worktrees/x\n");
+		pipelineAt(root);
+		expect(await hivePipelineDir(root)).toBe(`${root}/.hive`);
 	});
 
 	it("declines a directory with no pipeline anywhere above it", async () => {
 		const root = mkdtempSync(join(tmpdir(), "gate-nohive-"));
 		expect(await hivePipelineDir(root)).toBeNull();
+	});
+
+	// Papercut 2026-09-29T20:15: every repo under $HOME read as Hive-gated,
+	// because ~/.hive (the CLI's CONFIG dir, no main.star) sat above them all,
+	// and `quality_gate` dispatched `hive check --step lint` for hive-pi, which
+	// has no pipeline — "fetch .hive/main.star@… file not found".
+	it("does not mistake a .hive config dir with no main.star for a pipeline", async () => {
+		const home = mkdtempSync(join(tmpdir(), "gate-home-"));
+		mkdirSync(join(home, ".hive"));
+		writeFileSync(join(home, ".hive", "agent.env"), "HIVE_AGENT_CLUSTER=x\n");
+		const repo = repoAt(join(home, "repos", "hive-pi"));
+		mkdirSync(join(repo, "extensions"));
+		expect(await hivePipelineDir(join(repo, "extensions"))).toBeNull();
+	});
+
+	it("does not climb out of the git repository into a parent's pipeline", async () => {
+		// `hive check` packs and evaluates THIS repo's tree; a pipeline in some
+		// enclosing directory is not one it would ever read.
+		const outer = mkdtempSync(join(tmpdir(), "gate-outer-"));
+		pipelineAt(outer);
+		const repo = repoAt(join(outer, "vendor", "lib"));
+		expect(await hivePipelineDir(repo)).toBeNull();
 	});
 });
 

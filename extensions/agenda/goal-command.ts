@@ -114,7 +114,7 @@ export function looksUnverifiable(condition: string): boolean {
 		/\bexits? 0\b/i,
 		/\bpass(es|ing|ed)?\b/i,
 		/\bgreen\b/i,
-		/\bfail(s|ing)?\b/i,
+		/\bfail(s|ed|ing|ures?)?\b/i,
 		// A CI verdict or a PR's state is as checkable as an exit code — `gh pr
 		// checks`, `gh pr view` — and an agent naming its delivery that way was
 		// refused ("task PR exists and final-head hive/ci succeeded").
@@ -125,6 +125,17 @@ export function looksUnverifiable(condition: string): boolean {
 		/`[^`]+`/, // a quoted command
 		/\b[\w./-]+\.(ts|tsx|js|py|go|rs|json|md|yaml|yml)\b/i, // a path
 		/\b\d+\s*(tests?|errors?|warnings?)\b/i,
+		// A COUNT of a countable CI outcome — "exactly 2 failed steps", "at most
+		// 1 flaky job", "zero open findings" — is as checkable as an exit code.
+		// The quantity may sit a word or two before the unit, which is how the
+		// refused 2026-10-02 condition was phrased; the unit list keeps it from
+		// matching any number next to any noun ("fix 2 things"). A spelled-out
+		// zero ("no", "zero") is a quantity only directly before an outcome word —
+		// "no confusing issues" and "no longer runs" are prose, not counts.
+		/\b\d+\s+(\w+\s+){0,2}?(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|runs?|findings?|issues?|failures?)\b/i,
+		// Bare "no issues" is a mood, not a count, so a spelled-out zero needs an
+		// outcome qualifier unless the unit is itself a check result.
+		/\b(zero|no)\s+((failed|failing|flaky|red|lint|type|open|new|remaining)\s+(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|findings?|issues?)|(tests? failures?|errors?|warnings?|failures?))\b/i,
 	];
 	return !signals.some((pattern) => pattern.test(condition));
 }

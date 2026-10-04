@@ -24,6 +24,7 @@
 import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import { GIT_NO_OPTIONAL_LOCKS } from "../hive-common/git.ts";
 
 /** Mirrors internal/api/agent_worktree.go's closed state set. Hive drops an
  *  entry whose state it does not recognise, so the two must agree. */
@@ -269,7 +270,7 @@ export function parseNumstat(out: string): Map<string, { additions?: number; del
 
 function git(cwd: string, args: string[]): string | null {
 	try {
-		return execFileSync("git", ["-C", cwd, ...args], {
+		return execFileSync("git", [GIT_NO_OPTIONAL_LOCKS, "-C", cwd, ...args], {
 			timeout: GIT_TIMEOUT_MS,
 			encoding: "utf8",
 			maxBuffer: 8 * 1024 * 1024,
@@ -293,7 +294,7 @@ function git(cwd: string, args: string[]): string | null {
  */
 function gitDiffOutput(cwd: string, args: string[]): string | null {
 	try {
-		return execFileSync("git", ["-C", cwd, ...args], {
+		return execFileSync("git", [GIT_NO_OPTIONAL_LOCKS, "-C", cwd, ...args], {
 			timeout: GIT_TIMEOUT_MS,
 			encoding: "utf8",
 			maxBuffer: 8 * 1024 * 1024,
@@ -334,7 +335,7 @@ export function collectWorktree(cwd: string): WorktreePayload | null {
 	// unstaged together. --no-renames so a rename shows as an add plus a delete
 	// with real line counts, rather than as one record whose numbers describe a
 	// path pair this panel does not render.
-	const treeChurn = parseNumstat(git(cwd, ["diff", "--numstat", "-z", "--no-renames", "HEAD"]) ?? "");
+	const treeChurn = parseNumstat(git(cwd, ["diff-index", "--numstat", "-z", "--no-renames", "HEAD"]) ?? "");
 	for (const file of files) {
 		const churn = treeChurn.get(file.path);
 		if (churn) Object.assign(file, churn);
@@ -431,7 +432,7 @@ export function collectPatch(cwd: string, path: string, known?: (p: string) => b
 	// churn numbers describe, so the diff a reader opens is the diff they were
 	// counting. --no-renames keeps a rename as an add plus a delete, matching the
 	// list rather than describing a path pair it never showed.
-	let patch = git(cwd, ["diff", "--no-renames", "HEAD", "--", path]);
+	let patch = git(cwd, ["diff-index", "-p", "--no-renames", "HEAD", "--", path]);
 	if (patch === null) return { path, patch: "", reason: "git could not read this tree" };
 
 	// An untracked file has no HEAD side, so `git diff HEAD` says nothing about

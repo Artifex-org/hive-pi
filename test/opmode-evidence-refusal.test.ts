@@ -23,8 +23,8 @@ describe("refusalWithCandidates", () => {
 	it("lists observed ids newest first, so the next call can succeed", () => {
 		const out = refusalWithCandidates(
 			mapOf([
-				["call_a", { name: "bash", failed: true, text: "AssertionError: expected 3" }],
-				["call_b", { name: "bash", failed: false, text: "3 passed" }],
+				["call_a", { name: "bash", family: "shell", verdict: "failed", text: "AssertionError: expected 3" }],
+				["call_b", { name: "bash", family: "shell", verdict: "passed", text: "3 passed" }],
 			]),
 			undefined,
 		);
@@ -47,8 +47,8 @@ describe("refusalWithCandidates", () => {
 	it("asks for the reproduction_key the next call will also need", () => {
 		const out = refusalWithCandidates(
 			mapOf([
-				["call_a", { name: "bash", failed: true, text: "AssertionError: expected 3" }],
-				["call_b", { name: "bash", failed: false, text: "3 passed" }],
+				["call_a", { name: "bash", family: "shell", verdict: "failed", text: "AssertionError: expected 3" }],
+				["call_b", { name: "bash", family: "shell", verdict: "passed", text: "3 passed" }],
 			]),
 			undefined,
 		);
@@ -61,7 +61,7 @@ describe("refusalWithCandidates", () => {
 	});
 
 	it("names an unknown requested id instead of implying none was given", () => {
-		const out = refusalWithCandidates(mapOf([["call_a", { name: "bash", failed: false, text: "ok" }]]), "call_zz");
+		const out = refusalWithCandidates(mapOf([["call_a", { name: "bash", family: "shell", verdict: "passed", text: "ok" }]]), "call_zz");
 		expect(out).toContain("call_zz was not observed");
 		expect(out).toContain("call_a");
 	});
@@ -69,7 +69,7 @@ describe("refusalWithCandidates", () => {
 	it("bounds the listing to the newest eight", () => {
 		const entries: [string, ObservedResult][] = Array.from({ length: 12 }, (_, i) => [
 			`call_${i}`,
-			{ name: "bash", failed: false, text: `run ${i}` },
+			{ name: "bash", family: "shell", verdict: "passed", text: `run ${i}` },
 		]);
 		const out = refusalWithCandidates(mapOf(entries), undefined);
 		expect(out).toContain("call_11");
@@ -85,7 +85,7 @@ describe("refusalWithCandidates", () => {
 
 	it("flattens multi-line result text so one row stays one row", () => {
 		const out = refusalWithCandidates(
-			mapOf([["call_a", { name: "bash", failed: true, text: "line one\nline two\nline three" }]]),
+			mapOf([["call_a", { name: "bash", family: "shell", verdict: "failed", text: "line one\nline two\nline three" }]]),
 			undefined,
 		);
 		const row = out.split("\n").find((l) => l.includes("call_a"));
