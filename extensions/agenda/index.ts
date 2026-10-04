@@ -126,7 +126,14 @@ import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { randomUUID } from "node:crypto";
 import { DurableRunRegistry, type DurableRunResult } from "./run-registry.ts";
-import { nodeResultText, pageText, renderRunResults, RESULT_PAGE_CHARS, selectableNodes } from "./run-output.ts";
+import {
+	fencedNodeResult,
+	MAX_RESULT_PAGE_CHARS,
+	pageText,
+	renderRunResults,
+	RESULT_PAGE_CHARS,
+	selectableNodes,
+} from "./run-output.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
 
 /**
@@ -1680,7 +1687,11 @@ export default function (pi: ExtensionAPI) {
 			),
 			offset: Type.Optional(Type.Integer({ minimum: 0, description: "First character to show (default 0)." })),
 			limit: Type.Optional(
-				Type.Integer({ minimum: 1, description: `Characters per page (default ${RESULT_PAGE_CHARS}).` }),
+				Type.Integer({
+					minimum: 1,
+					maximum: MAX_RESULT_PAGE_CHARS,
+					description: `Characters per page (default ${RESULT_PAGE_CHARS}, at most ${MAX_RESULT_PAGE_CHARS}).`,
+				}),
 			),
 		}),
 		execute: async (_id, params) => {
@@ -1702,7 +1713,7 @@ export default function (pi: ExtensionAPI) {
 				const { plan, summary } = run.result;
 				let body = run.result.text;
 				if (params.node !== undefined) {
-					const one = nodeResultText(plan, summary, params.node);
+					const one = fencedNodeResult(plan, summary, params.node);
 					if (one === undefined) {
 						return {
 							content: [{ type: "text", text: `No node "${params.node}" in run ${run.id}. Selectable: ${selectableNodes(plan, summary).join(", ")}.` }],
@@ -1713,8 +1724,11 @@ export default function (pi: ExtensionAPI) {
 					body = one;
 				}
 				const nodeArg = params.node !== undefined ? `, node:${JSON.stringify(params.node)}` : "";
-				const paged = pageText(body, params.offset ?? 0, params.limit ?? RESULT_PAGE_CHARS, (next) =>
-					`orchestrate_result({id:"${run.id}"${nodeArg}, offset:${next}})`,
+				// The hint repeats the caller's own page size, clamped as the page is.
+				const limit = Math.min(params.limit ?? RESULT_PAGE_CHARS, MAX_RESULT_PAGE_CHARS);
+				const limitArg = params.limit !== undefined ? `, limit:${limit}` : "";
+				const paged = pageText(body, params.offset ?? 0, limit, (next) =>
+					`orchestrate_result({id:"${run.id}"${nodeArg}, offset:${next}${limitArg}})`,
 				);
 				// Typed `unknown` like the run's own details: this tool's branches
 				// return differently shaped details, and the tool contract is one type.

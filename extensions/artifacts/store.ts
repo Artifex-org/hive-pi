@@ -377,6 +377,12 @@ export interface SpillResult {
 	ref: string | null;
 	/** The file the bytes were written to, or null when nothing was written. */
 	file: string | null;
+	/**
+	 * How many of the body's bytes that file holds — its TAIL. Equal to the
+	 * body's size unless it was over MAX_ARTIFACT_BYTES; 0 when nothing was
+	 * written. A reader told "written in full" about a cut file is misled.
+	 */
+	storedBytes: number;
 }
 
 /**
@@ -398,7 +404,7 @@ export function spill(
 	opts: { dir: string; kind: string; previewBytes: number },
 ): SpillResult {
 	const total = Buffer.byteLength(body, "utf8");
-	if (total <= opts.previewBytes) return { text: body, ref: null, file: null };
+	if (total <= opts.previewBytes) return { text: body, ref: null, file: null, storedBytes: 0 };
 
 	const preview = keepTail(body, opts.previewBytes);
 	// Counted in BYTES, not in string length: `total` is a byte count and a
@@ -415,6 +421,7 @@ export function spill(
 			text: `[artifact store full: ${existing.length} artifacts this session, cap ${MAX_ARTIFACTS_PER_SESSION}. Showing the last ${shown} of ${total} bytes; ${preview.dropped} bytes were NOT retained]\n${preview.text}`,
 			ref: null,
 			file: null,
+			storedBytes: 0,
 		};
 	}
 
@@ -431,15 +438,19 @@ export function spill(
 			text: `[artifact write failed: ${reason}. Showing the last ${shown} of ${total} bytes; the rest is lost]\n${preview.text}`,
 			ref: null,
 			file: null,
+			storedBytes: 0,
 		};
 	}
 
-	const retained = Math.min(total, MAX_ARTIFACT_BYTES);
+	// Exact, not min(total, cap): the cut lands on a character boundary, so a
+	// multi-byte body keeps a few bytes fewer than the cap.
+	const retained = total <= MAX_ARTIFACT_BYTES ? total : Buffer.byteLength(keepTail(body, MAX_ARTIFACT_BYTES).text, "utf8");
 	const truncated = retained < total ? `, artifact holds the last ${retained}` : "";
 	return {
 		text: `[${ref} · ${total} bytes${truncated} · showing the last ${shown}. Use artifact_read to see more]\n${preview.text}`,
 		ref,
 		file: artifactFile(opts.dir, id, opts.kind),
+		storedBytes: retained,
 	};
 }
 

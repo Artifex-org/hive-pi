@@ -71,6 +71,7 @@ vi.mock("../extensions/agenda/rpc-worker.ts", async (importOriginal) => {
 });
 
 import agenda from "../extensions/agenda/index.ts";
+import { MAX_RESULT_PAGE_CHARS } from "../extensions/agenda/run-output.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 
 let pi: FakePi;
@@ -375,7 +376,9 @@ describe("the orchestrate tool", () => {
 	/** A worker that answers each node with `outputs[nodeId-from-prompt]`. */
 	function answerBy(outputs: Record<string, string>) {
 		runRoleAgent.mockImplementation(async ({ prompt }: { prompt: string }) => {
-			const node = Object.keys(outputs).find((id) => prompt.startsWith(`do ${id}`)) ?? "";
+			// With inputs the authored task comes last, under "## Your task".
+			const task = prompt.split("## Your task\n").at(-1) ?? prompt;
+			const node = Object.keys(outputs).find((id) => task.startsWith(`do ${id}`)) ?? "";
 			return {
 				text: outputs[node] ?? `out ${node}`,
 				tokens: 1,
@@ -417,7 +420,8 @@ describe("the orchestrate tool", () => {
 		expect(shown).toContain(`orchestrate_result({id:"${runId}", offset:`);
 		expect(shown).toContain('node:"reconcile"');
 
-		// One node, whole, across pages.
+		// One node, whole, across pages — fenced as worker data, and the hint
+		// for the next page keeps the caller's own page size.
 		const pages: string[] = [];
 		let offset = 0;
 		for (let guard = 0; guard < 10; guard++) {
@@ -425,9 +429,15 @@ describe("the orchestrate tool", () => {
 			expect(page.isError).toBeFalsy();
 			pages.push(page.details.page as string);
 			if (page.details.next_offset === undefined) break;
+			expect(page.content[0].text).toContain(`offset:${page.details.next_offset}, limit:10000})`);
 			offset = page.details.next_offset as number;
 		}
-		expect(pages.join("")).toBe(long);
+		expect(pages.join("")).toMatch(new RegExp(`<<<WORKER OUTPUT node=review nonce=(\\w+)>>>\\n${long.slice(0, 40)}`));
+		expect(pages.join("")).toContain(`${long}\n<<<END WORKER OUTPUT nonce=`);
+
+		// A page size past the ceiling is clamped, not honoured.
+		const huge = await tool("orchestrate_result").execute("r", { id: runId, offset: 0, limit: 1_000_000_000 });
+		expect((huge.details.page as string).length).toBeLessThanOrEqual(MAX_RESULT_PAGE_CHARS);
 
 		const reconciled = await tool("orchestrate_result").execute("r", { id: runId, node: "reconcile" });
 		expect(reconciled.content[0].text).toContain("RECONCILED: ship it");
@@ -491,7 +501,7 @@ describe("the orchestrate tool", () => {
 			undefined,
 			ctx,
 		);
-		const reconcilePrompt = runRoleAgent.mock.calls.map(([options]) => options.prompt as string).find((prompt) => prompt.startsWith("do reconcile"));
+		const reconcilePrompt = runRoleAgent.mock.calls.map(([options]) => options.prompt as string).find((prompt) => prompt.endsWith("## Your task\ndo reconcile"));
 		const file = /written in full to (\S+?) —/.exec(reconcilePrompt ?? "")?.[1];
 		expect(file?.startsWith(store), reconcilePrompt).toBe(true);
 		expect(readFileSync(file!, "utf8")).toBe(big);

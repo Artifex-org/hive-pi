@@ -12,15 +12,25 @@
  *   - a barrier renders as the list of what it joined, not a second copy of
  *     those results (the join used to repeat ~20KB of its members);
  *   - every cut is a PAGE with a footer stating the range, the total, and the
- *     exact call that returns the rest — or one node.
+ *     exact call that returns the rest — or one node;
+ *   - worker text is FENCED as data (harness/fence.ts): it reaches the parent
+ *     as a user-role message, and unfenced prose could forge headings there.
  */
 
 import type { RunSummary } from "./executor.ts";
 import type { Plan, PlanNode } from "./plan-schema.ts";
+import { FENCED_DATA_NOTE, fence, nonceFor } from "../harness/fence.ts";
 import { renderInputValue } from "./upstream.ts";
 
 /** What one page of run output shows by default. */
 export const RESULT_PAGE_CHARS = 24_000;
+
+/** The most one page may show, whatever `limit` asks for — a page is context. */
+export const MAX_RESULT_PAGE_CHARS = 100_000;
+
+function isHighSurrogate(code: number): boolean {
+	return code >= 0xd800 && code <= 0xdbff;
+}
 
 /**
  * The finished elements of a fanout/pipeline, read from their own result
@@ -56,45 +66,79 @@ export function selectableNodes(plan: Plan, summary: RunSummary): string[] {
 	return ids;
 }
 
-/**
- * One node's result as text, or undefined for an id this run does not have.
- * `reviews#2` is element 2 of a fanout/pipeline, whatever stage it ended on.
- */
-export function nodeResultText(plan: Plan, summary: RunSummary, id: string): string | undefined {
+/** A node's result: worker-produced text, or a placeholder the harness wrote. */
+interface NodeResult {
+	text: string;
+	/** True when `text` came from a worker — the part that must be fenced. */
+	worker: boolean;
+}
+
+function nodeResult(plan: Plan, summary: RunSummary, id: string): NodeResult | undefined {
 	if (!selectableNodes(plan, summary).includes(id)) return undefined;
 	const slot = /^(.+)#(\d+)$/.exec(id);
 	if (slot) {
 		const owner = plan.nodes.find((candidate) => candidate.id === slot[1]);
 		const element = owner ? elementResults(owner, summary).find((candidate) => candidate.id === id) : undefined;
-		return renderInputValue(element?.value);
+		return { text: renderInputValue(element?.value), worker: true };
 	}
 	const node = plan.nodes.find((candidate) => candidate.id === id);
 	const status = summary.state.status[id];
 	if (node?.kind === "barrier" && id in summary.results) {
-		return `(barrier — joins ${node.needs.join(", ")}; each result is under its own node)`;
+		return { text: `(barrier — joins ${node.needs.join(", ")}; each result is under its own node)`, worker: false };
 	}
 	if ((node?.kind === "fanout" || node?.kind === "pipeline") && !(id in summary.results)) {
 		const finished = elementResults(node, summary).length;
-		return `(no combined result: ${status ?? "never ran"}; ${finished} element(s) finished, each under <id>#<n>)`;
+		return { text: `(no combined result: ${status ?? "never ran"}; ${finished} element(s) finished, each under <id>#<n>)`, worker: false };
 	}
-	if (!(id in summary.results)) return `(no result: ${status ?? "never ran"})`;
-	return renderInputValue(summary.results[id]);
+	if (!(id in summary.results)) return { text: `(no result: ${status ?? "never ran"})`, worker: false };
+	return { text: renderInputValue(summary.results[id]), worker: true };
 }
 
-/** Every node's result, in plan order, each under its own heading. */
+/**
+ * One node's result as raw text, or undefined for an id this run does not
+ * have. `reviews#2` is element 2 of a fanout/pipeline, whatever stage it ended
+ * on. UNFENCED — for anything a model reads, use `fencedNodeResult`.
+ */
+export function nodeResultText(plan: Plan, summary: RunSummary, id: string): string | undefined {
+	return nodeResult(plan, summary, id)?.text;
+}
+
+const WORKER_LABEL = "WORKER OUTPUT";
+
+/** `orchestrate_result({node})`'s body: the data note, then the result fenced when a worker wrote it. */
+export function fencedNodeResult(plan: Plan, summary: RunSummary, id: string): string | undefined {
+	const result = nodeResult(plan, summary, id);
+	if (!result) return undefined;
+	if (!result.worker) return result.text;
+	return `${FENCED_DATA_NOTE}\n\n${fence(WORKER_LABEL, `node=${id}`, result.text, nonceFor([result.text]))}`;
+}
+
+/**
+ * Every node's result, in plan order, each under its own heading — worker text
+ * FENCED with one nonce per render that no result contains.
+ *
+ * This text reaches the parent as a user-role message (the background-run
+ * completion) or a tool result. The old JSON escaping incidentally kept a
+ * worker from forging structure in it; the fence does that on purpose, and the
+ * leading note says what the fence means.
+ */
 export function renderRunResults(plan: Plan, summary: RunSummary): string {
-	const sections: string[] = [];
+	const entries: Array<{ id: string; result: NodeResult }> = [];
 	for (const node of plan.nodes) {
 		if (node.kind === "fanout" || node.kind === "pipeline") {
-			if (!(node.id in summary.results)) sections.push(`### ${node.id}\n${nodeResultText(plan, summary, node.id)}`);
+			if (!(node.id in summary.results)) entries.push({ id: node.id, result: nodeResult(plan, summary, node.id)! });
 			for (const element of elementResults(node, summary)) {
-				sections.push(`### ${element.id}\n${renderInputValue(element.value)}`);
+				entries.push({ id: element.id, result: { text: renderInputValue(element.value), worker: true } });
 			}
 			continue;
 		}
-		sections.push(`### ${node.id}\n${nodeResultText(plan, summary, node.id)}`);
+		entries.push({ id: node.id, result: nodeResult(plan, summary, node.id)! });
 	}
-	return sections.join("\n\n");
+	const nonce = nonceFor(entries.filter((entry) => entry.result.worker).map((entry) => entry.result.text));
+	const sections = entries.map(({ id, result }) =>
+		`### ${id}\n${result.worker ? fence(WORKER_LABEL, `node=${id}`, result.text, nonce) : result.text}`,
+	);
+	return [FENCED_DATA_NOTE, "", ...sections.flatMap((section, index) => (index === 0 ? [section] : ["", section]))].join("\n");
 }
 
 export interface Page {
@@ -112,7 +156,10 @@ export interface Page {
  */
 export function pageText(text: string, offset: number, limit: number, more: (nextOffset: number) => string): Page {
 	const start = Math.max(0, Math.min(offset, text.length));
-	const end = Math.min(text.length, start + Math.max(1, limit));
+	let end = Math.min(text.length, start + Math.max(1, Math.min(limit, MAX_RESULT_PAGE_CHARS)));
+	// Never end a page between the two UTF-16 halves of one character: each
+	// half alone renders as U+FFFD on both pages. The pair moves to the next.
+	if (end < text.length && end - 1 > start && isHighSurrogate(text.charCodeAt(end - 1))) end -= 1;
 	const page = text.slice(start, end);
 	if (end >= text.length) {
 		const range = start === 0 ? `all ${text.length} characters` : `characters ${start}–${end} of ${text.length}`;

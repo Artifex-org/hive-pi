@@ -137,7 +137,7 @@ describe("spill — the inline/artifact decision", () => {
 	it("returns a small body unchanged and writes nothing", () => {
 		const dir = scratch();
 		const result = spill("short finding", { dir, kind: "note", previewBytes: PREVIEW_BYTES });
-		expect(result).toEqual({ text: "short finding", ref: null, file: null });
+		expect(result).toEqual({ text: "short finding", ref: null, file: null, storedBytes: 0 });
 		expect(existsSync(dir) && readdirSync(dir).length).toBe(0);
 	});
 
