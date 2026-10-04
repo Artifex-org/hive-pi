@@ -25,6 +25,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { type TurnFailureClass, newestTurnFailureRun } from "../hive-common/quota.ts";
+import type { YouShouldKnowState } from "../hive-common/you-should-know.ts";
 
 /**
  * One rate-limit window as the Codex backend reports it.
@@ -67,6 +68,8 @@ export interface StatusPayload {
 	 */
 	fast?: boolean;
 	fast_applies?: boolean;
+	/** Assistant-output content. Only sent under transcript sharing consent. */
+	you_should_know?: YouShouldKnowState;
 	/**
 	 * WHY the newest assistant turn failed — "quota_exhausted", "auth_expired"
 	 * or "other" — absent when it reached the provider.
@@ -277,8 +280,10 @@ export function buildStatus(
 	opMode?: string,
 	accountRecovery?: string,
 	fast?: { enabled: boolean; applies: boolean },
+	youShouldKnow?: YouShouldKnowState,
 ): StatusPayload {
 	const status: StatusPayload = { ...quota };
+	if (youShouldKnow) status.you_should_know = youShouldKnow;
 	// "unavailable" means this client CANNOT switch accounts (a sandbox that
 	// blocks the recovery socket, or a credential with no account identity).
 	// Claiming recovery there told the server's quota sweep to wait for a
@@ -348,6 +353,7 @@ export function buildStatus(
  */
 export function changed(previous: StatusPayload | null, next: StatusPayload): boolean {
 	if (!previous) return true;
+	if (JSON.stringify(previous.you_should_know) !== JSON.stringify(next.you_should_know)) return true;
 	if (previous.model !== next.model || previous.thinking !== next.thinking) return true;
 	if (previous.context_window !== next.context_window) return true;
 	if (previous.quota?.used_percent !== next.quota?.used_percent) return true;

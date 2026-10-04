@@ -53,7 +53,8 @@ supported, tested state, not an accident.
 
 ## You should know
 
-You Should Know runs by default in terminal sessions: a tool-less side scanner
+You Should Know runs by default in terminal sessions and attached Hive web
+conversations: a tool-less side scanner
 for important caveats, blockers, actions and decisions buried in pi's output.
 It surfaces source-backed notes above the prompt without steering the main
 agent. Bounded calls use the selected model/provider and consume its quota.

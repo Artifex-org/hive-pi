@@ -6,7 +6,7 @@ Anthropic documents a side agent that surfaces overlooked information above the
 prompt; its exact scanning implementation is not public in the linked source
 list. This extension implements that idea, not undocumented plugin parity.
 
-**Enabled by default in pi terminal sessions.** No enable command is required.
+**Enabled by default in pi terminal sessions and attached Hive web conversations.** No enable command is required.
 Scanning automatically sends assistant-prose excerpts to the currently selected
 model's provider and consumes that account's quota, within the limits below.
 
@@ -75,8 +75,33 @@ an old note. Dismiss obsolete notes. Silence is not a clean bill of health.
   overlapping billable requests even across off/on and session changes.
   Provider errors and malformed/unquoted verdicts visibly mark a scan failed,
   without automatic retries or exposing provider error text in the terminal.
-- Inert in delegated workers, RPC, print and JSON modes. This initial version is
-  terminal-only; it does not add a Hive web workspace attention panel.
+- Inert in delegated workers, standalone RPC, print and JSON modes. RPC scanning
+  requires a successful `hive-remote` conversation attachment with both prose
+  sharing (`streamDeltas`) and status reporting (`reportStatus`) enabled. Losing
+  that attachment cancels queued/in-flight RPC scanning, not the saved setting.
+
+## Hive web workspace
+
+The session pane shows a compact **You should know** strip above the composer,
+including the latest note. Expand it for all retained notes, assistant quotes,
+reported usage, failure/budget information and dismiss. Notes remain explicitly
+historical model interpretations; they do not become a verified blocker ledger.
+
+`hive-remote` forwards a bounded snapshot on the authenticated conversation's
+status route, **only under transcript-sharing consent**, never through counters
+telemetry. Quotes follow the conversation's existing sharing/access and secret
+redaction policy. Turning off retains existing notes, just like terminal `show`.
+
+The owner can turn scanning on/off or dismiss via a dedicated command — not a
+slash-command prompt sent to the main agent. Controls additionally require
+`hive-remote`'s `allowSetMode` spending-control consent and a positively reported
+scanner capability. The browser says queued until an agent-reported matching
+command ID confirms application. Unsupported clients report no scanner state;
+quiet clients retain historical evidence but do not offer live controls. Reload,
+branch restore, worker exclusions, quota limits and canceled-transport ownership
+remain the same as in the terminal. Requires the companion Hive server/web
+scanner-state contract; older servers do not gain web controls from this package
+alone.
 
 ## Verification
 
@@ -84,7 +109,10 @@ an old note. Dismiss obsolete notes. Silence is not a clean bill of health.
 startup defaults/env opt-out, saved settings, headless/worker exclusion,
 nonblocking completion, coalescing, deadlines,
 budget/cadence, branch restore, deduplication, late-result cancellation and the
-real provider-call shape. Native `Text` rendering is checked at narrow/wide
+real provider-call shape. `test/you-should-know-remote.test.ts` loads the real
+scanner/remote extensions together and exercises RPC consent, reported state,
+control acknowledgment, off/dismiss/restore, absent extensions and detach
+cancellation without main-agent injection. Native `Text` rendering is checked at narrow/wide
 widths. `node test/you-should-know-smoke.mjs` drives the real pi terminal through
 default-on → synthetic assistant output → note/quote → dismiss → off/on/off,
 using a local
