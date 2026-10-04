@@ -108,6 +108,7 @@ export interface SessionEntryLike {
 }
 
 export interface FakeCtxOptions {
+	sessionId?: string;
 	model?: ExtensionContext["model"];
 	/** What `ctx.modelRegistry` is. Defaults to an empty object: most extensions never touch it. */
 	modelRegistry?: unknown;
@@ -290,6 +291,7 @@ function makeCtx(
 			},
 		},
 		sessionManager: {
+			getSessionId: () => options.sessionId ?? "fake-session",
 			// `entries` defaults to `branch`, so every existing test keeps its old
 			// behaviour — but the two can now DIFFER, which is the whole point.
 			//
