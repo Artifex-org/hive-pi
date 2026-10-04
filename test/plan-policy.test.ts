@@ -224,7 +224,11 @@ describe("shell — hive is classified by subcommand", () => {
 		expect(allowed("hive --json get 4928")).toBe(true);
 		expect(allowed("hive --json retry 4928")).toBe(false);
 		expect(allowed("hive")).toBe(false);
-		expect(allowed("hive --help")).toBe(false);
+		// hive's own usage is printed by the top-level dispatch before any
+		// command runs (cmd/hive/main.go), so it is a read; a verb's --help is
+		// not, unless the verb is itself a read.
+		expect(allowed("hive --help")).toBe(true);
+		expect(allowed("hive retry --help")).toBe(false);
 	});
 });
 
@@ -302,7 +306,6 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 			"hive_k8s_action_scale",
 			// The Linear WRITE half stays a visible teammate's decision.
 			"linear_save_issue",
-			"linear_save_comment",
 			"linear_delete_comment",
 		]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
@@ -344,6 +347,89 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 		expect(orchestrated("gh api repos/o/r --input body.json")).toBe(false);
 		// `-f query=mutation{…}` reaches every GraphQL mutation there is.
 		expect(orchestrated("gh api graphql -f query=mutation{x}")).toBe(false);
+	});
+});
+
+describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
+	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
+	const bothEnvelopes = (tool: string) =>
+		classifyOrchestrateTool(tool, {}).allowed && classifyOrchestrateTool("mcp", { tool }).allowed;
+
+	it("permits capacity reads, Hive bug reports and ticket comments", () => {
+		// hive_list_clusters: refused 3x while reading agent_lane capacity before
+		// a launch. hive_report_issue: "blocks filing a Hive product bug from the
+		// controller". linear_save_comment: a handoff comment, the Linear twin of
+		// the already-permitted hive_comment_ticket. hive_get_test_pg_health: a
+		// fleet read the lead needed to decide whether a run could start.
+		for (const tool of ["hive_list_clusters", "hive_report_issue", "linear_save_comment", "hive_get_test_pg_health"]) {
+			expect(bothEnvelopes(tool), tool).toBe(true);
+		}
+	});
+
+	it("does not mistake a jq comparison inside quotes for a variable assignment", () => {
+		// `length==2` matched the VAR= prefix check, which scanned quoted text.
+		expect(orchestrated(`jq -r 'select(.ok and length==2)' f.json`)).toBe(true);
+		expect(allowed(`jq -r 'select(.ok and length==2)' f.json`)).toBe(true);
+		// jq's own $variables inside single quotes are not shell expansions.
+		expect(orchestrated(`jq --arg t low -r '.[] | select(.mode_key == $t)' f.json`)).toBe(true);
+		// A REAL prefix assignment is still refused: it can inject GIT_EXTERNAL_DIFF,
+		// PAGER and friends into an allowed reader.
+		expect(orchestrated("GIT_EXTERNAL_DIFF=/tmp/x git diff")).toBe(false);
+		expect(allowed("PAGER=/tmp/x git log")).toBe(false);
+		expect(allowed("ls; X=1 cat f")).toBe(false);
+		// And a double-quoted $ is a real shell expansion.
+		expect(orchestrated(`jq ".x | $t" f`)).toBe(false);
+	});
+
+	it("accepts one trailing semicolon, and nothing else dangling", () => {
+		expect(orchestrated("date -u; gh pr view 7998 --json title --jq '{t: .title}';")).toBe(true);
+		expect(allowed("ls;")).toBe(true);
+		expect(allowed("ls |")).toBe(false);
+		expect(allowed("ls &&")).toBe(false);
+		expect(allowed("ls ;;")).toBe(false);
+		expect(allowed("ls; ; cat f")).toBe(false);
+	});
+
+	it("lists and shows stashes, and nothing that changes them", () => {
+		expect(orchestrated("git -C /repo/wt stash list")).toBe(true);
+		expect(allowed("git stash list")).toBe(true);
+		expect(orchestrated("git stash show -p stash@{0}")).toBe(true);
+		for (const command of ["git stash", "git stash push", "git stash pop", "git stash drop", "git stash clear", "git stash apply"]) {
+			expect(orchestrated(command), command).toBe(false);
+			expect(allowed(command), command).toBe(false);
+		}
+	});
+
+	it("reads branches, and refuses the verbs that create, move or delete them", () => {
+		expect(orchestrated("git -C /repo/wt branch --show-current")).toBe(true);
+		expect(orchestrated("git branch -r --list 'origin/feature/asf-3883' 'origin/feature/asf-3435'")).toBe(true);
+		expect(orchestrated("git branch -vv")).toBe(true);
+		for (const command of ["git branch new-thing", "git branch -D old", "git branch -m a b", "git branch --set-upstream-to=origin/x", "git branch -f main HEAD~1"]) {
+			expect(orchestrated(command), command).toBe(false);
+			expect(allowed(command), command).toBe(false);
+		}
+	});
+
+	it("deduplicates with sort, which writes only with -o", () => {
+		expect(orchestrated("grep -h foo a b | sort -u")).toBe(true);
+		expect(orchestrated("sort -u -o out f")).toBe(false);
+	});
+
+	it("prints hive's own help, but not a verb's", () => {
+		expect(orchestrated("hive --help")).toBe(true);
+		expect(orchestrated("hive help")).toBe(true);
+		expect(allowed("hive -h")).toBe(true);
+		// A verb's --help is only inert if that verb parses flags before acting,
+		// which this policy cannot prove for every hive command.
+		expect(orchestrated("hive ssh --help")).toBe(false);
+	});
+
+	it("keeps refusing git fetch, and says what to use instead", () => {
+		// fetch writes FETCH_HEAD and the remote-tracking refs every worktree of
+		// the repository shares — a lead's fetch moves origin/* under its workers.
+		const verdict = classifyOrchestrateCommand("git fetch origin main");
+		expect(verdict.allowed).toBe(false);
+		expect(verdict.allowed === false && verdict.reason).toMatch(/git ls-remote/);
 	});
 });
 
