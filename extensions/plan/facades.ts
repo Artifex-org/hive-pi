@@ -27,6 +27,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { normalizeStatus, type ItemInput, type PlanDoc, type PlanOp, type WorkItemStatus } from "./state.ts";
 import { lanesOf, targetLane } from "./lanes.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /* -------------------------------------------------------------------------- */
 /* TodoWrite                                                                   */
@@ -564,7 +565,7 @@ export function registerFacadeTools(
 	};
 
 	pi.registerTool({
-		name: "TodoWrite",
+		name: "TodoWrite", exposure: exposureFor("TodoWrite"),
 		label: "Tasks",
 		description: [
 			"Create, update and complete the session's task list. Returns the resulting list, which IS the view",
@@ -580,7 +581,7 @@ export function registerFacadeTools(
 	// --- compatibility aliases: no promptSnippet, so they stay out of the prompt ---
 
 	pi.registerTool({
-		name: "TaskCreate",
+		name: "TaskCreate", exposure: exposureFor("TaskCreate"),
 		label: "Task create",
 		description: "Add one task to the session task list. Returns the full resulting list.",
 		parameters: Type.Object({
@@ -593,7 +594,7 @@ export function registerFacadeTools(
 	});
 
 	pi.registerTool({
-		name: "TaskUpdate",
+		name: "TaskUpdate", exposure: exposureFor("TaskUpdate"),
 		label: "Task update",
 		description: "Update one task by id. Returns the full resulting list.",
 		parameters: Type.Object({
@@ -615,7 +616,7 @@ export function registerFacadeTools(
 	});
 
 	pi.registerTool({
-		name: "TaskList",
+		name: "TaskList", exposure: exposureFor("TaskList"),
 		label: "Task list",
 		description: "Show the current session task list.",
 		parameters: Type.Object({}),
@@ -623,7 +624,7 @@ export function registerFacadeTools(
 	});
 
 	pi.registerTool({
-		name: "workflow_write",
+		name: "workflow_write", exposure: exposureFor("workflow_write"),
 		label: "Workflow",
 		description: [
 			"Declare the shape of the work — lanes, the items in them, their dependencies and iteration.",
@@ -710,7 +711,7 @@ export function registerFacadeTools(
 	});
 
 	pi.registerTool({
-		name: "TaskGet",
+		name: "TaskGet", exposure: exposureFor("TaskGet"),
 		label: "Task detail",
 		description: "Show one task's full detail by id.",
 		parameters: Type.Object({ taskId: Type.String({ description: "Id of the task to read." }) }),

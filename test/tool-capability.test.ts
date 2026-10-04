@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
+import { DIRECT_TOOLS, exposureFor, MODE_TOOLS } from "../extensions/loadout/policy.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 const REPO = join(import.meta.dirname, "..");
@@ -93,6 +94,7 @@ const READ_ONLY: Record<string, string> = {
 interface Registered {
 	name: string;
 	capability?: unknown;
+	exposure?: unknown;
 	source: string;
 }
 
@@ -253,6 +255,7 @@ beforeAll(async () => {
 			seen.push({
 				name: tool.name,
 				capability: (tool.definition as { capability?: unknown }).capability,
+				exposure: (tool.definition as { exposure?: unknown }).exposure,
 				source: entry,
 			});
 		}
@@ -338,5 +341,30 @@ describe("tool capability conformance", () => {
 				(typeof exemption === "string" && exemption.trim().length >= 20);
 			expect(meaningful, `${tool.name} declares an empty capability — say what it does, or use READ_ONLY`).toBe(true);
 		}
+	});
+});
+
+describe("tool loadout conformance", () => {
+	it("every registration asks the loadout policy for its exposure", () => {
+		// A site that omits `exposure` is silently always-on (pi's default is
+		// `direct`), which is how 71 tools came to ride on every request.
+		const drift = registered
+			.filter((tool) => tool.exposure !== exposureFor(tool.name))
+			.map((tool) => `${tool.name}: ${String(tool.exposure)} (${tool.source}) — expected ${exposureFor(tool.name)}`);
+		expect([...new Set(drift)].sort(), "register with `exposure: exposureFor(name)` (extensions/loadout/policy.ts)").toEqual([]);
+	});
+
+	it("keeps the policy honest — no entry for a tool that no longer exists", () => {
+		const names = new Set(registered.map((tool) => tool.name));
+		const stale = [...Object.keys(DIRECT_TOOLS), ...Object.keys(MODE_TOOLS)].filter((name) => !names.has(name));
+		expect(stale, "remove these from extensions/loadout/policy.ts, or restore the tools").toEqual([]);
+	});
+
+	it("keeps the always-declared set small", () => {
+		// The budget is the point of the policy. Raising it is allowed, in this
+		// diff, with the reason next to the new entry in DIRECT_TOOLS.
+		const direct = [...new Set(registered.filter((tool) => tool.exposure === "direct").map((tool) => tool.name))];
+		expect(direct.length).toBeLessThanOrEqual(25);
+		expect(registered.filter((tool) => tool.exposure === "deferred").length).toBeGreaterThan(20);
 	});
 });

@@ -81,6 +81,7 @@ import {
 	statusForExit,
 	type Job,
 } from "./jobs.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /** Grace period between SIGTERM and SIGKILL when reaping. */
 const KILL_GRACE_MS = 3_000;
@@ -648,7 +649,7 @@ export default function background(pi: ExtensionAPI) {
 	// extension's own in-memory registry. Declaring an empty capability instead
 	// would pass the audit while saying nothing, which the audit rejects.
 	pi.registerTool({
-		name: "background_list",
+		name: "background_list", exposure: exposureFor("background_list"),
 		label: "Background",
 		description: "List background jobs in this session with their status and elapsed time.",
 		parameters: Type.Object({}),
@@ -656,7 +657,7 @@ export default function background(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "background_result",
+		name: "background_result", exposure: exposureFor("background_result"),
 		label: "Background",
 		description:
 			"Get the full retained output of a background job. Use this when a completion notification was " +

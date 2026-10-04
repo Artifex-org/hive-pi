@@ -34,6 +34,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { fetchWorkspaceCatalog, requestAndWait, type WorkspaceGrantValue, type WorkspaceRepoGrant } from "./client.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /** How often the pending request is polled while waiting for a decision. */
 const POLL_MS = 3_000;
@@ -174,7 +175,7 @@ const DEPS_NOTE =
  */
 export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): void {
 	pi.registerTool({
-		name: "list_workspace_catalog",
+		name: "list_workspace_catalog", exposure: exposureFor("list_workspace_catalog"),
 		label: "List grantable repos",
 		description:
 			"List the repos this session can request mid-session with request_workspace. " +

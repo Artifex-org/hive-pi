@@ -88,6 +88,7 @@ import {
 	type PlanDoc,
 	type PlanOp,
 } from "./state.ts";
+import { exposureFor, restoredLoadout } from "../loadout/policy.ts";
 
 /** Tools this extension owns, kept active even while the mode narrows the set. */
 const PLAN_TOOLS = ["plan_write", "plan_ask", "plan_ready"] as const;
@@ -692,13 +693,12 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const narrowTools = () => {
 		try {
-			const all = pi.getAllTools().map((tool) => tool.name);
 			// Snapshot the ACTIVE set, not the registry: restoring from
 			// `getAllTools()` resurrects tools other extensions keep deliberately
 			// inactive — agenda's consent-gated `orchestrate` re-appeared on every
 			// plan-mode exit until this read the live set.
 			if (toolsBeforePlanMode === null) toolsBeforePlanMode = pi.getActiveTools();
-			const permitted = all.filter((name) => classifyTool(name).allowed);
+			const permitted = pi.getActiveTools().filter((name) => classifyTool(name).allowed);
 			pi.setActiveTools([...new Set([...permitted, ...PLAN_TOOLS])]);
 		} catch {
 			/* tool introspection unavailable; the deny hook still enforces */
@@ -707,7 +707,7 @@ export default function (pi: ExtensionAPI) {
 
 	const restoreTools = () => {
 		try {
-			if (toolsBeforePlanMode) pi.setActiveTools(toolsBeforePlanMode);
+			if (toolsBeforePlanMode) pi.setActiveTools(restoredLoadout(toolsBeforePlanMode, pi.getActiveTools(), PLAN_TOOLS));
 		} catch {
 			/* nothing to restore into */
 		} finally {
@@ -765,7 +765,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.registerTool({
-		name: "plan_write",
+		name: "plan_write", exposure: exposureFor("plan_write"),
 		label: "Plan write",
 		description:
 			"Create or patch the plan document. The plan is a list of typed blocks addressed by id; every call is a " +
@@ -953,7 +953,7 @@ export default function (pi: ExtensionAPI) {
 		active ? reason : `${reason}\n\nA plan is presented and awaiting approval; that is what is denying this.`;
 
 	pi.registerTool({
-		name: "plan_ready",
+		name: "plan_ready", exposure: exposureFor("plan_ready"),
 		label: "Plan ready",
 		description:
 			"Present the finished plan for user approval. Marks the plan ready, shows an approval dialog, and — " +
@@ -1192,7 +1192,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "plan_ask",
+		name: "plan_ask", exposure: exposureFor("plan_ask"),
 		label: "Plan question",
 		description:
 			"Ask the user a decision question that repository truth cannot settle — a product decision or a genuine " +

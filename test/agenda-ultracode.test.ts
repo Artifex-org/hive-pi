@@ -89,10 +89,10 @@ describe("orchestrate is gated behind /ultracode", () => {
 	it("is stripped from the active set on session_start, despite being registered", async () => {
 		agenda(pi.api);
 		expect(pi.tools.map((t) => t.name)).toContain("orchestrate");
-		// pi force-activates everything it registers…
-		expect(pi.activeTools).toContain("orchestrate");
+		// The loadout policy defers it, so registration does not activate it…
+		expect(pi.activeTools).not.toContain("orchestrate");
 
-		// …so session_start is where it has to come back out.
+		// …and session_start keeps it out.
 		await pi.emit({ type: "session_start", reason: "startup" });
 		expect(pi.activeTools).not.toContain("orchestrate");
 	});

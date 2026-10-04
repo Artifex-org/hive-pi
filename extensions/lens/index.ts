@@ -38,6 +38,7 @@ import {
 } from "./refactor.ts";
 import { findTsserver, TsServer, waitForProjectLoad } from "./tsserver.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /**
  * withPathAlias accepts `path` (and `file_path`) wherever these tools declare `file`.
@@ -133,7 +134,7 @@ function render(file: string, span: SymbolSpan): string {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
-		name: "read_symbol",
+		name: "read_symbol", exposure: exposureFor("read_symbol"),
 		label: "Read symbol",
 		description:
 			"Read a single function, method, class, type or constant from a file, with its " +
@@ -177,7 +178,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "list_symbols",
+		name: "list_symbols", exposure: exposureFor("list_symbols"),
 		label: "List symbols",
 		description:
 			"Outline a file: its top-level functions, types, classes and constants with line " +

@@ -36,6 +36,7 @@ import {
 	isAuditDepth,
 } from "./domains.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
+import { exposureFor } from "../loadout/policy.ts";
 
 /**
  * Where a deep audit keeps its notes.
@@ -83,7 +84,7 @@ function text(body: string) {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
-		name: "audit_domains",
+		name: "audit_domains", exposure: exposureFor("audit_domains"),
 		label: "Audit domains",
 		description:
 			"The closed set of audit domains and depth levels, with each domain's themes, report fields, verifier lens " +
@@ -183,7 +184,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "audit_state_read",
+		name: "audit_state_read", exposure: exposureFor("audit_state_read"),
 		label: "Audit state read",
 		description:
 			"Read back a deep audit's notes. With no `name`, lists what the audit has recorded so far — the first call " +
@@ -215,7 +216,7 @@ export default function (pi: ExtensionAPI) {
 	// Depth is validated where it is used rather than guessed at: a caller that
 	// mistypes `--deep` as a depth gets the set back instead of a silent default.
 	pi.registerTool({
-		name: "audit_depth",
+		name: "audit_depth", exposure: exposureFor("audit_depth"),
 		label: "Audit depth",
 		description: "Resolve and explain an audit depth (lite | balanced | deep). Returns the default when given nothing.",
 		parameters: Type.Object({
