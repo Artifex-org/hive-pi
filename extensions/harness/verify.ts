@@ -22,12 +22,19 @@ import { isAbsolute, join } from "node:path";
 
 const GIT_TIMEOUT_MS = 10_000;
 
-/** One git invocation's stdout, or null when it could not run. */
-function gitOutput(cwd: string, args: string[]): Promise<string | null> {
+/**
+ * One git invocation's raw stdout, or null when it could not run.
+ *
+ * Collected as Buffers and never decoded chunk by chunk: a chunk boundary can
+ * split a multi-byte character, and bytes that are not UTF-8 at all (a Latin-1
+ * file name) decode to U+FFFD — a path that then cannot be stat'ed, and two
+ * different bytes that stamp the same (review S6).
+ */
+function gitBytes(cwd: string, args: string[]): Promise<Buffer | null> {
 	return new Promise((resolve) => {
-		let out = "";
+		const chunks: Buffer[] = [];
 		let settled = false;
-		const finish = (value: string | null) => {
+		const finish = (value: Buffer | null) => {
 			if (!settled) {
 				settled = true;
 				resolve(value);
@@ -40,11 +47,11 @@ function gitOutput(cwd: string, args: string[]): Promise<string | null> {
 				finish(null);
 			}, GIT_TIMEOUT_MS);
 			child.stdout.on("data", (d: Buffer) => {
-				out += d.toString();
+				chunks.push(d);
 			});
 			child.on("close", (code) => {
 				clearTimeout(timer);
-				finish(code === 0 ? out : null);
+				finish(code === 0 ? Buffer.concat(chunks) : null);
 			});
 			child.on("error", () => {
 				clearTimeout(timer);
@@ -54,6 +61,11 @@ function gitOutput(cwd: string, args: string[]): Promise<string | null> {
 			finish(null);
 		}
 	});
+}
+
+/** One git invocation's stdout as text (decoded once, whole), or null. */
+async function gitOutput(cwd: string, args: string[]): Promise<string | null> {
+	return (await gitBytes(cwd, args))?.toString("utf8") ?? null;
 }
 
 /**
@@ -105,39 +117,54 @@ export function diffStamp(cwd: string): Promise<string | null> {
  */
 export async function treeStamp(cwd: string): Promise<string | null> {
 	const [status, diff, root] = await Promise.all([
-		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
+		gitBytes(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
 		// `diff-index`, never `diff HEAD`: the latter rewrites a stat-dirty
 		// index even under --no-optional-locks. diff-index reads the index and
 		// the working tree and writes nothing (a stat-only change patches empty).
-		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"]),
-		// Porcelain paths are relative to the repo ROOT, not to cwd.
-		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"]),
+		gitBytes(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"]),
+		// Porcelain paths are relative to the repo ROOT, not to cwd. Kept as
+		// bytes: a root that is not UTF-8 must still join to statable paths.
+		gitBytes(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"]),
 	]);
 	if (status === null || diff === null || root === null) return null;
-	const untracked = untrackedFingerprint(root.trim(), status);
-	const hash = createHash("sha256").update(diff).update("\0").update(untracked).digest("hex");
-	return `${status}\n#content:${hash}`;
+	const untracked = untrackedFingerprint(trimNewline(root), status);
+	const hash = createHash("sha256").update(status).update("\0").update(diff).update("\0").update(untracked).digest("hex");
+	return `#tree:${hash}`;
 }
 
 /**
- * `path size mtime` for each `??` entry of a `-z` porcelain listing. A file
- * that vanished between the listing and the stat is recorded as gone — that
- * is itself a change.
+ * `path size mtime` for each `??` entry of a `-z` porcelain listing, worked
+ * on as BYTES end to end so a path that is not UTF-8 is stat'ed as itself. A
+ * file that vanished between the listing and the stat is recorded as gone —
+ * that is itself a change.
  */
-function untrackedFingerprint(root: string, porcelainZ: string): string {
-	return porcelainZ
-		.split("\0")
-		.filter((entry) => entry.startsWith("?? "))
-		.map((entry) => entry.slice(3))
-		.map((rel) => {
-			try {
-				const stats = statSync(join(root, rel));
-				return `${rel} ${stats.size} ${stats.mtimeMs}`;
-			} catch {
-				return `${rel} gone`;
-			}
-		})
-		.join("\n");
+function untrackedFingerprint(root: Buffer, porcelainZ: Buffer): Buffer {
+	const lines: Buffer[] = [];
+	const slash = Buffer.from("/");
+	let start = 0;
+	while (start < porcelainZ.length) {
+		let end = porcelainZ.indexOf(0, start);
+		if (end === -1) end = porcelainZ.length;
+		const entry = porcelainZ.subarray(start, end);
+		start = end + 1;
+		if (entry.length < 4 || entry[0] !== 0x3f || entry[1] !== 0x3f) continue; // "??"
+		const rel = entry.subarray(3);
+		let stamp: string;
+		try {
+			const stats = statSync(Buffer.concat([root, slash, rel]));
+			stamp = ` ${stats.size} ${stats.mtimeMs}`;
+		} catch {
+			stamp = " gone";
+		}
+		lines.push(rel, Buffer.from(`${stamp}\n`));
+	}
+	return Buffer.concat(lines);
+}
+
+function trimNewline(bytes: Buffer): Buffer {
+	let end = bytes.length;
+	while (end > 0 && (bytes[end - 1] === 0x0a || bytes[end - 1] === 0x0d)) end--;
+	return bytes.subarray(0, end);
 }
 
 export const NO_CHANGE_ERROR =
