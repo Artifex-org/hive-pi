@@ -41,6 +41,7 @@ import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { realDeps, runAll } from "./probes.ts";
+import type { McpServerDef } from "./mcp.ts";
 import {
 	applyResults,
 	emptyReadiness,
@@ -123,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 		if (probing) return state;
 		probing = true;
 		try {
-			const deps = realDeps(() => toolNames(pi), process.cwd());
+			const deps = realDeps(() => toolNames(pi), process.cwd(), () => registeredMcpServers(pi));
 			const results = await runAll(deps);
 			const applied = applyResults(state, results);
 			state = applied.state;
@@ -258,6 +259,15 @@ export default function (pi: ExtensionAPI) {
 			ui?.notify?.(body, "info");
 		},
 	});
+}
+
+/** Servers extensions registered this session (pi ≥ 0.99), for their readiness rows. */
+function registeredMcpServers(pi: ExtensionAPI): { name: string; config: McpServerDef }[] {
+	try {
+		return (pi.getMcpServers?.() ?? []).map((s) => ({ name: s.name, config: s.config as unknown as McpServerDef }));
+	} catch {
+		return [];
+	}
 }
 
 /** Every registered tool name, for the per-server MCP probe. */

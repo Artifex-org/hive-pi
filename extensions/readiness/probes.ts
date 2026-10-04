@@ -67,6 +67,13 @@ export interface ProbeDeps {
 	/** Names of every tool registered in this session, e.g. `mcp__hive__get_run`. */
 	toolNames: () => string[];
 	/**
+	 * MCP servers extensions registered with `pi.registerMcpServer` this session
+	 * (hive-pi's `mcp-products`). They are not in `mcp.json`, so without this a
+	 * product server has no row even while it is connected. Optional so a test
+	 * that does not care stays as it was.
+	 */
+	registeredMcpServers?: () => { name: string; config: McpServerDef }[];
+	/**
 	 * Absolute path of a file inside an installed package, or null.
 	 *
 	 * Resolution rather than a guessed path: the probe must read the SAME
@@ -137,8 +144,11 @@ export function nativeToolCount(toolNames: readonly string[], server: string): n
 }
 
 export function mcpServerProbes(deps: ProbeDeps): { id: string; label: string; probe: Probe }[] {
-	const config = deps.readJson<McpConfig>(mcpConfigPath(deps));
-	const servers = Object.keys(config?.mcpServers ?? {});
+	const fileConfig = deps.readJson<McpConfig>(mcpConfigPath(deps));
+	// File-configured servers take precedence over registered ones of the same
+	// name — pi's own rule (docs/mcp.md §Add servers from extensions).
+	const config: McpConfig = { mcpServers: { ...Object.fromEntries((deps.registeredMcpServers?.() ?? []).map((s) => [s.name, s.config])), ...(fileConfig?.mcpServers ?? {}) } };
+	const servers = Object.keys(config.mcpServers ?? {});
 	if (servers.length === 0) return [];
 	// Product servers stay in the global file so a session that actually needs
 	// the other product can still connect. They are not a capability of THIS
@@ -856,8 +866,13 @@ export async function runAll(deps: ProbeDeps): Promise<ProbeResult[]> {
 // The real dependency set
 // ---------------------------------------------------------------------------
 
-export function realDeps(toolNames: () => string[], cwd: string = process.cwd()): ProbeDeps {
+export function realDeps(
+	toolNames: () => string[],
+	cwd: string = process.cwd(),
+	registeredMcpServers?: () => { name: string; config: McpServerDef }[],
+): ProbeDeps {
 	return {
+		...(registeredMcpServers ? { registeredMcpServers } : {}),
 		now: () => Date.now(),
 		env: process.env,
 		home: process.env.HOME ?? "",

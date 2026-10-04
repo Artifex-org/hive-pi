@@ -723,3 +723,27 @@ describe("delegation", () => {
 		expect(seen).toContain("/custom/agent/auth.json");
 	});
 });
+
+describe("mcp probes — servers an extension registered", () => {
+	it("gives a registered product server a row, and lets mcp.json win on a name clash", async () => {
+		// No profile: no server is a product, so the row is not filtered by cwd.
+		setHouseProfileForTest({});
+		const d = deps({
+			readJson: (() => ({ mcpServers: { hive: { url: "u" } } })) as never,
+			registeredMcpServers: () => [
+				{ name: "asfam", config: { command: "node", exposure: "deferred" } },
+				{ name: "hive", config: { url: "other", exposure: "direct" } },
+			],
+			toolNames: () => ["mcp__asfam__asfam_health_check", "mcp__hive__get_run"],
+			exists: () => true,
+		});
+		const rows = mcpServerProbes(d);
+		expect(rows.map((r) => r.id)).toEqual(["mcp.asfam", "mcp.hive"]);
+		const asfam = await rows[0].probe(d);
+		expect(asfam.status).toBe("ready");
+		expect(asfam.detail).toBe("1 tools · deferred");
+		const hive = await rows[1].probe(d);
+		expect(hive.detail).toBe("1 tools · codemode"); // the file's entry, not the registration
+		setHouseProfileForTest(null);
+	});
+});
