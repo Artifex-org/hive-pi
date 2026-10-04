@@ -185,6 +185,8 @@ describe("fold", () => {
 				task("coverage", "skipped", { error: "blocked by failed fan-out: test" }),
 				task("e2e", "skipped", { error: "upstream failed" }),
 				task("docs", "skipped"),
+				// hive's ReleaseDrainSkipPrefix: the cause is prose, not a step key.
+				task("deploy", "skipped", { error: "run already red: release disqualified after a blocking failure because a newer branch generation exists" }),
 			],
 			substeps: [],
 		});
@@ -195,14 +197,16 @@ describe("fold", () => {
 			{ step: "web-check", by: "codemetrics" },
 			{ step: "coverage", by: "test" },
 			{ step: "e2e", by: null },
+			{ step: "deploy", by: null },
 		]);
 		const text = renderReport(p);
 		expect(text).toContain("not run — blocked by failed codemetrics: test-1, test-2, web-check");
 		expect(text).toContain("not run — blocked by failed test: coverage");
-		expect(text).toContain("not run — blocked by a failed upstream step: e2e");
+		expect(text).toContain("not run — blocked by a failed upstream step: e2e, deploy");
+		expect(text).not.toContain("failed release disqualified");
 		expect(text).toContain("advisory (non-blocking): docs");
 		expect(text).not.toMatch(/advisory \(non-blocking\):.*test-1/);
-		expect(text).toContain("FAIL — 1 failing of 7 step(s), 5 not run, 1 advisory");
+		expect(text).toContain("FAIL — 1 failing of 8 step(s), 6 not run, 1 advisory");
 	});
 
 	// The emitters report a warning as outcome "passed" with the truth in the

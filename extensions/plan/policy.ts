@@ -516,9 +516,14 @@ const GIT_BRANCH_READ_FLAGS = new Set([
 	"--omit-empty", "-i", "--ignore-case", "--abbrev", "--no-abbrev",
 ]);
 
-/** Flags that put `git branch` in list mode, where positionals are PATTERNS. */
+/**
+ * Flags that put `git branch` in list mode, where positionals are PATTERNS.
+ * `--sort` and `--format` are NOT among them: they only shape a listing, and
+ * with a positional `git branch --format=x newb` still CREATES newb (verified
+ * on git 2.55).
+ */
 const GIT_BRANCH_LIST_MODE = new Set([
-	"--list", "-l", "--merged", "--no-merged", "--contains", "--no-contains", "--points-at", "--sort", "--format",
+	"--list", "-l", "--merged", "--no-merged", "--contains", "--no-contains", "--points-at",
 ]);
 
 /**
@@ -892,7 +897,9 @@ function hasSafeArguments(command: string, args: string[]): boolean {
 		if (args.some((arg) => writers.includes(arg))) return false;
 	}
 	if (command === "date" && args.some((arg) => arg === "-s" || arg.startsWith("--set"))) return false;
-	if (command === "sort" && args.some((arg) => arg.startsWith("-o") || arg.startsWith("--output"))) return false;
+	// `--compress-program` names a program GNU sort RUNS when it spills to
+	// temp files — execution behind a reader.
+	if (command === "sort" && args.some((arg) => arg.startsWith("-o") || arg.startsWith("--output") || arg.startsWith("--compress-program"))) return false;
 	if (command === "tee") return false;
 	return true;
 }

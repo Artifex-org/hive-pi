@@ -404,7 +404,7 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 		expect(orchestrated("git -C /repo/wt branch --show-current")).toBe(true);
 		expect(orchestrated("git branch -r --list 'origin/feature/asf-3883' 'origin/feature/asf-3435'")).toBe(true);
 		expect(orchestrated("git branch -vv")).toBe(true);
-		for (const command of ["git branch new-thing", "git branch -D old", "git branch -m a b", "git branch --set-upstream-to=origin/x", "git branch -f main HEAD~1"]) {
+		for (const command of ["git branch new-thing", "git branch -D old", "git branch -m a b", "git branch --set-upstream-to=origin/x", "git branch -f main HEAD~1", "git branch --format=%(refname) newb", "git branch --sort=refname newb"]) {
 			expect(orchestrated(command), command).toBe(false);
 			expect(allowed(command), command).toBe(false);
 		}
@@ -413,6 +413,9 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 	it("deduplicates with sort, which writes only with -o", () => {
 		expect(orchestrated("grep -h foo a b | sort -u")).toBe(true);
 		expect(orchestrated("sort -u -o out f")).toBe(false);
+		// GNU sort runs the compressor program when it spills to temp files.
+		expect(orchestrated("sort -S 1K --compress-program=./x.sh big.txt")).toBe(false);
+		expect(allowed("sort --compress-program ./x.sh big.txt")).toBe(false);
 	});
 
 	it("prints hive's own help, but not a verb's", () => {

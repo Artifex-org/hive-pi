@@ -165,7 +165,7 @@ describe("looksUnverifiable — advisory only", () => {
 		expect(looksUnverifiable(condition)).toBe(false);
 	});
 
-	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely"])(
+	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely", "the page no longer runs slowly", "users report no confusing issues", "no more manual steps for onboarding"])(
 		"flags an ungradeable one: %s",
 		(condition) => {
 			expect(looksUnverifiable(condition)).toBe(true);

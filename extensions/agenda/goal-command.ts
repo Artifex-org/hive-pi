@@ -129,8 +129,11 @@ export function looksUnverifiable(condition: string): boolean {
 		// 1 flaky job", "zero open findings" — is as checkable as an exit code.
 		// The quantity may sit a word or two before the unit, which is how the
 		// refused 2026-10-02 condition was phrased; the unit list keeps it from
-		// matching any number next to any noun ("fix 2 things").
-		/\b(\d+|zero|no)\s+(\w+\s+){0,2}?(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|runs?|findings?|issues?|failures?)\b/i,
+		// matching any number next to any noun ("fix 2 things"). A spelled-out
+		// zero ("no", "zero") is a quantity only directly before an outcome word —
+		// "no confusing issues" and "no longer runs" are prose, not counts.
+		/\b\d+\s+(\w+\s+){0,2}?(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|runs?|findings?|issues?|failures?)\b/i,
+		/\b(zero|no)\s+((failed|failing|open|new|flaky|red|remaining|lint|type)\s+)?(tests?|errors?|warnings?|steps?|checks?|jobs?|tasks?|findings?|issues?|failures?)\b/i,
 	];
 	return !signals.some((pattern) => pattern.test(condition));
 }

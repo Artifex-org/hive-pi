@@ -329,7 +329,12 @@ function taskOutcome(state: string): GateCheckProgress["outcome"] {
 export function blockedBy(error: string | null | undefined): { by: string | null } | undefined {
 	const reason = (error ?? "").trim();
 	const named = /^(?:blocked by failed (?:dependency|fan-out)|run already red): (.+)$/.exec(reason);
-	if (named) return { by: named[1].trim() };
+	// The cause names a step only when it IS a step key. hive's release-drain
+	// skip shares the "run already red: " prefix with prose after it
+	// ("release disqualified after a blocking failure …"), and printing that as
+	// "blocked by failed release disqualified…" would name a step that does not
+	// exist. Still blocked — it followed a blocking failure — just unnamed.
+	if (named) return { by: /^[A-Za-z0-9][\w.-]*$/.test(named[1].trim()) ? named[1].trim() : null };
 	if (reason === "upstream failed") return { by: null };
 	return undefined;
 }

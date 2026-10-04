@@ -123,13 +123,18 @@ export function observe(
 	isError: boolean,
 	fullText: string,
 	structured?: unknown,
+	ownText: string = fullText,
 ): ObservedResult {
 	const text = fullText.slice(0, 1200);
 	const canonical = canonicalMcpToolName(name);
 	const reader = RUN_RECORD_READERS[canonical];
 	if (reader) {
 		if (isError) return { name, family: HIVE_RUN_FAMILY, verdict: "indeterminate", text };
-		const body = structured && typeof structured === "object" ? structured : parseJSON(fullText);
+		// The LEADING JSON value of the tool's own first text part. Other
+		// extensions' tool_result handlers run first and append notes — narrate
+		// as a further part, toolhints/guards-bridge INTO the last text part —
+		// so neither the joined text nor the whole part is guaranteed to parse.
+		const body = structured && typeof structured === "object" ? structured : leadingJSON(ownText);
 		const state = body && typeof body === "object" && !Array.isArray(body) ? reader(body as Record<string, unknown>) : undefined;
 		return { name, family: HIVE_RUN_FAMILY, verdict: hiveStateVerdict(state), text };
 	}
@@ -139,12 +144,40 @@ export function observe(
 	return { name, family, verdict: isError ? "failed" : "passed", text };
 }
 
-function parseJSON(text: string): unknown {
-	try {
-		return JSON.parse(text);
-	} catch {
-		return undefined;
+/**
+ * The JSON object or array at the start of `text`, ignoring whatever follows
+ * it; undefined when the text does not open with one. Scans to the matching
+ * close bracket outside strings, then hands exactly that span to JSON.parse,
+ * so validity is still JSON.parse's call.
+ */
+export function leadingJSON(text: string): unknown {
+	const start = text.search(/\S/);
+	if (start < 0 || (text[start] !== "{" && text[start] !== "[")) return undefined;
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let i = start; i < text.length; i++) {
+		const ch = text[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') inString = false;
+			continue;
+		}
+		if (ch === '"') inString = true;
+		else if (ch === "{" || ch === "[") depth++;
+		else if (ch === "}" || ch === "]") {
+			depth--;
+			if (depth === 0) {
+				try {
+					return JSON.parse(text.slice(start, i + 1));
+				} catch {
+					return undefined;
+				}
+			}
+		}
 	}
+	return undefined;
 }
 
 /**
@@ -469,8 +502,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "bugfix_evidence" || event.toolName === "bugfix_root_cause") return;
-		const full = (event.content ?? []).map((part) => "text" in part && typeof part.text === "string" ? part.text : "").join("\n");
-		const observed = observe(event.toolName, Boolean(event.isError), full, event.structuredContent);
+		const texts = (event.content ?? []).map((part) => "text" in part && typeof part.text === "string" ? part.text : "");
+		const full = texts.join("\n");
+		const observed = observe(event.toolName, Boolean(event.isError), full, event.structuredContent, texts[0]);
 		// A pulled background job is keyed by its JOB id, and carries the JOB's
 		// verdict rather than the pull's. Both halves are load-bearing.
 		//

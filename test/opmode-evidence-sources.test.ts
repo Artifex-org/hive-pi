@@ -145,6 +145,26 @@ describe("b) a read of a run that already failed", () => {
 		expect(stage(await record("e5", { phase: "reverify", tool_call_id: "call-3", reproduction_key: "k" }))).toBe("done");
 	});
 
+	it("reads the tool's own JSON even when another extension appended a note after it", async () => {
+		// narrate, guards-bridge and pr-attachments all append to tool results,
+		// and pi chains handlers in load order — they run before opmode.
+		const pi = await startBugfix();
+		const record = evidence(pi);
+		await pi.emit({
+			type: "tool_result",
+			toolCallId: "call-1",
+			toolName: "hive_get_task_logs",
+			isError: false,
+			content: [{ type: "text", text: taskLogs("failed") }, { type: "text", text: "[reminder] narrate your next step" }],
+		});
+		expect(stage(await record("e1", { phase: "reproduce", tool_call_id: "call-1", reproduction_key: "k" }))).toBe("hypothesize");
+
+		// toolhints/guards append INTO the last text part rather than adding one.
+		await result(pi, "call-2", "hive_get_task_logs", `${taskLogs("failed")}\n\n[hint] the task id is also accepted as a run number`);
+		const pulled = await record("e2", { phase: "reproduce", tool_call_id: "call-2", reproduction_key: "k" });
+		expect(pulled.content[0]?.text).not.toMatch(/completed without failing|no verdict/);
+	});
+
 	it("does not treat a still-running run as either verdict", async () => {
 		const pi = await startBugfix();
 		const record = evidence(pi);
