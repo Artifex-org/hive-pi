@@ -24,6 +24,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { processToken } from "../hive-common/process-token.ts";
 
 export interface McpServerDef {
 	url?: string;
@@ -99,8 +100,8 @@ export function workerMcpConfig(config: McpConfigDoc): McpConfigDoc {
  */
 export type MirrorKind = "http" | "none";
 
-function workerAgentDirPath(tmp: string, pid: number, kind: MirrorKind = "http"): string {
-	return path.join(tmp, kind === "http" ? `pi-worker-agent-${pid}` : `pi-oneshot-agent-${pid}`);
+function workerAgentDirPath(tmp: string, owner: string, kind: MirrorKind = "http"): string {
+	return path.join(tmp, kind === "http" ? `pi-worker-agent-${owner}` : `pi-oneshot-agent-${owner}`);
 }
 
 /**
@@ -117,12 +118,12 @@ function workerAgentDirPath(tmp: string, pid: number, kind: MirrorKind = "http")
 export function ensureWorkerAgentDir(
 	sourceDir: string = agentDir(),
 	tmp: string = os.tmpdir(),
-	pid: number = process.pid,
+	owner: string = processToken(),
 	kind: MirrorKind = "http",
 ): string | null {
 	try {
 		if (!fs.existsSync(sourceDir)) return null;
-		const target = workerAgentDirPath(tmp, pid, kind);
+		const target = workerAgentDirPath(tmp, owner, kind);
 		fs.mkdirSync(target, { recursive: true });
 		for (const entry of fs.readdirSync(sourceDir)) {
 			if (entry === "mcp.json") continue;
@@ -148,10 +149,10 @@ function isSymlink(p: string): boolean {
 }
 
 /** Remove this process's worker agent dir. Links only — never their targets. */
-export function cleanupWorkerAgentDir(tmp: string = os.tmpdir(), pid: number = process.pid): void {
+export function cleanupWorkerAgentDir(tmp: string = os.tmpdir(), owner: string = processToken()): void {
 	for (const kind of ["http", "none"] as const) {
 		try {
-			fs.rmSync(workerAgentDirPath(tmp, pid, kind), { recursive: true, force: true });
+			fs.rmSync(workerAgentDirPath(tmp, owner, kind), { recursive: true, force: true });
 		} catch {
 			/* best effort; it is a directory of links in tmp */
 		}
@@ -159,7 +160,7 @@ export function cleanupWorkerAgentDir(tmp: string = os.tmpdir(), pid: number = p
 }
 
 /** The agent-dir env for a one-shot helper: same auth and models, no MCP servers. */
-export function oneShotMcpEnv(mirror: () => string | null = () => ensureWorkerAgentDir(agentDir(), os.tmpdir(), process.pid, "none")): Record<string, string> {
+export function oneShotMcpEnv(mirror: () => string | null = () => ensureWorkerAgentDir(agentDir(), os.tmpdir(), processToken(), "none")): Record<string, string> {
 	const dir = mirror();
 	return dir ? { PI_CODING_AGENT_DIR: dir } : {};
 }
