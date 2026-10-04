@@ -1,13 +1,14 @@
 ---
 name: app-analytics-dashboard
-description: Default method for any analysis request about business data that lives in one of our apps (pyERP/Tessera for WSZ sales, pricing, inventory, production, tasks; pyIMMO for properties, rent, vacancy, loans, construction; kontor for personal wealth, banking, cash flow). The deliverable is a persisted dashboard in the owning app, created over that app's MCP (find → preview → create/update), returned as a link with a short summary and the caveats — not numbers pasted into chat. Covers which app owns the data, metric vs dataset, method notes (price elasticity, speeds/cycle times, forecasts), and the honest fallback when a metric or the dashboard tools are missing. Triggers on "analyse", "analysis", "Analyse", "Auswertung", "dashboard", "price elasticity", "Preiselastizität", "customer groups", "Kundengruppen", "production speed", "task speed", "cycle time", "Durchlaufzeit", "throughput", "forecast", "Prognose", "trend", "vacancy", "Leerstand", "rent roll", "net worth", "cash flow by category", "how fast", "how much did", "compare … over time".
+description: Default method for any analysis request about business data that lives in one of our apps (pyERP/Tessera for WSZ sales, pricing, inventory, production, tasks; pyIMMO for properties, rent, vacancy, loans, construction; kontor for personal wealth, banking, cash flow). The deliverable is a persisted dashboard in the owning app, created over that app's MCP (find → preview → create/update), opened and visually checked in a browser, and returned as a URL with a short summary and the caveats — not numbers pasted into chat. Covers which app owns the data, metric vs dataset, method notes (price elasticity, speeds/cycle times, forecasts), and the honest fallback when a metric or the dashboard tools are missing. Triggers on "analyse", "analysis", "Analyse", "Auswertung", "dashboard", "price elasticity", "Preiselastizität", "customer groups", "Kundengruppen", "production speed", "task speed", "cycle time", "Durchlaufzeit", "throughput", "forecast", "Prognose", "trend", "vacancy", "Leerstand", "rent roll", "net worth", "cash flow by category", "how fast", "how much did", "compare … over time".
 ---
 
 # app-analytics-dashboard — analysis requests become app dashboards
 
 When someone asks for an analysis of data one of our apps owns, the answer is a
 **dashboard saved in that app**, built from the app's registered metrics,
-created through its MCP, and handed back as a link. The app re-runs every widget
+created through its MCP, opened and checked in a browser, and handed back as
+a URL. The app re-runs every widget
 under each viewer's own permissions, so the dashboard stays live, shareable and
 correct; a chat answer goes stale the moment it is sent.
 
@@ -84,10 +85,42 @@ Rules:
 3. `analytics_create_dashboard` (or `…_update_dashboard`) with an idempotency
    key. pyIMMO: `create_dashboard` returns a confirmation request — tell the user
    what will be created and let them confirm in the app.
-4. Reply with: the link, 3–5 lines of findings (with numbers and their
-   uncertainty), the caveats, and what would sharpen the answer.
+4. Open and check the page (next section) before you reply.
 
-## 5. Method notes (read before these analyses)
+## 5. Open the page and check it — the final step
+
+Before you report, open the dashboard URL returned by create/update in a
+browser you can drive and look at it the way the user will.
+
+1. Pick the browser by capability, in this order: the built-in browser pane
+   (`Claude_Browser`), Claude in Chrome (`claude-in-chrome`), chrome-devtools,
+   Playwright. Load its skill first if one exists. The user's own Chrome
+   session carries their app login; a fresh Playwright browser usually needs a
+   login you must not invent.
+2. Navigate to the URL and wait until every widget has left its loading state.
+3. Take a screenshot (Playwright: write it under the worktree's
+   `.playwright-mcp/`) and read the console for errors.
+4. Check the page against the spec:
+   - every widget rendered: no error card, no endless spinner, no
+     "not licensed"/"forbidden" state;
+   - empty widgets are only the ones preview reported as empty or refused;
+   - numbers plausible against preview (same order of magnitude, same sign);
+   - charts legible: labels not clipped, legend readable, forecast band and
+     backtest caption visible, nothing overflowing at the default width;
+   - the note widget is there and readable.
+5. If something is wrong, fix the spec (`…_update_dashboard`), reload and check
+   again. A defect in the app's renderer or a metric is a bug to report with
+   the screenshot, not something to hide by removing the widget.
+6. If no browser can reach the app (no browser tool, not logged in, app not
+   reachable from here), say so plainly: "created, not visually checked", with
+   the reason. Never claim a check you did not do.
+
+**Final answer, always:** the dashboard **URL** on its own line, then 3–5
+lines of findings (numbers with their uncertainty), the caveats, what you saw
+when you checked the page (or why you could not), and what would sharpen the
+answer.
+
+## 6. Method notes (read before these analyses)
 
 **Price elasticity** (pyERP `pricing.elasticityByCustomerGroup`): log-log
 regression of quantity on realised unit price per customer group over time
@@ -113,7 +146,7 @@ back and says so. Horizons beyond a quarter of the history are speculation.
 **pyIMMO / kontor money**: amounts are per company; never sum across
 currencies; vacancy as both physical and m²-weighted.
 
-## 6. When the tools are not there
+## 7. When the tools are not there
 
 The dashboard operations roll out per app (epic TES-14056). If
 `analytics_*_dashboard` / `create_dashboard` is not in the app's tool list,
