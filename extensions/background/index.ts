@@ -79,6 +79,7 @@ import {
 	resolveTimeoutMs,
 	resultHeader,
 	statusForExit,
+	statusForWatchExit,
 	type Job,
 } from "./jobs.ts";
 import { exposureFor } from "../loadout/policy.ts";
@@ -445,9 +446,37 @@ export default function background(pi: ExtensionAPI) {
 		// arrive. Cancelling the grace timer here keeps a normal job from waking a
 		// handler two seconds after it is already over.
 		let exitGrace: NodeJS.Timeout | undefined;
+		/**
+		 * Settle from the process's exit code — unless the job's own clock killed
+		 * it. The timer below kills the tree and THEN settles `timeout` after an
+		 * awaited annotation, so the kill's `close` used to win the race and
+		 * report a job WE stopped as `failed (exit ?)` (HIV-3110).
+		 */
+		let expiring = false;
+		const settleFromExit = (code: number | null): void => {
+			if (expiring) return;
+			if (!spec.runID) {
+				settle(id, statusForExit(code), code ?? undefined);
+				return;
+			}
+			const status = statusForWatchExit(code);
+			if (status !== "unconfirmed") {
+				settle(id, status, code ?? undefined);
+				return;
+			}
+			// The watch ended without the run's verdict. Say what the run is doing
+			// now, so "still running, re-watch it" is the reading and not "red".
+			void (async () => {
+				try {
+					await annotateWatchTimeout(id);
+				} finally {
+					settle(id, status, code ?? undefined);
+				}
+			})();
+		};
 		proc.on("close", (code) => {
 			if (exitGrace) clearTimeout(exitGrace);
-			settle(id, statusForExit(code), code ?? undefined);
+			settleFromExit(code);
 		});
 
 		/**
@@ -484,7 +513,7 @@ export default function background(pi: ExtensionAPI) {
 				// reaper, and we would be leaving exactly the orphan this feature is
 				// written not to industrialise (see the header, and `killTree`).
 				killTree(id);
-				settle(id, statusForExit(code), code ?? undefined);
+				settleFromExit(code);
 			}, EXIT_SETTLE_GRACE_MS);
 			// Unref'd for the same reason as the timeout below: a pending grace must
 			// never be the reason node stays alive.
@@ -492,6 +521,7 @@ export default function background(pi: ExtensionAPI) {
 		});
 
 		const timer = setTimeout(() => {
+			expiring = true;
 			killTree(id);
 			// A watch that hit its clock says nothing about WHY: the tail is
 			// `task.ready` either way, whether the run never started or one step
