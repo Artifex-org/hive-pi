@@ -1,26 +1,30 @@
 # You should know
 
-An opt-in pi-native adaptation of Claude Code's
+A default-on pi-native adaptation of Claude Code's
 [`cc-plugin-you-should-know@builtin`](https://code.claude.com/docs/en/plugins/mods/overview#mods-built-into-claude-code).
 Anthropic documents a side agent that surfaces overlooked information above the
 prompt; its exact scanning implementation is not public in the linked source
 list. This extension implements that idea, not undocumented plugin parity.
 
-Enable in a **pi terminal session**:
+**Enabled by default in pi terminal sessions.** No enable command is required.
+Scanning automatically sends assistant-prose excerpts to the currently selected
+model's provider and consumes that account's quota, within the limits below.
+
+Disable in the current session with:
 
 ```text
-/you-should-know on
+/you-should-know off
 ```
 
-Off by default. `PI_YOU_SHOULD_KNOW=1` opts new terminal sessions in. The command's
-setting is saved to the active session branch and restored on reload/resume.
-Consent is bound to the session ID: fork/clone/import into a different session
-uses the startup default, not inherited opt-in. No workstation settings files
-are changed.
+`PI_YOU_SHOULD_KNOW=0` makes new terminal sessions default off. `/you-should-know on`
+re-enables scanning explicitly. Command settings are saved to the active session
+branch and restored on reload/resume, overriding the startup default. Overrides
+are bound to the session ID: fork/clone/import into a different session uses its
+startup default instead. No workstation settings files are changed.
 
 | Command | Effect |
 | --- | --- |
-| `/you-should-know` or `status` | Consent, scan budget, reported side-call tokens/cost and failures |
+| `/you-should-know` or `status` | Enabled state, scan budget, reported side-call tokens/cost and failures |
 | `/you-should-know on` | Scan future assistant prose; does not backfill old output |
 | `/you-should-know show` | All retained notes, with their exact source quotes |
 | `/you-should-know dismiss` | Clear notes and cancel pending work; repeated quotes stay suppressed |
@@ -54,14 +58,14 @@ an old note. Dismiss obsolete notes. Silence is not a clean bill of health.
   a 60-second hard deadline, 2,048 answer tokens, and **20 attempted scans per
   active session branch**. Failures count; toggling off/on does not reset the
   budget. Fork/tree navigation restores the destination branch's state.
-- Explicitly opting in sends excerpts to your selected model's provider and
+- Enabled scanning sends excerpts to your selected model's provider and
   consumes that account's quota. No separate analytics or telemetry is added.
   `/you-should-know status` reports completed calls' provider-reported usage, separately from
   pi's main-session totals; canceled calls may still incur provider charges.
 - Event handlers do not await a model. A detached timer performs the scan; it
   does not delay tools, auto-continue the agent or change its context. No tools,
   messages, system-prompt changes or provider-request hooks are registered.
-- Session entries contain consent, budget, notes, quotes and usage counters, not
+- Session entries contain enabled state, budget, notes, quotes and usage counters, not
   full excerpts. They do not enter LLM context. Existing session export/telemetry
   retains its own behavior and consent policy.
 - Off/dismiss/session replacement/tree navigation cancel queued and in-flight
@@ -77,11 +81,13 @@ an old note. Dismiss obsolete notes. Silence is not a clean bill of health.
 ## Verification
 
 `test/you-should-know.test.ts` tests quote grounding/control-character validation,
-opt-in, headless/worker exclusion, nonblocking completion, coalescing, deadlines,
+startup defaults/env opt-out, saved settings, headless/worker exclusion,
+nonblocking completion, coalescing, deadlines,
 budget/cadence, branch restore, deduplication, late-result cancellation and the
 real provider-call shape. Native `Text` rendering is checked at narrow/wide
 widths. `node test/you-should-know-smoke.mjs` drives the real pi terminal through
-on → synthetic assistant output → note/quote → dismiss → off, using a local
+default-on → synthetic assistant output → note/quote → dismiss → off/on/off,
+using a local
 fixture provider and temporary agent directory (requires Python 3 + a POSIX PTY).
 For an opt-in **live-provider** relevance sanity check using four synthetic
 examples (routine chatter, a buried caveat, a resolved caveat and a quoted

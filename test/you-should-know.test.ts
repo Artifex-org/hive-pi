@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { createFakePi, type FakeCtxOptions } from "./fake-pi.ts";
-import { DEFAULT_CONFIG, scanOutput, wireYouShouldKnow, type Scanner } from "../extensions/you-should-know/index.ts";
+import youShouldKnow, { DEFAULT_CONFIG, scanOutput, wireYouShouldKnow, type Scanner } from "../extensions/you-should-know/index.ts";
 import { EXCERPT_CHARS, excerpt, outputText, parseNotes, SCAN_SYSTEM } from "../extensions/you-should-know/scan.ts";
 import { visibleWidth, Text } from "@earendil-works/pi-tui";
 
 const quote = "The migration was not tested against production data.";
+const testModel = { provider: "openai", id: "test" } as NonNullable<FakeCtxOptions["model"]>;
 const note = { kind: "caveat", text: "Production-data verification is still missing.", quote };
 function reply(text: string): AssistantMessage {
 	return {
@@ -65,9 +66,33 @@ describe("scanner trust boundary", () => {
 	});
 });
 
-describe("consent and delivery", () => {
-	it("defaults off, registers the command, and does no work before opt-in", async () => {
-		expect(DEFAULT_CONFIG.enabled).toBe(false);
+describe("settings and delivery", () => {
+	it.each([undefined, "1", "0"])("entrypoint defaults on unless startup opt-out is %s", async value => {
+		vi.stubEnv("PI_YOU_SHOULD_KNOW", value);
+		const fake = createFakePi();
+		const streamSimple = vi.fn(() => ({ result: async () => response() }));
+		youShouldKnow(fake.api);
+		await fake.emit({ type: "session_start" });
+		await prose(fake, quote, { model: testModel, modelRegistry: { streamSimple } });
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(DEFAULT_CONFIG.enabled).toBe(true);
+		expect(streamSimple).toHaveBeenCalledTimes(value === "0" ? 0 : 1);
+	});
+	it("explicit off remains off after same-session reload despite the on default", async () => {
+		vi.stubEnv("PI_YOU_SHOULD_KNOW", undefined);
+		const fake = createFakePi();
+		const streamSimple = vi.fn(() => ({ result: async () => response() }));
+		youShouldKnow(fake.api);
+		await fake.emit({ type: "session_start" });
+		await fake.runCommand("you-should-know", "off");
+		await fake.emit({ type: "session_start" }, { branch: [{ type: "custom", ...fake.entries.at(-1)! }] });
+		await prose(fake, quote, { model: testModel, modelRegistry: { streamSimple } });
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(streamSimple).not.toHaveBeenCalled();
+		await fake.runCommand("you-should-know", "status");
+		expect(fake.notifications.at(-1)?.message).toContain("off");
+	});
+	it("supports a disabled startup default and explicit on", async () => {
 		const h = harness(undefined, false);
 		await prose(h.fake);
 		expect(h.scanner).not.toHaveBeenCalled(); expect(h.fake.entries).toEqual([]);
@@ -78,7 +103,8 @@ describe("consent and delivery", () => {
 	});
 	it("does not register inside workers", () => {
 		vi.stubEnv("PI_AGENDA_WORKER", "1");
-		const h = harness(); expect(h.fake.handlers.size).toBe(0); expect(h.fake.commands.size).toBe(0);
+		const fake = createFakePi(); youShouldKnow(fake.api);
+		expect(fake.handlers.size).toBe(0); expect(fake.commands.size).toBe(0);
 	});
 	it.each(["print", "json", "rpc"] as const)("does not spend in %s mode", async mode => {
 		const h = harness(); await prose(h.fake, quote, { mode });
@@ -196,19 +222,19 @@ describe("asynchronous lifecycle", () => {
 		expect(other.fake.notifications.at(-1)?.message).toContain("2/20 scans");
 		await prose(other.fake); expect(other.fake.widgets.at(-1)?.cleared).toBe(true);
 	});
-	it("does not inherit consent in a fork or imported session with a different id", async () => {
-		const h = harness(undefined, false);
+	it.each([false, true])("different-session restore uses startup default %s, not inherited overrides", async enabled => {
+		const h = harness(undefined, enabled);
 		await h.fake.emit({ type: "session_start" });
-		await h.fake.runCommand("you-should-know", "on");
+		await h.fake.runCommand("you-should-know", enabled ? "off" : "on");
 		const saved = h.fake.entries.at(-1)!;
 		await h.fake.emit({ type: "session_start", reason: "fork" }, {
 			sessionId: "another-session", branch: [{ type: "custom", ...saved }],
 		});
 		await prose(h.fake, quote, { sessionId: "another-session" });
 		await vi.advanceTimersByTimeAsync(10_000);
-		expect(h.scanner).not.toHaveBeenCalled();
+		expect(h.scanner).toHaveBeenCalledTimes(enabled ? 1 : 0);
 		await h.fake.runCommand("you-should-know", "status");
-		expect(h.fake.notifications.at(-1)?.message).toContain("off");
+		expect(h.fake.notifications.at(-1)?.message).toContain(enabled ? "on" : "off");
 	});
 	it("malformed verdict is visibly failed, never a clean empty scan", async () => {
 		const h = harness(async () => reply("NOT JSON")); await prose(h.fake);

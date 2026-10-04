@@ -31,7 +31,8 @@ const script = `
 import os, pty, subprocess, select, time, re, struct, fcntl, termios, json
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 100, 0, 0))
-env = dict(os.environ, PI_CODING_AGENT_DIR=${JSON.stringify(dir)}, PI_SKIP_VERSION_CHECK='1', PI_OFFLINE='1', PI_TELEMETRY='0', PI_YOU_SHOULD_KNOW='0', PI_AGENDA_WORKER='0', TERM='xterm-256color')
+env = dict(os.environ, PI_CODING_AGENT_DIR=${JSON.stringify(dir)}, PI_SKIP_VERSION_CHECK='1', PI_OFFLINE='1', PI_TELEMETRY='0', PI_AGENDA_WORKER='0', TERM='xterm-256color')
+env.pop('PI_YOU_SHOULD_KNOW', None)
 proc = subprocess.Popen(['node', ${JSON.stringify(join(repo, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"))}, '--no-extensions', '-e', ${JSON.stringify(provider)}, '-e', ${JSON.stringify(join(repo, "extensions/you-should-know/index.ts"))}, '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-tools', '--no-session', '--provider', 'ysk-smoke', '--model', 'fixture'], stdin=slave, stdout=slave, stderr=slave, cwd=${JSON.stringify(dir)}, env=env)
 os.close(slave)
 raw = b''
@@ -44,13 +45,13 @@ def read_for(seconds):
    except OSError: break
 read_for(2)
 before_show = ''
-for command in ['/you-should-know on', 'Run the fixture.', '/you-should-know show', '/you-should-know dismiss', '/you-should-know off']:
+for command in ['Run the fixture.', '/you-should-know show', '/you-should-know dismiss', '/you-should-know off', '/you-should-know on', '/you-should-know off']:
  if command == '/you-should-know show': before_show = raw.decode(errors='replace')
  os.write(master, command.encode() + b'\\r')
  read_for(2)
 text = re.sub(r'\\x1b\\[[0-?]*[ -/]*[@-~]', '', raw.decode(errors='replace'))
 text = re.sub(r'\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)', '', text)
-checks = { 'enabled': 'You should know enabled.' in text, 'widget_before_show': 'earlier output (model notes)' in before_show and '[caveat] Production-data verification is still missing.' in before_show, 'quote': 'Source: The migration was not tested against production data.' in text, 'dismissed': 'Notes dismissed.' in text, 'disabled': 'You should know disabled.' in text }
+checks = { 'default_on': 'YSK: on' in before_show, 'widget_before_show': 'earlier output (model notes)' in before_show and '[caveat] Production-data verification is still missing.' in before_show, 'quote': 'Source: The migration was not tested against production data.' in text, 'dismissed': 'Notes dismissed.' in text, 'disabled': 'You should know disabled.' in text }
 print(json.dumps(checks, indent=2))
 if not all(checks.values()): print(text)
 os.write(master, b'/quit\\r')
