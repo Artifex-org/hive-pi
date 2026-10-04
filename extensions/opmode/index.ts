@@ -20,7 +20,7 @@
  * nothing here injects a turn.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
 	OP_MODE_CONTROL_CHANNEL,
@@ -32,7 +32,8 @@ import {
 	type PlanControlEvent,
 	type PlanModeStateEvent,
 } from "../hive-common/channels.ts";
-import { parseResultHeader } from "../background/jobs.ts";
+import { parseResultHeader, type JobStatus } from "../background/jobs.ts";
+import { canonicalMcpToolName } from "../mcp-common/names.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { classifyCommand, classifyDiscussionTool, classifyOrchestrateCommand, classifyOrchestrateTool } from "../plan/policy.ts";
 import { BUGFIX_WITHHELD_TOOLS, DEFAULT_OP_MODE, isOpMode, OP_MODES, OP_MODE_ENFORCES, type OpMode } from "./modes.ts";
@@ -41,8 +42,110 @@ import { buildOpModePrompt } from "./prompt.ts";
 /** Tools this extension owns; they stay callable in every mode it gates. */
 const OP_MODE_TOOLS = ["bugfix_evidence", "bugfix_root_cause"];
 
-/** A completed tool result the evidence protocol observed. */
-export type ObservedResult = { name: string; failed: boolean; text: string };
+/**
+ * What an observed run says about the code: it failed, it passed, or it made
+ * no claim (a job we timed out or a human cancelled, a CI run still going, a
+ * background job that has only just started).
+ *
+ * Three values, not a boolean, because "did not fail" is not "passed": with a
+ * boolean, a timed-out job read as a passing re-verification.
+ */
+export type Verdict = "failed" | "passed" | "indeterminate";
+
+/**
+ * A completed tool result the evidence protocol observed.
+ *
+ * `family` is the kind of execution it reports, which is what re-verification
+ * must match — not the tool name. Every shell wrapper (`bash`, a background
+ * job pulled or announced) is one family, so the same reproduction rerun
+ * through a different scheduler is the same evidence; every Hive run record is
+ * another. Any other tool is its own family.
+ */
+export type ObservedResult = { name: string; family: string; verdict: Verdict; text: string };
+
+/** The family every shell execution belongs to, however it was scheduled. */
+const SHELL_FAMILY = "shell";
+/** The family of Hive CI run records (see RUN_RECORD_READERS). */
+const HIVE_RUN_FAMILY = "hive run";
+
+/**
+ * Tools whose result IS the verdict of a run that already happened, and the
+ * structured field that holds it — keyed by canonical (adapter) MCP name, so
+ * `mcp__hive__get_task_logs` and `hive_get_task_logs` are one entry.
+ *
+ * The rule this encodes: a reproduction is a run that failed, and reading
+ * the record of a CI run that failed is observing that run — the retrieval
+ * succeeding is not a statement about the code (papercut 2026-10-04T16:48:
+ * a failed CI attempt with two FAILED tests refused because "the log retrieval
+ * tool itself completed successfully"). It stays a REVIEWED LIST read from the
+ * server's own state field: an arbitrary read whose text says FAILED (a file, a
+ * ticket) still binds nothing.
+ *
+ * Shapes from hive's internal/mcp: get_task_logs → `attempt_state`;
+ * explain_failure, get_run, wait_for_run → `run.state`.
+ */
+const RUN_RECORD_READERS: Record<string, (body: Record<string, unknown>) => unknown> = {
+	hive_get_task_logs: (body) => body.attempt_state,
+	hive_explain_failure: (body) => runState(body),
+	hive_get_run: (body) => runState(body),
+	hive_wait_for_run: (body) => runState(body),
+};
+
+function runState(body: Record<string, unknown>): unknown {
+	const run = body.run;
+	return run && typeof run === "object" ? (run as Record<string, unknown>).state : undefined;
+}
+
+/** A Hive run/attempt state as a verdict. Only the two terminal answers count. */
+function hiveStateVerdict(state: unknown): Verdict {
+	if (state === "failed") return "failed";
+	if (state === "succeeded") return "passed";
+	return "indeterminate";
+}
+
+/**
+ * A background job's status as a verdict. `timeout` and `canceled` say nothing
+ * about the code (see JobStatus), and `running` has not finished.
+ */
+function jobVerdict(status: JobStatus): Verdict {
+	if (status === "failed") return "failed";
+	if (status === "done") return "passed";
+	return "indeterminate";
+}
+
+/**
+ * Classify one tool result. `fullText` is the WHOLE result: a run record's
+ * verdict can sit well past any preview cut (Go sorts map keys, so
+ * explain_failure's `failures` with their log tails come before `run`).
+ */
+export function observe(
+	name: string,
+	isError: boolean,
+	fullText: string,
+	structured?: unknown,
+): ObservedResult {
+	const text = fullText.slice(0, 1200);
+	const canonical = canonicalMcpToolName(name);
+	const reader = RUN_RECORD_READERS[canonical];
+	if (reader) {
+		if (isError) return { name, family: HIVE_RUN_FAMILY, verdict: "indeterminate", text };
+		const body = structured && typeof structured === "object" ? structured : parseJSON(fullText);
+		const state = body && typeof body === "object" && !Array.isArray(body) ? reader(body as Record<string, unknown>) : undefined;
+		return { name, family: HIVE_RUN_FAMILY, verdict: hiveStateVerdict(state), text };
+	}
+	// `background_bash` returns "started bg-N"; the run has not happened yet.
+	if (name === "background_bash") return { name, family: SHELL_FAMILY, verdict: "indeterminate", text };
+	const family = name === "bash" ? SHELL_FAMILY : canonical;
+	return { name, family, verdict: isError ? "failed" : "passed", text };
+}
+
+function parseJSON(text: string): unknown {
+	try {
+		return JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+}
 
 /**
  * The refusal for a missing or unknown tool_call_id — WITH the ids it was
@@ -66,7 +169,7 @@ export function refusalWithCandidates(results: Map<string, ObservedResult>, requ
 		return `${head} No completed tool results have been observed yet — run the reproduction first, then record it.`;
 	}
 	const rows = recent.map(
-		([id, r]) => `  ${id}  ${r.name}${r.failed ? "  (failed)" : ""}  ${r.text.replace(/\s+/g, " ").slice(0, 70)}`,
+		([id, r]) => `  ${id}  ${r.name}${r.verdict === "failed" ? "  (failed)" : ""}  ${r.text.replace(/\s+/g, " ").slice(0, 70)}`,
 	);
 	// Name `reproduction_key` HERE, in the message read immediately before the
 	// retry. It is `Type.Optional` in the schema and mandatory for the first
@@ -77,7 +180,7 @@ export function refusalWithCandidates(results: Map<string, ObservedResult>, requ
 	// later. The example points at the newest FAILING result because `reproduce`
 	// rejects a passing one, and handing over an id that the next line rejects
 	// is the same failure wearing a different sentence.
-	const example = recent.find(([, r]) => r.failed)?.[0] ?? recent[0]![0];
+	const example = recent.find(([, r]) => r.verdict === "failed")?.[0] ?? recent[0]![0];
 	return (
 		`${head} Recent completed results, newest first — pass one of these ids as tool_call_id:\n${rows.join("\n")}\n` +
 		`Phase "reproduce" also needs a reproduction_key — any stable name for this bug, repeated on the later "reverify" call: ` +
@@ -119,9 +222,17 @@ const PHASE_ORDER = `reproduce → hypothesize → instrument → confirm → (b
  * on the id: the one thing that was right. It then went back to hunting ids.
  * Say which half is missing, and show the call that would have worked.
  */
+const JOB_STATUSES: readonly JobStatus[] = ["running", "done", "failed", "timeout", "canceled"];
+
+function isJobStatus(value: unknown): value is JobStatus {
+	return typeof value === "string" && (JOB_STATUSES as readonly string[]).includes(value);
+}
+
 function reproduceRefusal(id: string, observed: ObservedResult, key: string | undefined): string {
 	const faults: string[] = [];
-	if (observed.failed !== true) {
+	if (observed.verdict === "indeterminate") {
+		faults.push(`${id} (${observed.name}) reached no verdict — still running, timed out or cancelled — so it is not a reproduction`);
+	} else if (observed.verdict !== "failed") {
 		faults.push(`${id} (${observed.name}) completed without failing, so it is not a reproduction — bind the run that shows the bug`);
 	}
 	if (!key) {
@@ -134,7 +245,7 @@ function reproduceRefusal(id: string, observed: ObservedResult, key: string | un
 	// the run PASSED, printing it as the example would recommend the call that
 	// just failed — the same self-contradiction, one refusal further on, that
 	// this whole change exists to remove.
-	const exampleID = observed.failed === true ? id : "<id of the failing run>";
+	const exampleID = observed.verdict === "failed" ? id : "<id of the failing run>";
 	return (
 		`Read as phase "reproduce", the failing baseline. ${faults.join(". ")}. ` +
 		`Example: {"phase": "reproduce", "tool_call_id": "${exampleID}", "reproduction_key": "targeted-test"}`
@@ -166,7 +277,7 @@ function orderingRefusal(requested: string, state: ProtocolState, detail: string
 }
 
 /** A reproduction: one model-supplied key bound to one observed failing run. */
-type Reproduction = { key: string; failingCallID: string; toolName: string };
+type Reproduction = { key: string; failingCallID: string; toolName: string; family: string };
 
 /**
  * Why a call whose phase WAS the expected one still could not be recorded.
@@ -201,10 +312,11 @@ function payloadFault(
 	if (p.tool_call_id === reproduction.failingCallID) {
 		faults.push(`tool_call_id is the failing baseline ${reproduction.failingCallID} again — re-verification needs a distinct run`);
 	}
-	if (observed.name !== reproduction.toolName) {
+	if (observed.family !== reproduction.family) {
 		faults.push(`the result came from ${observed.name}, not ${reproduction.toolName} — rerun the tool that reproduced it`);
 	}
-	if (observed.failed) faults.push("that run still failed");
+	if (observed.verdict === "failed") faults.push("that run still failed");
+	if (observed.verdict === "indeterminate") faults.push("that run reached no verdict (still running, timed out or cancelled)");
 	// Unreachable while this list and the bind condition stay in step. Kept
 	// because a drifting pair should degrade to the old vague sentence, not to
 	// "…, but . Order: …" — a refusal with a hole in it reads as a harness bug
@@ -357,8 +469,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "bugfix_evidence" || event.toolName === "bugfix_root_cause") return;
-		const text = (event.content ?? []).map((part) => "text" in part && typeof part.text === "string" ? part.text : "").join("\n");
-		const observed: ObservedResult = { name: event.toolName, failed: Boolean(event.isError), text: text.slice(0, 1200) };
+		const full = (event.content ?? []).map((part) => "text" in part && typeof part.text === "string" ? part.text : "").join("\n");
+		const observed = observe(event.toolName, Boolean(event.isError), full, event.structuredContent);
 		// A pulled background job is keyed by its JOB id, and carries the JOB's
 		// verdict rather than the pull's. Both halves are load-bearing.
 		//
@@ -373,15 +485,53 @@ export default function (pi: ExtensionAPI) {
 		// and because it is the one that makes the re-verification check mean
 		// something. Keyed by call id, two pulls of the SAME failing job produce
 		// two ids, and the second would satisfy "a distinct run"; keyed by job id
-		// they collide, so a distinct id is a distinct run. The call id is not
-		// also registered: it is invisible to the model by construction, so a
-		// second row for it would only pad the candidate list.
-		const job = event.toolName === "background_result" ? parseResultHeader(text) : null;
-		if (job) {
-			results.set(job.id, { ...observed, failed: job.status === "failed" });
-			return;
-		}
-		results.set(event.toolCallId, observed);
+		// they collide, so a distinct id is a distinct run.
+		//
+		// Only `background_result` is read this way, so a header-shaped string in
+		// some other tool's output cannot mint a job id.
+		const job = event.toolName === "background_result" ? parseResultHeader(full) : null;
+		const key = job ? job.id : event.toolCallId;
+		results.set(key, job ? { ...observed, family: SHELL_FAMILY, verdict: jobVerdict(job.status) } : observed);
+		return evidenceTag(event, key);
+	});
+
+	/**
+	 * The id to bind, written INTO the result while the protocol is live.
+	 *
+	 * Pi's rendered transcript carries no tool-call ids, so the model was asked
+	 * for a value it could not see, and every phase began with a deliberately
+	 * refused call just to list them (papercuts 2026-10-04T13:12, 2047). Only in
+	 * bugfix mode and only until the reproduction is re-verified, so no other
+	 * session pays a token for it. Appended after the tool's own output and
+	 * tagged, like toolhints, so it is never mistaken for the tool's words; and
+	 * `structuredContent` is passed back unchanged, because pi drops it when a
+	 * handler replaces `content` alone.
+	 */
+	function evidenceTag(event: ToolResultEvent, key: string): ToolResultEventResult | undefined {
+		if (mode !== "bugfix" || phase === "done" || phase === "blocked") return undefined;
+		const tag = { type: "text" as const, text: `[bugfix evidence id: ${key}]` };
+		return {
+			content: [...(event.content ?? []), tag],
+			...(event.structuredContent !== undefined ? { structuredContent: event.structuredContent } : {}),
+		};
+	}
+
+	/**
+	 * A background job that finished is announced by a follow-up message, not a
+	 * tool result, and the model often never pulls it: the notification already
+	 * carried the output. Such a job was invisible here — "lists recent result
+	 * IDs but omits the completed bg-30 failing Playwright run". The message is
+	 * the background extension's own (`customType: "background"`, details.id and
+	 * details.status), which only an extension can emit, so it is as trustworthy
+	 * as the pulled header and keyed the same way.
+	 */
+	pi.on("message_end", (event) => {
+		const message = event.message as { role?: string; customType?: string; content?: unknown; details?: unknown } | undefined;
+		if (message?.role !== "custom" || message.customType !== "background") return;
+		const details = message.details as { id?: unknown; status?: unknown } | undefined;
+		if (typeof details?.id !== "string" || !isJobStatus(details.status)) return;
+		const text = typeof message.content === "string" ? message.content.slice(0, 1200) : "";
+		results.set(details.id, { name: "background_bash", family: SHELL_FAMILY, verdict: jobVerdict(details.status), text });
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -421,14 +571,14 @@ export default function (pi: ExtensionAPI) {
 			if (!observed) return text(refusalWithCandidates(results, p.tool_call_id));
 			if (p.phase === "reproduce") {
 				const key = p.reproduction_key?.trim();
-				if (observed.failed !== true || !key) return text(reproduceRefusal(p.tool_call_id!, observed, key));
-				reproduction = { key, failingCallID: p.tool_call_id!, toolName: observed.name }; phase = "hypothesize";
+				if (observed.verdict !== "failed" || !key) return text(reproduceRefusal(p.tool_call_id!, observed, key));
+				reproduction = { key, failingCallID: p.tool_call_id!, toolName: observed.name, family: observed.family }; phase = "hypothesize";
 				return protocolResult("hypothesize", `Reproduction failed via ${observed.name}; state a falsifiable mechanism.`);
 			}
 			if (p.phase === "hypothesize" && phase === "hypothesize" && p.hypothesis?.trim()) { phase = "instrument"; return protocolResult("instrument", "Hypothesis recorded; run an instrument that can distinguish it."); }
 			if (p.phase === "instrument" && phase === "instrument" && p.tool_call_id !== reproduction?.failingCallID) { phase = "confirm"; return protocolResult("confirm", "Instrumentation recorded; confirm the mechanism it established."); }
 			if (p.phase === "confirm" && phase === "confirm" && p.hypothesis?.trim()) { phase = "fix"; return protocolResult("fix", "Hypothesis confirmed; record the root cause, fix it, then rerun the same reproduction."); }
-			if (p.phase === "reverify" && phase === "fix" && reproduction && p.reproduction_key === reproduction.key && p.tool_call_id !== reproduction.failingCallID && observed.name === reproduction.toolName && !observed.failed) { phase = "done"; return protocolResult("done", "The same reproduction now passes."); }
+			if (p.phase === "reverify" && phase === "fix" && reproduction && p.reproduction_key === reproduction.key && p.tool_call_id !== reproduction.failingCallID && observed.family === reproduction.family && observed.verdict === "passed") { phase = "done"; return protocolResult("done", "The same reproduction now passes."); }
 			// Two questions, answered separately: was this the wrong PHASE, or the
 			// right phase with the wrong payload? The machine has always known
 			// both — `phase` is the state and `p.phase` is what was asked for —
