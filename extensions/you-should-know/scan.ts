@@ -41,7 +41,8 @@ export function fingerprint(quote: string): string {
 
 /** Model output is a trust boundary, including terminal escape/control injection. */
 function safeLine(value: unknown, min: number, max: number): value is string {
-	return typeof value === "string" && value.trim().length >= min && value.length <= max &&
+	return typeof value === "string" && value.length <= max * 2 &&
+		[...value.trim()].length >= min && [...value].length <= max &&
 		!/[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(value);
 }
 
