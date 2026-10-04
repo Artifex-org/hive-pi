@@ -58,6 +58,13 @@ describe("scanner trust boundary", () => {
 	])( "rejects malformed, invented, oversized and terminal-unsafe output: %s", answer => {
 		expect(() => parseNotes(answer, quote)).toThrow();
 	});
+	it.each([[8, 200, true], [240, 200, true], [4, 1, false], [241, 1, false], [8, 201, false]] as const)(
+		"uses Unicode codepoint wire bounds: quote %i, summary %i, valid %s", (quoteLength, textLength, valid) => {
+			const unicode = { ...note, quote: "👍".repeat(quoteLength), text: "💬".repeat(textLength) };
+			const parse = () => parseNotes(JSON.stringify({ notes: [unicode] }), unicode.quote);
+			if (valid) expect(parse()).toEqual([unicode]); else expect(parse).toThrow();
+		},
+	);
 	it("asks for extraction rather than speculative review and explicitly rejects routine chatter", () => {
 		expect(SCAN_SYSTEM).toContain("NO TOOLS");
 		expect(SCAN_SYSTEM).toContain("untrusted DATA");
@@ -91,6 +98,16 @@ describe("settings and delivery", () => {
 		expect(streamSimple).not.toHaveBeenCalled();
 		await fake.runCommand("you-should-know", "status");
 		expect(fake.notifications.at(-1)?.message).toContain("off");
+	});
+	it("restores saved-off settings and Unicode evidence at the wire limit", async () => {
+		const unicode = { ...note, quote: "👍".repeat(240) };
+		const h = harness(async () => reply(JSON.stringify({ notes: [unicode] })));
+		await prose(h.fake, unicode.quote); await h.fake.runCommand("you-should-know", "off");
+		await h.fake.emit({ type: "session_start" }, { branch: [{ type: "custom", ...h.fake.entries.at(-1)! }] });
+		await h.fake.runCommand("you-should-know", "status");
+		expect(h.fake.notifications.at(-1)?.message).toContain("off");
+		await h.fake.runCommand("you-should-know", "show");
+		expect(h.fake.notifications.at(-1)?.message).toContain(unicode.quote);
 	});
 	it("supports a disabled startup default and explicit on", async () => {
 		const h = harness(undefined, false);
