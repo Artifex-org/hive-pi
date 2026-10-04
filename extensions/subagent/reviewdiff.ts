@@ -39,6 +39,8 @@ export interface ReviewDiff {
 	 * implementation "not among the files authorized for this review".
 	 */
 	untracked: string[];
+	/** Untracked entries past UNTRACKED_LIST_CAP — counted, never silently dropped. */
+	untrackedOmitted: number;
 	/**
 	 * Paths the caller's task names that git did not report. The caller's scope
 	 * WINS: these are in scope, never "outside the change".
@@ -54,7 +56,7 @@ export interface ReviewDiff {
 /** Enough for a real change; beyond it the worker reads files itself, which it can, given the list. */
 export const DIFF_CAP_BYTES = 60 * 1024;
 
-/** Rendered untracked paths. An unignored build directory must not become the prompt. */
+/** Untracked paths in the review's scope and prompt. An unignored build directory must not become either. */
 export const UNTRACKED_LIST_CAP = 100;
 
 export type GitRunner = (args: string[], cwd: string) => string | null;
@@ -83,26 +85,62 @@ const runGit: GitRunner = (args, cwd) => {
  * Which repo the change under review lives in, or null when there is no one
  * repo to scope by.
  *
- * Normally the worker's cwd. But a session working on a model workspace runs
- * in the TOOLING repo and names the workspace's files by absolute path; diffing
- * cwd then handed the reviewer the tooling repo's unrelated edits as "the
- * change". So absolute paths the task names decide: all in one repo → that
- * repo; any in no repo, or spread over several → null, and nothing is scoped
- * rather than scoped wrongly.
+ * Normally the worker's cwd. Absolute paths the task names can move it, but
+ * only when they ARE a change: a session working on a model workspace runs in
+ * the TOOLING repo and names the workspace's edited files, and diffing cwd
+ * handed the reviewer the tooling repo's unrelated edits. A path that is merely
+ * referenced ("follow the pattern in /other/repo/x.ts") is not a change and
+ * must not move the review away from cwd's real one (review W5).
+ *
+ *   - named paths that are changes in exactly one other repo → that repo;
+ *     in several → null (the change spans repos; nothing is scoped wrongly);
+ *   - otherwise cwd's repo — unless every named path is in no repo at all (a
+ *     non-git model workspace), or cwd is no repo and the named paths do not
+ *     settle on one.
  */
 export function reviewRepoFor(cwd: string, task: string, git: GitRunner = runGit): string | null {
 	const topOf = (dir: string) => git(["rev-parse", "--show-toplevel"], dir)?.trim() || null;
 	const cwdTop = topOf(cwd);
 	const named = citedPaths(task).filter((path) => isAbsolute(path));
 	if (named.length === 0) return cwdTop;
-	// A path in no repo (a scratch note, a conventions file elsewhere, a
-	// deleted file's vanished directory) does not decide anything on its own…
-	const tops = new Set(named.map((path) => topOf(dirname(path))).filter((top): top is string => top !== null));
-	// …unless EVERY named path is in no repo: a non-git workspace, nothing to diff.
-	if (tops.size === 0) return null;
-	if (tops.size === 1) return [...tops][0];
-	// Several repos named: the session's own repo when it is one of them.
-	return cwdTop !== null && tops.has(cwdTop) ? cwdTop : null;
+	const located = named.map((path) => ({ path, top: topOf(dirname(path)) }));
+	const elsewhere = new Map<string, string[]>();
+	for (const { path, top } of located) {
+		if (top === null || top === cwdTop) continue;
+		elsewhere.set(top, [...(elsewhere.get(top) ?? []), path]);
+	}
+	const changeRepos = [...elsewhere].filter(([top, paths]) => {
+		const changes = statusChanges(top, git);
+		if (changes === null) return false;
+		const changed = [...changes.tracked, ...changes.untracked];
+		return paths.some((path) => changed.some((file) => samePath(file, relative(top, path))));
+	});
+	if (changeRepos.length === 1) return changeRepos[0][0];
+	if (changeRepos.length > 1) return null;
+	if (located.every(({ top }) => top === null)) return null;
+	if (cwdTop !== null) return cwdTop;
+	return elsewhere.size === 1 ? [...elsewhere.keys()][0] : null;
+}
+
+/** Above this many untracked files, the per-file listing gives way to directories. */
+export const UNTRACKED_ALL_LIMIT = 2_000;
+
+/**
+ * Tracked changes and untracked files in `repo`, bounded (review W4).
+ *
+ * `--untracked-files=all` lists every file inside an untracked directory, which
+ * is what makes a new file reviewable — and is unbounded: an unignored
+ * `node_modules` overflowed maxBuffer or the timeout, the call failed, and the
+ * review silently lost its whole diff. So when that call fails or is too long,
+ * `--untracked-files=normal` (one `dir/` entry per untracked directory) is
+ * used instead. Null only when status cannot run at all.
+ */
+function statusChanges(repo: string, git: GitRunner): { tracked: string[]; untracked: string[] } | null {
+	const all = git(["status", "--porcelain", "-z", "--untracked-files=all"], repo);
+	const parsedAll = all === null ? null : parseStatusZ(all);
+	if (parsedAll !== null && parsedAll.untracked.length <= UNTRACKED_ALL_LIMIT) return parsedAll;
+	const normal = git(["status", "--porcelain", "-z", "--untracked-files=normal"], repo);
+	return normal === null ? null : parseStatusZ(normal);
 }
 
 /**
@@ -115,11 +153,13 @@ export function captureReviewDiff(cwd: string, task: string, git: GitRunner = ru
 	if (repo === null) return null;
 	// Status, not `diff-index --name-only`: diff-index compares raw stat data
 	// and lists a file whose mtime moved but whose bytes did not.
-	const status = git(["status", "--porcelain", "-z", "--untracked-files=all"], repo);
-	if (status === null) return null;
-	const changed = parseStatusZ(status);
+	const changed = statusChanges(repo, git);
+	if (changed === null) return null;
 	let files = changed.tracked;
-	const untracked = changed.untracked;
+	// The cap bounds the SCOPE, not just the rendering: an uncapped set would
+	// still be the reviewer's file list and the outside-diff check's baseline.
+	const untracked = changed.untracked.slice(0, UNTRACKED_LIST_CAP);
+	const untrackedOmitted = changed.untracked.length - untracked.length;
 	let scope: ReviewDiff["scope"] = "working tree vs HEAD";
 	let range = ["diff-index", "-p", "HEAD"];
 	if (files.length === 0) {
@@ -140,11 +180,12 @@ export function captureReviewDiff(cwd: string, task: string, git: GitRunner = ru
 	const full = files.length > 0 ? (git(range, repo) ?? "") : "";
 	const bytes = Buffer.byteLength(full, "utf8");
 	const text = bytes > DIFF_CAP_BYTES ? full.slice(0, DIFF_CAP_BYTES) : full;
+	// Against the CAPPED list: a named file past the cap must still land in scope.
 	const known = [...files, ...untracked];
 	const callerNamed = citedPaths(task)
 		.map((path) => (isAbsolute(path) && !relative(repo, path).startsWith("..") ? relative(repo, path) : path))
 		.filter((path) => !known.some((file) => samePath(file, path)));
-	return { repo, files, untracked, callerNamed, text, scope, truncatedBytes: Math.max(0, bytes - Buffer.byteLength(text, "utf8")) };
+	return { repo, files, untracked, untrackedOmitted, callerNamed, text, scope, truncatedBytes: Math.max(0, bytes - Buffer.byteLength(text, "utf8")) };
 }
 
 /**
@@ -192,15 +233,15 @@ function splitLines(out: string): string[] {
 /** The task a review worker gets: the caller's prose plus the change, delimited as data. */
 export function reviewTaskWithDiff(task: string, diff: ReviewDiff): string {
 	const note = diff.truncatedBytes > 0 ? `\n[diff truncated: ${diff.truncatedBytes} bytes omitted — read the listed files for the rest]` : "";
-	const shownUntracked = diff.untracked.slice(0, UNTRACKED_LIST_CAP);
-	const hiddenUntracked = diff.untracked.length - shownUntracked.length;
-	const changed = diff.files.length + diff.untracked.length;
+	const shownUntracked = diff.untracked;
+	const hiddenUntracked = diff.untrackedOmitted;
+	const changed = diff.files.length + diff.untracked.length + diff.untrackedOmitted;
 	const lines = [
 		task,
 		"",
 		`What git reports changed (${diff.scope}, in ${diff.repo}): ${changed} file(s)` +
 			(diff.untracked.length > 0
-				? `, ${diff.untracked.length} of them new and untracked — their content is NOT in the diff below; read them in full:`
+				? `, ${diff.untracked.length + diff.untrackedOmitted} of them new and untracked — their content is NOT in the diff below; read them in full:`
 				: ":"),
 		...diff.files.map((file) => `- ${file}`),
 		...shownUntracked.map((file) => `- ${file} (new, untracked)`),
@@ -248,10 +289,16 @@ function citedPaths(text: string, cap = 20): string[] {
 	return seen;
 }
 
-/** One path names the other, however each is spelled (absolute, cwd-relative, bare tail). */
+/**
+ * One path names the other, however each is spelled (absolute, cwd-relative,
+ * bare tail). A collapsed untracked directory (`node_modules/`, from
+ * `--untracked-files=normal`) covers every path inside it.
+ */
 function samePath(a: string, b: string): boolean {
 	const x = normalize(a);
 	const y = normalize(b);
+	if (x.endsWith("/") && (y.startsWith(x) || y.includes(`/${x}`))) return true;
+	if (y.endsWith("/") && (x.startsWith(y) || x.includes(`/${y}`))) return true;
 	return x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`);
 }
 

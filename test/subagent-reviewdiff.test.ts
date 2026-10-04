@@ -17,6 +17,7 @@ import {
 	reviewScopeFiles,
 	reviewTaskWithDiff,
 	type GitRunner,
+	UNTRACKED_ALL_LIMIT,
 	UNTRACKED_LIST_CAP,
 } from "../extensions/subagent/reviewdiff.ts";
 import { resultNotes, type SingleResult } from "../extensions/subagent/index.ts";
@@ -47,6 +48,7 @@ describe("captureReviewDiff", () => {
 			repo: "/repo",
 			files: ["a/b.py", "c.ts"],
 			untracked: [],
+			untrackedOmitted: 0,
 			callerNamed: [],
 			text: "--- a/a/b.py\n+++ b/a/b.py\n+x\n",
 			scope: "working tree vs HEAD",
@@ -88,6 +90,7 @@ describe("what the worker reads", () => {
 			repo: "/repo",
 			files: ["a.py", "b.py"],
 			untracked: [],
+			untrackedOmitted: 0,
 			callerNamed: [],
 			text: "+1",
 			scope: "working tree vs HEAD" as const,
@@ -252,7 +255,7 @@ describe("the review scope never narrows what the caller asked for", () => {
 describe("an unignored build directory does not become the prompt", () => {
 	it("lists at most UNTRACKED_LIST_CAP untracked files and says how many it left out", () => {
 		const many = Array.from({ length: UNTRACKED_LIST_CAP + 7 }, (_, i) => `dist/chunk-${i}.js`);
-		const diff = { repo: "/repo", files: [], untracked: many, callerNamed: [], text: "", scope: "working tree vs HEAD" as const, truncatedBytes: 0 };
+		const diff = { repo: "/repo", files: [], untracked: many.slice(0, UNTRACKED_LIST_CAP), untrackedOmitted: 7, callerNamed: [], text: "", scope: "working tree vs HEAD" as const, truncatedBytes: 0 };
 		const text = reviewTaskWithDiff("Review.", diff);
 		expect(text).toContain(`- dist/chunk-${UNTRACKED_LIST_CAP - 1}.js (new, untracked)`);
 		expect(text).not.toContain(`- dist/chunk-${UNTRACKED_LIST_CAP}.js`);
@@ -267,5 +270,71 @@ describe("parseStatusZ", () => {
 			tracked: ["a.ts", "new.ts", "b.ts"],
 			untracked: ["c.ts"],
 		});
+	});
+});
+
+// Review W5: one absolute path into ANOTHER repo — a pattern to follow, not the
+// change — moved the whole review there, away from cwd's real change.
+describe("a referenced file in another repo does not move the review", () => {
+	const answers = {
+		"/repo: rev-parse --show-toplevel": "/repo\n",
+		"/repo: status --porcelain -z --untracked-files=all": " M src/feature.ts\0",
+		"/repo: diff-index -p HEAD": "+feature\n",
+		"/home/x/repos/hive__worktrees/main: rev-parse --show-toplevel": "/home/x/repos/hive__worktrees/main\n",
+		"/home/x/repos/hive__worktrees/main: status --porcelain -z --untracked-files=all": " M other.go\0",
+	};
+
+	it("stays in cwd when the named path is not among its own repo's changes", () => {
+		const diff = captureReviewDiff("/repo", "Review the change; follow the pattern in /home/x/repos/hive__worktrees/main/x.ts.", gitAt(answers));
+		expect(diff?.repo).toBe("/repo");
+		expect(diff?.files).toEqual(["src/feature.ts"]);
+	});
+
+	it("moves to the named repo when the named path IS one of that repo's changes", () => {
+		const diff = captureReviewDiff("/repo", "Review /home/x/repos/hive__worktrees/main/other.go.", gitAt({ ...answers, "/home/x/repos/hive__worktrees/main: diff-index -p HEAD": "+go\n" }));
+		expect(diff?.repo).toBe("/home/x/repos/hive__worktrees/main");
+	});
+});
+
+// Review W4: `--untracked-files=all` is unbounded — an unignored node_modules
+// overflowed maxBuffer or the timeout and the review lost its whole diff — and
+// UNTRACKED_LIST_CAP trimmed only the rendering, not the scope set.
+describe("a huge untracked tree does not cost the review its diff", () => {
+	const base = {
+		"/repo: rev-parse --show-toplevel": "/repo\n",
+		"/repo: diff-index -p HEAD": "+app\n",
+	};
+
+	it("falls back to directory-level untracked entries when the full listing fails", () => {
+		const diff = captureReviewDiff(
+			"/repo",
+			"Review.",
+			gitAt({ ...base, "/repo: status --porcelain -z --untracked-files=normal": " M src/App.tsx\0?? node_modules/\0" }),
+		);
+		expect(diff?.files).toEqual(["src/App.tsx"]);
+		expect(diff?.untracked).toEqual(["node_modules/"]);
+		expect(diff?.text).toBe("+app\n");
+	});
+
+	it("falls back when the full listing is too long, and caps the scope set itself", () => {
+		const many = Array.from({ length: UNTRACKED_ALL_LIMIT + 1 }, (_, i) => `?? node_modules/p${i}/index.js`).join("\0");
+		const normal = Array.from({ length: UNTRACKED_LIST_CAP + 5 }, (_, i) => `?? gen${i}/`).join("\0");
+		const diff = captureReviewDiff(
+			"/repo",
+			"Review.",
+			gitAt({
+				...base,
+				"/repo: status --porcelain -z --untracked-files=all": ` M src/App.tsx\0${many}\0`,
+				"/repo: status --porcelain -z --untracked-files=normal": ` M src/App.tsx\0${normal}\0`,
+			}),
+		)!;
+		expect(diff.untracked).toHaveLength(UNTRACKED_LIST_CAP);
+		expect(diff.untrackedOmitted).toBe(5);
+		expect(reviewScopeFiles(diff)).toHaveLength(1 + UNTRACKED_LIST_CAP);
+		expect(reviewTaskWithDiff("Review.", diff)).toContain("5 more untracked");
+	});
+
+	it("treats a collapsed untracked directory as covering the files inside it", () => {
+		expect(citedOutsideDiff("node_modules/pkg/index.js:3 bad", ["node_modules/"])).toEqual([]);
 	});
 });
