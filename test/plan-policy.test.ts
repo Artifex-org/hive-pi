@@ -461,6 +461,45 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 	});
 });
 
+describe("orchestrate — supervised transcript read (2026-10-04 papercut sweep)", () => {
+	const bothEnvelopes = (tool: string) =>
+		classifyOrchestrateTool(tool, {}).allowed && classifyOrchestrateTool("mcp", { tool }).allowed;
+
+	it("permits the reviewed read-only transcript operation under every envelope", () => {
+		// Root 1d6c9048 was refused `mcp__hive__read_agent_transcript` on its
+		// controlled verifier: "not on orchestrate mode's coordination
+		// allowlist". The adapter form, the native pi form, and the `mcp`
+		// wrapper are the same operation; the allowlist is keyed by operation,
+		// not envelope (#52 rule). The wrapper speaks adapter-form names by
+		// convention — even long-allowed tools are refused in wrapper-native
+		// form — so the matrix below pins the adapter wrapper only. What this
+		// repo can pin is the policy decision per name; that codemode-nested
+		// calls actually pass through this classifier is pi's tool_call
+		// contract (_executeNestedToolCall → _beforeToolCall), not this
+		// policy's, and is covered by pi's own tests.
+		for (const tool of ["hive_read_agent_transcript", "mcp__hive__read_agent_transcript"]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(true);
+		}
+		expect(bothEnvelopes("hive_read_agent_transcript"), "mcp wrapper").toBe(true);
+	});
+
+	it("still refuses neighbours the review did not cover", () => {
+		// Exact names, never a prefix: a `hive_get_*` or `hive_read_*` prefix
+		// would silently admit every tool the server grows afterwards.
+		for (const tool of [
+			"hive_trigger_run", // generic run trigger: implementation, not supervision
+			"mcp__hive__trigger_run",
+			"hive_read_agent_transcripts", // unknown operation: near-miss spelling
+			"hive_read_agent", // prefix fragment, not a reviewed tool
+			"mcp__other__read_agent_transcript", // foreign server, same suffix
+			"linear_save_issue", // unreviewed write stays out
+		]) {
+			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
+			expect(classifyOrchestrateTool("mcp", { tool }).allowed, `mcp ${tool}`).toBe(false);
+		}
+	});
+});
+
 describe("independent review of #104: bypasses verified under bash -c and git 2.55", () => {
 	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
 	const refusedEverywhere = (commands: string[]) => {

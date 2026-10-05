@@ -289,6 +289,15 @@ const ORCHESTRATE_TOOLS = new Set([
 //   ticket and changes none of its state, owner or scope, whereas save_issue
 //   (create/edit) and every delete stay a visible teammate's decision.
 //
+// Fifth pass, 2026-10-04, from the Hive agent/Factory papercut sweep: a root
+// lead supervising its controlled verifier was refused
+// `mcp__hive__read_agent_transcript` — "not on orchestrate mode's
+// coordination allowlist" — while trying to read that worker's transcript.
+// - hive_read_agent_transcript is the supervised-transcript read: a read-only
+//   view of an owned/shared agent session's transcript, with the server (not
+//   this policy) authorising whose sessions a caller may see. Admitted by
+//   exact name only — not a `hive_get_*` prefix, not a generic run trigger.
+//
 // Names that are not tools (hive_list_pending_launches, hive_interrupt_agent,
 // hive_list_team_notes) stay denied. The refusal names the real coordination
 // tool instead of saying "delegate implementation".
@@ -373,6 +382,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_patch_communication",
 	"hive_post_team_note",
 	"hive_prioritize_run",
+	"hive_read_agent_transcript",
 	"hive_read_inbox",
 	"hive_read_team_notes",
 	"hive_recap_session",
