@@ -7,7 +7,7 @@
  * back what `tool_search` loaded while they ran.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import loadoutExtension, { deferredToolNames, LOAD_TOOL, loadoutPrompt, planLoad } from "../extensions/loadout/index.ts";
 import { exposureFor, GATED_TOOLS, restoredLoadout } from "../extensions/loadout/policy.ts";
@@ -123,7 +123,11 @@ describe("load_tools", () => {
 });
 
 describe("consent-gated tools stay unreachable without consent", () => {
+	afterEach(() => vi.unstubAllEnvs());
 	it("orchestrate is registered direct and kept inactive, so neither load_tools nor tool_search can reach it", async () => {
+		// This is the ordinary non-launched consent path, independent of the
+		// agent or CI process running the suite.
+		vi.stubEnv("HIVE_LAUNCH_ID", undefined);
 		const pi = createFakePi();
 		agendaExtension(pi.api);
 		loadoutExtension(pi.api);
@@ -132,6 +136,13 @@ describe("consent-gated tools stay unreachable without consent", () => {
 		const info = pi.api.getAllTools().find((t) => t.name === "orchestrate");
 		expect(info?.exposure).toBe("direct");
 		expect(planLoad(["orchestrate"], pi.api.getAllTools(), pi.api.getActiveTools()).refused).toEqual(["orchestrate"]);
+	});
+	it("a Hive-launched session keeps its explicitly authorized orchestration tools active", async () => {
+		vi.stubEnv("HIVE_LAUNCH_ID", "123e4567-e89b-42d3-a456-426614174000");
+		const pi = createFakePi(); agendaExtension(pi.api); loadoutExtension(pi.api);
+		await pi.emit({ type: "session_start", reason: "startup" });
+		expect(pi.activeTools).toContain("orchestrate");
+		expect(planLoad(["orchestrate"], pi.api.getAllTools(), pi.api.getActiveTools()).already).toEqual(["orchestrate"]);
 	});
 });
 
