@@ -44,6 +44,18 @@ export const PLAN_LEDGER_ID = "conductor:plan";
 export const VERIFY_LEDGER_ID = "conductor:verify";
 
 export const MAX_VERIFY_INJECTIONS = 2;
+
+/**
+ * The frame and plan kicks are advice for the START of a task. Past this many
+ * tool calls the agent is executing, and telling it to frame a todo list or
+ * enter read-only plan mode reopens finished or running work.
+ *
+ * Measured 2026-10-05 over 7 days of local sessions: 104 frame/plan kicks in
+ * 67 sessions, 99 of them after ≥10 tool calls in the run — "All four steps
+ * completed" followed by "capture this as a todo list", "Plan approved; its
+ * steps were already completed" after a forced re-plan.
+ */
+export const EARLY_TOOL_CALLS = 8;
 const PR_CHECK_TIMEOUT_MS = 120_000;
 const OUTPUT_TAIL_CHARS = 4000;
 
@@ -146,6 +158,13 @@ export interface ConductorHooks {
 	/** Session-level enablement — `/conductor off` and the settings default. */
 	enabled(): boolean;
 	/**
+	 * Can the model call this tool now or load it on demand? A kick that names a
+	 * tool the session does not have reads as a broken harness: measured, agents
+	 * answered "Can't comply — no `TodoWrite` in my tool surface". Optional so
+	 * hand-built test hooks keep the old behaviour (everything reachable).
+	 */
+	toolReachable?(name: string): boolean;
+	/**
 	 * The previous verify failure's distilled note, for red-vs-red comparison
 	 * (HIV-1232) — session-scoped closure state owned by the index. Optional so
 	 * hand-built test hooks without an opinion on it stay valid.
@@ -205,14 +224,21 @@ function decideIdle(hooks: ConductorHooks, context: PolicyContext, signals: Sess
 	// created, so an all-day session of quick asks costs nothing but this fold.
 	if (complexity !== "complex") return null;
 
+	// The work is already under way: framing now would reopen it (EARLY_TOOL_CALLS).
+	if (signals.toolCallsSinceUser > EARLY_TOOL_CALLS) return null;
+
 	// Todos already exist → skip frame, go straight to planning.
-	if (signals.tasks.total > 0) return planTransition(hooks, context);
+	if (signals.tasks.total > 0) return planTransition(hooks, context, signals);
 
 	if (atCap(context.ledger, FRAME_LEDGER_ID, 1)) {
 		// Frame budget already spent (rehydrated session) — move on rather than
 		// re-nagging; the todo step is advisory.
-		return planTransition(hooks, context);
+		return planTransition(hooks, context, signals);
 	}
+
+	// No todo tool to frame with → straight to planning rather than a kick
+	// the model can only refuse.
+	if (hooks.toolReachable && !hooks.toolReachable("TodoWrite")) return planTransition(hooks, context, signals);
 
 	return {
 		name: "conductor",
@@ -233,15 +259,20 @@ function decideFrame(hooks: ConductorHooks, context: PolicyContext, signals: Ses
 	// Waiting for todos. Once they exist — or once the model settled again
 	// without writing any (the nudge is advisory, cap 1) — advance to planning.
 	if (signals.tasks.total === 0 && count(context.ledger, FRAME_LEDGER_ID) === 0) return null;
-	return planTransition(hooks, context);
+	return planTransition(hooks, context, signals);
 }
 
 /** The frame→plan / idle→plan transition: doorbell + one guidance injection. */
-function planTransition(hooks: ConductorHooks, context: PolicyContext): PolicyWork | null {
+function planTransition(hooks: ConductorHooks, context: PolicyContext, signals: SessionSignals): PolicyWork | null {
 	if (atCap(context.ledger, PLAN_LEDGER_ID, 1)) {
 		// Plan guidance already delivered (rehydrated session) — just advance.
 		return silentAdvance(hooks, "plan");
 	}
+	// The agent went on executing after the frame kick (or never framed):
+	// read-only plan mode now would freeze work in flight. Skip planning for
+	// this task; the lifecycle carries on from execute.
+	const late = signals.toolCallsSinceInjection > EARLY_TOOL_CALLS || signals.toolCallsSinceUser > EARLY_TOOL_CALLS * 3;
+	if (late || (hooks.toolReachable && !hooks.toolReachable("plan_write"))) return silentAdvance(hooks, "execute");
 	return {
 		name: "conductor",
 		status: "conductor: entering plan mode",

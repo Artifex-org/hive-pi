@@ -409,3 +409,58 @@ describe("describeConductor", () => {
 		expect(describeConductor(withStage(createConductor("c", 0), "frame", 0), true)).toContain("TodoWrite");
 	});
 });
+
+// The frame and plan kicks are advice for the START of a task. Measured: 99 of
+// 104 fired after ≥10 tool calls, reopening finished or running work.
+describe("conductor policy — kicks only before the work is under way", () => {
+	it("frames a complex task at its first settle", async () => {
+		const { hooks } = makeHooks();
+		const work = createConductorPolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ toolCallsSinceUser: 3 })));
+		expect((await work?.run())?.inject).toBe(FRAME_INJECTION);
+	});
+
+	it("stays out of a task the agent has already been executing", () => {
+		const { hooks, item } = makeHooks();
+		const work = createConductorPolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ toolCallsSinceUser: 40 })));
+		expect(work).toBeNull();
+		expect(item()).toBeNull();
+	});
+
+	it("skips planning when the agent went on executing after the frame kick", async () => {
+		const { hooks, item, rang } = makeHooks(withStage(createConductor("c1", 1), "frame", 2));
+		const ledger = record(emptyLedger, FRAME_LEDGER_ID);
+		const work = createConductorPolicy(hooks).decide(
+			contextWith(ledger, signalsWith({ tasks: { total: 2, pending: 2, inProgress: 0, completed: 0 }, toolCallsSinceInjection: 30, toolCallsSinceUser: 33 })),
+		);
+		const outcome = await work?.run();
+		expect(outcome?.inject).toBeUndefined();
+		expect(rang()).toBe(0); // no read-only plan mode over work in flight
+		expect(item()?.stage).toBe("execute");
+	});
+
+	it("still plans when the frame kick was answered with a todo list", async () => {
+		const { hooks, rang } = makeHooks(withStage(createConductor("c1", 1), "frame", 2));
+		const ledger = record(emptyLedger, FRAME_LEDGER_ID);
+		const work = createConductorPolicy(hooks).decide(
+			contextWith(ledger, signalsWith({ tasks: { total: 3, pending: 3, inProgress: 0, completed: 0 }, toolCallsSinceInjection: 1, toolCallsSinceUser: 4 })),
+		);
+		expect((await work?.run())?.inject).toBe(PLAN_INJECTION);
+		expect(rang()).toBe(1);
+	});
+
+	it("does not name a todo tool the session cannot reach — it plans instead", async () => {
+		const { hooks } = makeHooks();
+		hooks.toolReachable = (name) => name !== "TodoWrite";
+		const work = createConductorPolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ toolCallsSinceUser: 2 })));
+		expect((await work?.run())?.inject).toBe(PLAN_INJECTION);
+	});
+
+	it("skips plan mode entirely when plan_write is unreachable", async () => {
+		const { hooks, item, rang } = makeHooks();
+		hooks.toolReachable = () => false;
+		const work = createConductorPolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ toolCallsSinceUser: 2 })));
+		expect((await work?.run())?.inject).toBeUndefined();
+		expect(rang()).toBe(0);
+		expect(item()?.stage).toBe("execute");
+	});
+});

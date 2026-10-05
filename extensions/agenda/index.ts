@@ -308,6 +308,12 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 		enabled: () => conductorEnabled,
+		toolReachable: (name: string) => {
+			// Active now, or deferred and loadable on demand (loadout). A tool kept
+			// inactive any other way — a `--tools` allowlist — is not reachable.
+			if (pi.getActiveTools().includes(name)) return true;
+			return pi.getAllTools().some((tool) => tool.name === name && (tool as { exposure?: string }).exposure === "deferred");
+		},
 		lastVerifyNote: () => verifyNote,
 		recordVerifyNote: (note: string) => {
 			verifyNote = note;

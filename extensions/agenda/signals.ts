@@ -78,6 +78,14 @@ export interface SessionSignals {
 	lastUserPrompt: string;
 	/** How many user turns exist. Zero means nothing has been asked yet. */
 	userTurns: number;
+	/**
+	 * Tool calls the agent has made since the newest user prompt — how far into
+	 * the asked task the agent already is. The conductor's framing advice is
+	 * only worth giving before the work is under way.
+	 */
+	toolCallsSinceUser: number;
+	/** Tool calls since the newest user prompt OR agenda injection, whichever is later. */
+	toolCallsSinceInjection: number;
 }
 
 export const emptyContextSignal: ContextSignal = { tokens: null, window: 0, percent: null };
@@ -88,13 +96,21 @@ export const emptySignals: SessionSignals = {
 	context: emptyContextSignal,
 	lastUserPrompt: "",
 	userTurns: 0,
+	toolCallsSinceUser: 0,
+	toolCallsSinceInjection: 0,
 };
 
 type RawEntry = {
+	type?: string;
 	customType?: string;
 	data?: unknown;
 	message?: { role?: string; content?: unknown };
 };
+
+function toolCallCount(content: unknown): number {
+	if (!Array.isArray(content)) return 0;
+	return content.filter((part) => (part as { type?: string })?.type === "toolCall").length;
+}
 
 /** Plain text of a message's content, whatever shape it uses. */
 function contentText(content: unknown): string {
@@ -214,13 +230,28 @@ export function deriveSignals(
 ): SessionSignals {
 	let lastUserPrompt = "";
 	let userTurns = 0;
+	let toolCallsSinceUser = 0;
+	let toolCallsSinceInjection = 0;
 	for (const raw of branch) {
 		const entry = raw as RawEntry;
-		if (entry?.message?.role !== "user") continue;
-		const text = contentText(entry.message.content);
+		if (entry?.type === "custom_message" && entry.customType === "agenda") {
+			toolCallsSinceInjection = 0;
+			continue;
+		}
+		const role = entry?.message?.role;
+		if (role === "assistant") {
+			const calls = toolCallCount(entry.message?.content);
+			toolCallsSinceUser += calls;
+			toolCallsSinceInjection += calls;
+			continue;
+		}
+		if (role !== "user") continue;
+		const text = contentText(entry.message?.content);
 		if (!text.trim()) continue;
 		userTurns++;
 		lastUserPrompt = text;
+		toolCallsSinceUser = 0;
+		toolCallsSinceInjection = 0;
 	}
 
 	return {
@@ -229,5 +260,7 @@ export function deriveSignals(
 		context: contextSignalOf(contextUsage),
 		lastUserPrompt,
 		userTurns,
+		toolCallsSinceUser,
+		toolCallsSinceInjection,
 	};
 }
