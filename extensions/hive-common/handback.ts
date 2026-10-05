@@ -64,6 +64,31 @@ export type Handback =
 export const NO_HANDBACK: Handback = { kind: "none" };
 
 /**
+ * A hand-back strong enough to hold even the agent's OWN job completions: a
+ * gate a person must open (plan, grant, an abort), or a question / decision put
+ * to them in so many words. A bare "standing by" is not: an agent that says it
+ * is standing by while its CI watcher runs must still hear the verdict.
+ */
+export function isFirmHandback(handback: Handback): boolean {
+	return handback.kind === "human" && (handback.structured || handback.reason !== "waiting");
+}
+
+/**
+ * The hand-back reduced to what a re-entry policy keys on:
+ *   - `firm`    — a person must act (isFirmHandback)
+ *   - `waiting` — the agent said it is waiting, without asking anything
+ *   - `machine` — waiting on its own job
+ *   - `none`    — a plain stop
+ */
+export type HandbackClass = "firm" | "waiting" | "machine" | "none";
+
+export function handbackClass(handback: Handback): HandbackClass {
+	if (handback.kind === "none") return "none";
+	if (handback.kind === "machine") return "machine";
+	return isFirmHandback(handback) ? "firm" : "waiting";
+}
+
+/**
  * Strip fenced code blocks and inline code before reading prose.
  *
  * Without this, a turn ending in a shell snippet (`grep -q "x" && echo "?"`) or
@@ -121,8 +146,11 @@ const HUMAN_PHRASES: readonly RegExp[] = [
 	/\bpending (?:your |human |operator )?(?:approval|sign-?off|decision)\b/i,
 	/\bblocked on (?:your\b|you\b|the (?:user|operator|controller)\b|(?:an? |the )?(?:decision|approval|grant)\b|(?:controller|operator)\b|joan\b)/i,
 	/\/plan approve\b/i,
+	/\b(?:requires?|needs?|awaits?|awaiting) (?:\w+ ){0,2}(?:authori[sz]ation|approval|sign-?off)\b/i,
+	/\bauthori[sz]ation (?:is )?(?:needed|required)\b/i,
+	/\bauthori[sz]ed [\w -]{1,40} is (?:needed|required)\b/i,
 	// German: "ich warte auf deine Freigabe", "soll ich …", "sobald du …".
-	/\b(?:auf|ohne|nach) (?:deine|ihre|eure|joans|die|eine) (?:freigabe|entscheidung|zustimmung|bestätigung|antwort|rückmeldung)\b/i,
+	/\b(?:auf|ohne|nach|bis zu)\s+(?:[\p{L}-]+\s+){0,3}(?:freigabe|entscheidung|zustimmung|bestätigung|rückmeldung)\b/iu,
 	/\b(?:soll ich|möchtest du|willst du|sobald du|sag(?:e|t)? (?:mir )?bescheid|gib mir bescheid)\b/i,
 	/\bbitte (?:bestätige|entscheide|wähle|prüfe|gib (?:mir )?(?:frei|bescheid))\b/i,
 	/\bich warte\b/i,
@@ -142,6 +170,8 @@ const WAIT_WORDS: readonly RegExp[] = [
 	/(?:^|[.!—–-]\s*)stopping(?: here| now)?\s*\.?\s*$/im,
 	/\bnothing (?:executable|actionable) (?:remains|left)\b/i,
 	/\bno executable step(?:s)? remains?\b/i,
+	/\bwork (?:is|remains) (?:stopped|paused)\b/i,
+	/\bi will not (?:retry|continue|proceed)\b/i,
 ];
 
 /** The agent is waiting on work it started itself, and will be told when it lands. */
@@ -152,6 +182,10 @@ const OWN_WORK: readonly RegExp[] = [
 	/\b(?:waiting|wait) (?:for|on) (?:run|ci\b|the (?:run|ci|build|checks?|verdict|watcher|job|pipeline|gate|signing)\b|#\d|image build)/i,
 	/\bawait(?:s|ing)? (?:run\b|ci\b|the (?:run|ci|build|checks?|verdict|watcher|job|pipeline)\b|#\d)/i,
 	/\bwill (?:report|resume|continue|inspect|harvest|push|deliver)\b[^.\n]*\b(?:when|once|after|the moment)\b/i,
+	/\b(?:standing by|holding|waiting) (?:on|for) (?:run\b|ci\b|`?bg-\d|#\d|the (?:ci )?(?:verdict|run|build|checks?|watch(?:er)?)\b)/i,
+	/\bholding the watch\b/i,
+	/\bblocked on ci\b/i,
+	/`?bg-\d+`? (?:still )?(?:watches|tracks|is (?:running|watching))\b/i,
 ];
 
 /** The last two paragraphs, code removed: where a hand-back lives when there is one. */
@@ -229,9 +263,11 @@ function hiveToolOf(call: ToolCallLike | undefined, fallbackName: string | undef
 	return `${call?.name ?? fallbackName ?? ""} ${viaMeta}`;
 }
 
-const GRANT_TOOL = /request_(?:host|credential|network|environment|resource|workspace)|get_(?:host|credential|network|environment)_request/;
+// Only the requests a PERSON decides. `request_resource` / `request_environment`
+// also answer "pending", but that is provisioning, which finishes on its own.
+const GRANT_TOOL = /\b(?:mcp__hive__|hive_)?(?:request_(?:host|credential|network)|get_(?:host|credential|network)_request)\b/;
 const GRANT_PENDING = /"(?:verdict|state|status|decision)"\s*:\s*"(?:pending|requested|awaiting[\w-]*)"/i;
-const GRANT_DECIDED = /"(?:verdict|state|status|decision)"\s*:\s*"(?:approved|granted|denied|rejected|expired|revoked|canceled|cancelled|failed|ready|active)"/i;
+const GRANT_DECIDED = /"(?:verdict|state|status|decision)"\s*:\s*"(?:approved?|granted|deny|denied|rejected|expired|revoked|canceled|cancelled|failed)"/i;
 
 /**
  * Structured hand-backs inside the final run: the tool results say a person

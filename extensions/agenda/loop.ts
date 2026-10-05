@@ -42,6 +42,9 @@ export interface LoopHooks {
 export function createLoopPolicy(hooks: LoopHooks, now: () => number = Date.now): Policy {
 	return {
 		name: "loop",
+		// A user-armed loop exists to re-wake an agent that is standing by or
+		// watching; it still stands down under a question, a plan or a grant.
+		proceedsDespite: ["machine", "waiting"],
 
 		decide(_context: PolicyContext): PolicyWork | null {
 			const loop = hooks.current();

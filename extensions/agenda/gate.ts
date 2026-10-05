@@ -147,6 +147,9 @@ export interface GateStampStore {
 export function createGatePolicy(stamps?: GateStampStore): Policy {
 	return {
 	name: "verification-loop",
+	// A red gate is worth hearing while the agent waits on its own CI watcher;
+	// never under a question or a decision put to a person.
+	proceedsDespite: ["machine"],
 
 	decide({ cwd, ledger }: PolicyContext): PolicyWork | null {
 		const loaded = loadConfig(cwd);

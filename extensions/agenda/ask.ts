@@ -25,19 +25,16 @@
  * authorize integrating the separately owned Shipping repair". Those are not
  * decisions a harness should be making by default.
  *
- * ## Why this is a nudge and not a wider guard
+ * ## How it sits next to the hand-back guard
  *
- * The obvious fix is to widen `endsWithQuestion` so the guard vetoes these too.
- * That is the wrong trade. The guard's own header explains why it is a bare
- * final-character test: a false positive there STALLS the item, silently, and
- * a stalled item looks exactly like a finished one. Its narrowness is load
- * bearing.
- *
- * So this policy deliberately covers only what the guard does NOT: endings that
- * ask for a decision without a trailing question mark. Those are not vetoed
- * today — the chain runs straight past them — so converting one into a nudge
- * cannot stall anything that is not already stalling. A wrong guess costs one
- * turn, and the model is free to ignore the nudge and carry on.
+ * `hive-common/handback.ts` now reads a prose decision request as a hand-back,
+ * so the driver stands every OTHER policy down on these endings — nothing
+ * answers the operator's decision on their behalf any more. That guard parks
+ * the session; it does not render a card. This policy is the one that still
+ * runs through a hand-back (`proceedsDespite`), because turning the prose ask
+ * into an answerable card is the only automatic turn that serves the person
+ * being asked. A wrong guess costs one turn, and the model is free to ignore
+ * the nudge.
  *
  * The pattern is the harness playbook's `ForceTool`: ask for the tool in a soft
  * prompt first, rather than compelling it. Escalating to native tool forcing is
@@ -47,7 +44,7 @@
 import { noulQuestion, type ClassifierClient } from "../typesafe-common/client.ts";
 import { atCap, record } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
-import { stripCode } from "./question-guard.ts";
+import { DECISION_PHRASES, stripCode } from "../hive-common/handback.ts";
 
 /**
  * Nudges per session.
@@ -60,37 +57,6 @@ import { stripCode } from "./question-guard.ts";
 export const MAX_ASK_NUDGES = 3;
 
 const LEDGER_ID = "ask";
-
-/**
- * Phrasings that ask a human to decide, WITHOUT a question mark.
- *
- * Deliberately request-shaped rather than topic-shaped. "confirm" alone matches
- * "I can confirm the tests pass", which is a report; "please confirm" cannot be
- * anything but a request.
- *
- * Every entry was validated against a fleet-week of real endings: this set
- * matches 4 of 7,864 and all four are genuine requests. Two candidates were cut
- * for firing on statements — "confirm whether", which matched "it will confirm
- * whether the missing install is the cause", and "unless you say otherwise",
- * which accompanies a stated assumption and a decision already taken. The
- * second is the behaviour we WANT unattended, not a question to convert.
- *
- * When adding a phrase, re-run that check. A false positive here costs one
- * wasted turn, which is cheap — but a set that drifts toward matching reports
- * turns every summary into a nudge.
- */
-const DECISION_PHRASES: readonly RegExp[] = [
-	/\blet me know\b/i,
-	/\byour call\b/i,
-	/\bshall i\b/i,
-	/\bdo you want\b/i,
-	/\bwould you like\b/i,
-	/\bwhich (?:one )?(?:would you|should i|do you)\b/i,
-	/\bbefore i proceed\b/i,
-	/\bplease (?:confirm|advise|choose|decide|pick|specify)\b/i,
-	/\bawaiting your\b/i,
-	/\bsay the word\b/i,
-];
 
 /**
  * The final sentence of `text`, with code removed.
@@ -112,10 +78,8 @@ function lastSentence(text: string): string {
 /**
  * Does this turn end by asking the user to decide, in prose?
  *
- * Returns false for anything ending in `?` — that case belongs to
- * `question-guard.ts`, which vetoes re-entry outright. Two mechanisms reacting
- * to the same ending would mean the guard's veto races a nudge that can never
- * be delivered.
+ * Returns false for anything ending in `?` — a question already reads as one,
+ * and a nudge to re-ask it as a card would only repeat it.
  */
 export function endsWithProseDecisionRequest(text: string | undefined): boolean {
 	if (!text) return false;
@@ -186,7 +150,7 @@ export function askTail(text: string): string {
 export function worthAskingJev(text: string | undefined): boolean {
 	if (!text) return false;
 	const trimmed = stripCode(text).replace(/[\s)\]}"'*_>]+$/u, "");
-	if (trimmed.endsWith("?")) return false; // question-guard.ts owns these
+	if (trimmed.endsWith("?")) return false; // already a question, see endsWithProseDecisionRequest
 	return ASK_PREFILTER.test(askTail(text));
 }
 
@@ -225,6 +189,7 @@ export interface AskHooks {
 export function createAskPolicy(hooks: AskHooks): Policy {
 	return {
 		name: "ask",
+		proceedsDespite: ["waiting", "firm"],
 
 		decide(context: PolicyContext): PolicyWork | null {
 			if (!hooks.attended()) return null;
