@@ -29,7 +29,7 @@
  *     injection per settle. (Until pi 0.87 `ctx.isIdle()` did this job; since
  *     then a triggerTurn sent from `agent_settled` is deferred until the chain
  *     returns, so the session reads idle throughout.) It reuses the driver's own guards (`turnFailureOf`,
- *     `blocksReentry`) so an error, an abort or a question is never re-driven.
+ *     `classifyHandback`) so an error, an abort or a hand-back is never re-driven.
  *     Its cap is per-session and independent of the driver's ledger; the two
  *     caps do not compose, which is by design — see the PR and autocontinue.ts.
  */

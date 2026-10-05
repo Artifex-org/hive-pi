@@ -29,7 +29,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SettleClaims } from "../hive-common/settle-claim.ts";
-import { blocksReentry } from "../agenda/question-guard.ts";
+import { classifyHandback, type Handback } from "../hive-common/handback.ts";
 import { turnFailureOf } from "../agenda/turn-outcome.ts";
 import { itemCounts } from "./lanes.ts";
 import type { PlanDoc, PlanPhase } from "./state.ts";
@@ -212,34 +212,6 @@ export interface AutoContinueDeps {
 	settleClaims?: SettleClaims;
 }
 
-/** Plain text of the most recent assistant turn, for the question guard. Fails OPEN. */
-function lastAssistantText(ctx: ExtensionContext): string | undefined {
-	try {
-		const branch = ctx.sessionManager.getBranch();
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i] as { message?: { role?: string; content?: unknown } };
-			const message = entry?.message;
-			if (!message || message.role !== "assistant") continue;
-			const content = message.content;
-			if (typeof content === "string") return content.length > 0 ? content : undefined;
-			if (Array.isArray(content)) {
-				const text = content
-					.filter((part): part is { type: string; text: string } => {
-						const p = part as { type?: string; text?: unknown };
-						return p?.type === "text" && typeof p.text === "string";
-					})
-					.map((part) => part.text)
-					.join("\n");
-				return text.length > 0 ? text : undefined;
-			}
-			return undefined;
-		}
-	} catch {
-		/* session replaced — the guard fails open, isIdle already gated us */
-	}
-	return undefined;
-}
-
 /**
  * The thin driver, called from the plan extension's `agent_before_settle` boundary.
  *
@@ -262,7 +234,14 @@ function lastAssistantText(ctx: ExtensionContext): string | undefined {
  *   - turn failed/aborted    → a turn that never reached the provider is not
  *                              evidence; auto-continuing an error is a burn loop
  *                              and auto-continuing an abort overrides the human.
- *   - ended on a question    → re-entering answers the user's question for them.
+ *   - handed back            → a question, a plan up for approval, a pending
+ *                              grant, "standing by — blocked on the controller",
+ *                              or a wait on its own CI watcher. Re-entering
+ *                              answers the person for them, or nudges a model
+ *                              that has nothing to do until a result lands
+ *                              (hive-common/handback.ts). Measured: the nudge
+ *                              landed on "Standing by — blocked on controller
+ *                              decisions" until the spin guard ran out.
  *
  * Returns the decision (for tests / callers that want it); side effect is the
  * injection and the state advance.
@@ -278,7 +257,7 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 	let counts: ReturnType<typeof itemCounts>;
 	let idle: boolean;
 	let turnFailed: boolean;
-	let assistantText: string | undefined;
+	let handback: Handback;
 	try {
 		const mode = ctx.mode;
 		if (mode !== "tui" && mode !== "rpc") return { action: "noop", reason: `mode ${mode}` };
@@ -291,7 +270,7 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 		phase = doc.phase;
 		counts = itemCounts(doc);
 		turnFailed = turnFailureOf(ctx.sessionManager.getBranch() as readonly unknown[]) !== undefined;
-		assistantText = lastAssistantText(ctx);
+		handback = classifyHandback(ctx.sessionManager.getBranch() as readonly unknown[]);
 	} catch {
 		return { action: "noop", reason: "ctx unreadable" };
 	}
@@ -304,9 +283,11 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 	if (claimedBy) return { action: "noop", reason: `settle already taken by ${claimedBy}` };
 	// A failed/aborted turn is not evidence: skip WITHOUT charging the cap.
 	if (turnFailed) return { action: "noop", reason: "last turn failed or was aborted" };
-	// A turn that ended by asking the user must not be answered automatically.
-	if (blocksReentry({ lastAssistantText: assistantText, automatic: true })) {
-		return { action: "noop", reason: "assistant ended on a question" };
+	// A turn handed back to a person, or to the agent's own pending job, is not a
+	// short stop: "continue — do not stop to ask for confirmation" is exactly the
+	// wrong thing to tell it. No charge: the model did nothing wrong.
+	if (handback.kind !== "none") {
+		return { action: "noop", reason: `handed back (${handback.kind}: ${handback.reason})` };
 	}
 
 	const decision = decideAutoContinue({

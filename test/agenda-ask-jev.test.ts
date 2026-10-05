@@ -49,7 +49,7 @@ describe("the prefilter decides only whether Jev is asked", () => {
 	it("skips a plain report", () => {
 		expect(worthAskingJev(REPORT)).toBe(false);
 	});
-	it("leaves an ending in ? to question-guard", () => {
+	it("leaves an ending in ? alone — it already reads as a question", () => {
 		expect(worthAskingJev("Should I also update the docs for you?")).toBe(false);
 	});
 	it("looks at the last two paragraphs, where the ask sat in a measured miss", () => {

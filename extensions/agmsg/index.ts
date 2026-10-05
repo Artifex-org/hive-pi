@@ -26,6 +26,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createWaker } from "../hive-common/waker.ts";
 
 import { registerAgmsgCommands } from "./commands.ts";
 import { AgmsgController } from "./controller.ts";
@@ -44,6 +45,7 @@ export default function (pi: ExtensionAPI) {
 	 * callback long after the emit that minted it returned.
 	 */
 	let latestCtx: ExtensionContext | null = null;
+	const waker = createWaker(pi, "agmsg");
 
 	const withCtx = (fn: (ctx: ExtensionContext) => void): void => {
 		const ctx = latestCtx;
@@ -103,19 +105,18 @@ export default function (pi: ExtensionAPI) {
 			sessionId: ctx.sessionManager.getSessionId?.(),
 			hiveLaunchId: process.env.HIVE_LAUNCH_ID?.trim() || undefined,
 			inject: (message) => {
-				pi.sendMessage(
+				// The waker decides whether this wakes an idle session and never
+				// lets it extend a run past a hand-back (hive-common/waker.ts). A
+				// peer's message is `message`-kind: the agent may be waiting on
+				// exactly this sender, so only a structured hand-back holds it.
+				waker.deliver(
 					{
 						customType: "agmsg",
 						content: formatInjection(message),
 						display: true,
 						details: { team: message.team, from: message.from, to: message.to, ts: message.ts },
 					},
-					// followUp, not steer: a message that arrives mid-tool-call waits
-					// for the agent to finish what it was doing rather than cutting in
-					// between a tool call and its result. triggerTurn is what makes an
-					// IDLE session answer at all — without it the message sits unread
-					// until the human types something.
-					{ deliverAs: "followUp", triggerTurn: true },
+					"message",
 				);
 			},
 			notify: (text) => withCtx((c) => c.ui.notify(text, "warning")),

@@ -11,7 +11,7 @@
  *
  *   1. cheap synchronous rejects (worker process, re-entrancy, headless mode)
  *   2. read EVERYTHING off `ctx` — it throws once the session is replaced
- *   3. the question guard can veto before any work runs
+ *   3. the hand-back guard (hive-common/handback.ts) can veto before any work runs
  *   4. walk the policy chain in fixed order, running each policy that wants the
  *      settle, until one of them INJECTS
  *   5. re-check `generation` after every await; the session may be replaced
@@ -32,7 +32,7 @@ import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-com
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { emptyLedger, type LedgerState } from "./ledger.ts";
 import type { MetricOutcome, Policy } from "./policy.ts";
-import { blocksReentry } from "./question-guard.ts";
+import { classifyHandback, type Handback, handbackClass, NO_HANDBACK } from "../hive-common/handback.ts";
 import { deriveSignals, emptySignals, type SessionSignals } from "./signals.ts";
 import { type TurnFailure, turnFailureOf } from "./turn-outcome.ts";
 
@@ -63,13 +63,13 @@ export interface DriverHandle {
 	ledger(): LedgerState;
 	/** Wipe per-session state. Called on `session_start` and by `/agenda stop`. */
 	reset(): void;
-	/** Terminal state set by the question guard, surfaced in `/agenda`. */
+	/** Terminal state set by the hand-back guard, surfaced in `/agenda`. */
 	blockedOnUser(): boolean;
 	/**
 	 * Run the policy chain NOW, outside a settle — the timer's entry point.
 	 *
 	 * Fire-and-forget: a timer has nowhere to await. It runs the identical chain
-	 * as `agent_settled`, so the caps, the question guard and the idle check all
+	 * as `agent_settled`, so the caps, the hand-back guard and the idle check all
 	 * apply. No-ops when the session is busy or already inside the chain.
 	 */
 	pump(): void;
@@ -150,7 +150,21 @@ function readSignals(ctx: ExtensionContext): SessionSignals {
 	}
 }
 
-/** Text of the most recent assistant turn, for the question guard. */
+/**
+ * The session's hand-back state. Fails OPEN to "no hand-back", like the text
+ * read below: an unreadable branch is already a stale ctx, which the caller
+ * rejects on its own, and a guess of "the human is needed" would silently park
+ * a legitimate gate injection.
+ */
+function readHandback(ctx: ExtensionContext): Handback {
+	try {
+		return classifyHandback(ctx.sessionManager.getBranch() as readonly unknown[]);
+	} catch {
+		return NO_HANDBACK;
+	}
+}
+
+/** Text of the most recent assistant turn, for the policies that read it. */
 function lastAssistantText(ctx: ExtensionContext): string | undefined {
 	try {
 		const branch = ctx.sessionManager.getBranch();
@@ -215,6 +229,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		let transcript: string;
 		let signals: SessionSignals;
 		let turnFailure: TurnFailure | undefined;
+		let handback: Handback;
 		let setStatus: (text: string) => void;
 		let isIdle: () => boolean;
 		try {
@@ -224,6 +239,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			transcript = recentTranscript(ctx);
 			signals = readSignals(ctx);
 			turnFailure = readTurnFailure(ctx);
+			handback = readHandback(ctx);
 			setStatus = (text: string) => {
 				try {
 					ctx.ui.setStatus("agenda", text);
@@ -262,18 +278,17 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		// settle-claim.ts) is the mutual exclusion now.
 		if (!isIdle() || settleClaims.claimedBy()) return;
 
-		// The question guard is a PRE-condition on automatic re-entry, not a
+		// The hand-back guard is a PRE-condition on automatic re-entry, not a
 		// filter on the injection. Vetoing here means the policy's expensive work
 		// never runs and nothing is charged to its budget — charging for an
 		// injection the model never saw would spend a cap it had no chance to
 		// satisfy. It also means the guard covers every policy for free.
 		// A turn that did not RUN is not evidence — see turn-outcome.ts.
 		//
-		// This sits before the question guard because it is the stronger claim:
-		// the guard asks whether the assistant said something that needs a human,
-		// while this asks whether there was a turn at all. Both mean "do not
-		// re-enter", and neither charges the ledger, because charging for an
-		// injection the model never saw spends a cap it had no chance to satisfy.
+		// This sits before the hand-back guard because it is the stronger claim:
+		// the guard asks whether the assistant handed the turn to someone, while
+		// this asks whether there was a turn at all. Both mean "do not re-enter",
+		// and neither charges the ledger.
 		//
 		// `aborted` sets blockedOnUser: the human stopped this deliberately, and
 		// `/agenda` should say so rather than look idle for no reason.
@@ -282,11 +297,20 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			return;
 		}
 
-		if (blocksReentry({ lastAssistantText: assistantText, automatic: true })) {
-			blockedOnUser = true;
-			return;
-		}
-		blockedOnUser = false;
+		// A turn handed back — to a person (a plan up for approval, a pending
+		// grant, a question, "ich warte auf deine Freigabe") or to the agent's own
+		// running job — is not a stop to re-drive. Before this, only a trailing
+		// `?` stood a policy down, and the goal judge re-drove an explicit
+		// "waiting for your approval" seven times in one measured session.
+		// Policies that legitimately act on a hand-back say so with
+		// `proceedsDespite` (ask converts a prose decision into a card; the gate
+		// and a user-armed loop still run while the agent waits on its own job).
+		blockedOnUser = handback.kind === "human";
+		const held = handbackClass(handback);
+		const eligible = options.policies.filter(
+			(policy) => held === "none" || policy.proceedsDespite?.includes(held) === true,
+		);
+		if (eligible.length === 0) return;
 
 		const gen = generation;
 
@@ -304,7 +328,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			// "At most one injection per settle" is preserved: we stop at the first
 			// injection. Every policy that ran still reports its own metric, so a
 			// green gate followed by a goal evaluation records both.
-			for (const policy of options.policies) {
+			for (const policy of eligible) {
 				const context = { cwd, ledger, lastAssistantText: assistantText, transcript, signals, signal: ctx.signal };
 				const work = policy.decide(context);
 				if (!work) continue;

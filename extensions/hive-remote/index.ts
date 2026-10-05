@@ -73,6 +73,7 @@ import {
 	type ResolvedAuth,
 } from "../hive-common/identity.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
+import { createWaker } from "../hive-common/waker.ts";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
@@ -341,6 +342,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * agent loop is not.
 	 */
 	let latestCtx: ExtensionContext | null = null;
+	const teamWaker = createWaker(pi, "team-message");
 	const remember = (ctx: ExtensionContext) => {
 		latestCtx = ctx;
 	};
@@ -1579,11 +1581,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// The message is still DELIVERED and still folded, so nothing is
 				// lost: it sits in the queue for whenever the session can run
 				// again, exactly as a non-waking team category already does.
+				// A direct message goes through the shared waker: it may wake an
+				// idle agent, but never stretches a run past a hand-back, and a
+				// structured hand-back (plan approval, pending grant) holds it
+				// (hive-common/waker.ts). Every other category stays non-waking.
 				const wedged = overflowWedged(latestCtx);
-				pi.sendMessage(
-					{ customType: "team-message", content: rendered, display: true },
-					{ deliverAs: "followUp", triggerTurn: !wedged && triggersTurn(msg.category) },
-				);
+				const notice = { customType: "team-message", content: rendered, display: true };
+				if (!wedged && triggersTurn(msg.category)) teamWaker.deliver(notice, "message");
+				else pi.sendMessage(notice, { deliverAs: "followUp", triggerTurn: false });
 				foldNotice(transcript, rendered, Date.now(), "team");
 				if (wedged) {
 					// The only place a human learns why their teammate's message
