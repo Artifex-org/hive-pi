@@ -7,8 +7,12 @@ prompt; its exact scanning implementation is not public in the linked source
 list. This extension implements that idea, not undocumented plugin parity.
 
 **Enabled by default in pi terminal sessions and attached Hive web conversations.** No enable command is required.
-Scanning automatically sends assistant-prose excerpts to the currently selected
-model's provider and consumes that account's quota, within the limits below.
+Scanning automatically sends assistant-prose excerpts to a configured low-tier
+model provider and consumes that account's quota, within the limits below. Set
+`PI_YOU_SHOULD_KNOW_MODEL=provider/id` to select an explicit model; otherwise the
+extension uses only the exact `low` key from the Hive agent-mode catalog. It
+never falls back to the currently selected session model or delegation model.
+If the low model or its credentials are unavailable, scanning fails closed.
 
 Disable in the current session with:
 
@@ -29,13 +33,17 @@ startup default instead. No workstation settings files are changed.
 | `/you-should-know show` | All retained notes, with their exact source quotes |
 | `/you-should-know dismiss` | Clear notes and cancel pending work; repeated quotes stay suppressed |
 | `/you-should-know off` | Stop/cancel scans and hide the widget; retained notes remain available via `show` |
+| `/you-should-know record-on` | Request recording of future eligible sources, independently of scanning/highlights |
+| `/you-should-know record-off` | Stop unissued recording locally and request an ordered server cutoff; retain actual receipts |
 
 ## What it catches
 
 Buried missing-verification caveats, blockers, user actions and consequential
-decisions. A tool-less side call to the **currently selected model**, using pi's
-configured provider/auth, returns up to three short notes. Each must include an
-exact quote present in the scanned excerpt. Routine progress, success summaries,
+decisions. A tool-less side call to the configured **low-tier model**, using pi's
+configured provider/auth, returns up to three short notes with source-grounded
+classification and optional expected outcome/impact. Each must include an
+exact quote present in the scanned excerpt; expected/impact must also be exact
+source excerpts rather than inferred consequences. Routine progress, success summaries,
 hypotheticals, quoted examples and resolved issues are excluded by the prompt.
 
 The host's native above-editor widget shows the newest three notes; `show`
@@ -49,8 +57,13 @@ an old note. Dismiss obsolete notes. Silence is not a clean bill of health.
 
 ## Boundaries and cost
 
-- Only finalized assistant **text** is scanned. No thinking, user prompts, tool
-  arguments/results, files, Claude transcripts or independent investigation.
+- Finalized assistant **text** is scanned. `PI_YOU_SHOULD_KNOW_CAPTURE_TOOLS=1`
+  additionally opts into explicit failed SDK tool-result text, bounded to 2,000
+  characters and referenced by tool-call ID. Normal results, expected lookup
+  misses and scanner/control/papercut acknowledgments are excluded. No thinking,
+  user prompts, raw tool arguments, result-detail dumps, files, Claude transcripts
+  or independent investigation are captured. Evidence is redacted before model
+  or Jev egress; source provenance remains client-reported, not server-verified.
 - The excerpt keeps at most 16,000 characters of recent prose, explicitly marking
   an omitted beginning. New output is coalesced while a scan is running.
 - First scan is debounced by one second, or scheduled when the agent settles.
@@ -58,10 +71,12 @@ an old note. Dismiss obsolete notes. Silence is not a clean bill of health.
   a 60-second hard deadline, 2,048 answer tokens, and **20 attempted scans per
   active session branch**. Failures count; toggling off/on does not reset the
   budget. Fork/tree navigation restores the destination branch's state.
-- Enabled scanning sends excerpts to your selected model's provider and
-  consumes that account's quota. No separate analytics or telemetry is added.
+- Enabled scanning sends excerpts to the configured low-tier model's provider
+  and consumes that account's quota. No separate analytics or telemetry is added.
   `/you-should-know status` reports completed calls' provider-reported usage, separately from
   pi's main-session totals; canceled calls may still incur provider charges.
+  Jev's reported tokens are disclosed separately; its unreported monetary cost is
+  not estimated or added to extraction cost.
 - Event handlers do not await a model. A detached timer performs the scan; it
   does not delay tools, auto-continue the agent or change its context. No tools,
   messages, system-prompt changes or provider-request hooks are registered.
@@ -102,6 +117,46 @@ branch restore, worker exclusions, quota limits and canceled-transport ownership
 remain the same as in the terminal. Requires the companion Hive server/web
 scanner-state contract; older servers do not gain web controls from this package
 alone.
+
+## Recording and advisory classification
+
+Highlights and recording are independent. Stable SHA-256 finding IDs derive from
+session/source/quote, never from model output. Findings persist as non-context
+custom session entries separate from the ten dismissible highlights, with a
+200-record local cap. Dismissal retains the ledger and receipts. Restore reads
+only the active branch; a fork or different server session cannot transplant
+recording captures.
+
+An existing authenticated Hive attachment with both `streamDeltas` and
+`reportStatus` consent discovers the versioned findings endpoint before uploading.
+Recording initially follows the server's policy (default on); standalone findings
+remain local, with no destination-delivery claim. A source keeps the recording
+flag, server session and revision from capture, checked again at scan start and
+completion. Off/re-enable cannot backfill old sources. Local recording controls
+use retry-safe, stable-ID compare-and-set PUTs; remote controls apply the revision
+allocated by Hive without another PUT. Failed local stop requests stay locally
+paused until resolved or superseded by a newer explicit server command.
+
+The server, not either model, establishes owner/tenant/project permissions and
+routes eligible friction to papercuts, shared incidents to the project board,
+and actionable Hive-product defects/improvements to the configured Hive Linear
+report team. Other repositories' automatic Linear routing is blocked. Stable
+batches contain at most 20 findings and stay below the server's byte limit.
+Responses alone supply receipts: queued is not delivered. Retries are bounded to
+five per capture/control/reconnect, and POST drives dispatch; this is not an
+autonomous server outbox. Retry exhaustion or client exit can leave an unissued
+queue waiting for another capture/reconnect. Ambiguous Linear creates remain
+uncertain for operator reconciliation, never blindly retried.
+
+If the existing TypeSafe/Jev config explicitly enables it and provides usable
+credentials, a long-lived client performs **shadow-only** attention and category
+choices after low-tier extraction. Fixed named choices include `none`; either
+choice below 0.85 confidence or `none` abstains. Configuration/key absence,
+malformed answers, timeouts and cancellation are explicit outcomes. Redacted,
+bounded candidates are data, never question definitions or instructions. Jev
+cannot grade severity, suppress a grounded highlight, authorize a destination or
+alter routing. Its non-context shadow entries retain baseline/verdict pairs for
+future evaluation; this change does not promote it based on unmeasured relevance.
 
 ## Verification
 

@@ -23,6 +23,7 @@
 
 import { rehydratePlan, toEntry } from "../plan/state.ts";
 import { YSK_CONTROL_CHANNEL, YSK_STATE_CHANNEL, YSK_REMOTE_CHANNEL, readYouShouldKnowAction, type YouShouldKnowState } from "../hive-common/you-should-know.ts";
+import { createYouShouldKnowRemoteBridge } from "./you-should-know.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -554,10 +555,12 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * by the config, which only says the operator would permit it.
 	 */
 	let scannerServerSupported = false;
+	const yskBridge = createYouShouldKnowRemoteBridge(pi, { allowed: () => cfg.enabled && cfg.streamDeltas && cfg.reportStatus && !!auth && !!sessionID });
 	const announceRemoteAnswers = (available: boolean) => {
 		try {
 			pi.events.emit(QUESTION_REMOTE_CHANNEL, { available } satisfies QuestionRemoteEvent);
-			pi.events.emit(YSK_REMOTE_CHANNEL, { available: available && cfg.reportStatus && scannerServerSupported });
+			if (!available || !cfg.streamDeltas || !cfg.reportStatus) yskBridge.detach();
+			pi.events.emit(YSK_REMOTE_CHANNEL, { available: available && cfg.reportStatus && scannerServerSupported, serverSessionId: available ? sessionID : undefined });
 		} catch {
 			/* no bus, or nothing waiting */
 		}
@@ -1450,9 +1453,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			}
 			case "you_should_know": {
 				if (!canControlYouShouldKnow()) return;
-				let action;
-				try { action = readYouShouldKnowAction(JSON.parse(cmd.payload)); } catch { return; }
-				if (action) pi.events.emit(YSK_CONTROL_CHANNEL, { action, command_id: cmd.id });
+				let payload: { action?: unknown; recording_revision?: unknown };
+				try { payload = JSON.parse(cmd.payload); } catch { return; }
+				const action = readYouShouldKnowAction(payload);
+				if (action === "record_on" || action === "record_off") {
+					if (!Number.isSafeInteger(payload.recording_revision) || (payload.recording_revision as number) < 0) return;
+					yskBridge.applyRecording(action === "record_on", payload.recording_revision as number);
+				}
+				if (action) pi.events.emit(YSK_CONTROL_CHANNEL, { action, command_id: cmd.id, recording_revision: payload.recording_revision });
 				return;
 			}
 			case "set_fast": {
@@ -1858,6 +1866,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// re-creating, precisely, the stuck chat this feature exists to end.
 				scannerServerSupported = typeof res.body?.can_control_you_should_know === "boolean";
 				announceRemoteAnswers(cfg.streamDeltas);
+				yskBridge.attach(auth, resolvedSession);
 				// RESUME FROM THE SERVER'S WATERMARK, before anything can be sent.
 				//
 				// This is the whole point of `last_seq` coming back from attach, and
@@ -1998,6 +2007,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	}
 
 	function cleanup(): void {
+		yskBridge.detach();
 		invalidateRemoteLifecycle(lifecycle);
 		attaching = false;
 		sessionID = null;

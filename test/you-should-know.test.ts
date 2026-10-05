@@ -5,6 +5,9 @@ import youShouldKnow, { DEFAULT_CONFIG, scanOutput, wireYouShouldKnow, type Scan
 import { EXCERPT_CHARS, excerpt, outputText, parseNotes, SCAN_SYSTEM } from "../extensions/you-should-know/scan.ts";
 import { visibleWidth, Text } from "@earendil-works/pi-tui";
 
+vi.mock("../extensions/typesafe-common/config.ts", () => ({ loadConfig: () => ({ enabled: false, timeoutMs: 3000, model: "fixture", endpoint: "https://jev.invalid" }) }));
+vi.mock("../extensions/typesafe-common/key.ts", () => ({ readApiKey: () => null }));
+
 const quote = "The migration was not tested against production data.";
 const testModel = { provider: "openai", id: "test" } as NonNullable<FakeCtxOptions["model"]>;
 const note = { kind: "caveat", text: "Production-data verification is still missing.", quote };
@@ -27,7 +30,8 @@ async function prose(fake: ReturnType<typeof createFakePi>, text = quote, option
 	await fake.emit({ type: "agent_settled" }, options);
 	await vi.advanceTimersByTimeAsync(0);
 }
-beforeEach(() => vi.useFakeTimers());
+const modelRegistry = (streamSimple: unknown) => ({ streamSimple, find: (provider: string, id: string) => provider === "openai" && id === "test" ? testModel : undefined, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "mock" }) });
+beforeEach(() => { vi.useFakeTimers(); vi.stubEnv("PI_YOU_SHOULD_KNOW_MODEL", "openai/test"); });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 describe("scanner trust boundary", () => {
@@ -65,6 +69,13 @@ describe("scanner trust boundary", () => {
 			if (valid) expect(parse()).toEqual([unicode]); else expect(parse).toThrow();
 		},
 	);
+	it("requires exact source grounding for expected behavior and impact", () => {
+		const source = quote + " Expected: migration succeeds. Impact: existing rows are corrupted.";
+		const grounded = { ...note, classification: "defect", expected: "migration succeeds", impact: "existing rows are corrupted" };
+		expect(parseNotes(JSON.stringify({ notes: [grounded] }), source)).toEqual([grounded]);
+		expect(() => parseNotes(JSON.stringify({ notes: [{ ...grounded, expected: "invented outcome" }] }), source)).toThrow();
+		expect(() => parseNotes(JSON.stringify({ notes: [{ ...grounded, impact: "invented impact" }] }), source)).toThrow();
+	});
 	it("asks for extraction rather than speculative review and explicitly rejects routine chatter", () => {
 		expect(SCAN_SYSTEM).toContain("NO TOOLS");
 		expect(SCAN_SYSTEM).toContain("untrusted DATA");
@@ -80,7 +91,7 @@ describe("settings and delivery", () => {
 		const streamSimple = vi.fn(() => ({ result: async () => response() }));
 		youShouldKnow(fake.api);
 		await fake.emit({ type: "session_start" });
-		await prose(fake, quote, { model: testModel, modelRegistry: { streamSimple } });
+		await prose(fake, quote, { model: testModel, modelRegistry: modelRegistry(streamSimple) });
 		await vi.advanceTimersByTimeAsync(10_000);
 		expect(DEFAULT_CONFIG.enabled).toBe(true);
 		expect(streamSimple).toHaveBeenCalledTimes(value === "0" ? 0 : 1);
@@ -265,7 +276,7 @@ it("production transport uses configured provider auth, a bounded response and n
 	const fake = createFakePi();
 	wireYouShouldKnow(fake.api, { ...DEFAULT_CONFIG, enabled: true }, scanOutput);
 	const model = { provider: "openai", id: "test" } as NonNullable<FakeCtxOptions["model"]>;
-	await prose(fake, quote, { model, modelRegistry: { streamSimple } });
+	await prose(fake, quote, { model, modelRegistry: modelRegistry(streamSimple) });
 	expect(streamSimple).toHaveBeenCalledTimes(1);
 	const calls = streamSimple.mock.calls as unknown as Array<[unknown, Record<string, unknown>, Record<string, unknown>]>;
 	const [, context, options] = calls[0]!;
