@@ -3,11 +3,31 @@
 The typed client for the TypeSafe ("Jev") System One API, and the two-stage tool
 router built on it.
 
-**Consumers:** `agenda/drift.ts` asks Jev first for the drift probe and falls
-back to its `pi -p` probe when Jev does not answer. The router is still
-unwired. A consumer builds its client once, at construction, and is only live
-with `enabled: true` in `~/.pi/agent/hive-telemetry/typesafe.config.json` plus a
-key (`$TYPESAFE_API_KEY` or the `typesafe` credential in pi's auth store).
+**Consumers:** agenda drift and prose-question probes use `native.ts` and
+`ctx.modelRegistry.classify()`. Standalone replay/eval tools retain the HTTP
+client in `client.ts`; agenda has no HTTP fallback. Drift retains its incumbent
+`pi -p` probe when classification cannot answer; a failed question classification
+never produces a nudge.
+
+`enabled: true` in `~/.pi/agent/hive-telemetry/typesafe.config.json` remains
+mandatory. `provider` defaults to `typesafe`, `model` to `jev-latest`; pi owns
+request-time credentials and provider routing. Missing context/catalog is
+`disabled/no_model`; credential/provider failures remain non-OK. The native SDK
+exposes error prose, not structured HTTP status/Retry-After, so these failures
+are redacted `transport_error`, not fabricated HTTP categories. Native
+`bool.probability` is checked and normalized to the existing advisory `noul`
+domain; choice/score checks are unchanged. Reported native token counts and
+catalog costs are retained, not estimated. This does not itself add classifier
+costs to pi's session footer.
+
+Object state keeps its JSON keys; scalar/array state is wrapped under `data`
+for the native object-only context. Deadline expiry ends the await even if a
+provider ignores abort. Caller cancellation is propagated when a signal exists;
+pi 1.0.2 has no core signal at before-settle after a model turn ends, so that
+case relies on the independent deadline and the SDK continuation-abort veto.
+
+A non-default legacy `endpoint` is refused: configure the provider endpoint in
+pi `models.json` instead. No settings or credentials are migrated automatically.
 
 ## This directory is NOT an extension
 
@@ -26,7 +46,8 @@ asserts both facts so the next person cannot undo them by accident.
 | --- | --- |
 | `key.ts` | `readApiKey()` — `$TYPESAFE_API_KEY`, else pi's auth store, vetted |
 | `config.ts` | `configFrom`/`loadConfig`, with `enabled: raw.enabled === true` |
-| `client.ts` | questions, answers, the outcome union, the round trip |
+| `client.ts` | questions, answer validation, outcomes, standalone HTTP client |
+| `native.ts` | agenda's registry transport, opt-in, deadlines, validated answers |
 | `liveness.ts` | the outcome tally that tells "agreed" apart from "never called" |
 | `router.ts` | `<server>/<group>` categories and the structural floor |
 | `replay.ts` | the foldable half of `scripts/typesafe-route-replay.ts` |

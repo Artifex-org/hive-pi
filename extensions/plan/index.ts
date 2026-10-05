@@ -68,6 +68,7 @@ import { currentLane, isObservedKind, targetLane } from "./lanes.ts";
 import {
 	createAutoContinueState,
 	runAutoContinue,
+	AUTOCONTINUE_MESSAGE_TYPE,
 	type AutoContinueState,
 } from "./autocontinue.ts";
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
@@ -1491,13 +1492,18 @@ export default function (pi: ExtensionAPI) {
 	// agenda driver (at most one injection per settle). See autocontinue.ts and
 	// hive-common/settle-claim.ts.
 	const settleClaims = trackSettleClaims(pi);
-	pi.on("agent_settled", (_event, ctx) => {
-		runAutoContinue(pi, ctx, {
+	pi.on("agent_before_settle", (event, ctx) => {
+		if (event.outcome !== "completed" || event.continue) return;
+		const decision = runAutoContinue(pi, ctx, {
 			loadDoc: (c) => rehydratePlan(branchEntries(c)) ?? emptyPlan(Date.now()),
 			state: autoContinue,
 			uiPromptOpen,
 			settleClaims,
-		});
+		}, true);
+		return decision.action === "continue" ? {
+			entries: [...event.entries, { type: "custom_message", customType: AUTOCONTINUE_MESSAGE_TYPE, content: decision.nudge, display: true }],
+			continue: true,
+		} : undefined;
 	});
 
 	/* ---------------------------------------------------------------------- */

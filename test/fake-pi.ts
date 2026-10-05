@@ -118,6 +118,7 @@ export interface FakeCtxOptions {
 	confirm?: boolean;
 	idle?: boolean;
 	pendingMessages?: boolean;
+	signal?: AbortSignal;
 	/** Observe ctx.abort(), used to exercise an operator interrupt end to end. */
 	onAbort?: () => void;
 	/**
@@ -254,7 +255,7 @@ function makeCtx(
 		isIdle: () => options.idle ?? true,
 		hasPendingMessages: () => options.pendingMessages ?? false,
 		isProjectTrusted: () => true,
-		signal: undefined,
+		signal: options.signal,
 		abort: () => options.onAbort?.(),
 		getContextUsage: () => undefined,
 		compact: () => sinks.onCompact(),
@@ -448,17 +449,39 @@ export function createFakePi(): FakePi {
 			// only ever test that a guard ran, never WHAT it decided.
 			const results: unknown[] = [];
 			const turnsBefore = messages.filter((m) => m.options?.triggerTurn).length;
+			type Draft = { type: string; customType?: string; content?: string; display?: boolean };
+			let entries: Draft[] = [];
+			let shouldContinue = false;
 			for (const handler of handlers.get(event.type) ?? []) {
-				results.push(await handler(event, ctx));
-			}
-			// pi 0.87+: a triggerTurn sent from `agent_settled` is deferred and run
-			// once every handler has returned — and running it emits `agent_start`.
-			// Modelled here so per-settle state that resets on agent_start (the
-			// settle claim) behaves in tests the way it does in pi.
-			if (event.type === "agent_settled" && messages.filter((m) => m.options?.triggerTurn).length > turnsBefore) {
-				for (const handler of handlers.get("agent_start") ?? []) {
-					await handler({ type: "agent_start" }, ctx);
+				const currentEvent = event.type === "agent_before_settle"
+					? { ...event, entries, continue: shouldContinue, outcome: event.outcome ?? "completed" }
+					: event;
+				const result = await handler(currentEvent, ctx);
+				results.push(result);
+				if (event.type === "agent_before_settle" && result && typeof result === "object") {
+					const override = result as { entries?: Draft[]; continue?: boolean };
+					if (override.entries !== undefined) entries = override.entries;
+					if (override.continue !== undefined) shouldContinue = override.continue;
 				}
+			}
+			// Actionable boundaries return proposed entries. Pi commits those only
+			// after the complete handler chain, then flushes custom messages and
+			// starts exactly one continuation when requested.
+			if (event.type === "agent_before_settle") {
+				for (const entry of entries) {
+					if (entry.type === "custom_message") {
+						messages.push({ customType: entry.customType!, content: entry.content as string, display: entry.display });
+					}
+				}
+				if (shouldContinue) {
+					for (const handler of handlers.get("agent_start") ?? []) {
+						await handler({ type: "agent_start" }, ctx);
+					}
+				}
+			}
+			// pi 0.87+: triggerTurn work from final notifications is deferred.
+			if (event.type === "agent_settled" && messages.filter((m) => m.options?.triggerTurn).length > turnsBefore) {
+				for (const handler of handlers.get("agent_start") ?? []) await handler({ type: "agent_start" }, ctx);
 			}
 			return results;
 		},

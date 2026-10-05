@@ -204,7 +204,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		ledger = emptyLedger;
 	});
 
-	async function runChain(ctx: ExtensionContext): Promise<void> {
+	async function runChain(ctx: ExtensionContext, boundary = false): Promise<string | undefined> {
 		if (options.isWorker) return;
 		if (inSettle) return; // our own injected turn settling — never recurse
 
@@ -236,7 +236,8 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			// session is gone, and injecting into it is never right.
 			isIdle = () => {
 				try {
-					return ctx.isIdle() && !ctx.hasPendingMessages();
+					// Before-settle is inside the active SDK run; only timer pumps need idle.
+					return !ctx.signal?.aborted && (boundary || ctx.isIdle()) && !ctx.hasPendingMessages();
 				} catch {
 					return false;
 				}
@@ -304,13 +305,13 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			// injection. Every policy that ran still reports its own metric, so a
 			// green gate followed by a goal evaluation records both.
 			for (const policy of options.policies) {
-				const context = { cwd, ledger, lastAssistantText: assistantText, transcript, signals };
+				const context = { cwd, ledger, lastAssistantText: assistantText, transcript, signals, signal: ctx.signal };
 				const work = policy.decide(context);
 				if (!work) continue;
 
 				if (work.status) setStatus(work.status);
 				const outcome = await work.run();
-				if (gen !== generation) return; // session replaced mid-await
+				if (gen !== generation || ctx.signal?.aborted) return; // replaced or cancelled mid-await
 				setStatus("");
 
 				// Publish on the in-process bus for hive-telemetry. Emitting with no
@@ -328,14 +329,20 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 				// then would cut into their turn.
 				if (!isIdle() || settleClaims.claimedBy()) return;
 
+				if (boundary) {
+					try {
+						pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: work.name } satisfies AgendaInjectionEvent);
+						settleClaims.claim("agenda");
+						return outcome.inject;
+					} catch {
+						return; // session went away mid-check
+					}
+				}
 				try {
 					pi.sendMessage(
 						{ customType: "agenda", content: outcome.inject, display: true },
 						{ deliverAs: "followUp", triggerTurn: true },
 					);
-					// The policy NAME only (enum, never the injected prose): the
-					// doorbell that lets hive-remote show the harness steering as a
-					// distinct row in the workspace transcript (HIV-1242).
 					pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: work.name } satisfies AgendaInjectionEvent);
 					settleClaims.claim("agenda");
 				} catch {
@@ -350,9 +357,21 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		}
 	}
 
-	pi.on("agent_settled", async (_event, ctx) => {
+	pi.on("agent_before_settle", async (event, ctx) => {
 		heldCtx = ctx;
-		await runChain(ctx);
+		if (event.outcome !== "completed") {
+			blockedOnUser = event.outcome === "aborted";
+			return;
+		}
+		if (event.continue) return; // another boundary handler already requested a turn
+		const injection = await runChain(ctx, true);
+		return injection ? {
+			entries: [...event.entries, { type: "custom_message", customType: "agenda", content: injection, display: true }],
+			continue: true,
+		} : undefined;
+	});
+	pi.on("agent_settled", (_event, ctx) => {
+		heldCtx = ctx; // final observation only; no policy work or continuation
 	});
 
 	return {

@@ -74,27 +74,27 @@ function metricEvents() {
 describe("verification-loop — when it stays silent", () => {
 	it("does nothing when the repo has no .pi/harness.json", async () => {
 		const cwd = makeRepo(null);
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(0);
 		expect(metricEvents()).toHaveLength(0);
 	});
 
 	it("does nothing when the gate passes", async () => {
 		const cwd = makeRepo(PASSING);
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(0);
 	});
 
 	it.each(["print", "json"] as const)("does nothing in %s mode (session is replaced at settle)", async (mode) => {
 		const cwd = makeRepo(FAILING);
-		await pi.emit({ type: "agent_settled" }, { cwd, mode });
+		await pi.emit({ type: "agent_before_settle" }, { cwd, mode });
 		expect(pi.messages).toHaveLength(0);
 		expect(metricEvents()).toHaveLength(0);
 	});
 
 	it("does nothing when `check` is present but blank", async () => {
 		const cwd = makeRepo({ check: "   " });
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(0);
 	});
 
@@ -103,26 +103,26 @@ describe("verification-loop — when it stays silent", () => {
 		mkdirSync(join(root, ".git"), { recursive: true });
 		mkdirSync(join(root, ".pi"), { recursive: true });
 		writeFileSync(join(root, ".pi", "harness.json"), "{ not json");
-		await pi.emit({ type: "agent_settled" }, { cwd: root });
+		await pi.emit({ type: "agent_before_settle" }, { cwd: root });
 		expect(pi.messages).toHaveLength(0);
 	});
 });
 
 describe("verification-loop — the injection", () => {
-	it("injects exactly once per settle, as a turn-triggering followUp", async () => {
+	it("returns exactly one boundary draft and requests one continuation", async () => {
 		const cwd = makeRepo(FAILING);
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 
 		expect(pi.messages).toHaveLength(1);
 		const injected = pi.messages[0];
 		expect(injected.customType).toBe("agenda"); // CHANGED (1) — was "verification-loop"
 		expect(injected.display).toBe(true);
-		expect(injected.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+		expect(injected.options).toBeUndefined(); // returned draft, no sendMessage side effect
 	});
 
 	it("names the gate, quotes the output tail, and states the remaining budget", async () => {
 		const cwd = makeRepo(FAILING);
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 
 		const content = pi.messages[0].content;
 		expect(content).toContain("The project gate `echo BOOM >&2; exit 1` FAILED.");
@@ -133,7 +133,7 @@ describe("verification-loop — the injection", () => {
 
 	it("switches to the final-attempt wording on the last allowed injection", async () => {
 		const cwd = makeRepo({ ...FAILING, maxInjections: 1 });
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 
 		expect(pi.messages[0].content).toContain(
 			"This was the final automatic attempt — stop, summarize what is still failing, and hand back to the user.",
@@ -158,23 +158,23 @@ describe("verification-loop — the injection", () => {
 
 	it("stops injecting once maxInjections is reached", async () => {
 		const cwd = makeRepo({ ...FAILING, maxInjections: 2 });
-		for (let i = 0; i < 5; i++) await pi.emit({ type: "agent_settled" }, { cwd });
+		for (let i = 0; i < 5; i++) await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(2);
 	}, SPAWN_BUDGET_MS);
 
 	it("defaults to 3 injections when maxInjections is absent", async () => {
 		const cwd = makeRepo(FAILING);
-		for (let i = 0; i < 5; i++) await pi.emit({ type: "agent_settled" }, { cwd });
+		for (let i = 0; i < 5; i++) await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(3);
 	}, SPAWN_BUDGET_MS);
 
 	it("resets the injection budget on session_start", async () => {
 		const cwd = makeRepo({ ...FAILING, maxInjections: 1 });
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(1);
 
 		await pi.emit({ type: "session_start", reason: "startup" }, { cwd });
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(2);
 	});
 
@@ -202,15 +202,15 @@ describe("verification-loop — the injection", () => {
 		const marker = join(root, ".fixed");
 		process.env.AGENDA_FIXTURE = marker;
 
-		await pi.emit({ type: "agent_settled" }, { cwd: root }); // red → 1 charged
+		await pi.emit({ type: "agent_before_settle" }, { cwd: root }); // red → 1 charged
 		expect(pi.messages).toHaveLength(1);
 
 		writeFileSync(marker, ""); // build fixed
-		await pi.emit({ type: "agent_settled" }, { cwd: root }); // green → counter zeroed
+		await pi.emit({ type: "agent_before_settle" }, { cwd: root }); // green → counter zeroed
 		expect(pi.messages).toHaveLength(1);
 
 		rmSync(marker); // broken again
-		await pi.emit({ type: "agent_settled" }, { cwd: root });
+		await pi.emit({ type: "agent_before_settle" }, { cwd: root });
 
 		// Without the zeroing this would be 2-of-2 and skip, leaving 1 message.
 		expect(pi.messages).toHaveLength(2);
@@ -223,7 +223,7 @@ describe("verification-loop — the injection", () => {
 describe("verification-loop — the hive.metric contract", () => {
 	it("reports a pass as a gate metric with a duration and no free text", async () => {
 		const cwd = makeRepo(PASSING);
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 
 		expect(metricEvents()).toHaveLength(1);
 		const { name, payload } = metricEvents()[0];
@@ -239,14 +239,14 @@ describe("verification-loop — the hive.metric contract", () => {
 
 	it("reports a failure as outcome:fail", async () => {
 		const cwd = makeRepo(FAILING);
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect((metricEvents()[0].payload as Record<string, unknown>).outcome).toBe("fail");
 	});
 
 	it("reports outcome:skip once the budget is exhausted, instead of going silent", async () => {
 		const cwd = makeRepo({ ...FAILING, maxInjections: 1 });
-		await pi.emit({ type: "agent_settled" }, { cwd });
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 
 		// CHANGED (2). HIV-1095 pinned the GAP here: the cap check returned before
 		// the gate ran, so an exhausted loop emitted nothing and was
@@ -263,7 +263,7 @@ describe("verification-loop — the hive.metric contract", () => {
 describe("verification-loop — status", () => {
 	it("shows the gate command while running, then clears the status", async () => {
 		const cwd = makeRepo(PASSING);
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 
 		const ours = pi.statuses.filter((s) => s.key === "agenda"); // CHANGED (1) — was "verification-loop"
 		expect(ours[0].text).toBe("running: exit 0");

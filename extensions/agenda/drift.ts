@@ -18,9 +18,10 @@
  * noise, and the human owns the call via /agenda.
  */
 
-import { noulQuestion, TypesafeClient } from "../typesafe-common/client.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { noulQuestion, type ClassifierClient } from "../typesafe-common/client.ts";
 import { loadConfig } from "../typesafe-common/config.ts";
-import { readApiKey } from "../typesafe-common/key.ts";
+import { nativeClassifier } from "../typesafe-common/native.ts";
 import { type GoalItem } from "./goal-state.ts";
 import { atCap, record } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
@@ -46,7 +47,7 @@ export interface DriftHooks {
 	 * did not answer. Absent or not live is a supported state: the probe then
 	 * behaves exactly as it did before Jev existed.
 	 */
-	jev?(): TypesafeClient | null;
+	jev?(): ClassifierClient | null;
 }
 
 /**
@@ -113,13 +114,10 @@ const DRIFT_JEV_QUESTION = {
  * The session's Jev client for this probe, or null when reading the config or
  * key fails. Call once, at extension construction.
  */
-export function driftJevClient(): TypesafeClient | null {
+export function driftJevClient(registry: () => ExtensionContext["modelRegistry"] | null, signal: () => AbortSignal | undefined = () => undefined): ClassifierClient | null {
 	try {
 		const config = loadConfig();
-		return new TypesafeClient({
-			config: { ...config, timeoutMs: Math.max(config.timeoutMs, DRIFT_JEV_TIMEOUT_MS) },
-			apiKey: readApiKey(),
-		});
+		return nativeClassifier({ ...config, timeoutMs: Math.max(config.timeoutMs, DRIFT_JEV_TIMEOUT_MS) }, registry, signal);
 	} catch {
 		return null;
 	}
@@ -137,7 +135,7 @@ export function jevDriftReason(p: number): string {
  * a verdict.
  */
 export async function askJevAlignment(
-	client: TypesafeClient,
+	client: ClassifierClient,
 	condition: string,
 	transcript: string,
 ): Promise<number | null> {
@@ -234,6 +232,7 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 						// Jev did not answer: fall through to the incumbent probe.
 					}
 
+					if (context.signal?.aborted) return { metric: { outcome: "skip", value: Date.now() - startedAt } };
 					const result = await runOneShot({
 						prompt: buildDriftPrompt(goal.condition, transcript),
 						model: hooks.evaluatorModel(),
