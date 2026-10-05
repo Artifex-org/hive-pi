@@ -97,13 +97,14 @@ import { buildGrillKick } from "../plan/prompt.ts";
 import {
 	AGENT_STATUS_ENTRY_TYPE,
 	buildRecapPrompt,
-	lastAssistantTextOf,
 	mechanicalTaskState,
 	MIN_TRANSCRIPT_CHARS,
 	sanitizeRecap,
 	type AgentStatusItem,
 } from "./recap.ts";
-import { blocksReentry } from "./question-guard.ts";
+import { classifyHandback } from "../hive-common/handback.ts";
+import { announceOwnWork } from "../hive-common/own-work.ts";
+import { createWaker } from "../hive-common/waker.ts";
 import { runOneShot } from "./spawn.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { PlanSchema, type Plan, resolveCaps, validatePlan } from "./plan-schema.ts";
@@ -179,6 +180,9 @@ const CONFIRM_ABOVE_AGENTS = 25;
 
 export default function (pi: ExtensionAPI) {
 	const hiveLaunched = isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID);
+	// Orchestration completions wake the agent through the hand-back rule
+	// (hive-common/waker.ts), like background jobs do.
+	const orchestrateWaker = createWaker(pi, "orchestrate");
 	let goal: GoalItem | null = null;
 	let idCounter = 0;
 
@@ -376,7 +380,7 @@ export default function (pi: ExtensionAPI) {
 	// Chain order is load-bearing: build health first (gate), then the prose
 	// decision nudge — it must precede the goal policy, or the goal's continuation
 	// fires first and answers the operator's question on their behalf, which is
-	// the exact failure question-guard.ts exists to prevent — then the drift
+	// the exact failure the hand-back guard (hive-common/handback.ts) exists to prevent — then the drift
 	// probe, then the passive advisor — both must also sit BEFORE the goal policy,
 	// whose per-settle continue injection would starve everything behind it —
 	// then the goal verdict (the conductor's execute→verify transition keys off
@@ -489,7 +493,8 @@ export default function (pi: ExtensionAPI) {
 		try {
 			if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
 			const branch = ctx.sessionManager.getBranch() as readonly unknown[];
-			asksQuestion = blocksReentry({ lastAssistantText: lastAssistantTextOf(branch), automatic: true });
+			// Any hand-back to a person — not only a trailing `?` — is "needs input".
+			asksQuestion = classifyHandback(branch).kind === "human";
 			transcript = recapTranscript(branch);
 		} catch {
 			return; // ctx already stale — nothing to classify
@@ -1473,6 +1478,9 @@ export default function (pi: ExtensionAPI) {
 	// each half would believe it owned every worker.
 	const workers = new WorkerRegistry();
 	const runs = new DurableRunRegistry();
+	// A durable orchestration is the agent's own pending work (hive-common/own-work.ts).
+	const announceDurableRuns = () =>
+		announceOwnWork(pi, "orchestrate", runs.list().filter((run) => run.status === "running").length);
 
 	/** Keep `orchestrate` in the active set exactly while /ultracode is on. */
 	const syncOrchestrateTool = () => {
@@ -1874,9 +1882,11 @@ export default function (pi: ExtensionAPI) {
 			if (caps.durable) {
 				const controller = new AbortController();
 				runs.start(runId, plan.name, () => controller.abort());
+				announceDurableRuns();
 				void executeRun(controller.signal)
 					.then((result) => {
 						const completed = runs.complete(runId, result);
+						announceDurableRuns();
 						// Session shutdown marks the run canceled before its worker promises
 						// unwind. Do not resurrect it as done or inject into a dead session.
 						if (!completed || completed.status === "canceled") return;
@@ -1885,9 +1895,9 @@ export default function (pi: ExtensionAPI) {
 							firstPage(runId, result, NOTIFY_PAGE_CHARS),
 						].join("\n");
 						try {
-							pi.sendMessage(
+							orchestrateWaker.deliver(
 								{ customType: "orchestrate", content: notification, display: true, details: { run_id: runId, status: "done" } },
-								{ deliverAs: "followUp", triggerTurn: true },
+								"completion",
 							);
 							runs.markNotified(runId);
 						} catch {
@@ -1896,11 +1906,12 @@ export default function (pi: ExtensionAPI) {
 					})
 					.catch((error) => {
 						const failed = runs.fail(runId, error);
+						announceDurableRuns();
 						if (!failed || failed.status === "canceled") return;
 						try {
-							pi.sendMessage(
+							orchestrateWaker.deliver(
 								{ customType: "orchestrate", content: `Background orchestration ${runId} failed: ${String(error)}`, display: true },
-								{ deliverAs: "followUp", triggerTurn: true },
+								"completion",
 							);
 							runs.markNotified(runId);
 						} catch {

@@ -13,10 +13,10 @@
  * ## Three decisions worth reading before changing anything
  *
  * **1. Completion is pushed; status is pulled.** A finished job injects itself
- * once, via `sendMessage({deliverAs:"followUp", triggerTurn:true})` — the exact
- * `agmsg` shape, for its exact reasons: `followUp` so the message never cuts in
- * between a tool call and its result, `triggerTurn` so an IDLE session actually
- * acts on it rather than sitting on it until the human types. Everything else
+ * once, through the shared waker (`hive-common/waker.ts`): never between a tool
+ * call and its result, waking an IDLE session so it acts rather than sitting on
+ * the result until the human types — but not one that has handed the turn to a
+ * person, and never by stretching a run past the agent's final word. Everything else
  * — how many are running, what they have printed so far — is a tool the model
  * calls when it wants, plus a footer segment that costs no context at all.
  *
@@ -56,6 +56,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
+import { announceOwnWork } from "../hive-common/own-work.ts";
+import { createWaker } from "../hive-common/waker.ts";
 import { resolveRunUUID, runStateNote, watchCommand } from "./watch-run.ts";
 import { strandedIndexLock } from "./indexlock.ts";
 import {
@@ -135,6 +137,7 @@ export default function background(pi: ExtensionAPI) {
 	const procs = new Map<string, ChildProcess>();
 	const timers = new Map<string, NodeJS.Timeout>();
 	let latestCtx: ExtensionContext | undefined;
+	const waker = createWaker(pi, "background");
 
 	const allJobs = (): Job[] => [...jobs.values()];
 
@@ -156,6 +159,9 @@ export default function background(pi: ExtensionAPI) {
 	};
 
 	const paintFooter = (): void => {
+		// Every job state change passes through here, so the shared running count
+		// (hive-common/own-work.ts) is announced from the same place.
+		announceOwnWork(pi, "background", allJobs().filter((job) => job.status === "running").length);
 		const segment = footerSegment(allJobs());
 		withCtx((ctx) => ctx.ui.setStatus("background", segment ?? undefined));
 	};
@@ -200,14 +206,19 @@ export default function background(pi: ExtensionAPI) {
 		if (overflowWedged()) return;
 		const content = notificationFor(job, Date.now());
 		try {
-			pi.sendMessage(
+			// A completion the agent asked for wakes it — unless it has since
+			// handed the turn to a person (a plan up for approval, a question, a
+			// pending grant), and never by extending a run past its final word
+			// (hive-common/waker.ts). A held notice is still delivered and still
+			// counts as notified: it is in the transcript for the next turn.
+			waker.deliver(
 				{
 					customType: "background",
 					content,
 					display: true,
 					details: { id: job.id, status: job.status, exitCode: job.exitCode, what: job.what },
 				},
-				{ deliverAs: "followUp", triggerTurn: true },
+				"completion",
 			);
 		} catch {
 			return; // session gone — leave it unannounced rather than lying

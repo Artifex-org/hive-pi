@@ -11,7 +11,6 @@ import agenda from "../extensions/agenda/index.ts";
 import { contextTreeEnvelope, recapTranscript } from "../extensions/agenda/index.ts";
 import {
 	buildRecapPrompt,
-	lastAssistantTextOf,
 	latestAgentStatus,
 	mechanicalTaskState,
 	sanitizeRecap,
@@ -45,15 +44,6 @@ describe("pure builders", () => {
 	it("sanitizeRecap keeps the first line, bounded", () => {
 		expect(sanitizeRecap("  fixing the join\nand more prose  ")).toBe("fixing the join");
 		expect(sanitizeRecap("x".repeat(500)).length).toBe(200);
-	});
-
-	it("lastAssistantTextOf reads string and block content", () => {
-		expect(
-			lastAssistantTextOf([
-				{ message: { role: "user", content: "go" } },
-				{ message: { role: "assistant", content: [{ type: "text", text: "should I use port 8080?" }] } },
-			]),
-		).toBe("should I use port 8080?");
 	});
 
 	it("recapTranscript caps from the end", () => {

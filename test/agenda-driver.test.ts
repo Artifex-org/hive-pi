@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { installDriver } from "../extensions/agenda/driver.ts";
+import { announceOwnWork } from "../extensions/hive-common/own-work.ts";
 import { emptyLedger } from "../extensions/agenda/ledger.ts";
 import type { Policy, PolicyWork } from "../extensions/agenda/policy.ts";
 import agenda, { describe as describeAgenda } from "../extensions/agenda/index.ts";
@@ -361,7 +362,7 @@ describe("driver — headless and worker modes", () => {
 	});
 });
 
-describe("driver — the question guard", () => {
+describe("driver — the hand-back guard on a question", () => {
 	it("cancels automatic re-entry when the last turn asked the user something", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
 		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Which branch should I target?") });
@@ -385,6 +386,45 @@ describe("driver — the question guard", () => {
 
 		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Proceeding.") });
 		expect(driver.blockedOnUser()).toBe(false);
+	});
+});
+
+describe("driver — the hand-back guard", () => {
+	const planAwaitingApproval = [
+		{ type: "message", message: { role: "user", content: "plan it" } },
+		{ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "plan_ready", arguments: {} }], stopReason: "toolUse" } },
+		{ type: "message", message: { role: "toolResult", toolCallId: "c1", toolName: "plan_ready", content: [{ type: "text", text: "Plan is ready and awaiting approval:\n\nX" }] } },
+		{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Here is the plan. Let me know if you want changes." }], stopReason: "stop" } },
+	];
+
+	it("stands every policy down on an explicit wait for approval — not only a trailing ?", async () => {
+		installDriver(pi.api, { policies: [alwaysInjects()] });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Verstanden. Ich warte auf deine Freigabe.") });
+		expect(pi.messages).toHaveLength(0);
+	});
+
+	it("lets a policy that opted in run through a prose request, never through a gate", async () => {
+		const ask = { ...alwaysInjects("ask", "use the card"), proceedsDespite: ["waiting", "firm"] as const };
+		installDriver(pi.api, { policies: [ask] });
+
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Two options. Let me know which.") });
+		expect(pi.messages.map((m) => m.content)).toEqual(["use the card"]);
+
+		await pi.emit({ type: "agent_before_settle" }, { branch: planAwaitingApproval });
+		expect(pi.messages).toHaveLength(1);
+	});
+
+	it("treats 'waiting on my watcher' as a hand-back only while own work is running", async () => {
+		installDriver(pi.api, { policies: [alwaysInjects()] });
+		const watching = assistantSaid("Nothing actionable — the watcher will deliver the verdict.");
+
+		await pi.emit({ type: "agent_before_settle" }, { branch: watching });
+		expect(pi.messages).toHaveLength(1); // nothing running: prose alone is a plain stop
+
+		announceOwnWork(pi.api, "background", 1);
+		await pi.emit({ type: "agent_start" });
+		await pi.emit({ type: "agent_before_settle" }, { branch: watching });
+		expect(pi.messages).toHaveLength(1);
 	});
 });
 

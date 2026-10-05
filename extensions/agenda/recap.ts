@@ -83,28 +83,6 @@ export function sanitizeRecap(text: string): string {
 	return line.slice(0, MAX_RECAP_CHARS);
 }
 
-/** The newest assistant turn's text, for the question guard. Pure over a branch. */
-export function lastAssistantTextOf(branch: readonly unknown[]): string | undefined {
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const message = (branch[i] as { message?: { role?: string; content?: unknown } } | undefined)?.message;
-		if (!message || message.role !== "assistant") continue;
-		const content = message.content;
-		if (typeof content === "string") return content;
-		if (Array.isArray(content)) {
-			const text = content
-				.filter((part): part is { type: string; text: string } => {
-					const p = part as { type?: string; text?: unknown };
-					return p?.type === "text" && typeof p.text === "string";
-				})
-				.map((part) => part.text)
-				.join("\n");
-			return text.length > 0 ? text : undefined;
-		}
-		return undefined;
-	}
-	return undefined;
-}
-
 /** Newest agent-status entry, or null. Backwards scan — the log is append-only. */
 export function latestAgentStatus(entries: readonly unknown[]): AgentStatusItem | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
