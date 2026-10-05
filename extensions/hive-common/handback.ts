@@ -154,6 +154,9 @@ const HUMAN_PHRASES: readonly RegExp[] = [
 	// "the route now requires authorization" reports.
 	/\b(?:awaits?|awaiting|needs?|requires?) (?:your|explicit|renewed|operator|human|root) (?:\w+ )?(?:authori[sz]ation|approval|sign-?off)\b/i,
 	/\bawait(?:s|ing) (?:authori[sz]ation|approval|sign-?off)\b/i,
+	// "Awaiting scope confirmation", "awaits controller scope", "awaiting the controller's go-ahead".
+	/\bawait(?:s|ing) (?:the )?(?:controller|operator|root|parent|lead)(?:'s|’s)? (?:\w+ )?(?:scope|decision|confirmation|approval|go-ahead|direction|review|harvest|sign-?off|reservation)\b/i,
+	/\bawait(?:s|ing) (?:scope|direction) (?:confirmation|decision)\b/i,
 	/\bauthori[sz]ed [\w -]{1,40} is (?:needed|required) to (?:continue|proceed)\b/i,
 	// German: "ich warte auf deine Freigabe", "soll ich …", "sobald du …".
 	// "auf/ohne/bis zu … Freigabe" waits; "nach der Freigabe habe ich deployed" reports.
@@ -348,5 +351,31 @@ export function classifyHandback(branch: readonly unknown[]): Handback {
 			break;
 		}
 	}
-	return structuredHandback(branch.slice(start, last)) ?? classifyText(textOf(final.content));
+	const run = branch.slice(start, last);
+	const own = structuredHandback(run) ?? classifyText(textOf(final.content));
+	if (own.kind !== "none") return own;
+	return lateAsk(run);
+}
+
+/**
+ * An ask made in the run's LAST few messages, beside a tool call, still holds
+ * when the final word does not repeat it: "Waiting for the controller's
+ * schema-repair reservation." + `message_teammate`, then a status summary.
+ * Measured: 12 such messages in 23,656 tool-calling turns, most to a controller.
+ *
+ * It is read as a SOFT wait, never firm: the same runs usually also wait on a
+ * CI watcher, whose completion must still land. What it stops is a nudge to
+ * "keep going" on the agent's own initiative.
+ */
+const LATE_ASK_MESSAGES = 2;
+
+function lateAsk(run: readonly unknown[]): Handback {
+	let seen = 0;
+	for (let i = run.length - 1; i >= 0 && seen < LATE_ASK_MESSAGES; i--) {
+		const message = messageOf(run[i]);
+		if (message?.role !== "assistant") continue;
+		seen++;
+		if (classifyText(textOf(message.content)).kind === "human") return { kind: "human", reason: "waiting", structured: false };
+	}
+	return NO_HANDBACK;
 }

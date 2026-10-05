@@ -214,6 +214,38 @@ describe("classifyHandback — the branch decides", () => {
 	});
 });
 
+describe("classifyHandback — an ask late in the run", () => {
+	it("holds as a soft wait when the final word does not repeat it", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting for the controller's schema-repair reservation." }, { type: "toolCall", id: "c1", name: "mcp__hive__message_teammate", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "mcp__hive__message_teammate", "queued"),
+			said("Final-head PR CI #4401 is still running. No merge or deployment."),
+		];
+		const handback = classifyHandback(branch);
+		expect(handback).toMatchObject({ kind: "human", reason: "waiting" });
+		expect(isFirmHandback(handback)).toBe(false); // a CI completion must still land
+	});
+
+	it("does not reach back further than the run's last two messages", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Aligning v2 needs your approval." }, { type: "toolCall", id: "c1", name: "bash", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "bash", "ok"),
+			called("c2", "bash"),
+			result("c2", "bash", "ok"),
+			called("c3", "edit"),
+			result("c3", "edit", "ok"),
+			said("Implemented and tested."),
+		];
+		expect(classifyHandback(branch)).toEqual({ kind: "none" });
+	});
+
+	it("reads 'awaiting scope confirmation' as a request", () => {
+		expect(classifyText("Evidence updated. Awaiting scope confirmation for CLI parity.").kind).toBe("human");
+	});
+});
+
 describe("handbackClass", () => {
 	it("separates a structured gate from a prose request", () => {
 		const plan = classifyHandback([
