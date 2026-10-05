@@ -55,7 +55,9 @@ describe("harness git reads take no optional index lock", () => {
 		// would make every assertion below pass for the wrong reason.
 		const { dir, indexHash } = statDirtyRepo();
 		const before = indexHash();
-		execFileSync("git", ["-C", dir, "status", "--porcelain"], { stdio: "ignore" });
+		// Explicit negative control: launched harnesses inherit optional locks
+		// disabled. Only this counterexample must opt in to index refreshes.
+		execFileSync("git", ["-C", dir, "status", "--porcelain"], { stdio: "ignore", env: { ...process.env, GIT_OPTIONAL_LOCKS: "1" } });
 		expect(indexHash()).not.toBe(before);
 	});
 

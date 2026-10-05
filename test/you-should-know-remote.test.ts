@@ -24,11 +24,15 @@ let statuses: Record<string, unknown>[];
 let queued: { id: string; kind: string; payload: string }[];
 let nextCommand: number;
 let serverSupported: boolean | undefined;
+let findingsSupported: boolean, recording: boolean, recordingRevision: number;
+let findingRequests: { method: string; body?: Record<string, unknown> }[];
+let findingRecords: Record<string, unknown>[];
 let scanner: ReturnType<typeof vi.fn<Scanner>>;
 const rpc = { mode: "rpc" as const, hasUI: false };
 beforeEach(() => {
-	vi.useFakeTimers(); home = mkdtempSync(join(tmpdir(), "ysk-remote-")); vi.stubEnv("HOME", home);
+	vi.useFakeTimers(); vi.stubEnv("PI_AGENDA_WORKER", ""); home = mkdtempSync(join(tmpdir(), "ysk-remote-")); vi.stubEnv("HOME", home);
 	fake = createFakePi(); conversations = []; statuses = []; queued = []; nextCommand = 0; serverSupported = true;
+	findingsSupported = false; recording = true; recordingRevision = 0; findingRequests = []; findingRecords = [];
 	scanner = vi.fn<Scanner>(async () => reply(JSON.stringify({ notes: [note] })));
 	const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 	vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
@@ -37,6 +41,19 @@ beforeEach(() => {
 		if (path === "/me") return json({ id: "owner-1", name: "Fixture owner" });
 		if (path.startsWith("/agent-sessions/by-run/")) return json({ id: "sess-1" });
 		if (path.endsWith("/conversation")) { conversations.push(body); return json({ session_id: "sess-1", last_seq: 0, ...(serverSupported === undefined ? {} : { can_control_you_should_know: serverSupported }) }); }
+		if (findingsSupported && path.endsWith("/you-should-know/findings/recording")) {
+			findingRequests.push({ method: init.method ?? "GET", body });
+			if (body.expected_revision !== recordingRevision) return new Response(JSON.stringify({ version: 1, recording, recording_revision: recordingRevision, findings: findingRecords }), { status: 409 });
+			recording = body.recording; recordingRevision++;
+			return json({ version: 1, recording, recording_revision: recordingRevision });
+		}
+		if (findingsSupported && path.endsWith("/you-should-know/findings")) {
+			findingRequests.push({ method: init.method ?? "GET", body });
+			if (init.method === "POST") for (const finding of body.findings as Record<string, unknown>[]) {
+				if (!findingRecords.some(f => f.id === finding.id)) findingRecords.push({ ...finding, deliveries: [{ destination: "papercut", state: "delivered" }] });
+			}
+			return json({ version: 1, recording, recording_revision: recordingRevision, findings: findingRecords });
+		}
 		if (path.endsWith("/status")) statuses.push(body);
 		if (path.endsWith("/commands/claim")) return json({ items: queued.splice(0) });
 		return json({});
@@ -58,13 +75,42 @@ async function prose(context: FakeCtxOptions = rpc) {
 	await fake.emit({ type: "agent_settled" }, context);
 	await vi.advanceTimersByTimeAsync(1000);
 }
-async function command(action: string) {
-	queued.push({ id: `c${++nextCommand}`, kind: "you_should_know", payload: JSON.stringify({ action }) });
+async function command(action: string, revision?: number) {
+	queued.push({ id: `c${++nextCommand}`, kind: "you_should_know", payload: JSON.stringify({ action, ...(revision === undefined ? {} : { recording_revision: revision }) }) });
 	await vi.advanceTimersByTimeAsync(5000);
 }
 const state = () => statuses.at(-1)?.you_should_know;
 
 describe("You Should Know, attached RPC conversation to scanner and back", () => {
+	it("round-trips durable findings through the real remote loader and independent recording controls", async () => {
+		findingsSupported = true;
+		scanner.mockImplementation(async () => reply(JSON.stringify({ notes: [{ ...note, classification: "friction" }] })));
+		await start(); await prose();
+		const initial = findingRequests.find(r => r.method === "POST")?.body;
+		expect(initial).toMatchObject({ version: 1, recording: true, recording_revision: 0, findings: [{ classification: "friction", source_type: "assistant", provenance: "assistant_reported", quote }] });
+		expect((initial?.findings as { id: string }[])[0].id).toMatch(/^[a-f0-9]{64}$/);
+		expect(fake.busEvents.some(e => e.name === "hive.you-should-know.receipts" && JSON.stringify(e.payload).includes('"delivered"'))).toBe(true);
+		recording = false; recordingRevision = 1; await command("record_off", 1);
+		expect(state()).toMatchObject({ command_id: "c1", enabled: true, recording: false, recording_revision: 1 });
+		expect(findingRequests.some(r => r.method === "PUT")).toBe(false);
+		const offQuote = "The new release was not tested against production data.";
+		scanner.mockImplementation(async () => reply(JSON.stringify({ notes: [{ kind: "caveat", classification: "friction", text: "New release verification is missing.", quote: offQuote }] })));
+		await fake.emit({ type: "message_end", message: reply(offQuote) }, rpc); await fake.emit({ type: "agent_settled" }, rpc); await vi.advanceTimersByTimeAsync(1000);
+		expect(state()).toMatchObject({ enabled: true, recording: false, notes: [{}, { quote: offQuote }] });
+		expect(findingRequests.filter(r => r.method === "POST")).toHaveLength(1);
+		await fake.runCommand("you-should-know", "record-on", rpc); await vi.advanceTimersByTimeAsync(1000);
+		expect(findingRequests.find(r => r.method === "PUT")?.body).toMatchObject({ version: 1, recording: true, expected_revision: 1 });
+		expect(state()).toMatchObject({ recording: true, recording_revision: 2 });
+		expect(findingRequests.filter(r => r.method === "POST")).toHaveLength(1);
+		const onQuote = "The later release was not tested against production data.";
+		scanner.mockImplementation(async () => reply(JSON.stringify({ notes: [{ kind: "caveat", classification: "friction", text: "Later release verification is missing.", quote: onQuote }] })));
+		await fake.emit({ type: "message_end", message: reply(onQuote) }, rpc); await fake.emit({ type: "agent_settled" }, rpc); await vi.advanceTimersByTimeAsync(1000);
+		const posts = findingRequests.filter(r => r.method === "POST"); expect(posts).toHaveLength(2);
+		expect(posts[1].body).toMatchObject({ recording_revision: 2, findings: [{ quote: onQuote }] });
+		expect(JSON.stringify(posts)).not.toContain(offQuote);
+		expect(fake.userMessages).toEqual([]); expect(fake.messages).toEqual([]);
+	});
+
 	it("reports default-on state, capability, extracted evidence and bounded cost", async () => {
 		await start();
 		expect(conversations.at(-1)?.can_control_you_should_know).toBe(true);
