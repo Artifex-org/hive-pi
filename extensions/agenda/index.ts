@@ -325,10 +325,9 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Jev for the drift probe, built once here — the config and key reads block,
-	// and typesafe-common forbids them inside a handler. Not live (no config
-	// `enabled: true`, or no key) leaves the probe exactly as it was.
-	const driftJev = driftJevClient();
+	// Config is read once; native pi resolves provider credentials at request
+	// time. Absent opt-in or unavailable classification never yields a verdict.
+	const driftJev = driftJevClient(() => heldCtx?.modelRegistry ?? null);
 	const driftPolicy = createDriftPolicy({
 		goal: () => goal,
 		evaluatorModel: () => process.env.PI_AGENDA_EVALUATOR_MODEL || DEFAULT_EVALUATOR_MODEL,
