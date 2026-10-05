@@ -84,7 +84,7 @@ export interface SessionSignals {
 	 * only worth giving before the work is under way.
 	 */
 	toolCallsSinceUser: number;
-	/** Tool calls since the newest user prompt OR agenda injection, whichever is later. */
+	/** Tool calls since the newest user prompt OR conductor kick, whichever is later. */
 	toolCallsSinceInjection: number;
 }
 
@@ -103,6 +103,7 @@ export const emptySignals: SessionSignals = {
 type RawEntry = {
 	type?: string;
 	customType?: string;
+	content?: unknown;
 	data?: unknown;
 	message?: { role?: string; content?: unknown };
 };
@@ -234,7 +235,10 @@ export function deriveSignals(
 	let toolCallsSinceInjection = 0;
 	for (const raw of branch) {
 		const entry = raw as RawEntry;
-		if (entry?.type === "custom_message" && entry.customType === "agenda") {
+		// Only a conductor kick restarts the count: a goal continuation or a
+		// restored-after-compaction note between the frame kick and the frame
+		// decision must not make a late agent look early.
+		if (entry?.type === "custom_message" && entry.customType === "agenda" && /^Conductor:/.test(contentText(entry.content))) {
 			toolCallsSinceInjection = 0;
 			continue;
 		}

@@ -221,7 +221,8 @@ export function applyVerdict(
 		if (pendingStreak < MAX_PENDING && !isBudgetExhausted(waiting.ledger, base.createdAt, now)) {
 			return { goal: waiting, outcome: { kind: "pending", reason: verdict.reason, waited: pendingStreak } };
 		}
-		if (verdict.blocked) {
+		// A spent budget keeps its own ending (and its wrap-up message).
+		if (verdict.blocked && !isBudgetExhausted(waiting.ledger, base.createdAt, now)) {
 			return { goal: { ...base, state: "blocked_user" }, outcome: { kind: "blocked_user", reason: verdict.reason } };
 		}
 		// Out of patience: fall through and charge it as an ordinary unmet

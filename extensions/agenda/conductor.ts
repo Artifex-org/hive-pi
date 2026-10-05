@@ -225,7 +225,13 @@ function decideIdle(hooks: ConductorHooks, context: PolicyContext, signals: Sess
 	if (complexity !== "complex") return null;
 
 	// The work is already under way: framing now would reopen it (EARLY_TOOL_CALLS).
-	if (signals.toolCallsSinceUser > EARLY_TOOL_CALLS) return null;
+	// With a todo list the lifecycle still runs — execute, then verify once every
+	// item closes — without the retroactive plan mode. Without one there is
+	// nothing for execute to finish on, so stay idle for the next prompt.
+	if (signals.toolCallsSinceUser > EARLY_TOOL_CALLS) {
+		if (signals.tasks.total > 0) return silentAdvance(hooks, "execute", "complex");
+		return null;
+	}
 
 	// Todos already exist → skip frame, go straight to planning.
 	if (signals.tasks.total > 0) return planTransition(hooks, context, signals);
@@ -271,8 +277,12 @@ function planTransition(hooks: ConductorHooks, context: PolicyContext, signals: 
 	// The agent went on executing after the frame kick (or never framed):
 	// read-only plan mode now would freeze work in flight. Skip planning for
 	// this task; the lifecycle carries on from execute.
+	// With no todos, execute has nothing to complete on: back to idle, which
+	// leaves the lifecycle free for the next prompt rather than parked forever.
 	const late = signals.toolCallsSinceInjection > EARLY_TOOL_CALLS || signals.toolCallsSinceUser > EARLY_TOOL_CALLS * 3;
-	if (late || (hooks.toolReachable && !hooks.toolReachable("plan_write"))) return silentAdvance(hooks, "execute");
+	if (late || (hooks.toolReachable && !hooks.toolReachable("plan_write"))) {
+		return silentAdvance(hooks, signals.tasks.total > 0 ? "execute" : "idle");
+	}
 	return {
 		name: "conductor",
 		status: "conductor: entering plan mode",
@@ -289,13 +299,14 @@ function planTransition(hooks: ConductorHooks, context: PolicyContext, signals: 
 	};
 }
 
-function silentAdvance(hooks: ConductorHooks, stage: ConductorItem["stage"]): PolicyWork {
+function silentAdvance(hooks: ConductorHooks, stage: ConductorItem["stage"], complexity?: "complex"): PolicyWork {
 	return {
 		name: "conductor",
 		status: "",
 		run: async () => {
 			const now = Date.now();
-			hooks.commit(withStage(itemFor(hooks, now), stage, now));
+			const staged = withStage(itemFor(hooks, now), stage, now);
+			hooks.commit(complexity ? withComplexity(staged, complexity, now) : staged);
 			return { metric: { outcome: "pass" as const, value: 0 } };
 		},
 	};

@@ -184,6 +184,12 @@ describe("a blocked verdict waits on someone else", () => {
 		expect(after.state).toBe("active");
 	});
 
+	it("keeps the budget's own ending when the budget runs out while blocked", () => {
+		let g = createGoal("g3", "x", NOW, { budget: { tokens: 100 } });
+		g = applyVerdict(g, blockedOnController, NOW, 500).goal;
+		expect(applyVerdict(g, blockedOnController, NOW + 1, 500).outcome.kind).toBe("budget_exhausted");
+	});
+
 	it("ends silently as blocked_user — never as 'continue' — once patience runs out", () => {
 		let g = goal();
 		for (let i = 0; i < MAX_PENDING - 1; i++) g = applyVerdict(g, { ...blockedOnController, reason: `${blockedOnController.reason} (${i})` }, NOW + i, 10).goal;

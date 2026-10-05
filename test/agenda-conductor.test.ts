@@ -455,10 +455,20 @@ describe("conductor policy — kicks only before the work is under way", () => {
 		expect((await work?.run())?.inject).toBe(PLAN_INJECTION);
 	});
 
-	it("skips plan mode entirely when plan_write is unreachable", async () => {
+	it("skips plan mode entirely when plan_write is unreachable — back to idle without todos", async () => {
 		const { hooks, item, rang } = makeHooks();
 		hooks.toolReachable = () => false;
 		const work = createConductorPolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ toolCallsSinceUser: 2 })));
+		expect((await work?.run())?.inject).toBeUndefined();
+		expect(rang()).toBe(0);
+		expect(item()?.stage).toBe("idle");
+	});
+
+	it("keeps the lifecycle for a late task with a todo list: execute, so verify follows completion", async () => {
+		const { hooks, item, rang } = makeHooks();
+		const work = createConductorPolicy(hooks).decide(
+			contextWith(emptyLedger, signalsWith({ toolCallsSinceUser: 40, tasks: { total: 3, pending: 1, inProgress: 1, completed: 1 } })),
+		);
 		expect((await work?.run())?.inject).toBeUndefined();
 		expect(rang()).toBe(0);
 		expect(item()?.stage).toBe("execute");

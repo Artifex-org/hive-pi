@@ -129,7 +129,7 @@ import { randomUUID } from "node:crypto";
 import { DurableRunRegistry, type DurableRunResult } from "./run-registry.ts";
 import { nodeResultText, pageText, renderRunResults, RESULT_PAGE_CHARS, selectableNodes } from "./run-output.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
-import { exposureFor } from "../loadout/policy.ts";
+import { exposureFor, LOAD_TOOL } from "../loadout/policy.ts";
 
 /**
  * Set in a spawned worker so a child never re-enters its own loop. Read once at
@@ -309,10 +309,12 @@ export default function (pi: ExtensionAPI) {
 		},
 		enabled: () => conductorEnabled,
 		toolReachable: (name: string) => {
-			// Active now, or deferred and loadable on demand (loadout). A tool kept
-			// inactive any other way — a `--tools` allowlist — is not reachable.
-			if (pi.getActiveTools().includes(name)) return true;
-			return pi.getAllTools().some((tool) => tool.name === name && (tool as { exposure?: string }).exposure === "deferred");
+			// Active now, or deferred AND the loader that activates deferred tools is
+			// itself active (loadout). A tool kept inactive any other way — a
+			// `--tools` allowlist — is not reachable.
+			const active = pi.getActiveTools();
+			if (active.includes(name)) return true;
+			return active.includes(LOAD_TOOL) && pi.getAllTools().some((tool) => tool.name === name && tool.exposure === "deferred");
 		},
 		lastVerifyNote: () => verifyNote,
 		recordVerifyNote: (note: string) => {
@@ -509,6 +511,7 @@ export default function (pi: ExtensionAPI) {
 		const taskState = mechanicalTaskState({
 			asksQuestion,
 			goalAchieved: goal?.state === "achieved",
+			goalBlocked: goal?.state === "blocked_user",
 			conductorDone: conductor?.stage === "done",
 		});
 

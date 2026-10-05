@@ -59,7 +59,12 @@ export type HandbackReason =
 export type Handback =
 	| { kind: "none" }
 	| { kind: "human"; reason: Exclude<HandbackReason, "own-work">; structured: boolean }
-	| { kind: "machine"; reason: "own-work" };
+	/**
+	 * `otherwise` is what the turn reads as when no own work is actually
+	 * running (own-work.ts drops the `machine` reading then) — a late ask in the
+	 * same run must not be lost with it.
+	 */
+	| { kind: "machine"; reason: "own-work"; otherwise?: Handback };
 
 export const NO_HANDBACK: Handback = { kind: "none" };
 
@@ -353,8 +358,10 @@ export function classifyHandback(branch: readonly unknown[]): Handback {
 	}
 	const run = branch.slice(start, last);
 	const own = structuredHandback(run) ?? classifyText(textOf(final.content));
-	if (own.kind !== "none") return own;
-	return lateAsk(run);
+	if (own.kind === "human") return own;
+	const late = lateAsk(run);
+	if (own.kind === "machine") return late.kind === "none" ? own : { ...own, otherwise: late };
+	return late;
 }
 
 /**
@@ -366,16 +373,33 @@ export function classifyHandback(branch: readonly unknown[]): Handback {
  * It is read as a SOFT wait, never firm: the same runs usually also wait on a
  * CI watcher, whose completion must still land. What it stops is a nudge to
  * "keep going" on the agent's own initiative.
+ *
+ * Narrower than the final-message rules on purpose. Mid-run narration is full
+ * of questions to itself ("is the column there?") and incidental "wait"/"hold"
+ * ("I'll wait for the build"), so only a request-shaped phrase counts, and only
+ * beside a call that actually reaches a person. An answer that arrived later
+ * in the run (a team or agmsg message) ends the ask.
  */
 const LATE_ASK_MESSAGES = 2;
+const ANSWER_TYPES = new Set(["team-message", "agmsg"]);
+const PERSON_TOOL = /\b(?:mcp__hive__|hive_)?(?:message_teammate|agmsg_send|post_team_note)\b/;
+
+function reachesAPerson(content: unknown): boolean {
+	return toolCallsOf(content).some((call) => PERSON_TOOL.test(hiveToolOf(call, undefined)));
+}
 
 function lateAsk(run: readonly unknown[]): Handback {
 	let seen = 0;
 	for (let i = run.length - 1; i >= 0 && seen < LATE_ASK_MESSAGES; i--) {
+		const entry = run[i] as { type?: string; customType?: string };
+		if (entry?.type === "custom_message" && entry.customType && ANSWER_TYPES.has(entry.customType)) return NO_HANDBACK;
 		const message = messageOf(run[i]);
 		if (message?.role !== "assistant") continue;
 		seen++;
-		if (classifyText(textOf(message.content)).kind === "human") return { kind: "human", reason: "waiting", structured: false };
+		const tail = handbackTail(textOf(message.content));
+		if (HUMAN_PHRASES.some((re) => re.test(tail)) && reachesAPerson(message.content)) {
+			return { kind: "human", reason: "waiting", structured: false };
+		}
 	}
 	return NO_HANDBACK;
 }

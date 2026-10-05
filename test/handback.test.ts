@@ -15,6 +15,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyHandback, classifyText, endsWithQuestion, handbackClass, isFirmHandback } from "../extensions/hive-common/handback.ts";
 import { decideWake } from "../extensions/hive-common/waker.ts";
+import { confirmOwnWork } from "../extensions/hive-common/own-work.ts";
 
 describe("endsWithQuestion — fires", () => {
 	it.each([
@@ -215,6 +216,45 @@ describe("classifyHandback — the branch decides", () => {
 });
 
 describe("classifyHandback — an ask late in the run", () => {
+	it("ignores mid-run narration: a question to itself, an incidental wait, an ask with no one addressed", () => {
+		for (const text of [
+			"Let me check whether the migration ran — is the column there?",
+			"The build is running; I'll wait for it to finish.",
+			"PR #12 is pending approval; let me check the CI status.",
+		]) {
+			const branch = [
+				user("go"),
+				{ type: "message", message: { role: "assistant", content: [{ type: "text", text }, { type: "toolCall", id: "c1", name: "bash", arguments: {} }], stopReason: "toolUse" } },
+				result("c1", "bash", "ok"),
+				said("Build passed. All done."),
+			];
+			expect(classifyHandback(branch), text).toEqual({ kind: "none" });
+		}
+	});
+
+	it("is answered by a teammate's reply later in the run", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting for the controller's reservation." }, { type: "toolCall", id: "c1", name: "mcp__hive__message_teammate", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "mcp__hive__message_teammate", "queued"),
+			{ type: "custom_message", customType: "team-message", content: "Reservation granted." },
+			said("Repair applied and tests pass."),
+		];
+		expect(classifyHandback(branch)).toEqual({ kind: "none" });
+	});
+
+	it("survives a final 'watching CI' line when no own work turns out to be running", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting for the controller's reservation." }, { type: "toolCall", id: "c1", name: "mcp__hive__message_teammate", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "mcp__hive__message_teammate", "queued"),
+			said("Still watching run #1828."),
+		];
+		const handback = classifyHandback(branch);
+		expect(handback.kind).toBe("machine");
+		expect(confirmOwnWork(handback, { running: () => 0 })).toMatchObject({ kind: "human", reason: "waiting" });
+	});
+
 	it("holds as a soft wait when the final word does not repeat it", () => {
 		const branch = [
 			user("go"),
