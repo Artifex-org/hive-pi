@@ -44,7 +44,7 @@
  * deliberately not done here — the model may have good reason to proceed.
  */
 
-import { noulQuestion, type TypesafeClient } from "../typesafe-common/client.ts";
+import { noulQuestion, type ClassifierClient } from "../typesafe-common/client.ts";
 import { atCap, record } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
 import { stripCode } from "./question-guard.ts";
@@ -203,7 +203,7 @@ const ASK_JEV_QUESTION = {
 };
 
 /** Jev's probability that the ending asks the human, or null when it did not answer. */
-export async function askJevForDecision(client: TypesafeClient, text: string): Promise<number | null> {
+export async function askJevForDecision(client: ClassifierClient, text: string): Promise<number | null> {
 	const outcome = await client.ask(askTail(text), ASK_JEV_QUESTION);
 	return outcome.kind === "ok" ? outcome.answers.asks.noul : null;
 }
@@ -219,7 +219,7 @@ export interface AskHooks {
 	 */
 	attended(): boolean;
 	/** Jev, when configured. Absent or not live leaves the phrase list alone. */
-	jev?(): TypesafeClient | null;
+	jev?(): ClassifierClient | null;
 }
 
 export function createAskPolicy(hooks: AskHooks): Policy {

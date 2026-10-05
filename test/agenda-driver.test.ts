@@ -65,6 +65,26 @@ function metricEvents() {
 }
 
 describe("driver — metric name", () => {
+	it("cancellation during awaited work neither continues nor charges the ledger", async () => {
+		const controller = new AbortController();
+		let enter!: () => void;
+		let finish!: (outcome: Awaited<ReturnType<PolicyWork["run"]>>) => void;
+		const entered = new Promise<void>(resolve => { enter = resolve; });
+		let charged = 0;
+		const handle = installDriver(pi.api, { policies: [{ name: "pending", decide: () => ({
+			name: "pending", status: "", run: () => { enter(); return new Promise(resolve => { finish = resolve; }); },
+		}) }] });
+		const pending = pi.emit({ type: "agent_before_settle" }, { signal: controller.signal });
+		await entered;
+		controller.abort();
+		finish({ metric: { outcome: "fail", value: 1 }, inject: "must not continue",
+			ledger: state => { charged++; return state; } });
+		await pending;
+		expect(pi.messages).toHaveLength(0);
+		expect(charged).toBe(0);
+		expect(handle.ledger()).toEqual(emptyLedger);
+	});
+
 	// A policy with two paths names the one that answered (drift reports
 	// `drift-jev` when Jev answered). Without the override both paths would read
 	// as the same gate and "Jev was never reached" would be invisible.
@@ -78,21 +98,58 @@ describe("driver — metric name", () => {
 			}),
 		};
 		installDriver(pi.api, { policies: [policy] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 		expect((metricEvents()[0].payload as Record<string, unknown>).name).toBe("drift-jev");
 	});
 
 	it("falls back to the work's name", async () => {
 		installDriver(pi.api, { policies: [runsButSilent("drift")] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 		expect((metricEvents()[0].payload as Record<string, unknown>).name).toBe("drift");
 	});
 });
 
 describe("driver — one injection per settle", () => {
+	it.each(["aborted", "error"])("does not run a policy on a native %s outcome", async outcome => {
+		installDriver(pi.api, { policies: [alwaysInjects()] });
+		await pi.emit({ type: "agent_before_settle", outcome });
+		expect(pi.messages).toHaveLength(0);
+		expect(metricEvents()).toHaveLength(0);
+	});
+
+	it("preserves earlier drafts, and an empty later override cannot discard them", async () => {
+		pi.api.on("agent_before_settle", () => ({ entries: [
+			{ type: "custom_message", customType: "other", content: "context", display: true },
+		] }));
+		installDriver(pi.api, { policies: [alwaysInjects()] });
+		pi.api.on("agent_before_settle", event => {
+			expect(event.entries.map(entry => entry.type)).toEqual(["custom_message", "custom_message"]);
+			return {};
+		});
+		await pi.emit({ type: "agent_before_settle" });
+		expect(pi.messages.map(message => message.content)).toEqual(["context", "do the thing"]);
+	});
+
+	it("does not charge another policy when a native handler already requested continuation", async () => {
+		pi.api.on("agent_before_settle", () => ({ entries: [
+			{ type: "custom_message", customType: "other", content: "next", display: true },
+		], continue: true }));
+		installDriver(pi.api, { policies: [alwaysInjects()] });
+		await pi.emit({ type: "agent_before_settle" });
+		expect(pi.messages.map(message => message.content)).toEqual(["next"]);
+		expect(metricEvents()).toHaveLength(0);
+	});
+
+	it("registers the actionable continuation boundary and observes final settle only", async () => {
+		installDriver(pi.api, { policies: [alwaysInjects()] });
+		expect(pi.handlers.has("agent_before_settle")).toBe(true);
+		await pi.emit({ type: "agent_settled" });
+		expect(pi.messages).toHaveLength(0);
+	});
+
 	it("injects exactly once when a policy asks to", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 		expect(pi.messages).toHaveLength(1);
 	});
 
@@ -100,7 +157,7 @@ describe("driver — one injection per settle", () => {
 		installDriver(pi.api, {
 			policies: [neverApplies("a"), alwaysInjects("b", "from b"), alwaysInjects("c", "from c")],
 		});
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		expect(pi.messages).toHaveLength(1);
 		expect(pi.messages[0].content).toBe("from b");
@@ -115,7 +172,7 @@ describe("driver — one injection per settle", () => {
 		installDriver(pi.api, {
 			policies: [runsButSilent("quiet-gate"), alwaysInjects("goal", "from goal")],
 		});
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		expect(pi.messages).toHaveLength(1);
 		expect(pi.messages[0].content).toBe("from goal");
@@ -125,7 +182,7 @@ describe("driver — one injection per settle", () => {
 
 	it("still injects nothing when every policy is silent", async () => {
 		installDriver(pi.api, { policies: [runsButSilent("a"), runsButSilent("b")] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		expect(pi.messages).toHaveLength(0);
 		expect(metricEvents()).toHaveLength(2);
@@ -133,15 +190,15 @@ describe("driver — one injection per settle", () => {
 
 	it("stays silent when no policy applies, and emits no metric", async () => {
 		installDriver(pi.api, { policies: [neverApplies("a"), neverApplies("b")] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 		expect(pi.messages).toHaveLength(0);
 		expect(metricEvents()).toHaveLength(0);
 	});
 
 	it("injects as a turn-triggering followUp", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" });
-		expect(pi.messages[0].options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+		const results = await pi.emit({ type: "agent_before_settle" });
+		expect(results[0]).toMatchObject({ continue: true, entries: [{ type: "custom_message", customType: "agenda", content: "do the thing", display: true }] });
 	});
 });
 
@@ -159,7 +216,7 @@ describe("driver — re-entrancy", () => {
 				run: async () => {
 					if (!reentered) {
 						reentered = true;
-						await pi.emit({ type: "agent_settled" });
+						await pi.emit({ type: "agent_before_settle" });
 					}
 					return { metric: { outcome: "fail", value: 1 }, inject: "again" };
 				},
@@ -167,7 +224,7 @@ describe("driver — re-entrancy", () => {
 		};
 
 		installDriver(pi.api, { policies: [recursive] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		expect(reentered).toBe(true);
 		expect(pi.messages).toHaveLength(1); // NOT 2
@@ -175,8 +232,8 @@ describe("driver — re-entrancy", () => {
 
 	it("releases the guard so a later settle is served normally", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
+		await pi.emit({ type: "agent_before_settle" });
 		expect(pi.messages).toHaveLength(2);
 	});
 
@@ -192,11 +249,11 @@ describe("driver — re-entrancy", () => {
 			}),
 		};
 		installDriver(pi.api, { policies: [boom] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		// Swallowed, and the guard is released for the next settle.
 		expect(pi.messages).toHaveLength(0);
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 		expect(pi.messages).toHaveLength(0);
 	});
 });
@@ -217,7 +274,7 @@ describe("driver — session replacement", () => {
 		};
 
 		installDriver(pi.api, { policies: [slow] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		// The generation moved, so the result belongs to a session that is gone.
 		expect(pi.messages).toHaveLength(0);
@@ -239,46 +296,40 @@ describe("driver — session replacement", () => {
 });
 
 describe("driver — coexistence with other injectors", () => {
-	it("stands down when a turn is already running", async () => {
-		// The mutual exclusion between injectors. `sendMessage({triggerTurn:true})`
-		// reaches `_runAgentPrompt`, which sets `_isAgentRunActive = true`
-		// synchronously before its first await — so any extension that injected
-		// earlier in this same serial settle chain has already made us non-idle.
-		// `@narumitw/pi-goal` gates on exactly this; without the same check here,
-		// agenda injects on top of whatever it did.
+	it("continues at the native boundary while the SDK run is still active", async () => {
+		// AgentSession calls before-settle BEFORE _emitAgentSettled clears
+		// _isAgentRunActive. isIdle=false is normal here, not another injector.
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" }, { idle: false });
-
-		expect(pi.messages).toHaveLength(0);
-		// And the policy never ran, so nothing was charged.
-		expect(metricEvents()).toHaveLength(0);
+		await pi.emit({ type: "agent_before_settle" }, { idle: false });
+		expect(pi.messages).toHaveLength(1);
+		expect(metricEvents()).toHaveLength(1);
 	});
 
 	it("stands down when messages are already queued", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" }, { pendingMessages: true });
+		await pi.emit({ type: "agent_before_settle" }, { pendingMessages: true });
 		expect(pi.messages).toHaveLength(0);
 	});
 
 	it("does not inject if the user starts typing while the policy works", async () => {
 		// A gate can run for minutes. Re-checking at injection time is what stops
 		// the result cutting into a turn the human started meanwhile.
-		let idle = true;
+		let pending = false;
 		const slow: Policy = {
 			name: "slow",
 			decide: (): PolicyWork => ({
 				name: "slow",
 				status: "",
 				run: async () => {
-					idle = false; // human typed during the gate run
+					pending = true; // human input was queued during the gate run
 					return { metric: { outcome: "fail", value: 1 }, inject: "late result" };
 				},
 			}),
 		};
 
 		installDriver(pi.api, { policies: [slow] });
-		// `idle` is read live by the fake, so it flips mid-run.
-		await pi.emit({ type: "agent_settled" }, { get idle() { return idle; } } as never);
+		// Queued input, not isIdle(), detects interference inside the active boundary.
+		await pi.emit({ type: "agent_before_settle" }, { get pendingMessages() { return pending; } });
 
 		expect(pi.messages).toHaveLength(0);
 		// The gate still RAN and still reported — only the injection is dropped.
@@ -289,13 +340,13 @@ describe("driver — coexistence with other injectors", () => {
 describe("driver — headless and worker modes", () => {
 	it.each(["print", "json"] as const)("never injects in %s mode", async (mode) => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" }, { mode });
+		await pi.emit({ type: "agent_before_settle" }, { mode });
 		expect(pi.messages).toHaveLength(0);
 	});
 
 	it("is completely inert in a worker process", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()], isWorker: true });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 		expect(pi.messages).toHaveLength(0);
 		expect(metricEvents()).toHaveLength(0);
 	});
@@ -313,7 +364,7 @@ describe("driver — headless and worker modes", () => {
 describe("driver — the question guard", () => {
 	it("cancels automatic re-entry when the last turn asked the user something", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" }, { branch: assistantSaid("Which branch should I target?") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Which branch should I target?") });
 
 		expect(pi.messages).toHaveLength(0);
 		// And the policy never ran, so nothing was charged to it.
@@ -322,17 +373,17 @@ describe("driver — the question guard", () => {
 
 	it("injects normally when the last turn was a statement", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects()] });
-		await pi.emit({ type: "agent_settled" }, { branch: assistantSaid("Build is broken.") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Build is broken.") });
 		expect(pi.messages).toHaveLength(1);
 	});
 
 	it("surfaces the blocked state, and clears it once the question is gone", async () => {
 		const driver = installDriver(pi.api, { policies: [alwaysInjects()] });
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantSaid("Proceed?") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Proceed?") });
 		expect(driver.blockedOnUser()).toBe(true);
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantSaid("Proceeding.") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("Proceeding.") });
 		expect(driver.blockedOnUser()).toBe(false);
 	});
 });
@@ -340,7 +391,7 @@ describe("driver — the question guard", () => {
 describe("driver — status", () => {
 	it("shows the policy's status while it works, then clears it", async () => {
 		installDriver(pi.api, { policies: [alwaysInjects("gatey")] });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		const ours = pi.statuses.filter((s) => s.key === "agenda");
 		expect(ours[0].text).toBe("working: gatey");
@@ -381,11 +432,11 @@ describe("/agenda command", () => {
 		agenda(pi.api);
 		const cwd = makeRepo({ check: "exit 1", checkTimeoutMs: 30_000, maxInjections: 3 });
 
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(1);
 
 		await pi.runCommand("agenda", "stop");
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 
 		// Budget was restored, so a second injection is allowed.
 		expect(pi.messages).toHaveLength(2);
@@ -420,7 +471,7 @@ describe("a turn that did not run is not evidence", () => {
 		const policy = alwaysInjects();
 		installDriver(pi.api, { policies: [policy] });
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantFailed("error", "Codex error: No tool call found for …") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantFailed("error", "Codex error: No tool call found for …") });
 
 		expect(pi.messages).toHaveLength(0);
 	});
@@ -429,7 +480,7 @@ describe("a turn that did not run is not evidence", () => {
 		// Stronger than wasteful: auto-continuing overrides an explicit stop.
 		installDriver(pi.api, { policies: [alwaysInjects()] });
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantFailed("aborted", "Operation aborted") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantFailed("aborted", "Operation aborted") });
 
 		expect(pi.messages).toHaveLength(0);
 	});
@@ -437,7 +488,7 @@ describe("a turn that did not run is not evidence", () => {
 	it("charges the ledger nothing for a turn it never judged", async () => {
 		const handle = installDriver(pi.api, { policies: [alwaysInjects()] });
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantFailed("error") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantFailed("error") });
 
 		expect(handle.ledger()).toEqual(emptyLedger);
 	});
@@ -446,10 +497,10 @@ describe("a turn that did not run is not evidence", () => {
 		// A failure must suppress this settle, not disarm the goal for the session.
 		installDriver(pi.api, { policies: [alwaysInjects()] });
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantFailed("error") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantFailed("error") });
 		expect(pi.messages).toHaveLength(0);
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantSaid("here is the work") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantSaid("here is the work") });
 		expect(pi.messages).toHaveLength(1);
 	});
 
@@ -458,10 +509,10 @@ describe("a turn that did not run is not evidence", () => {
 		// is not something the human did.
 		const handle = installDriver(pi.api, { policies: [alwaysInjects()] });
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantFailed("aborted") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantFailed("aborted") });
 		expect(handle.blockedOnUser()).toBe(true);
 
-		await pi.emit({ type: "agent_settled" }, { branch: assistantFailed("error") });
+		await pi.emit({ type: "agent_before_settle" }, { branch: assistantFailed("error") });
 		expect(handle.blockedOnUser()).toBe(false);
 	});
 });

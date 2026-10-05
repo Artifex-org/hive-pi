@@ -47,16 +47,25 @@ function piImports(): { file: string; specifier: string }[] {
  * list is the goal; a growing one is the signal.
  */
 const KNOWN_SUBPATH_DEBT: Record<string, string> = {};
+// pi 1.0 native provider factories are public package exports, not /compat debt.
+// Exact exception only: this factory is not available from the package root.
+const PUBLIC_PROVIDER_ENTRY = "@earendil-works/pi-ai/providers/meta";
 
 describe("pi API surface", () => {
-	it("imports pi from package ROOTS only, except for known, named debt", () => {
+	it("imports roots or the verified public native Meta provider, not private subpaths", () => {
 		const subpath = piImports().filter(({ specifier }) => specifier.split("/").length > 2);
-		const unexpected = subpath.filter(({ specifier }) => !(specifier in KNOWN_SUBPATH_DEBT));
+		const unexpected = subpath.filter(({ specifier }) => specifier !== PUBLIC_PROVIDER_ENTRY && !(specifier in KNOWN_SUBPATH_DEBT));
 		expect(
 			unexpected.map((u) => `${u.file} → ${u.specifier}`),
-			"a non-root pi import is a private entrypoint: it can vanish without a breaking-change note. " +
+			"an unverified non-root pi import may be private: it can vanish without a breaking-change note. " +
 				"Import from the package root, or add it to KNOWN_SUBPATH_DEBT with the reason.",
 		).toEqual([]);
+	});
+
+	it("verifies the exact native Meta exception against the installed package export map", () => {
+		const pkg = JSON.parse(readFileSync(join(REPO, "node_modules/@earendil-works/pi-ai/package.json"), "utf8"));
+		expect(pkg.exports["./providers/*"]).toEqual({ types: "./dist/providers/*.d.ts", import: "./dist/providers/*.js" });
+		expect(readFileSync(join(REPO, "node_modules/@earendil-works/pi-ai/dist/providers/meta.d.ts"), "utf8")).toContain("metaProvider");
 	});
 
 	it("has no caller of /compat at all — the debt is paid, not merely capped", () => {

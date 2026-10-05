@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import registerMetaProvider from "../extensions/meta-media/provider-only.ts";
+import { createFakePi } from "./fake-pi.ts";
 import {
 	WORKER_BUILTIN_MCP_EXTENSIONS,
 	buildSubagentWorkerArgs,
@@ -138,7 +140,10 @@ describe("subagent worker invocation", () => {
 		const provider = workerExtensionPaths().find((path) => path.endsWith("/extensions/meta-media/provider-only.ts"));
 		expect(provider, "worker must load the meta provider").toBeDefined();
 		const source = readFileSync(provider as string, "utf8");
-		expect(source).toMatch(/registerProvider\("meta"/);
+		const pi = createFakePi();
+		const register = vi.spyOn(pi.api, "registerProvider");
+		registerMetaProvider(pi.api);
+		expect(register).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: "meta" }));
 		expect(source, "a worker provider module must not add tools").not.toMatch(/\bregisterTool\(/);
 	});
 

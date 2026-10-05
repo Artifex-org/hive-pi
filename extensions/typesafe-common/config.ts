@@ -27,6 +27,8 @@ export interface TypesafeConfig {
 	 * loop, which is why nothing in this package registers a handler.
 	 */
 	timeoutMs: number;
+	/** Native classifier provider. Credentials are resolved by pi. */
+	provider: string;
 	/** The model alias sent in the request body. */
 	model: string;
 	/** Endpoint, overridable so a test or a proxy never has to patch the code. */
@@ -41,6 +43,7 @@ export function configFrom(raw: unknown): TypesafeConfig {
 	const cfg = (raw && typeof raw === "object" ? raw : {}) as Partial<TypesafeConfig>;
 	return {
 		enabled: cfg.enabled === true,
+		provider: typeof cfg.provider === "string" && cfg.provider.length > 0 ? cfg.provider : "typesafe",
 		timeoutMs: numberOr(cfg.timeoutMs, 3_000, 250, 30_000),
 		model: typeof cfg.model === "string" && cfg.model.length > 0 ? cfg.model : DEFAULT_MODEL,
 		endpoint:

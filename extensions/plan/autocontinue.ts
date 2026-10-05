@@ -241,7 +241,7 @@ function lastAssistantText(ctx: ExtensionContext): string | undefined {
 }
 
 /**
- * The thin driver, called from the plan extension's ONE `agent_settled` handler.
+ * The thin driver, called from the plan extension's `agent_before_settle` boundary.
  *
  * SYNCHRONOUS and cheap by contract: reads `ctx` once, up front, inside a
  * try/catch (ctx throws once the session is replaced), and never awaits — so
@@ -267,7 +267,7 @@ function lastAssistantText(ctx: ExtensionContext): string | undefined {
  * Returns the decision (for tests / callers that want it); side effect is the
  * injection and the state advance.
  */
-export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: AutoContinueDeps): AutoContinueDecision {
+export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: AutoContinueDeps, boundary = false): AutoContinueDecision {
 	const config = deps.config ?? DEFAULT_AUTOCONTINUE_CONFIG;
 	const env = deps.env ?? process.env;
 
@@ -285,7 +285,8 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 		// Read live, not captured — whether a turn is already running changes as
 		// the serial chain runs. Fails CLOSED: an unreadable ctx means the session
 		// is gone and injecting into it is never right.
-		idle = ctx.isIdle() && !ctx.hasPendingMessages();
+		// Native before-settle runs while isIdle() is false by SDK design.
+		idle = !ctx.signal?.aborted && (boundary || ctx.isIdle()) && !ctx.hasPendingMessages();
 		const doc = deps.loadDoc(ctx);
 		phase = doc.phase;
 		counts = itemCounts(doc);
@@ -323,7 +324,7 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 	if (decision.action !== "continue") return decision;
 
 	try {
-		pi.sendMessage(
+		if (!boundary) pi.sendMessage(
 			{ customType: AUTOCONTINUE_MESSAGE_TYPE, content: decision.nudge, display: true },
 			// The proven idle-wake shape: `agmsg/index.ts:106`, `background`,
 			// `credential-recovery`, and the agenda driver (`driver.ts:333`) all
