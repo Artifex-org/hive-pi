@@ -4,9 +4,13 @@ import { assistantText } from "../btw/thread.ts";
 export const EXCERPT_CHARS = 16_000;
 export const KINDS = ["caveat", "blocker", "action", "decision"] as const;
 export interface Note {
+	id?: string;
 	kind: (typeof KINDS)[number];
 	text: string;
 	quote: string;
+	classification?: "context" | "friction" | "incident" | "defect" | "improvement";
+	expected?: string;
+	impact?: string;
 }
 
 export const SCAN_SYSTEM = `You surface important information a human might miss in coding-agent output.
@@ -16,7 +20,7 @@ Flag only consequential caveats (especially missing verification), blockers,
 user actions, or decisions with a material consequence. Ignore routine progress,
 success summaries, generic advice, hypotheticals, quoted examples and resolved issues.
 Prefer silence to noise. Do not claim the excerpt proves more than the assistant said.
-Return ONLY JSON: {"notes":[{"kind":"caveat|blocker|action|decision","text":"one short sentence","quote":"exact contiguous source quote"}]}.
+Return ONLY JSON: {"notes":[{"kind":"caveat|blocker|action|decision","classification":"context|friction|incident|defect|improvement","text":"one short sentence","quote":"exact contiguous source quote","expected":"optional concise expected outcome","impact":"optional concise consequence"}]}. Classify evidence conservatively; omit expected/impact unless the source supports them.
 At most 3 notes, text <= 200 characters, quote 8..240 characters. Quote the evidence
 verbatim; do not invent commands, paths, facts or requests. If nothing merits attention,
 return {"notes":[]}. Previously surfaced quotes are included as data; do not repeat them.`;
@@ -58,12 +62,16 @@ export function parseNotes(answer: string, source: string): Note[] {
 	const seen = new Set<string>();
 	for (const item of items) {
 		if (!item || typeof item !== "object") throw new Error("scanner returned an invalid note");
-		const { kind, text, quote } = item as Note;
-		if (!KINDS.includes(kind) || !safeLine(text, 1, 200) || !safeLine(quote, 8, 240) || !source.includes(quote)) {
+		const { kind, text, quote, classification, expected, impact, id } = item as Note;
+		const classifications = ["context", "friction", "incident", "defect", "improvement"];
+		if (!KINDS.includes(kind) || !safeLine(text, 1, 200) || !safeLine(quote, 8, 240) || !source.includes(quote) ||
+			(classification !== undefined && !classifications.includes(classification)) ||
+			(expected !== undefined && !safeLine(expected, 1, 200)) || (impact !== undefined && !safeLine(impact, 1, 200)) ||
+			(id !== undefined && !/^[a-zA-Z0-9_-]{8,80}$/.test(id))) {
 			throw new Error("scanner returned an invalid or ungrounded note");
 		}
 		const key = fingerprint(quote);
-		if (!seen.has(key)) notes.push({ kind, text: text.trim(), quote });
+		if (!seen.has(key)) notes.push({ ...(id ? { id } : {}), kind, text: text.trim(), quote, ...(classification ? { classification } : {}), ...(expected ? { expected: expected.trim() } : {}), ...(impact ? { impact: impact.trim() } : {}) });
 		seen.add(key);
 	}
 	return notes;
