@@ -43,6 +43,14 @@ export interface Verdict {
 	 * evaluator answer keeps its exact meaning.
 	 */
 	pending?: boolean;
+	/**
+	 * The remaining work waits on someone else — a person's or another agent's
+	 * decision, approval, review or reservation — and the worker cannot move it
+	 * alone. Like `pending` there is nothing to push on: "Goal not yet met,
+	 * continue" only makes a blocked worker restate that it is blocked
+	 * (measured: ~30 such restatement turns in a week). Same leniency rules.
+	 */
+	blocked?: boolean;
 }
 
 export type VerdictResult = { kind: "verdict"; verdict: Verdict } | { kind: "error"; message: string };
@@ -127,5 +135,6 @@ export function parseVerdict(raw: string): VerdictResult {
 	// and a different object, and every existing caller compares whole verdicts.
 	const verdict: Verdict = { ok: record.ok, reason: record.reason.trim() };
 	if (pending && !record.ok) verdict.pending = true;
+	if (record.blocked === true && !record.ok) verdict.blocked = true;
 	return { kind: "verdict", verdict };
 }

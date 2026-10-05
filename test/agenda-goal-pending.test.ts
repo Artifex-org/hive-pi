@@ -162,3 +162,39 @@ describe("the streak", () => {
 		expect(rehydrateGoal([{ customType: GOAL_ENTRY_TYPE, data: old }])?.ledger.pendingStreak).toBe(0);
 	});
 });
+
+// Measured 2026-10-05: ~30 goal continuations in a week went to workers that
+// had already reported "blocked on the controller / the operator's decision",
+// and bought only a restatement.
+describe("a blocked verdict waits on someone else", () => {
+	const blockedOnController = { ok: false, blocked: true, reason: "Step s4 waits on the controller's schema decision." };
+
+	it("reads blocked off the wire, and lets ok:true win", () => {
+		expect(parseVerdict('{"ok": false, "reason": "waits on root", "blocked": true}')).toEqual({
+			kind: "verdict",
+			verdict: { ok: false, reason: "waits on root", blocked: true },
+		});
+		expect(parseVerdict('{"ok": true, "reason": "done", "blocked": true}')).toEqual({ kind: "verdict", verdict: { ok: true, reason: "done" } });
+	});
+
+	it("says nothing and spends no iteration", () => {
+		const { goal: after, outcome } = applyVerdict(goal(), blockedOnController, NOW, 100);
+		expect(injectionFor(outcome)).toBeNull();
+		expect(after.ledger.iterations).toBe(0);
+		expect(after.state).toBe("active");
+	});
+
+	it("keeps the budget's own ending when the budget runs out while blocked", () => {
+		let g = createGoal("g3", "x", NOW, { budget: { tokens: 100 } });
+		g = applyVerdict(g, blockedOnController, NOW, 500).goal;
+		expect(applyVerdict(g, blockedOnController, NOW + 1, 500).outcome.kind).toBe("budget_exhausted");
+	});
+
+	it("ends silently as blocked_user — never as 'continue' — once patience runs out", () => {
+		let g = goal();
+		for (let i = 0; i < MAX_PENDING - 1; i++) g = applyVerdict(g, { ...blockedOnController, reason: `${blockedOnController.reason} (${i})` }, NOW + i, 10).goal;
+		const last = applyVerdict(g, blockedOnController, NOW + 99, 10);
+		expect(last.outcome.kind).toBe("blocked_user");
+		expect(injectionFor(last.outcome)).toBeNull();
+	});
+});

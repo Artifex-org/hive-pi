@@ -15,6 +15,7 @@
 import { describe, expect, it } from "vitest";
 import { classifyHandback, classifyText, endsWithQuestion, handbackClass, isFirmHandback } from "../extensions/hive-common/handback.ts";
 import { decideWake } from "../extensions/hive-common/waker.ts";
+import { confirmOwnWork } from "../extensions/hive-common/own-work.ts";
 
 describe("endsWithQuestion — fires", () => {
 	it.each([
@@ -211,6 +212,77 @@ describe("classifyHandback — the branch decides", () => {
 		const ask = (text: string) => [user("go"), called("c1", "plan_ask"), result("c1", "plan_ask", text), said("Noted.")];
 		expect(classifyHandback(ask("Which schema?\n\n1. A\n2. B"))).toMatchObject({ reason: "question", structured: true });
 		expect(classifyHandback(ask("The user answered: A"))).toEqual({ kind: "none" });
+	});
+});
+
+describe("classifyHandback — an ask late in the run", () => {
+	it("ignores mid-run narration: a question to itself, an incidental wait, an ask with no one addressed", () => {
+		for (const text of [
+			"Let me check whether the migration ran — is the column there?",
+			"The build is running; I'll wait for it to finish.",
+			"PR #12 is pending approval; let me check the CI status.",
+		]) {
+			const branch = [
+				user("go"),
+				{ type: "message", message: { role: "assistant", content: [{ type: "text", text }, { type: "toolCall", id: "c1", name: "bash", arguments: {} }], stopReason: "toolUse" } },
+				result("c1", "bash", "ok"),
+				said("Build passed. All done."),
+			];
+			expect(classifyHandback(branch), text).toEqual({ kind: "none" });
+		}
+	});
+
+	it("is answered by a teammate's reply later in the run", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting for the controller's reservation." }, { type: "toolCall", id: "c1", name: "mcp__hive__message_teammate", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "mcp__hive__message_teammate", "queued"),
+			{ type: "custom_message", customType: "team-message", content: "Reservation granted." },
+			said("Repair applied and tests pass."),
+		];
+		expect(classifyHandback(branch)).toEqual({ kind: "none" });
+	});
+
+	it("survives a final 'watching CI' line when no own work turns out to be running", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting for the controller's reservation." }, { type: "toolCall", id: "c1", name: "mcp__hive__message_teammate", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "mcp__hive__message_teammate", "queued"),
+			said("Still watching run #1828."),
+		];
+		const handback = classifyHandback(branch);
+		expect(handback.kind).toBe("machine");
+		expect(confirmOwnWork(handback, { running: () => 0 })).toMatchObject({ kind: "human", reason: "waiting" });
+	});
+
+	it("holds as a soft wait when the final word does not repeat it", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Waiting for the controller's schema-repair reservation." }, { type: "toolCall", id: "c1", name: "mcp__hive__message_teammate", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "mcp__hive__message_teammate", "queued"),
+			said("Final-head PR CI #4401 is still running. No merge or deployment."),
+		];
+		const handback = classifyHandback(branch);
+		expect(handback).toMatchObject({ kind: "human", reason: "waiting" });
+		expect(isFirmHandback(handback)).toBe(false); // a CI completion must still land
+	});
+
+	it("does not reach back further than the run's last two messages", () => {
+		const branch = [
+			user("go"),
+			{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Aligning v2 needs your approval." }, { type: "toolCall", id: "c1", name: "bash", arguments: {} }], stopReason: "toolUse" } },
+			result("c1", "bash", "ok"),
+			called("c2", "bash"),
+			result("c2", "bash", "ok"),
+			called("c3", "edit"),
+			result("c3", "edit", "ok"),
+			said("Implemented and tested."),
+		];
+		expect(classifyHandback(branch)).toEqual({ kind: "none" });
+	});
+
+	it("reads 'awaiting scope confirmation' as a request", () => {
+		expect(classifyText("Evidence updated. Awaiting scope confirmation for CLI parity.").kind).toBe("human");
 	});
 });
 

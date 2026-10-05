@@ -59,7 +59,12 @@ export type HandbackReason =
 export type Handback =
 	| { kind: "none" }
 	| { kind: "human"; reason: Exclude<HandbackReason, "own-work">; structured: boolean }
-	| { kind: "machine"; reason: "own-work" };
+	/**
+	 * `otherwise` is what the turn reads as when no own work is actually
+	 * running (own-work.ts drops the `machine` reading then) — a late ask in the
+	 * same run must not be lost with it.
+	 */
+	| { kind: "machine"; reason: "own-work"; otherwise?: Handback };
 
 export const NO_HANDBACK: Handback = { kind: "none" };
 
@@ -154,6 +159,9 @@ const HUMAN_PHRASES: readonly RegExp[] = [
 	// "the route now requires authorization" reports.
 	/\b(?:awaits?|awaiting|needs?|requires?) (?:your|explicit|renewed|operator|human|root) (?:\w+ )?(?:authori[sz]ation|approval|sign-?off)\b/i,
 	/\bawait(?:s|ing) (?:authori[sz]ation|approval|sign-?off)\b/i,
+	// "Awaiting scope confirmation", "awaits controller scope", "awaiting the controller's go-ahead".
+	/\bawait(?:s|ing) (?:the )?(?:controller|operator|root|parent|lead)(?:'s|’s)? (?:\w+ )?(?:scope|decision|confirmation|approval|go-ahead|direction|review|harvest|sign-?off|reservation)\b/i,
+	/\bawait(?:s|ing) (?:scope|direction) (?:confirmation|decision)\b/i,
 	/\bauthori[sz]ed [\w -]{1,40} is (?:needed|required) to (?:continue|proceed)\b/i,
 	// German: "ich warte auf deine Freigabe", "soll ich …", "sobald du …".
 	// "auf/ohne/bis zu … Freigabe" waits; "nach der Freigabe habe ich deployed" reports.
@@ -348,5 +356,50 @@ export function classifyHandback(branch: readonly unknown[]): Handback {
 			break;
 		}
 	}
-	return structuredHandback(branch.slice(start, last)) ?? classifyText(textOf(final.content));
+	const run = branch.slice(start, last);
+	const own = structuredHandback(run) ?? classifyText(textOf(final.content));
+	if (own.kind === "human") return own;
+	const late = lateAsk(run);
+	if (own.kind === "machine") return late.kind === "none" ? own : { ...own, otherwise: late };
+	return late;
+}
+
+/**
+ * An ask made in the run's LAST few messages, beside a tool call, still holds
+ * when the final word does not repeat it: "Waiting for the controller's
+ * schema-repair reservation." + `message_teammate`, then a status summary.
+ * Measured: 12 such messages in 23,656 tool-calling turns, most to a controller.
+ *
+ * It is read as a SOFT wait, never firm: the same runs usually also wait on a
+ * CI watcher, whose completion must still land. What it stops is a nudge to
+ * "keep going" on the agent's own initiative.
+ *
+ * Narrower than the final-message rules on purpose. Mid-run narration is full
+ * of questions to itself ("is the column there?") and incidental "wait"/"hold"
+ * ("I'll wait for the build"), so only a request-shaped phrase counts, and only
+ * beside a call that actually reaches a person. An answer that arrived later
+ * in the run (a team or agmsg message) ends the ask.
+ */
+const LATE_ASK_MESSAGES = 2;
+const ANSWER_TYPES = new Set(["team-message", "agmsg"]);
+const PERSON_TOOL = /\b(?:mcp__hive__|hive_)?(?:message_teammate|agmsg_send|post_team_note)\b/;
+
+function reachesAPerson(content: unknown): boolean {
+	return toolCallsOf(content).some((call) => PERSON_TOOL.test(hiveToolOf(call, undefined)));
+}
+
+function lateAsk(run: readonly unknown[]): Handback {
+	let seen = 0;
+	for (let i = run.length - 1; i >= 0 && seen < LATE_ASK_MESSAGES; i--) {
+		const entry = run[i] as { type?: string; customType?: string };
+		if (entry?.type === "custom_message" && entry.customType && ANSWER_TYPES.has(entry.customType)) return NO_HANDBACK;
+		const message = messageOf(run[i]);
+		if (message?.role !== "assistant") continue;
+		seen++;
+		const tail = handbackTail(textOf(message.content));
+		if (HUMAN_PHRASES.some((re) => re.test(tail)) && reachesAPerson(message.content)) {
+			return { kind: "human", reason: "waiting", structured: false };
+		}
+	}
+	return NO_HANDBACK;
 }

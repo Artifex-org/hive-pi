@@ -29,9 +29,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { exposureFor, MODE_TOOLS } from "./policy.ts";
+import { exposureFor, LOAD_TOOL, MODE_TOOLS } from "./policy.ts";
 
-export const LOAD_TOOL = "load_tools";
+export { LOAD_TOOL };
 
 type ToolLike = { name: string; exposure?: string };
 

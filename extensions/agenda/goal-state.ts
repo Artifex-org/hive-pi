@@ -182,7 +182,7 @@ export type GoalOutcome =
  */
 export function applyVerdict(
 	goal: GoalItem,
-	verdict: { ok: boolean; reason: string; pending?: boolean },
+	verdict: { ok: boolean; reason: string; pending?: boolean; blocked?: boolean },
 	now: number,
 	spentTokens: number,
 ): { goal: GoalItem; outcome: GoalOutcome } {
@@ -192,7 +192,7 @@ export function applyVerdict(
 		turnsEvaluated: goal.ledger.turnsEvaluated + 1,
 		judgeErrors: 0, // a real verdict clears the error streak
 		// A gradeable verdict means the wait is over, whichever way it went.
-		pendingStreak: verdict.pending && !verdict.ok ? goal.ledger.pendingStreak : 0,
+		pendingStreak: (verdict.pending || verdict.blocked) && !verdict.ok ? goal.ledger.pendingStreak : 0,
 		tokens: goal.ledger.tokens + spentTokens,
 		// Counts occurrences of the current reason, so the first unmet verdict is
 		// already a streak of 1 and three identical ones in a row trip the check.
@@ -210,11 +210,20 @@ export function applyVerdict(
 	// succeeded") that differ on every poll, so a streak that reset on a changed
 	// reason would never reach its cap — which is precisely how the binary
 	// verdict let these goals run to the iteration cap instead.
-	if (verdict.pending && !verdict.ok) {
+	//
+	// BLOCKED rides the same wait: nothing the worker can do moves it, so a
+	// continuation would only buy a restatement. It is never charged as an
+	// unmet verdict — when patience runs out it ends as `blocked_user`, which
+	// says nothing and leaves the decision with whoever it is waiting on.
+	if ((verdict.pending || verdict.blocked) && !verdict.ok) {
 		const pendingStreak = goal.ledger.pendingStreak + 1;
 		const waiting: GoalItem = { ...base, ledger: { ...ledger, pendingStreak } };
 		if (pendingStreak < MAX_PENDING && !isBudgetExhausted(waiting.ledger, base.createdAt, now)) {
 			return { goal: waiting, outcome: { kind: "pending", reason: verdict.reason, waited: pendingStreak } };
+		}
+		// A spent budget keeps its own ending (and its wrap-up message).
+		if (verdict.blocked && !isBudgetExhausted(waiting.ledger, base.createdAt, now)) {
+			return { goal: { ...base, state: "blocked_user" }, outcome: { kind: "blocked_user", reason: verdict.reason } };
 		}
 		// Out of patience: fall through and charge it as an ordinary unmet
 		// verdict, so a goal waiting on something that never lands still
