@@ -103,6 +103,7 @@ import {
 	type AgentStatusItem,
 } from "./recap.ts";
 import { classifyHandback } from "../hive-common/handback.ts";
+import { announceOwnWork } from "../hive-common/own-work.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import { runOneShot } from "./spawn.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
@@ -1477,6 +1478,9 @@ export default function (pi: ExtensionAPI) {
 	// each half would believe it owned every worker.
 	const workers = new WorkerRegistry();
 	const runs = new DurableRunRegistry();
+	// A durable orchestration is the agent's own pending work (hive-common/own-work.ts).
+	const announceDurableRuns = () =>
+		announceOwnWork(pi, "orchestrate", runs.list().filter((run) => run.status === "running").length);
 
 	/** Keep `orchestrate` in the active set exactly while /ultracode is on. */
 	const syncOrchestrateTool = () => {
@@ -1878,9 +1882,11 @@ export default function (pi: ExtensionAPI) {
 			if (caps.durable) {
 				const controller = new AbortController();
 				runs.start(runId, plan.name, () => controller.abort());
+				announceDurableRuns();
 				void executeRun(controller.signal)
 					.then((result) => {
 						const completed = runs.complete(runId, result);
+						announceDurableRuns();
 						// Session shutdown marks the run canceled before its worker promises
 						// unwind. Do not resurrect it as done or inject into a dead session.
 						if (!completed || completed.status === "canceled") return;
@@ -1900,6 +1906,7 @@ export default function (pi: ExtensionAPI) {
 					})
 					.catch((error) => {
 						const failed = runs.fail(runId, error);
+						announceDurableRuns();
 						if (!failed || failed.status === "canceled") return;
 						try {
 							orchestrateWaker.deliver(

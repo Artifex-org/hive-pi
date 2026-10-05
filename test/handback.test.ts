@@ -107,6 +107,10 @@ describe("classifyText — a plain stop stays plain", () => {
 		["confirm as a report", "I can confirm the tests pass on the final commit."],
 		["holding as a verb mid-sentence", "The lock file is holding a stale pid; I removed it and the build passed."],
 		["German report with Bestätigung", "Die Bestätigung kam um 10:02; der Build ist grün."],
+		["a route that requires authorization", "Fixed: the /api/orders route now requires authorization."],
+		["German report after the release", "Nach der Freigabe habe ich deployed; Build ist grün."],
+		["a decision not to retry a flake", "Flaky test failed; I will not retry it, root cause fixed and suite passes."],
+		["a status label", "Status: holding pattern resolved, queue drained."],
 	])("%s", (_label, text) => {
 		expect(classifyText(text)).toEqual({ kind: "none" });
 	});
@@ -210,6 +214,19 @@ describe("classifyHandback — the branch decides", () => {
 	});
 });
 
+describe("handbackClass", () => {
+	it("separates a structured gate from a prose request", () => {
+		const plan = classifyHandback([
+			user("plan it"),
+			called("c1", "plan_ready"),
+			result("c1", "plan_ready", "Plan is ready and awaiting approval:\n\nX"),
+			said("Here is the plan. Let me know if you want changes."),
+		]);
+		expect(handbackClass(plan)).toBe("gate");
+		expect(handbackClass(classifyText("Let me know which."))).toBe("firm");
+	});
+});
+
 describe("decideWake", () => {
 	const firm = classifyText("Shall I merge?");
 	const soft = classifyText("Standing by.");
@@ -224,7 +241,7 @@ describe("decideWake", () => {
 	it("a direct message wakes through prose with a reminder, never through a gate", () => {
 		const decision = decideWake("message", firm);
 		expect(decision.wake).toBe(true);
-		expect(decision.wake && decision.reminder).toMatch(/do not treat it as that answer/);
+		expect(decision.wake && decision.reminder).toMatch(/If it IS that answer, act on it/);
 		expect(decideWake("message", structured)).toEqual({ wake: false });
 	});
 });

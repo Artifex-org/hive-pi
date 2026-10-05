@@ -79,7 +79,7 @@ export interface Policy {
 	 * default — none — stands the policy down whenever the last turn handed the
 	 * conversation to a person or to the agent's own pending job.
 	 */
-	proceedsDespite?: readonly Exclude<HandbackClass, "none">[];
+	proceedsDespite?: readonly Exclude<HandbackClass, "none" | "gate">[];
 	/** Synchronous, cheap, no `ctx`. Returns null when this policy does not want this settle. */
 	decide(context: PolicyContext): PolicyWork | null;
 }

@@ -32,7 +32,8 @@ import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-com
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { emptyLedger, type LedgerState } from "./ledger.ts";
 import type { MetricOutcome, Policy } from "./policy.ts";
-import { classifyHandback, type Handback, handbackClass, NO_HANDBACK } from "../hive-common/handback.ts";
+import { classifyHandback, type Handback, handbackClass } from "../hive-common/handback.ts";
+import { confirmOwnWork, trackOwnWork } from "../hive-common/own-work.ts";
 import { deriveSignals, emptySignals, type SessionSignals } from "./signals.ts";
 import { type TurnFailure, turnFailureOf } from "./turn-outcome.ts";
 
@@ -150,20 +151,6 @@ function readSignals(ctx: ExtensionContext): SessionSignals {
 	}
 }
 
-/**
- * The session's hand-back state. Fails OPEN to "no hand-back", like the text
- * read below: an unreadable branch is already a stale ctx, which the caller
- * rejects on its own, and a guess of "the human is needed" would silently park
- * a legitimate gate injection.
- */
-function readHandback(ctx: ExtensionContext): Handback {
-	try {
-		return classifyHandback(ctx.sessionManager.getBranch() as readonly unknown[]);
-	} catch {
-		return NO_HANDBACK;
-	}
-}
-
 /** Text of the most recent assistant turn, for the policies that read it. */
 function lastAssistantText(ctx: ExtensionContext): string | undefined {
 	try {
@@ -202,6 +189,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	// stale on session replacement, which every read below is guarded against.
 	let heldCtx: ExtensionContext | null = null;
 	const settleClaims = trackSettleClaims(pi);
+	const ownWork = trackOwnWork(pi);
 
 	// Registered UNCONDITIONALLY. The extension factory runs once at startup, so
 	// a registration gated on state can never be un-gated by a later command —
@@ -239,7 +227,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			transcript = recentTranscript(ctx);
 			signals = readSignals(ctx);
 			turnFailure = readTurnFailure(ctx);
-			handback = readHandback(ctx);
+			handback = confirmOwnWork(classifyHandback(ctx.sessionManager.getBranch() as readonly unknown[]), ownWork);
 			setStatus = (text: string) => {
 				try {
 					ctx.ui.setStatus("agenda", text);
@@ -308,7 +296,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		blockedOnUser = handback.kind === "human";
 		const held = handbackClass(handback);
 		const eligible = options.policies.filter(
-			(policy) => held === "none" || policy.proceedsDespite?.includes(held) === true,
+			(policy) => held === "none" || (held !== "gate" && policy.proceedsDespite?.includes(held) === true),
 		);
 		if (eligible.length === 0) return;
 

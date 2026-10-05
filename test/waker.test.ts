@@ -61,7 +61,9 @@ describe("idle", () => {
 		await at("agent_settled", { branch: question });
 		waker.deliver({ customType: "team-message", content: "FYI: I touched x.ts", display: true }, "message");
 		expect(pi.messages[0].options?.triggerTurn).toBe(true);
-		expect(pi.messages[0].content).toMatch(/^FYI: I touched x\.ts\n\n\(Before this arrived you handed the turn back/);
+		expect(pi.messages[0].content).toMatch(/^FYI: I touched x\.ts\n\n\(This message arrived after you handed the turn back/);
+		// The sender may be the very controller the agent waits on: its answer must stay actionable.
+		expect(pi.messages[0].content).toMatch(/If it IS that answer, act on it/);
 	});
 
 	it("never wakes a teammate's message through a plan awaiting approval", async () => {
@@ -76,30 +78,53 @@ describe("idle", () => {
 		expect(pi.messages[0].options?.triggerTurn).toBe(false);
 	});
 
-	it("does not wake when another injector already took the settle", async () => {
+	it("does not let a claim left by a settle that never continued silence later wakes", async () => {
 		await at("agent_settled", { branch: plainStop });
-		trackSettleClaims(pi.api).claim("agenda");
+		trackSettleClaims(pi.api).claim("agenda"); // claimed, but no run ever started
 		waker.deliver(done, "completion");
+		expect(pi.messages[0].options?.triggerTurn).toBe(true);
+	});
+
+	it("defers to a claim made inside the same settle chain", async () => {
+		await at("agent_start", { idle: false });
+		await at("agent_before_settle", { idle: false, branch: plainStop });
+		waker.deliver(done, "completion"); // lands mid-settle: held
+		trackSettleClaims(pi.api).claim("agenda");
+		await at("agent_settled", { branch: plainStop });
 		expect(pi.messages[0].options?.triggerTurn).toBe(false);
+	});
+
+	it("delivers without waking when the session it last saw was replaced", async () => {
+		await at("agent_settled", { branch: plainStop });
+		pi.staleCurrentCtx();
+		waker.deliver(done, "completion");
+		expect(pi.messages).toEqual([{ ...done, options: { deliverAs: "followUp", triggerTurn: false } }]);
+	});
+
+	it("treats an idle compaction as idle, not as a run whose settle would wake it", async () => {
+		// ctx.isIdle() reads false while compacting, but no agent run is active.
+		await at("session_compact", { idle: false, branch: plainStop });
+		waker.deliver(done, "completion");
+		expect(pi.messages[0].options?.triggerTurn).toBe(true);
 	});
 });
 
 describe("mid-run", () => {
 	it("never joins the follow-up queue while streaming", async () => {
-		await at("turn_start", { idle: false });
+		await at("agent_start", { idle: false });
 		waker.deliver(done, "completion");
 		expect(pi.messages).toEqual([{ ...done, options: { deliverAs: "followUp", triggerTurn: false } }]);
 	});
 
 	it("asks for one continuation when the run ends on a plain stop", async () => {
-		await at("turn_start", { idle: false });
+		await at("agent_start", { idle: false });
 		waker.deliver(done, "completion");
 		const results = await at("agent_before_settle", { idle: false, branch: plainStop });
 		expect(results).toContainEqual({ continue: true });
 	});
 
 	it("lets the run END when its final turn handed back — the notice stays parked", async () => {
-		await at("turn_start", { idle: false });
+		await at("agent_start", { idle: false });
 		waker.deliver(done, "completion");
 		const results = await at("agent_before_settle", { idle: false, branch: question });
 		expect(results).toEqual([undefined]);
@@ -107,7 +132,7 @@ describe("mid-run", () => {
 	});
 
 	it("does not continue for a notice the model already read in a later turn", async () => {
-		await at("turn_start", { idle: false });
+		await at("agent_start", { idle: false });
 		waker.deliver(done, "completion");
 		await at("turn_end", { idle: false });
 		await at("turn_start", { idle: false });
@@ -118,7 +143,7 @@ describe("mid-run", () => {
 	it("does not double up when another handler already continued the run", async () => {
 		pi.api.on("agent_before_settle", () => ({ continue: true }));
 		const late = createWaker(pi.api, "late");
-		await at("turn_start", { idle: false });
+		await at("agent_start", { idle: false });
 		late.deliver(done, "completion");
 		const results = await at("agent_before_settle", { idle: false, branch: plainStop });
 		// Registration order: the first waker had nothing pending, the extra
@@ -126,8 +151,20 @@ describe("mid-run", () => {
 		expect(results).toEqual([undefined, { continue: true }, undefined]);
 	});
 
+	it("continues past a prose question for a message only with a reminder entry", async () => {
+		await at("agent_start", { idle: false });
+		waker.deliver({ customType: "team-message", content: "FYI", display: true }, "message");
+		const results = await at("agent_before_settle", { idle: false, branch: question });
+		expect(results).toEqual([
+			{
+				entries: [{ type: "custom_message", customType: "handback", content: expect.stringMatching(/handed the turn back/), display: true }],
+				continue: true,
+			},
+		]);
+	});
+
 	it("ignores a run that did not complete", async () => {
-		await at("turn_start", { idle: false });
+		await at("agent_start", { idle: false });
 		waker.deliver(done, "completion");
 		const results = await at("agent_before_settle", { idle: false, branch: plainStop }, { outcome: "aborted" });
 		expect(results).toEqual([undefined]);
@@ -150,15 +187,26 @@ describe("settling", () => {
 		expect(pi.messages).toEqual([{ ...done, options: { deliverAs: "followUp", triggerTurn: false } }]);
 	});
 
-	it("delivers it as streaming when the settle continued the run instead", async () => {
+	it("delivers it as streaming when the settle continued the run instead — pi emits agent_start first", async () => {
 		await at("agent_before_settle", { idle: false, branch: plainStop });
 		waker.deliver(done, "completion");
-		await at("turn_start", { idle: false });
+		await at("agent_start", { idle: false });
 		expect(pi.messages).toEqual([{ ...done, options: { deliverAs: "followUp", triggerTurn: false } }]);
+		await at("turn_start", { idle: false });
+		expect(pi.messages).toHaveLength(1);
 	});
 });
 
 describe("status", () => {
+	it("sums parked notices across extensions that share the footer", async () => {
+		const other = createWaker(pi.api, "agmsg");
+		await at("agent_settled", { branch: question });
+		waker.deliver(done, "completion");
+		waker.deliver(done, "completion");
+		other.deliver({ customType: "agmsg", content: "x", display: true }, "completion");
+		expect(pi.statuses.at(-1)).toEqual({ key: "handback", text: "⏸ waiting on you (question) — 3 notices held" });
+	});
+
 	it("clears the parked line when the next run starts", async () => {
 		await at("agent_settled", { branch: question });
 		waker.deliver(done, "completion");

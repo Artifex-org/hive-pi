@@ -72,6 +72,7 @@ import {
 	type AutoContinueState,
 } from "./autocontinue.ts";
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
+import { trackOwnWork } from "../hive-common/own-work.ts";
 import { registerFacadeTools } from "./facades.ts";
 import { opsForLane, TEMPLATE_NAMES_TUPLE } from "./templates.ts";
 import {
@@ -1492,6 +1493,7 @@ export default function (pi: ExtensionAPI) {
 	// agenda driver (at most one injection per settle). See autocontinue.ts and
 	// hive-common/settle-claim.ts.
 	const settleClaims = trackSettleClaims(pi);
+	const ownWork = trackOwnWork(pi);
 	pi.on("agent_before_settle", (event, ctx) => {
 		if (event.outcome !== "completed" || event.continue) return;
 		const decision = runAutoContinue(pi, ctx, {
@@ -1499,6 +1501,7 @@ export default function (pi: ExtensionAPI) {
 			state: autoContinue,
 			uiPromptOpen,
 			settleClaims,
+			ownWork,
 		}, true);
 		return decision.action === "continue" ? {
 			entries: [...event.entries, { type: "custom_message", customType: AUTOCONTINUE_MESSAGE_TYPE, content: decision.nudge, display: true }],

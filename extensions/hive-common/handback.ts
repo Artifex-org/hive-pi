@@ -75,16 +75,20 @@ export function isFirmHandback(handback: Handback): boolean {
 
 /**
  * The hand-back reduced to what a re-entry policy keys on:
- *   - `firm`    — a person must act (isFirmHandback)
+ *   - `gate`    — a structured hold: a plan awaiting approval, a pending grant,
+ *                 an unanswered `plan_ask`, a human abort. Nothing automatic
+ *                 runs through it.
+ *   - `firm`    — a question or decision put to a person in prose
  *   - `waiting` — the agent said it is waiting, without asking anything
  *   - `machine` — waiting on its own job
  *   - `none`    — a plain stop
  */
-export type HandbackClass = "firm" | "waiting" | "machine" | "none";
+export type HandbackClass = "gate" | "firm" | "waiting" | "machine" | "none";
 
 export function handbackClass(handback: Handback): HandbackClass {
 	if (handback.kind === "none") return "none";
 	if (handback.kind === "machine") return "machine";
+	if (handback.structured) return "gate";
 	return isFirmHandback(handback) ? "firm" : "waiting";
 }
 
@@ -146,11 +150,14 @@ const HUMAN_PHRASES: readonly RegExp[] = [
 	/\bpending (?:your |human |operator )?(?:approval|sign-?off|decision)\b/i,
 	/\bblocked on (?:your\b|you\b|the (?:user|operator|controller)\b|(?:an? |the )?(?:decision|approval|grant)\b|(?:controller|operator)\b|joan\b)/i,
 	/\/plan approve\b/i,
-	/\b(?:requires?|needs?|awaits?|awaiting) (?:\w+ ){0,2}(?:authori[sz]ation|approval|sign-?off)\b/i,
-	/\bauthori[sz]ation (?:is )?(?:needed|required)\b/i,
-	/\bauthori[sz]ed [\w -]{1,40} is (?:needed|required)\b/i,
+	// A qualifier makes it a request: "requires explicit authorization" asks,
+	// "the route now requires authorization" reports.
+	/\b(?:awaits?|awaiting|needs?|requires?) (?:your|explicit|renewed|operator|human|root) (?:\w+ )?(?:authori[sz]ation|approval|sign-?off)\b/i,
+	/\bawait(?:s|ing) (?:authori[sz]ation|approval|sign-?off)\b/i,
+	/\bauthori[sz]ed [\w -]{1,40} is (?:needed|required) to (?:continue|proceed)\b/i,
 	// German: "ich warte auf deine Freigabe", "soll ich …", "sobald du …".
-	/\b(?:auf|ohne|nach|bis zu)\s+(?:[\p{L}-]+\s+){0,3}(?:freigabe|entscheidung|zustimmung|bestätigung|rückmeldung)\b/iu,
+	// "auf/ohne/bis zu … Freigabe" waits; "nach der Freigabe habe ich deployed" reports.
+	/\b(?:auf|ohne|bis zu)\s+(?:[\p{L}-]+\s+){0,3}(?:freigabe|entscheidung|zustimmung|bestätigung|rückmeldung)\b/iu,
 	/\b(?:soll ich|möchtest du|willst du|sobald du|sag(?:e|t)? (?:mir )?bescheid|gib mir bescheid)\b/i,
 	/\bbitte (?:bestätige|entscheide|wähle|prüfe|gib (?:mir )?(?:frei|bescheid))\b/i,
 	/\bich warte\b/i,
@@ -164,14 +171,14 @@ const HUMAN_PHRASES: readonly RegExp[] = [
  */
 const WAIT_WORDS: readonly RegExp[] = [
 	/\bstanding by\b/i,
-	/(?:^|[.!:—–-]\s*)holding\b/im,
+	/(?:^|[.!—–-]\s*)holding\b/im,
 	/\bon hold\b/i,
 	/\b(?:i'?ll|i will|i'm going to) (?:wait|stop here|hold)\b/i,
 	/(?:^|[.!—–-]\s*)stopping(?: here| now)?\s*\.?\s*$/im,
 	/\bnothing (?:executable|actionable) (?:remains|left)\b/i,
 	/\bno executable step(?:s)? remains?\b/i,
 	/\bwork (?:is|remains) (?:stopped|paused)\b/i,
-	/\bi will not (?:retry|continue|proceed)\b/i,
+	/\bi will not (?:continue|proceed)\b/i,
 ];
 
 /** The agent is waiting on work it started itself, and will be told when it lands. */

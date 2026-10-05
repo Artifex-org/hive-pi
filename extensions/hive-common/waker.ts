@@ -80,28 +80,42 @@ export function decideWake(kind: NoticeKind, handback: Handback): WakeDecision {
 }
 
 /**
- * Appended to a message that wakes an agent which had handed back in prose. The
- * agent may answer the sender; it may not treat the wake as the human's answer.
+ * Rides with a message that wakes an agent which had handed back in prose. The
+ * sender may be exactly who the agent is waiting on (a controller answering
+ * "blocked on controller decision"), so it must not forbid acting on an answer;
+ * it forbids treating an unrelated message as one.
  */
-function reminderFor(reason: string): string {
-	const what = reason === "question" || reason === "decision-request" ? "an answer to the question you asked" : "the decision you said you are waiting for";
+export function reminderFor(reason: string): string {
+	const what = reason === "question" || reason === "decision-request" ? "an answer to what you asked" : "the decision you said you are waiting for";
 	return (
-		`\n\n(Before this arrived you handed the turn back, waiting on ${what}. ` +
-		"Reply to this message if it needs a reply, but do not treat it as that answer and do not resume the held work until it arrives.)"
+		`(This message arrived after you handed the turn back, waiting on ${what}. ` +
+		"If it IS that answer, act on it. If not, reply to it if it needs a reply and keep waiting — do not resume the held work on your own.)"
 	);
 }
 
-/** Footer line for a notice held behind a hand-back. Enum words only — never notice content. */
-function heldStatus(handback: Handback, held: number): string {
-	const why = handback.kind === "human" ? handback.reason : "hand-back";
-	return `⏸ waiting on you (${why}) — ${held} notice${held === 1 ? "" : "s"} held`;
+/** Footer line for notices held behind a hand-back. Enum words only — never notice content. */
+function heldStatus(reason: string, held: number): string {
+	return `⏸ waiting on you (${reason}) — ${held} notice${held === 1 ? "" : "s"} held`;
+}
+
+/**
+ * Every waker paints the same footer key, so they share the count over the bus:
+ * each announces its own parked total and renders the sum.
+ */
+const PARKED_CHANNEL = "hive.handback.parked";
+
+interface ParkedEvent {
+	by: string;
+	count: number;
+	reason: string;
 }
 
 export interface Waker {
 	/**
-	 * Deliver a notice under the hand-back rule. Throws only if pi throws — the
-	 * session went away — so a caller that tracks "notified" (background) keeps
-	 * the notice for the next session instead of losing it.
+	 * Deliver a notice under the hand-back rule. Throws if the session cannot be
+	 * read or pi refuses the send — the session went away — so a caller that
+	 * tracks "notified" (background) keeps the notice for the next session
+	 * instead of losing it.
 	 */
 	deliver(notice: Notice, kind: NoticeKind): void;
 }
@@ -112,44 +126,67 @@ interface PendingWake {
 	flushed: boolean;
 }
 
-/** Reads the branch fail-open: an unreadable session classifies as no hand-back. */
-function handbackOf(ctx: ExtensionContext | null): Handback {
-	if (!ctx) return NO_HANDBACK;
-	try {
-		return classifyHandback(ctx.sessionManager.getBranch() as readonly unknown[]);
-	} catch {
-		return NO_HANDBACK;
-	}
-}
-
-function isStreaming(ctx: ExtensionContext | null): boolean {
-	if (!ctx) return false;
-	try {
-		return !ctx.isIdle();
-	} catch {
-		return false;
-	}
-}
-
 export function createWaker(pi: ExtensionAPI, by: string): Waker {
 	const claims = trackSettleClaims(pi);
 	let ctx: ExtensionContext | null = null;
+	// An agent run is active from `agent_start` to `agent_settled`. Tracked here
+	// rather than read from `ctx.isIdle()`, which is also false during an idle
+	// compaction — a notice sent then was treated as mid-run and its wake waited
+	// for a settle that never came.
+	let inRun = false;
 	let settling = false;
 	let pending: PendingWake[] = [];
 	let held: Array<{ notice: Notice; kind: NoticeKind }> = [];
-	let parked = 0;
+	const parked = new Map<string, ParkedEvent>();
+	let paintedTotal = 0;
 
-	const setStatus = (text: string | undefined) => {
+	const paintParked = () => {
+		let total = 0;
+		let reason = "";
+		for (const entry of parked.values()) {
+			total += entry.count;
+			reason = entry.reason;
+		}
+		if (total === 0 && paintedTotal === 0) return; // nothing shown, nothing to clear
+		paintedTotal = total;
 		try {
-			ctx?.ui.setStatus("handback", text);
+			ctx?.ui.setStatus("handback", total > 0 ? heldStatus(reason, total) : undefined);
 		} catch {
-			/* cosmetic — a stale ctx never fails a delivery */
+			/* a replaced session has no footer to paint; the next session_start repaints */
 		}
 	};
 
+	pi.events.on(PARKED_CHANNEL, (data: unknown) => {
+		const event = data as Partial<ParkedEvent> | undefined;
+		if (typeof event?.by !== "string" || typeof event.count !== "number") return;
+		parked.set(event.by, { by: event.by, count: event.count, reason: typeof event.reason === "string" ? event.reason : "hand-back" });
+		paintParked();
+	});
+
+	const announceParked = (count: number, reason: string) => {
+		pi.events.emit(PARKED_CHANNEL, { by, count, reason } satisfies ParkedEvent);
+	};
+
 	const park = (handback: Handback) => {
-		parked++;
-		setStatus(heldStatus(handback, parked));
+		const reason = handback.kind === "human" ? handback.reason : "hand-back";
+		announceParked((parked.get(by)?.count ?? 0) + 1, reason);
+	};
+
+	/**
+	 * The hand-back of the session this waker last saw. `null` when that ctx can
+	 * no longer be read — the session was replaced and its successor's state is
+	 * not known yet — which the callers answer by delivering WITHOUT waking:
+	 * guessing "no hand-back" there could wake through a plan awaiting approval.
+	 */
+	const handbackNow = (): Handback | null => {
+		if (!ctx) return NO_HANDBACK;
+		let branch: readonly unknown[];
+		try {
+			branch = ctx.sessionManager.getBranch() as readonly unknown[];
+		} catch {
+			return null;
+		}
+		return classifyHandback(branch);
 	};
 
 	const sendStreaming = (notice: Notice, kind: NoticeKind) => {
@@ -159,18 +196,35 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 		pending.push({ kind, flushed: false });
 	};
 
-	const sendIdle = (notice: Notice, kind: NoticeKind) => {
-		const handback = handbackOf(ctx);
+	/**
+	 * `fromSettle` — only a delivery made inside the `agent_settled` chain may
+	 * defer to a settle claim: a claim belongs to ONE settle, and outside its
+	 * chain one left behind by a continuation that never started would silence
+	 * every later wake.
+	 */
+	const sendIdle = (notice: Notice, kind: NoticeKind, fromSettle: boolean) => {
+		const handback = handbackNow();
+		if (!handback) {
+			pi.sendMessage(notice, { deliverAs: "followUp", triggerTurn: false });
+			return;
+		}
 		const decision = decideWake(kind, handback);
-		const claimed = claims.claimedBy() !== null;
-		if (!decision.wake || claimed) {
+		if (!decision.wake || (fromSettle && claims.claimedBy() !== null)) {
 			pi.sendMessage(notice, { deliverAs: "followUp", triggerTurn: false });
 			if (!decision.wake) park(handback);
 			return;
 		}
-		const content = decision.reminder ? `${notice.content}${decision.reminder}` : notice.content;
+		const content = decision.reminder ? `${notice.content}\n\n${decision.reminder}` : notice.content;
 		pi.sendMessage({ ...notice, content }, { deliverAs: "followUp", triggerTurn: true });
-		claims.claim(by);
+		if (fromSettle) claims.claim(by);
+	};
+
+	/** The settle continued the run: deliver what it held the streaming way. */
+	const releaseHeldIntoRun = () => {
+		settling = false;
+		const release = held;
+		held = [];
+		for (const item of release) sendStreaming(item.notice, item.kind);
 	};
 
 	const remember = (next: ExtensionContext) => {
@@ -179,34 +233,29 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 
 	pi.on("session_start", (_event, next) => {
 		remember(next);
+		inRun = false;
 		settling = false;
 		pending = [];
 		held = [];
-		parked = 0;
+		parked.clear();
+		paintParked(); // clears a footer the replaced session left behind
 	});
 
 	pi.on("agent_start", (_event, next) => {
 		remember(next);
-		settling = false;
+		inRun = true;
 		// Anything appended before a run starts is in the context it reads.
 		for (const wake of pending) wake.flushed = true;
-		if (parked > 0) {
-			parked = 0;
-			setStatus(undefined);
-		}
+		// A continued settle emits agent_start BEFORE turn_start.
+		if (settling) releaseHeldIntoRun();
+		if ((parked.get(by)?.count ?? 0) > 0) announceParked(0, "");
 	});
 
 	pi.on("turn_start", (_event, next) => {
 		remember(next);
 		// The model is about to read everything flushed so far: those wakes are spent.
 		pending = pending.filter((wake) => !wake.flushed);
-		if (settling) {
-			// The settle continued instead of ending; deliver what we held as streaming.
-			settling = false;
-			const release = held;
-			held = [];
-			for (const item of release) sendStreaming(item.notice, item.kind);
-		}
+		if (settling) releaseHeldIntoRun();
 	});
 
 	pi.on("turn_end", (_event, next) => {
@@ -224,21 +273,29 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 		for (const wake of wakes) wake.flushed = true;
 		if (wakes.length === 0 || event.outcome !== "completed") return;
 		if (event.continue || claims.claimedBy()) return; // someone else is already continuing the run
-		const handback = handbackOf(ctx);
-		if (!wakes.some((wake) => decideWake(wake.kind, handback).wake)) {
+		const handback = handbackNow();
+		if (!handback) return;
+		const decisions = wakes.map((wake) => decideWake(wake.kind, handback));
+		if (!decisions.some((decision) => decision.wake)) {
 			park(handback);
 			return;
 		}
 		claims.claim(by);
-		return { continue: true };
+		// The notice is already in the transcript, so a wake that carries a
+		// reminder adds it as its own entry rather than amending the notice.
+		const reminder = decisions.find((decision): decision is { wake: true; reminder: string } => decision.wake && decision.reminder !== undefined)?.reminder;
+		return reminder
+			? { entries: [...event.entries, { type: "custom_message" as const, customType: "handback", content: reminder, display: true }], continue: true }
+			: { continue: true };
 	});
 
 	pi.on("agent_settled", (_event, next) => {
 		remember(next);
+		inRun = false;
 		settling = false;
 		const release = held;
 		held = [];
-		for (const item of release) sendIdle(item.notice, item.kind);
+		for (const item of release) sendIdle(item.notice, item.kind, true);
 	});
 
 	return {
@@ -247,8 +304,8 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 				held.push({ notice, kind });
 				return;
 			}
-			if (isStreaming(ctx)) sendStreaming(notice, kind);
-			else sendIdle(notice, kind);
+			if (inRun) sendStreaming(notice, kind);
+			else sendIdle(notice, kind, false);
 		},
 	};
 }

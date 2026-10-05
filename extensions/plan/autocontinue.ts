@@ -29,6 +29,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SettleClaims } from "../hive-common/settle-claim.ts";
+import { confirmOwnWork, type OwnWork } from "../hive-common/own-work.ts";
 import { classifyHandback, type Handback } from "../hive-common/handback.ts";
 import { turnFailureOf } from "../agenda/turn-outcome.ts";
 import { itemCounts } from "./lanes.ts";
@@ -210,6 +211,12 @@ export interface AutoContinueDeps {
 	 * extension always passes it.
 	 */
 	settleClaims?: SettleClaims;
+	/**
+	 * The agent's own running jobs (hive-common/own-work.ts). A "waiting on my
+	 * watcher" hand-back only stands this down while something is running.
+	 * Optional so a unit test can drive the decision without the bus.
+	 */
+	ownWork?: OwnWork;
 }
 
 /**
@@ -270,7 +277,8 @@ export function runAutoContinue(pi: ExtensionAPI, ctx: ExtensionContext, deps: A
 		phase = doc.phase;
 		counts = itemCounts(doc);
 		turnFailed = turnFailureOf(ctx.sessionManager.getBranch() as readonly unknown[]) !== undefined;
-		handback = classifyHandback(ctx.sessionManager.getBranch() as readonly unknown[]);
+		const read = classifyHandback(ctx.sessionManager.getBranch() as readonly unknown[]);
+		handback = deps.ownWork ? confirmOwnWork(read, deps.ownWork) : read;
 	} catch {
 		return { action: "noop", reason: "ctx unreadable" };
 	}

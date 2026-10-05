@@ -56,6 +56,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
+import { announceOwnWork } from "../hive-common/own-work.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import { resolveRunUUID, runStateNote, watchCommand } from "./watch-run.ts";
 import { strandedIndexLock } from "./indexlock.ts";
@@ -158,6 +159,9 @@ export default function background(pi: ExtensionAPI) {
 	};
 
 	const paintFooter = (): void => {
+		// Every job state change passes through here, so the shared running count
+		// (hive-common/own-work.ts) is announced from the same place.
+		announceOwnWork(pi, "background", allJobs().filter((job) => job.status === "running").length);
 		const segment = footerSegment(allJobs());
 		withCtx((ctx) => ctx.ui.setStatus("background", segment ?? undefined));
 	};
