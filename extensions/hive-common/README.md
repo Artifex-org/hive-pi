@@ -21,6 +21,10 @@ can leave this machine", and two logins for one server.
 | `identity.ts` | credential + config paths, `resolveAuth`, `resolveProject`, `resolveBranch`, `apiKeyFromCredential` |
 | `http.ts` | timeouts, error redaction, the 4xx/5xx retry classification, `validateToken` |
 | `channels.ts` | in-process event-bus channels between Hive extensions |
+| `handback.ts` | pure: has the last turn handed the conversation to a person, or to the agent's own pending job? |
+| `waker.ts` | the one way an automatic notice (background, orchestrate, team message, agmsg) may wake the agent |
+| `own-work.ts` | running background jobs / durable orchestrations, shared over the bus |
+| `settle-claim.ts` | at most one automatic continuation per settle, across extensions |
 
 ## Two invariants
 
@@ -34,3 +38,8 @@ rather than as a migration.
 I/O (file reads, `git`), and pi awaits handlers serially — a 15ms `git` call
 inside one is 15ms of stalled agent loop. Callers resolve on a timer or in a
 command handler.
+
+The exceptions are the handler-path modules `handback.ts`, `waker.ts`,
+`own-work.ts` and `settle-claim.ts`: they exist to be called from lifecycle
+handlers, and they do no I/O — a read of the session branch and the in-process
+bus, nothing else. Keep them that way.

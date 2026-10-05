@@ -236,9 +236,14 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 		inRun = false;
 		settling = false;
 		pending = [];
-		held = [];
 		parked.clear();
 		paintParked(); // clears a footer the replaced session left behind
+		// A notice held through a settle the session never finished (replaced
+		// mid-settle) was already counted as delivered by its caller — background
+		// marks the job notified — so it goes to the new session, never nowhere.
+		const release = held;
+		held = [];
+		for (const item of release) sendIdle(item.notice, item.kind, false);
 	});
 
 	pi.on("agent_start", (_event, next) => {
