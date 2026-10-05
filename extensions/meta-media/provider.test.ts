@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { metaModels } from "./provider.ts";
+import { metaProvider } from "@earendil-works/pi-ai/providers/meta";
+import { hiveMetaProvider, metaModels } from "./provider.ts";
 
 // Structured output for Muse rides on `compat.supportsStrictMode`: it turns on
 // strict JSON-schema constrained tool inputs, which api.meta.ai was verified to
@@ -9,6 +10,24 @@ import { metaModels } from "./provider.ts";
 // edit to the entries cannot silently drop the capability — or, worse, add back
 // the two flags that were deliberately left off.
 describe("Muse model compat", () => {
+	it("preserves native catalog metadata, image limits and thinking levels", () => {
+		const native = metaProvider().getModels();
+		expect(metaModels.map(model => model.id)).toEqual(native.map(model => model.id));
+		for (const model of metaModels) {
+			const original = native.find(candidate => candidate.id === model.id)!;
+			expect(model).toEqual({ ...original, compat: { ...original.compat, supportsStrictMode: true } });
+		}
+		expect(hiveMetaProvider.getAllModels()).toEqual(metaModels);
+	});
+
+	it("retains native API-key and OAuth authentication and built-in transports", () => {
+		expect(hiveMetaProvider.auth.apiKey).toBeDefined();
+		expect(hiveMetaProvider.auth.oauth).toBeDefined();
+		expect(hiveMetaProvider.stream).toBeTypeOf("function");
+		expect(hiveMetaProvider.streamSimple).toBeTypeOf("function");
+		expect(hiveMetaProvider.baseUrl).toBe(metaProvider().baseUrl);
+	});
+
 	it("enables strict-mode structured output on every entry", () => {
 		expect(metaModels.length).toBeGreaterThan(0);
 		for (const m of metaModels) {

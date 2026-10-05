@@ -60,19 +60,19 @@ describe.runIf(hasGit)("gate-skip on unchanged worktree", () => {
 		const cwd = makeGitRepo(FAILING);
 
 		// First settle: the gate runs, fails, injects.
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(1);
 		expect(gateMetrics(pi)).toEqual(["fail"]);
 
 		// Second settle, nothing changed: the gate is SKIPPED — no spawn result,
 		// no injection, no ledger charge; the metric says so.
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(1);
 		expect(gateMetrics(pi)).toEqual(["fail", "skip"]);
 
 		// The tree changes (a new untracked file): the gate runs again.
 		writeFileSync(join(cwd, "fix.txt"), "attempt");
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(pi.messages).toHaveLength(2);
 		expect(gateMetrics(pi)).toEqual(["fail", "skip", "fail"]);
 	});
@@ -100,11 +100,11 @@ describe.runIf(hasGit)("gate-skip on unchanged worktree", () => {
 	it("a fix that turns the gate green clears the stamp and the budget", async () => {
 		const cwd = makeGitRepo({ check: "test -f ok", checkTimeoutMs: 30_000 });
 
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(gateMetrics(pi)).toEqual(["fail"]);
 
 		writeFileSync(join(cwd, "ok"), "");
-		await pi.emit({ type: "agent_settled" }, { cwd });
+		await pi.emit({ type: "agent_before_settle" }, { cwd });
 		expect(gateMetrics(pi)).toEqual(["fail", "pass"]);
 		// Green produced no injection beyond the original failure.
 		expect(pi.messages).toHaveLength(1);
@@ -120,8 +120,8 @@ describe("gate-skip without a usable git", () => {
 		mkdirSync(join(root, ".pi"), { recursive: true });
 		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify(FAILING));
 
-		await pi.emit({ type: "agent_settled" }, { cwd: root });
-		await pi.emit({ type: "agent_settled" }, { cwd: root });
+		await pi.emit({ type: "agent_before_settle" }, { cwd: root });
+		await pi.emit({ type: "agent_before_settle" }, { cwd: root });
 		// No skip: both settles ran the gate and injected.
 		expect(gateMetrics(pi)).toEqual(["fail", "fail"]);
 		expect(pi.messages).toHaveLength(2);

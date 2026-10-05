@@ -46,6 +46,8 @@ export interface PolicyWork {
 }
 
 export interface PolicyContext {
+	/** Active run cancellation, captured before policy work begins. */
+	signal?: AbortSignal;
 	cwd: string;
 	ledger: LedgerState;
 	/** Text of the most recent assistant turn, for the question guard. */

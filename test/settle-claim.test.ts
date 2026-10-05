@@ -12,7 +12,9 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { installDriver } from "../extensions/agenda/driver.ts";
 import type { Policy, PolicyWork } from "../extensions/agenda/policy.ts";
 import { createAutoContinueState, runAutoContinue } from "../extensions/plan/autocontinue.ts";
-import { emptyPlan } from "../extensions/plan/state.ts";
+import { applyOps, emptyPlan, PLAN_ENTRY_TYPE, toEntry } from "../extensions/plan/state.ts";
+import planExtension from "../extensions/plan/index.ts";
+import { AUTOCONTINUE_MESSAGE_TYPE } from "../extensions/plan/autocontinue.ts";
 import { trackSettleClaims } from "../extensions/hive-common/settle-claim.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 
@@ -33,11 +35,26 @@ beforeEach(() => {
 });
 
 describe("two injectors on one settle", () => {
-	it("only the first injects; the session stays idle throughout, as pi 0.87 reports it", async () => {
+	it.each([true, false])("agenda and the actual plan extension continue exactly once (plan first=%s)", async planFirst => {
+		const doc = applyOps(emptyPlan(0), [
+			{ op: "lane", kind: "execute", title: "Execute", items: [{ id: "next", title: "Next", status: "pending" }] },
+			{ op: "header", phase: "approved" },
+		], 1).doc;
+		if (planFirst) planExtension(pi.api);
+		installDriver(pi.api, { policies: [injects("agenda next")] });
+		if (!planFirst) planExtension(pi.api);
+		const context = { idle: false, branch: [{ customType: PLAN_ENTRY_TYPE, data: toEntry(doc) }] };
+		await pi.emit({ type: "session_start", reason: "startup" }, context);
+		await pi.emit({ type: "agent_before_settle" }, context);
+		expect(pi.messages).toHaveLength(1);
+		expect(pi.messages[0].customType).toBe(planFirst ? AUTOCONTINUE_MESSAGE_TYPE : "agenda");
+	});
+
+	it("only the first injects; the session stays idle throughout, at the native boundary", async () => {
 		installDriver(pi.api, { policies: [injects("first")] });
 		installDriver(pi.api, { policies: [injects("second")] });
 
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		expect(pi.messages.map((m) => m.content)).toEqual(["first"]);
 	});
@@ -46,8 +63,8 @@ describe("two injectors on one settle", () => {
 		installDriver(pi.api, { policies: [injects("first")] });
 		installDriver(pi.api, { policies: [injects("second")] });
 
-		await pi.emit({ type: "agent_settled" });
-		await pi.emit({ type: "agent_settled" });
+		await pi.emit({ type: "agent_before_settle" });
+		await pi.emit({ type: "agent_before_settle" });
 
 		expect(pi.messages.map((m) => m.content)).toEqual(["first", "first"]);
 	});

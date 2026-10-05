@@ -192,6 +192,8 @@ export function certaintyOf(answer: Answer): number {
 export interface JevUsage {
 	inputTokens: number;
 	outputTokens: number;
+	/** Native registry prices, when supplied; never estimated here. */
+	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
 }
 
 /**
@@ -205,7 +207,7 @@ export interface JevUsage {
 export type Outcome<T> =
 	| { kind: "ok"; answers: T; usage: JevUsage; latencyMs: number; model: string }
 	/** Never reached the network, and deliberately so. */
-	| { kind: "disabled"; reason: "config" | "no_key" }
+	| { kind: "disabled"; reason: "config" | "no_key" | "no_model" }
 	/** Refused before the network, or refused permanently by the server (4xx). */
 	| { kind: "rejected"; reason: string; status?: number }
 	/** HTTP 200 carrying nothing usable. An ERROR, never an answer. */
@@ -386,6 +388,9 @@ export function decodeEnvelope(
 // ---------------------------------------------------------------------------
 // The client
 // ---------------------------------------------------------------------------
+
+/** Advisory policies depend on behavior, not on an HTTP transport. */
+export type ClassifierClient = Pick<TypesafeClient, "live" | "ask">;
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
