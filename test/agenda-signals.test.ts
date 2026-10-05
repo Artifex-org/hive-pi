@@ -123,3 +123,21 @@ describe("deriveSignals", () => {
 		expect(signals.lastUserPrompt).toBe("");
 	});
 });
+
+describe("deriveSignals — how far into the asked task", () => {
+	const call = (id: string) => ({ type: "toolCall", id, name: "bash", arguments: {} });
+	it("counts tool calls since the newest user prompt and since the newest agenda injection", () => {
+		const branch = [
+			{ message: { role: "user", content: "first task" } },
+			{ message: { role: "assistant", content: [call("a"), call("b")] } },
+			{ message: { role: "user", content: "second task" } },
+			{ message: { role: "assistant", content: [call("c"), call("d"), call("e")] } },
+			{ type: "custom_message", customType: "agenda", content: "Conductor: …" },
+			{ message: { role: "assistant", content: [call("f")] } },
+			{ message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+		];
+		const signals = deriveSignals([], branch);
+		expect(signals.toolCallsSinceUser).toBe(4);
+		expect(signals.toolCallsSinceInjection).toBe(1);
+	});
+});

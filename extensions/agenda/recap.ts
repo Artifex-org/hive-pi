@@ -47,8 +47,10 @@ export function mechanicalTaskState(input: {
 	asksQuestion: boolean;
 	goalAchieved: boolean;
 	conductorDone: boolean;
+	/** The goal stopped because it waits on a person (blocked_user) — that needs someone too. */
+	goalBlocked?: boolean;
 }): TaskState {
-	if (input.asksQuestion) return "needs_input";
+	if (input.asksQuestion || input.goalBlocked) return "needs_input";
 	if (input.goalAchieved || input.conductorDone) return "completed";
 	return "idle";
 }

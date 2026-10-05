@@ -41,6 +41,10 @@ import type { ToolExposure } from "@earendil-works/pi-coding-agent";
  * workstation's pi sessions (2026-09-27..10-04, 18.6k tool calls), or the
  * contract that needs the tool visible without a search.
  */
+
+/** The tool that activates deferred tools by exact name (loadout/index.ts). */
+export const LOAD_TOOL = "load_tools";
+
 export const DIRECT_TOOLS: Readonly<Record<string, string>> = {
 	// pi's built-ins, re-registered by pretty-tools for rendering.
 	bash: "2994 calls",

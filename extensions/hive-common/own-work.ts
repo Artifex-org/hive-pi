@@ -49,5 +49,6 @@ export function trackOwnWork(pi: ExtensionAPI): OwnWork {
 
 /** A `machine` hand-back with nothing actually running is a plain stop. */
 export function confirmOwnWork(handback: Handback, ownWork: OwnWork): Handback {
-	return handback.kind === "machine" && ownWork.running() === 0 ? NO_HANDBACK : handback;
+	if (handback.kind !== "machine" || ownWork.running() > 0) return handback;
+	return handback.otherwise ?? NO_HANDBACK;
 }
