@@ -17,13 +17,14 @@
  */
 
 import { access, constants, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { ancestors, gateArgs, gateCandidates, render, selectorMatchedNothing, splitReport } from "./gate.ts";
+import { AGENT_CHECK_PATH, agentCheckArgs, foldSummary, parseSummary, renderVerify } from "./agentcheck.ts";
+import { ancestors, gateArgs, gateCandidates, render, selectorMatchedNothing, splitReport, stripAnsi } from "./gate.ts";
 import { consume, emptyProgress, finish, type GateProgress, widgetEnvelope } from "./stream.ts";
 import {
 	deckLines,
@@ -36,7 +37,7 @@ import {
 import { cancelRun, dispatch, dispatchUnconfirmed, failedTaskLogs, follow, hivePipelineDir, QUEUED_FOLLOW_MINUTES, resolveCheckAuth } from "./hiverun.ts";
 import { DECK_SECTION_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
-import { GIT_NO_OPTIONAL_LOCKS } from "../hive-common/git.ts";
+import { GIT_NO_OPTIONAL_LOCKS, repoRoot } from "../hive-common/git.ts";
 
 /**
  * Timeout, scaled by mode — and only when progress is actually flowing.
@@ -52,8 +53,13 @@ const TIMEOUT_STREAMING: Record<string, number> = {
 	quick: 300_000,
 	standard: 600_000,
 	thorough: 1_800_000,
+	// A repo's agent check runs the tests CI selects, after bootstrapping
+	// dependencies a fresh worktree lacks — thorough-sized, not quick-sized.
+	verify: 1_800_000,
 };
 const TIMEOUT_BUFFERED = 300_000;
+/** After we kill a run, how long its output may keep draining before we stop waiting on the pipes. */
+const PIPE_GRACE_MS = 2_000;
 const MAX_LINES = 200;
 /** A network hop per 100ms of bash output is 10x too fast; 1 Hz is plenty. */
 const UPDATE_INTERVAL_MS = 1000;
@@ -84,7 +90,26 @@ function text(s: string) {
  * instead of dying on exec.
  */
 export async function findGate(cwd: string): Promise<string | null> {
-	for (const path of gateCandidates(ancestors(cwd))) {
+	return await firstRunnable(gateCandidates(ancestors(cwd)));
+}
+
+/**
+ * The repo's declared agent check (`scripts/agent-check`), nearest first, under
+ * the same "must be a runnable FILE" rule as the gate.
+ */
+export async function findAgentCheck(cwd: string): Promise<string | null> {
+	// Bounded by the repository, as the Hive pipeline lookup is: an agent check
+	// in an ENCLOSING repo verifies that repo's tree, not this one (a nested
+	// clone, a vendored checkout with its own gate), and its verdict would be
+	// about the wrong code.
+	const root = repoRoot(cwd);
+	if (!root) return null;
+	const dirs = ancestors(cwd).filter((dir) => dir === root || dir.startsWith(`${root}/`));
+	return await firstRunnable(dirs.map((dir) => `${dir.replace(/\/$/, "")}/${AGENT_CHECK_PATH}`));
+}
+
+async function firstRunnable(candidates: string[]): Promise<string | null> {
+	for (const path of candidates) {
 		try {
 			await access(path, constants.X_OK);
 			// Follows symlinks deliberately: a gate is often a symlink into a
@@ -164,6 +189,8 @@ export async function uncommittedCount(cwd: string, signal?: AbortSignal): Promi
  */
 interface GateRun {
 	out: string;
+	/** stdout alone, for readers whose contract is stdout's final line. */
+	stdout?: string;
 	code: number | null;
 	signal: NodeJS.Signals | null;
 	streamed?: boolean;
@@ -171,6 +198,25 @@ interface GateRun {
 	/** Set only when the ceiling below is what did the killing. */
 	ceilingMs?: number;
 }
+
+/**
+ * How a streamed run's output is read while it runs.
+ *
+ * The vendored gate speaks quality-gate's `##hive:substep` protocol when
+ * `QG_SUBSTEPS=1` is set, and `consume` folds it into per-check rows. An agent
+ * check speaks no protocol beyond its final line, so it gets no marker and a
+ * fold that only marks the output as new — the live view is its output tail.
+ * Setting the marker there would make its NESTED quality gate's markers fold
+ * into rows (and its banner into the meter's denominator) for checks that are
+ * only one of the agent check's steps.
+ */
+interface StreamProtocol {
+	substeps: boolean;
+	fold(progress: GateProgress, line: string): { changed: boolean; hide: boolean };
+}
+
+const QUALITY_GATE_PROTOCOL: StreamProtocol = { substeps: true, fold: consume };
+const PLAIN_OUTPUT: StreamProtocol = { substeps: false, fold: () => ({ changed: true, hide: false }) };
 
 /**
  * Run the gate, forwarding progress as it arrives.
@@ -189,6 +235,7 @@ async function streamGate(
 	scope: string,
 	onUpdate?: (u: { content: { type: "text"; text: string }[]; details: unknown }) => void,
 	onProgress?: (p: GateProgress) => void,
+	protocol: StreamProtocol = QUALITY_GATE_PROTOCOL,
 ): Promise<GateRun> {
 	return await new Promise((resolve, reject) => {
 		// `env` via the env(1) binary rather than the spawn option: the marker
@@ -200,12 +247,13 @@ async function streamGate(
 		// nothing else, so a killed run left basedpyright and tsgo running —
 		// and those orphans go on holding `.git/index.lock`, which breaks the
 		// NEXT commit in that worktree with "File exists" (HIV-2687).
-		const child = spawn("env", [`QG_SUBSTEPS=1`, gate, ...args], { cwd, signal, detached: true });
+		const child = spawn("env", [...(protocol.substeps ? ["QG_SUBSTEPS=1"] : []), gate, ...args], { cwd, signal, detached: true });
 		const startedAt = Date.now();
 		const progress = emptyProgress(mode, scope);
 		const shown: string[] = [];
 		let pending = "";
 		let raw = "";
+		let stdoutOnly = "";
 		let dirty = false;
 		let lastSent = 0;
 
@@ -231,7 +279,7 @@ async function streamGate(
 			const lines = pending.split("\n");
 			pending = lines.pop() ?? "";
 			for (const line of lines) {
-				const { changed, hide } = consume(progress, line);
+				const { changed, hide } = protocol.fold(progress, line);
 				// Protocol markers are stripped from what the MODEL reads: leaving
 				// them in teaches it that `##hive:substep` is output.
 				if (!hide) shown.push(line);
@@ -240,7 +288,10 @@ async function streamGate(
 			flush(false);
 		};
 
-		child.stdout?.on("data", onData);
+		child.stdout?.on("data", (buf: Buffer) => {
+			stdoutOnly += buf.toString();
+			onData(buf);
+		});
 		child.stderr?.on("data", onData);
 
 		/** Signal the whole gate, not just the wrapper that spawned it. */
@@ -272,7 +323,28 @@ async function streamGate(
 		const onAbort = () => killTree("SIGTERM");
 		signal?.addEventListener("abort", onAbort, { once: true });
 
+		// `close` waits for the PIPES, not the process. A descendant that left
+		// the process group (`setsid`, a daemon, a test runner's
+		// `start_new_session`) keeps them open after the kill, so an aborted or
+		// ceiling-killed run would never settle — measured: `setsid sleep 8 &`
+		// held an aborted call for 8 s, and a daemon holds it forever. Once WE
+		// ended the run, give its output a moment to drain, then let go of the
+		// pipes so `close` can fire.
+		child.on("exit", () => {
+			if (!signal?.aborted && !hitCeiling) return;
+			setTimeout(() => {
+				child.stdout?.destroy();
+				child.stderr?.destroy();
+			}, PIPE_GRACE_MS).unref();
+		});
+
 		child.on("error", (err) => {
+			// An abort arrives here too — the spawn `signal` option reports it as
+			// an AbortError — and it is NOT a failure to spawn. Rejecting sent
+			// the caller to its buffered fallback, which ran the whole gate AGAIN
+			// for a call that had just been cancelled. `close` follows with the
+			// signal, and that is the honest report: terminated, no verdict.
+			if (signal?.aborted && err.name === "AbortError") return;
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 			reject(err);
@@ -281,7 +353,7 @@ async function streamGate(
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 			if (pending) {
-				const { hide } = consume(progress, pending);
+				const { hide } = protocol.fold(progress, pending);
 				if (!hide) shown.push(pending);
 			}
 			flush(true);
@@ -292,6 +364,7 @@ async function streamGate(
 			// facts through untouched and let render decide what they mean.
 			resolve({
 				out: raw,
+				stdout: stdoutOnly,
 				code,
 				signal: killedBy,
 				streamed: true,
@@ -341,7 +414,7 @@ function publishDeck(pi: ExtensionAPI, progress: GateProgress | null): void {
  */
 async function runHiveCheck(
 	pi: ExtensionAPI,
-	params: { only?: string; mode?: string; scope?: string; skip?: string; stopEarly?: boolean; project?: string },
+	params: { only?: string; mode?: string; scope?: string; skip?: string; stopEarly?: boolean; project?: string; tests?: boolean; install?: boolean },
 	cwd: string,
 	signal: AbortSignal | undefined,
 	onUpdate?: (u: { content: { type: "text"; text: string }[]; details: unknown }) => void,
@@ -350,7 +423,7 @@ async function runHiveCheck(
 	// The vendored gate's knobs have no counterpart in a pipeline, and silently
 	// ignoring one is how `mode:"thorough"` comes to mean "lint only" without
 	// anybody being told. Named, once, in the report the model reads.
-	const ignored = ["mode", "scope", "skip", "stopEarly"].filter(
+	const ignored = ["mode", "scope", "skip", "stopEarly", "tests", "install"].filter(
 		(k) => (params as Record<string, unknown>)[k] !== undefined,
 	);
 	let note = ignored.length
@@ -498,6 +571,71 @@ async function runHiveCheck(
 	}
 }
 
+/** The deck's scope label for a verify run: the script chooses its own scope, and "changed" would claim one. */
+const VERIFY_SCOPE = "repo-defined";
+
+/**
+ * The repo's agent check (`mode:"verify"`), through the same streaming,
+ * ceiling, abort and deck as the vendored gate; read by the contract in
+ * agentcheck.ts.
+ */
+async function runAgentCheck(
+	pi: ExtensionAPI,
+	agentCheck: string,
+	params: { tests?: boolean; install?: boolean; scope?: string; only?: string; skip?: string; stopEarly?: boolean; project?: string },
+	cwd: string,
+	signal: AbortSignal | undefined,
+	onUpdate?: (u: { content: { type: "text"; text: string }[]; details: unknown }) => void,
+) {
+	const args = agentCheckArgs(params);
+	const command = [relative(cwd, agentCheck) || agentCheck, ...args].join(" ");
+	// The vendored gate's knobs mean nothing to a repo's own script, and
+	// dropping one silently is how `scope:"staged"` comes to mean "whatever the
+	// script decides" without anybody being told.
+	const ignored = (["scope", "stopEarly", "only", "skip", "project"] as const).filter((k) => params[k] !== undefined);
+	let run: GateRun;
+	try {
+		run = await streamGate(agentCheck, args, cwd, signal, "verify", VERIFY_SCOPE, onUpdate, (p) => publishDeck(pi, p), PLAIN_OUTPUT);
+	} catch {
+		// Same fallback as the vendored path: progress unavailable must not make
+		// the check unavailable. Buffered, so the shorter ceiling.
+		const res = await pi.exec(agentCheck, args, { signal, timeout: TIMEOUT_BUFFERED });
+		run = {
+			out: `${res.stdout ?? ""}${res.stderr ?? ""}`,
+			stdout: res.stdout ?? "",
+			// `killed` without an abort is the buffered ceiling: no exit code, and
+			// the ceiling advice ("tests:false") is what to say.
+			code: res.killed ? null : (res.code ?? null),
+			signal: null,
+			ceilingMs: res.killed && !signal?.aborted ? TIMEOUT_BUFFERED : undefined,
+		};
+	} finally {
+		publishDeck(pi, null);
+	}
+	const out = stripAnsi(run.out);
+	const stdout = stripAnsi(run.stdout ?? run.out);
+	const summary = parseSummary(stdout);
+	return {
+		content: [
+			{
+				type: "text" as const,
+				text: renderVerify({ output: out, stdout }, {
+					command,
+					exitCode: run.code,
+					signal: run.signal,
+					elapsedMs: run.elapsedMs,
+					ceilingMs: run.ceilingMs,
+					maxLines: MAX_LINES,
+					ignored: [...ignored],
+				}),
+			},
+		],
+		details: widgetEnvelope(
+			foldSummary(emptyProgress("verify", VERIFY_SCOPE), summary, { exitCode: run.code, signal: run.signal, elapsedMs: run.elapsedMs }),
+		),
+	};
+}
+
 export default function (pi: ExtensionAPI) {
 	registerGuardedTool(pi, {
 		capability: { executes: true }, // spawns the repo quality gate (`env … <gate>`), or the `hive` CLI
@@ -507,16 +645,35 @@ export default function (pi: ExtensionAPI) {
 			"Run the repository's real quality gate on your changes — the same checks the " +
 			"pre-commit hook and CI run (ruff, oxlint, typescript, basedpyright, gitleaks, " +
 			"file-length, and whatever else this repo configures). Use it AFTER edits and " +
-			"BEFORE claiming work is done; `quick` mode is lint-only and fast enough to run " +
+			"BEFORE claiming work is done. When the repo declares `scripts/agent-check` (its one " +
+			"verification command: deps bootstrap, quick gate, type-check, the tests CI would " +
+			"select), the default is mode `verify`, which runs that and reports each step as " +
+			"passed, failed or NOT RUN; pass `tests:false` for the fast steps only. Otherwise, and " +
+			"with mode `quick`, it runs the vendored gate — lint-only and fast enough to run " +
 			"repeatedly. Reports which checks failed, the findings, and — importantly — any " +
-			"check that could not run because its tool is missing. " +
+			"check that did not run. " +
 			"In a repo that gates through Hive (hive, Aurora, Borealis-Ops) it runs `hive check` " +
 			"on the fleet against your uncommitted working tree instead — same report, same live " +
 			"progress — so reach for this rather than shelling out to `hive check` yourself.",
 		parameters: Type.Object({
 			mode: Type.Optional(
-				StringEnum(["quick", "standard", "thorough"] as const, {
-					description: "quick = lint only (default, fast); standard = + tests for changed files; thorough = everything",
+				StringEnum(["verify", "quick", "standard", "thorough"] as const, {
+					description:
+						"verify = the repo's scripts/agent-check (the default when the repo has one and neither " +
+						"`only` nor `skip` is given); quick = vendored gate, lint only (the default otherwise, fast); " +
+						"standard = + tests for changed files; thorough = everything",
+				}),
+			),
+			tests: Type.Optional(
+				Type.Boolean({
+					description:
+						"verify only: false passes --no-tests (deps, gate and type-check, no test suites). " +
+						"Skipped steps are reported as not run, never as passed.",
+				}),
+			),
+			install: Type.Optional(
+				Type.Boolean({
+					description: "verify only: false passes --no-install (report missing dependencies, install nothing).",
 				}),
 			),
 			scope: Type.Optional(
@@ -595,6 +752,23 @@ export default function (pi: ExtensionAPI) {
 				}
 				cwd = requested;
 			}
+			// The repo's ONE agent check, when it declares one, unless the caller
+			// asked for the vendored gate — by mode, or by naming checks with
+			// `only`/`skip`, which are the vendored gate's vocabulary. See the
+			// README's "One agent check" for why this is the default.
+			const agentCheck = await findAgentCheck(cwd);
+			// Every vendored-gate knob selects the vendored gate: `scope:"all"` asks
+			// for a lint of every file, not for a 30-minute test run.
+			const asksForVendoredGate = (["only", "skip", "scope", "stopEarly"] as const).some((k) => params[k] !== undefined);
+			if (params.mode === "verify" || (params.mode === undefined && agentCheck && !asksForVendoredGate)) {
+				if (!agentCheck) {
+					return text(
+						`mode "verify" runs the repo's own \`${AGENT_CHECK_PATH}\`, and there is none in ${cwd} or above it. ` +
+							'Nothing was checked. Use mode "quick" (or omit mode) for the vendored gate.',
+					);
+				}
+				return await runAgentCheck(pi, agentCheck, params, cwd, signal, onUpdate);
+			}
 			const gate = await findGate(cwd);
 			if (!gate) {
 				// A Hive-gated repo is not a repo without a gate — it is a repo
@@ -606,7 +780,7 @@ export default function (pi: ExtensionAPI) {
 				// Naming the alternative matters: an agent told only "not found"
 				// concludes the repo has no gate and ships unchecked.
 				return text(
-					"No quality gate found in this repo (looked for vendor/quality-gate/quality-gate, " +
+					"No quality gate found in this repo (looked for scripts/agent-check, vendor/quality-gate/quality-gate, " +
 						"scripts/quality-gate and quality-gate, and a .hive/ pipeline, from the cwd upwards).\n" +
 						"This repo may gate differently, so check its CLAUDE.md/AGENTS.md before assuming " +
 						"there is nothing to run.",
@@ -676,11 +850,18 @@ export default function (pi: ExtensionAPI) {
 				return hive;
 			}
 			const progress = finish(emptyProgress(mode, scope), result, run.code);
+			// `tests`/`install` belong to the repo's agent check; here they would
+			// otherwise vanish, and `tests:false` would read as honoured.
+			const verifyOnly = (["tests", "install"] as const).filter((k) => params[k] !== undefined);
+			const verifyNote = verifyOnly.length
+				? `\nnote: ${verifyOnly.join(", ")} apply only to mode "verify" (a repo's scripts/agent-check) and were ignored by the vendored gate.`
+				: "";
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: render(diagnostics, result, {
+						text:
+							render(diagnostics, result, {
 							command: `${gate} ${args.join(" ")}`,
 							exitCode: run.code,
 							maxLines: MAX_LINES,
@@ -699,7 +880,7 @@ export default function (pi: ExtensionAPI) {
 							// Only read in the zero-check branch, where a selector that
 							// matched nothing is the likeliest explanation.
 							selector: params.only,
-						}),
+						}) + verifyNote,
 					},
 				],
 				// The SAME envelope type the live updates carried, so the browser
