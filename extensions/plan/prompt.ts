@@ -55,6 +55,37 @@ Only when the plan is genuinely decision-complete, present it again with
 refuse until you have asked at least one round of questions.`;
 }
 
+/**
+ * How to keep an approved plan honest while executing it.
+ *
+ * Part of the plan-mode prompt, and ALSO injected on its own after approval
+ * (index.ts, `executionPrompt`): plan mode is left at approval, which is
+ * exactly when execution starts, so before this the only instruction to keep
+ * the plan current left the system prompt at the moment it began to matter.
+ * HIV-3013 measured the result — 75% of finished sessions leave a step
+ * in_progress forever. Fixed text, so the prompt changes only at the approval
+ * and completion transitions and the cache holds in between.
+ */
+export const EXECUTION_GUIDANCE = `## While the plan is being executed
+
+After the user approves, the plan stays live and you keep it honest:
+
+- move a step to \`in_progress\` when you start it, \`done\` when it is finished
+- when reality diverges from the plan, record it with \`note\` on that step
+- when the approach itself changes, patch the affected blocks
+- before you report the work done, close every step: \`done\`, \`skipped\`,
+  \`failed\` or \`blocked\`, each with a note — never leave one \`in_progress\`
+- when the work has changed shape, retitle the session with \`session_title\`
+
+A plan that still describes what you *intended* two hours after you did
+something else is worse than no plan, because the next reader — human or agent —
+will trust it.`;
+
+/** The execution section alone, for an approved plan outside plan mode. */
+export function buildExecutionPrompt(): string {
+	return `# Your approved plan\n\nYou are executing an approved plan (plan_write edits it).\n\n${EXECUTION_GUIDANCE}`;
+}
+
 export function buildPlanPrompt(): string {
 	return `${PLAN_MODE_MARKER}
 # Plan mode
@@ -220,15 +251,5 @@ When the plan is decision-complete, set the phase to \`ready\`:
 That hands it to the user, who accepts it, asks for changes, or discards it. Do
 not ask "shall I proceed?" in prose — setting the phase is how you ask.
 
-## While the plan is being executed
-
-After the user approves, the plan stays live and you keep it honest:
-
-- move a step to \`in_progress\` when you start it, \`done\` when it is finished
-- when reality diverges from the plan, record it with \`note\` on that step
-- when the approach itself changes, patch the affected blocks
-
-A plan that still describes what you *intended* two hours after you did
-something else is worse than no plan, because the next reader — human or agent —
-will trust it.`;
+${EXECUTION_GUIDANCE}`;
 }
