@@ -293,7 +293,12 @@ if [[ -f "${revision_file}" && "$(<"${revision_file}")" == "${revision}" ]]; the
   exit 0
 fi
 
-npm --prefix "${repo}" ci --ignore-scripts
+# --no-audit: the vulnerability report is not this unit's job, and it is a
+# separate network call whose failure left npm idle and never exiting under
+# launchd on macOS (ECONNRESET in the audit, then nothing for 11 minutes,
+# measured 2026-10-06), which wedged the whole run. --no-fund drops the other
+# advisory request.
+npm --prefix "${repo}" ci --ignore-scripts --no-audit --no-fund
 npm --prefix "${repo}" run check
 
 # The hive-pi source intentionally has no @ref, so this advances only it;

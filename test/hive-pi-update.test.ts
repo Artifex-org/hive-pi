@@ -160,6 +160,18 @@ describe("hive-pi-update", () => {
 		expect(readFileSync(join(repo, "README"), "utf8")).toContain("advanced");
 	});
 
+	// Activation installs the base's dependencies without npm's network
+	// advisories: an audit that failed left npm hanging and wedged the run.
+	it("installs dependencies without the audit or fund requests when activating", () => {
+		const { root, origin } = fixture();
+		const { home, repo } = checkout(root, origin, "activate");
+		const { bin, log } = stubTools(home);
+		runUpdater(home, bin);
+		const calls = readFileSync(log, "utf8");
+		expect(calls).toContain(`npm --prefix ${repo} ci --ignore-scripts --no-audit --no-fund`);
+		expect(calls).toContain(`npm --prefix ${repo} run check`);
+	});
+
 	// The guard the removal above must not have weakened: real local work in the
 	// base still stops the update rather than being fast-forwarded over.
 	it("refuses to update a base checkout carrying local work", () => {
