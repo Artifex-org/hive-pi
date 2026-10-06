@@ -424,7 +424,15 @@ export default function background(pi: ExtensionAPI) {
 
 		let proc: ChildProcess;
 		try {
-			proc = spawn("bash", ["-lc", spec.command], {
+			// `-c`, never `-lc`, exactly as pi's own bash tool runs a command. A
+			// login shell reads /etc/profile, and Debian's REPLACES PATH rather
+			// than appending to it — so every directory the launch put in front
+			// (the harness Node, the `hive` CLI) vanished and `hive watch` died
+			// 127, reported as a run with no verdict. Measured on ci-node03
+			// (Debian 13) 2026-10-06; Arch's /etc/profile appends, which is why
+			// it never showed on the machine this was written on. `env` already
+			// carries the session's environment, which is all a job needs.
+			proc = spawn("bash", ["-c", spec.command], {
 				cwd: spec.cwd,
 				env: process.env,
 				// Its own process group, so killTree can take the whole tree.
