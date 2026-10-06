@@ -50,6 +50,24 @@ describe("issuer attribution", () => {
 	});
 });
 
+describe("attachment references", () => {
+	it("retains IDs on attachment-only user events through queue drain, requeue and rebase", () => {
+		const t = createTranscript();
+		foldUserText(t, "", Date.now(), "operator", "user-1", ["att-1"]);
+		const sent = drain(t, 1);
+		expect(sent[0]).toMatchObject({ text: "", attachment_ids: ["att-1"], origin: "operator" });
+		requeue(t, sent);
+		rebase(t, 5);
+		expect(t.queue[0]).toMatchObject({ seq: 6, attachment_ids: ["att-1"] });
+	});
+
+	it("carries attachment IDs on assistant caption events", () => {
+		const t = createTranscript();
+		foldAssistantText(t, "Before screenshot", Date.now(), ["att-2"]);
+		expect(t.queue[0]).toMatchObject({ role: "assistant", text: "Before screenshot", attachment_ids: ["att-2"] });
+	});
+});
+
 describe("seq", () => {
 	it("is monotonic across every event kind", () => {
 		const t = createTranscript();

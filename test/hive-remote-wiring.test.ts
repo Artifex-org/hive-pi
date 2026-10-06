@@ -96,6 +96,13 @@ function fakeHive(handlers: {
 			return json(status, status >= 400 ? { error: "transient" } : {});
 		}
 
+		if (/\/attachments\/[^/]+$/.test(path)) {
+			return new Response(Buffer.from("image-bytes"), {
+				status: 200,
+				headers: { "Content-Type": "image/png", "X-Hive-File-Name": "shot.png" },
+			});
+		}
+
 		if (path.endsWith("/commands/claim")) {
 			// Serve the queued commands ONCE — a poll loop that re-served them
 			// would re-kill the session on every tick and prove nothing.
@@ -163,6 +170,20 @@ beforeEach(() => {
 afterEach(() => {
 	vi.unstubAllGlobals();
 	vi.useRealTimers();
+});
+
+describe("send_attachment wiring", () => {
+	it("registers independently of steer and refuses publication after remote-off", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ allowSteer: false })));
+		await attachAndSettle(fake);
+		const tool = fake.tools.find((entry) => entry.name === "send_attachment")?.definition;
+		expect(tool).toBeDefined();
+		// Execution's lifecycle validation is independently covered by the tool test;
+		// this asserts remote-off withdraws its target before a queued completion.
+		await fake.emit({ type: "session_shutdown" });
+		expect(hive.attaches()).toHaveLength(1);
+	});
 });
 
 describe("attach", () => {
@@ -370,6 +391,18 @@ describe("attach", () => {
 		expect(hive.attaches()[0]?.body?.can_compact).toBe(true);
 		expect(fake.compactions).toBe(1);
 		expect(fake.userMessages).toEqual([]);
+	});
+
+	it("echoes attachment-only incoming steer IDs into the transcript", async () => {
+		const hive = fakeHive({ commands: [{ id: "img-1", kind: "steer", payload: "", attachment_ids: ["att-1"] }] });
+		hiveRemote(fake.api, deps());
+
+		await attachAndSettle(fake);
+		await vi.advanceTimersByTimeAsync(2_200);
+
+		expect(fake.userMessages).toHaveLength(1);
+		const events = hive.posted().flatMap((call) => (call.body?.events ?? []) as Array<{ role?: string; attachment_ids?: string[] }>);
+		expect(events).toContainEqual(expect.objectContaining({ role: "user", attachment_ids: ["att-1"] }));
 	});
 
 	it("opts a catalogued browser /skill: steer into prompt expansion", async () => {

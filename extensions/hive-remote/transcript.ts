@@ -50,6 +50,8 @@ export interface WireEvent {
 	 * it and resolves the display name on read — this side only relays it.
 	 */
 	issued_by?: string;
+	/** Hive attachment references associated with this transcript event. */
+	attachment_ids?: string[];
 	client_ts?: string;
 }
 
@@ -164,13 +166,16 @@ export function foldUserText(
 	atMs?: number,
 	origin?: string,
 	issuedBy?: string,
+	attachmentIDs?: string[],
 ): void {
 	const trimmed = text.trim();
-	if (!trimmed) return;
+	const ids = attachmentIDs?.slice(0, 4).filter((id) => typeof id === "string" && id.length > 0);
+	if (!trimmed && !ids?.length) return;
 	push(t, {
 		role: "user",
 		kind: "text",
 		text: trimmed,
+		attachment_ids: ids?.length ? ids : undefined,
 		origin: origin || undefined,
 		issued_by: issuedBy || undefined,
 		client_ts: iso(atMs),
@@ -178,9 +183,9 @@ export function foldUserText(
 }
 
 /** A finalized assistant message. Deltas are streamed separately and never stored. */
-export function foldAssistantText(t: Transcript, text: string, atMs?: number): void {
-	if (!text) return;
-	push(t, { role: "assistant", kind: "text", text, client_ts: iso(atMs) });
+export function foldAssistantText(t: Transcript, text: string, atMs?: number, attachmentIDs?: string[]): void {
+	if (!text && !attachmentIDs?.length) return;
+	push(t, { role: "assistant", kind: "text", text, attachment_ids: attachmentIDs?.length ? attachmentIDs.slice(0, 4) : undefined, client_ts: iso(atMs) });
 	t.lastAssistantSeq = t.seq;
 }
 
