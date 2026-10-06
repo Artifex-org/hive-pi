@@ -187,9 +187,12 @@ describe("StdinWatch", () => {
 		const reader = {
 			read: (pid: number) => tree.find((p) => p.pid === pid) ?? null,
 		};
+		// The fixtures were measured on x86-64 (read = syscall 0); on an arm64
+		// host the same numbers are not reads, so the arch is the fixture's.
 		const watch = new StdinWatch(tree[0]!.pid, reader, (v) => seen.push(v.kind), {
 			now: () => now,
 			renotifyMs: 30_000,
+			arch: "x64",
 		});
 		return { watch, seen, advance: (ms: number) => void (now += ms) };
 	}

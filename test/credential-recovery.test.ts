@@ -161,6 +161,10 @@ describe("credential recovery", () => {
 
 	it("still classifies an exchange that fails on the socket as unavailable, not a retrying error", async () => {
 		expect(isSocketUnreachable("connect EPERM /tmp/hive-launch-pi-1/auth.json.hive-recovery.sock")).toBe(true);
+		// The macOS shapes (measured on macOS 26.6): a non-socket at the path, and a
+		// canonical /private/var/folders/… path longer than sun_path's 104 bytes.
+		expect(isSocketUnreachable("connect ENOTSOCK /var/folders/x/T/auth.json.hive-recovery.sock")).toBe(true);
+		expect(isSocketUnreachable("connect EINVAL /private/var/folders/x/T/auth.json.hive-recovery.sock - Local (undefined:undefined)")).toBe(true);
 		expect(isSocketUnreachable("Credential exchange failed (HTTP 503)")).toBe(false);
 		expect(await probeSocket(join(tmpdir(), "definitely-absent-recovery.sock"))).toMatch(/ENOENT/);
 	});

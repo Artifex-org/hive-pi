@@ -398,6 +398,8 @@ export class StdinWatch {
 			quietAfterMs?: number;
 			renotifyMs?: number;
 			now?: () => number;
+			/** Whose syscall table the tree's numbers use; the host's by default. */
+			arch?: string;
 		} = {},
 	) {
 		this.lastOutputMs = this.now();
@@ -423,7 +425,7 @@ export class StdinWatch {
 	tick(): void {
 		const quietMs = this.now() - this.lastOutputMs;
 		const tree = readTree(this.rootPid, this.reader);
-		const verdict = classify(tree, quietMs, process.arch, this.opts);
+		const verdict = classify(tree, quietMs, this.opts.arch ?? process.arch, this.opts);
 		this.current = verdict;
 
 		if (verdict.kind === "working") return;

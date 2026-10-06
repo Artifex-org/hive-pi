@@ -8,9 +8,16 @@ import { isQuotaExhaustedText } from "./quota.ts";
 
 export const RECOVERY_CHANNEL = "hive.credential-recovery";
 
-/** A unix-socket connect that will keep failing: the sandbox forbids it, or the socket is gone. */
+/**
+ * A unix-socket connect that will keep failing: the sandbox forbids it, or the
+ * socket is gone. Two macOS answers, measured on macOS 26.6: ENOTSOCK for a path
+ * that exists but is not a socket (Linux says ECONNREFUSED for that shape), and
+ * EINVAL for a path longer than sun_path's 104 bytes — the canonical
+ * /private/var/folders/… lease path is ~98 bytes for one user, so a longer
+ * username crosses it, and no retry can ever connect.
+ */
 export function isSocketUnreachable(text: string): boolean {
-	return /\b(EPERM|EACCES|ENOENT|ECONNREFUSED)\b/.test(text);
+	return /\b(EPERM|EACCES|ENOENT|ECONNREFUSED|ENOTSOCK|EINVAL)\b/.test(text);
 }
 
 /** The one-line reason a sandboxed session cannot switch accounts itself. */

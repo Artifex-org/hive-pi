@@ -37,7 +37,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -150,7 +150,9 @@ describe("class 1 — symlink write redirect (real resolver, filesystem only)", 
 	let outside: string;
 
 	beforeAll(() => {
-		root = mkdtempSync(join(tmpdir(), "guard-sym-"));
+		// Canonical: macOS's tmpdir is under /var, a symlink to /private/var, and
+		// the resolver under test returns real paths.
+		root = realpathSync(mkdtempSync(join(tmpdir(), "guard-sym-")));
 		guarded = join(root, "guarded", "src");
 		outside = join(root, "outside");
 		mkdirSync(guarded, { recursive: true });

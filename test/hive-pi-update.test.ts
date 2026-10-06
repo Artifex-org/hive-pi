@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -67,7 +67,9 @@ function runUpdater(home: string, extraPath?: string, overlay = ""): void {
 }
 
 function fixture() {
-	const root = mkdtempSync(join(tmpdir(), "hive-pi-update-"));
+	// Canonical: the script derives npm prefixes from RESOLVED binary paths, and
+	// macOS's tmpdir is under /var, a symlink to /private/var.
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "hive-pi-update-")));
 	roots.push(root);
 	const origin = join(root, "origin.git");
 	const source = join(root, "source");
