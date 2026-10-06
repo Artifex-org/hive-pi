@@ -14,7 +14,7 @@ import {
 } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
 	buildHandoffSeed,
 	consumeHandoff,
@@ -34,6 +34,8 @@ delete process.env.PI_BRIEF_WORKER;
 import { createConductor, withStage } from "../extensions/agenda/conductor-state.ts";
 import type { GoalItem } from "../extensions/agenda/goal-state.ts";
 import { emptySignals } from "../extensions/agenda/signals.ts";
+
+const LOAD_TIMEOUT_MS = 120_000;
 
 const goal: GoalItem = {
 	schemaVersion: 1,
@@ -378,9 +380,19 @@ describe("guard behavior", () => {
 		expect(guardTargets([handoffPath(base)], "handoff")).toBeNull();
 	});
 
+	// Loaded in a hook with its own budget, as test/tool-capability.test.ts does:
+	// a cold import of the whole agenda extension under a busy full suite took
+	// longer than a test's 5s on ci-node03 (2 of 6 runs), failing an assertion
+	// that never ran. Still a dynamic import, so the worker-env scrub above runs
+	// first.
+	let agenda: (pi: never) => unknown;
+	let createFakePi: typeof import("./fake-pi.ts").createFakePi;
+	beforeAll(async () => {
+		({ createFakePi } = await import("./fake-pi.ts"));
+		agenda = (await import("../extensions/agenda/index.ts")).default;
+	}, LOAD_TIMEOUT_MS);
+
 	it("the tool declares the fallback it actually writes", async () => {
-		const { createFakePi } = await import("./fake-pi.ts");
-		const agenda = (await import("../extensions/agenda/index.ts")).default;
 		const pi = createFakePi();
 		await agenda(pi.api as never);
 		const tool = pi.tools.find((t) => t.name === "handoff");
