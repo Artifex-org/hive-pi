@@ -30,8 +30,14 @@ function stubTools(home: string): { bin: string; log: string } {
 	const log = join(home, "tool-calls.log");
 	mkdirSync(bin, { recursive: true });
 	mkdirSync(pkg, { recursive: true });
-	writeFileSync(join(pkg, "cli.js"), "#!/usr/bin/env node\n", { mode: 0o755 });
-	for (const name of ["mise", "npm"]) {
+	// A shell stub, not `#!/usr/bin/env node`: the updater runs with a narrow
+	// PATH, and where node lives off it (the CI runner's tool cache) the
+	// activation path's `pi update --extensions` failed with exit 127. It keeps
+	// the real package path, which is what update_pi_binaries keys on.
+	writeFileSync(join(pkg, "cli.js"), `#!/bin/sh\necho "pi $*" >> "${log}"\n`, { mode: 0o755 });
+	// Every external tool the activation path runs after the pull, so the test
+	// is hermetic: a runner without stow (or with node off PATH) still passes.
+	for (const name of ["mise", "npm", "stow"]) {
 		writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} $*" >> "${log}"\n`, { mode: 0o755 });
 	}
 	symlinkSync(join(pkg, "cli.js"), join(bin, "pi"));
@@ -170,6 +176,9 @@ describe("hive-pi-update", () => {
 		const calls = readFileSync(log, "utf8");
 		expect(calls).toContain(`npm --prefix ${repo} ci --ignore-scripts --no-audit --no-fund`);
 		expect(calls).toContain(`npm --prefix ${repo} run check`);
+		expect(calls).toContain("pi update --extensions");
+		expect(calls).toContain(`stow --restow --no-folding -d ${repo} -t ${home} workstation`);
+		expect(readFileSync(join(home, "state/hive-pi-update/last-run"), "utf8")).toContain("activated");
 	});
 
 	// The guard the removal above must not have weakened: real local work in the
