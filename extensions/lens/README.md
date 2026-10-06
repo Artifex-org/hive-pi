@@ -74,20 +74,57 @@ Verified against real files in this workspace (Go and TS, 8–82 line symbols):
 every extracted span was brace-balanced and started at the doc comment.
 
 
-## The escape hatch, taken (HIV-1565)
+## The escape hatch, taken (HIV-1565, HIV-3816)
 
 The rule above says real reference resolution belongs in an **explicit LSP-backed
 tool, not a larger regex**. `rename_symbol` and `move_file` are that tool, and
 they honour the constraint that mattered: **no bundled LSP infrastructure.** They
-speak to the TARGET PROJECT's own `node_modules/typescript/bin/tsserver`, spawned
-per call and killed after — no daemon, no state directory, no grammar downloads,
-no session-start cost, and the project's own TypeScript version answers. A
-project without a local tsserver gets a clean refusal, not a weaker fallback.
+speak to the TARGET PROJECT's own TypeScript 7 language server — the native
+binary `node_modules/typescript` carries, run as `<exe> --lsp --stdio` — spawned
+per call and killed after: no daemon, no state directory, no grammar downloads,
+no session-start cost, zero dependencies here, and the project's own compiler
+answers.
 
 They exist because a regex cannot reach the case: with a barrel re-export the
 file that must change does not contain the symbol in a form grep can match, so a
 hand-rolled rename yields a diff that typechecks locally and breaks the
 whole-project gate.
+
+### TypeScript 7 only
+
+These tools used to drive `node_modules/typescript/bin/tsserver`. TypeScript 7
+ships no tsserver, so they refused on any project that had moved — pyERP pins
+7.0.2 at its root and its largest frontend has no TypeScript of its own. Measured
+2026-10-06 on that frontend, renaming one hook and moving its file:
+
+| | native server (7.0.2) | tsserver (5.9) |
+| --- | --- | --- |
+| rename | 28 files / 59 edits in 2.7 s | identical edits in 23.4 s |
+| move | 27 files / 27 edits | identical |
+| peak RSS | 2.0 GiB | 2.9 GiB |
+
+There is **no tsserver fallback**, by decision. Resolution walks up from the file
+to the nearest `node_modules/typescript` whose major is 7 or more, *skipping*
+older installs on the way (pyERP's storefront and mobile app each carry a local
+5.9.3 under a 7.0.2 root, and the root's server handles their tsconfigs). A tree
+with nothing newer gets a refusal naming what it found. The binary is located the
+way TypeScript's own `lib/getExePath.js` does it — the optional dependency
+`@typescript/typescript-<platform>-<arch>` — mirrored rather than imported, so
+finding it never runs the project's JavaScript in the agent's process.
+
+### What the protocol taught us
+
+| | |
+| --- | --- |
+| `useAliasesForRenames: false` | the server's default rewrites a barrel to `export { newName as oldName }`, preserving the public name — the opposite of what `rename_symbol` promises. Off, the rename propagates to every importer, and the edit set is identical to what tsserver 5.9 returned |
+| both WorkspaceEdit shapes | `rename` answers with `changes` even when `documentChanges` is advertised; `willRenameFiles` answers with `documentChanges`. A create/rename/delete operation is refused, never skipped |
+| `prepareRename` first | it names the symbol for the report, and the server *snaps* a position that is not on an identifier to a nearby one (the `import` keyword resolves to the imported name). A snapped position is refused with the identifier's exact position, so a retry is one call |
+| the moved file's own imports | `willRenameFiles` returns edits to the moved file itself, keyed by its old path. The tsserver client filtered them out and left a moved file's relative imports broken; they are now applied with everything else, before the move |
+| strings that are not imports | `vi.mock("…")` paths are not references. Moving that hook left 17 behind with a green typecheck, so `move_file` names the stem to grep for |
+
+Every edit set is applied all-or-nothing, after `guardTargets` has cleared every
+file it touches — a tool that writes files is invisible to `guards-bridge`, which
+matches on tool names.
 
 The regex tools (`read_symbol`, `list_symbols`) are unchanged and remain the
 default for reading — they need no project, no install, and no subprocess.
