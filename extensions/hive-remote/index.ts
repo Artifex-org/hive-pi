@@ -96,6 +96,7 @@ import {
 	type ActivityState,
 } from "./activity.ts";
 import { saveAttachment, textLikeAttachment } from "./attachments.ts";
+import { registerSendAttachmentTool } from "./sendAttachment.ts";
 import { loadConfig, writeConfig, type RemoteConfig } from "./config.ts";
 import { registerWorkspaceTools } from "./workspace.ts";
 import { collectPatch, collectWorktree, type WorktreePayload } from "./worktree.ts";
@@ -1293,7 +1294,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// the operator or from another agent's MCP call (HIV-1215) — and,
 				// with the issuer, WHICH PERSON, once a read-write share means the
 				// owner is not the only human who can steer (HIV-1420).
-				foldUserText(transcript, cmd.payload, Date.now(), cmd.source, cmd.issued_by);
+				foldUserText(transcript, cmd.payload, Date.now(), cmd.source, cmd.issued_by, cmd.attachment_ids);
 				kick();
 				return;
 			}
@@ -2498,6 +2499,18 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	// this runs), and are inert until it does, reporting "not attached" rather
 	// than failing. Registered outside start() because a tool is a session-wide
 	// capability, not part of the attach/stream lifecycle start()/stop() manage.
+	registerSendAttachmentTool(pi, {
+		getAuth: () => auth,
+		getSessionID: () => sessionID,
+		getGeneration: () => lifecycle.generation,
+		isUploadTargetCurrent: (targetSession, generation) =>
+			cfg.enabled && sessionID === targetSession && lifecycle.generation === generation,
+		onUploaded: (targetSession, caption, ids) => {
+			if (!cfg.enabled || sessionID !== targetSession) return;
+			foldAssistantText(transcript, caption, Date.now(), ids);
+			kick();
+		},
+	});
 	if (workspaceEnabled) {
 		registerWorkspaceTools(pi, {
 			getAuth: () => auth,

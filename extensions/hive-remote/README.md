@@ -8,6 +8,28 @@ Its sibling [`hive-telemetry`](../hive-telemetry/README.md) reports *counters*.
 This one carries *prose*, which is a strictly larger decision — so it is a
 separate opt-in with its own flag, and enabling one never enables the other.
 
+## Chat screenshots and files
+
+The deferred `send_attachment` tool uploads a local file (maximum 5 MiB) to
+this session's private Hive transcript, with an optional caption. Discover it
+with `tool_search` or `load_tools`; passing `path` from `browser_screenshot`
+works without copying the image into the checkout. Only real files beneath the
+session working directory or its own browser screenshot directory are allowed.
+Files in that working directory can still be sensitive: attach only material
+the operator asked to see. This does not publish an attachment to GitHub.
+
+Remote reporting must be enabled and the conversation attached. Incoming
+steering may be disabled without disabling output screenshots. An upload whose
+session changes or whose reporting is disabled before completion is not
+published into the new conversation. Captions and attachment IDs use the same
+client sequence and retry queue as ordinary transcript events.
+
+Launch and steer commands retain their attachment IDs on the echoed user turn,
+including image-only commands. Hive's matching backend and UI must ship before
+this client: older backends do not support `/output-attachments`. Older clients
+still report text but cannot populate historical screenshot references; the
+update does not reconstruct attachments omitted by a previous client.
+
 ## Setup, start to finish
 
 ```
