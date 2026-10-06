@@ -98,7 +98,10 @@ function bashAvailable(): boolean {
 
 export function runCheck(command: string, cwd: string, timeoutMs: number): Promise<CheckResult> {
 	return new Promise((resolve) => {
-		const child = spawn("bash", ["-lc", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		// `-c`, not `-lc`: a login shell on Debian resets PATH from /etc/profile,
+		// so the gate would run without the tools the session itself has
+		// (see the background extension's spawn for the measurement).
+		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
 		let out = "";
 		let timedOut = false;
 		const timer = setTimeout(() => {
