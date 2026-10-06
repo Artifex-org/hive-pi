@@ -1,7 +1,62 @@
 # gate
 
-`quality_gate(mode?, scope?, only?, skip?, stopEarly?)` — run the repository's
+`quality_gate(mode?, scope?, only?, skip?, stopEarly?, tests?, install?)` — run the repository's
 **real** quality gate from inside the agent loop.
+
+## One agent check (`mode: "verify"`, HIV-3818)
+
+A repo can declare **one command that answers "is this change done?"** —
+`scripts/agent-check` — and when it does, that is what `quality_gate` runs by
+default. pyERP's bootstraps missing dependencies and env files, runs the quick
+gate, type-checks the touched TypeScript packages and runs the tests CI would
+select for the diff.
+
+**Why it is the default when present.** `quick` is lint only. That is the right
+default for a tool meant to run constantly, and the wrong answer to the question
+an agent asks before saying "done": lint-green is not test-green, and an agent
+that read `PASS — 20 check(s)` had no way to know no test had run. A repo that
+writes an agent check has decided what "verified" means for itself; this tool
+should run that rather than its own narrower guess. It is the default only when
+the call does not ask for the vendored gate — no `mode`, and none of its knobs
+(`only`, `skip`, `scope`, `stopEarly`): `scope:"all"` asks for a lint of every
+file, not a 30-minute test run. `mode: "quick"` stays exactly what it was: lint
+only, fast, for the inner loop. Discovery stops at the repository root — an
+agent check in an enclosing repo verifies that repo's tree, not this one.
+
+| | |
+| --- | --- |
+| `mode: "verify"` | run `scripts/agent-check` (found from the cwd upwards); refused, naming `quick`, where there is none |
+| `tests: false` | `--no-tests`: deps, gate, type-check, no suites |
+| `install: false` | `--no-install`: report missing dependencies, install nothing |
+| `scope`, `stopEarly`, `only`, `skip`, `project` | with an explicit `mode:"verify"`: ignored, and the report says so. `tests`/`install` on any other path: likewise named as ignored |
+
+**The contract it reads, and nothing more:** exit 0 only if every step that ran
+passed, and a FINAL line `AGENT-CHECK: PASS|FAIL ran=<steps> failed=<steps>
+skipped=<steps>` (comma-separated, `-` for none), read from STDOUT's final line
+so a late stderr chunk cannot displace it. A step named in `failed=` but missing
+from `ran=` is still a failure (pyERP's merge-base exit prints `ran=- failed=scope`):
+an explicit failure is never dropped as "no verdict". Per-step lines a particular
+script prints are diagnostics for the model, never parsed — reading them would
+turn one implementation's formatting into an interface it never agreed to.
+
+The same honesty rules as the vendored path, each a way this could have lied:
+
+| | |
+| --- | --- |
+| a **skipped** step | `not run: …` in the text, an `advisory` row and a `missing_tools` entry on the card — never passed |
+| `PASS` with `ran=-` | NOTHING CHECKED, not a pass |
+| no summary on the **final** line | NO VERDICT — a crash, or a summary-shaped line echoed earlier, is not a verdict |
+| summary vs exit code disagree | NO VERDICT, naming the contradiction — neither half is trusted |
+| a step both run and skipped | NO VERDICT, naming it |
+| killed (ceiling or abort) | NO VERDICT — terminated, on the card too even after a FAIL summary; the ceiling is 30 min, as for `thorough` |
+| long output | keeps the END, and says how much it dropped |
+
+Two fixes to the shared streaming path, for both modes: an abort is no longer
+mistaken for a spawn failure (`spawn`'s `signal` reports it as an `AbortError`,
+which sent the call to the buffered fallback — running the whole gate again for
+a call just cancelled); and a killed run whose detached descendant still holds
+the output pipes (`setsid`, a test runner's `start_new_session`) settles 2 s
+after the kill instead of waiting on the pipes forever.
 
 ## Why the real gate rather than a language server
 
@@ -22,7 +77,8 @@ adopted.
 
 | | |
 | --- | --- |
-| `mode: quick` | lint only, no test suites |
+| `mode: verify` | when the repo declares `scripts/agent-check` — see "One agent check" above |
+| `mode: quick` | otherwise: lint only, no test suites |
 | `scope: changed` | vs the merge base |
 | `stopEarly: false` | **`--no-fast-fail`** — see below |
 
