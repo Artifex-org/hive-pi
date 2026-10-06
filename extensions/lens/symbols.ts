@@ -197,6 +197,7 @@ function braceEnd(lines: string[], start: number): number {
 	let depth = 0;
 	let seenOpen = false;
 	let inBlockComment = false;
+	let signatureParenDepth = 0;
 
 	for (let i = start; i < lines.length; i++) {
 		const line = lines[i];
@@ -229,6 +230,15 @@ function braceEnd(lines: string[], start: number): number {
 				inString = ch;
 				continue;
 			}
+			if (!seenOpen && ch === "(") {
+				signatureParenDepth++;
+				continue;
+			}
+			if (!seenOpen && ch === ")") {
+				signatureParenDepth = Math.max(0, signatureParenDepth - 1);
+				continue;
+			}
+			if (!seenOpen && signatureParenDepth > 0 && (ch === "{" || ch === "}")) continue;
 			if (ch === "{") {
 				depth++;
 				seenOpen = true;
@@ -241,10 +251,10 @@ function braceEnd(lines: string[], start: number): number {
 			}
 			// A statement that ended before any block opened is the whole symbol:
 			// `type ID string`, `type X = Y;`, `const n = 1;`
-			if (ch === ";" && !seenOpen && depth === 0) return i;
+			if (ch === ";" && !seenOpen && depth === 0 && signatureParenDepth === 0) return i;
 		}
 		// Unbraced single-line declaration (Go has no semicolons).
-		if (!seenOpen && !inBlockComment && !/[=(,{[]\s*$/.test(line) && i >= start) {
+		if (!seenOpen && signatureParenDepth === 0 && !inBlockComment && !/[=(,{[]\s*$/.test(line) && i >= start) {
 			if (!/^\s*(?:\/\/|#)/.test(line)) return i;
 		}
 	}

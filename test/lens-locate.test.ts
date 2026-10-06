@@ -138,6 +138,23 @@ describe("read_symbol / list_symbols answer instead of throwing", () => {
 		return map;
 	}
 
+	it("read_symbol returns the body after a multiline TSX destructured signature", async () => {
+		const file = join(root, "BillingDifferenceRow.tsx");
+		await writeFile(
+			file,
+			`/** billing row */\nexport function BillingDifferenceRow({\n\tinvoice,\n}: {\n\tinvoice: { id: string };\n}): JSX.Element {\n\tconst total = invoice.id;\n\treturn <div>{total}</div>;\n}\n`,
+		);
+		const out = await (await tools()).get("read_symbol")!.execute("tsx-body", {
+			file,
+			symbol: "BillingDifferenceRow",
+		});
+		const body = out.content.map((c) => c.text).join("\n");
+		expect(body).toContain("/** billing row */");
+		expect(body).toContain("const total = invoice.id;");
+		expect(body).toContain("return <div>{total}</div>;");
+		expect(body).toContain(":1-9");
+	});
+
 	it("read_symbol names the neighbour rather than raising ENOENT", async () => {
 		const missing = join(root, "internal", "retention", "reaper.go");
 		const out = await (await tools()).get("read_symbol")!.execute("t1", {

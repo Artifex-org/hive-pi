@@ -90,6 +90,24 @@ const later = build(1);
 `;
 
 describe("findSymbol — TypeScript", () => {
+	it("skips parameter braces in a multiline TSX function signature", () => {
+		const src = `/** billing row */
+export function BillingDifferenceRow({
+		invoice,
+}: {
+		invoice: { id: string };
+}): JSX.Element {
+	const total = invoice.id;
+	return <div>{total}</div>;
+}
+`;
+		const [s] = findSymbol(src, "BillingDifferenceRow.tsx", "BillingDifferenceRow");
+		expect(s.text).toContain("/** billing row */");
+		expect(s.text).toContain("const total = invoice.id;");
+		expect(s.text).toContain("return <div>{total}</div>;");
+		expect(s.endLine).toBe(9);
+	});
+
 	it("does not stop at a brace inside a template literal", () => {
 		const [s] = findSymbol(TS, "a.ts", "build");
 		expect(s.text).toContain("a } b");
