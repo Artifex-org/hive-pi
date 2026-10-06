@@ -61,7 +61,7 @@ import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "
 import { isUnattendedHiveLaunch } from "../hive-common/launch.ts";
 import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
 import { classifyCommand, classifyTool } from "./policy.ts";
-import { buildGrillKick, buildPlanPrompt } from "./prompt.ts";
+import { buildExecutionPrompt, buildGrillKick, buildPlanPrompt } from "./prompt.ts";
 import { lintPlanComposition, type PlanLintIssue } from "./lint.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
 import { currentLane, isObservedKind, targetLane } from "./lanes.ts";
@@ -355,6 +355,16 @@ const OpSchema = Type.Union([
 
 function text(body: string) {
 	return { content: [{ type: "text" as const, text: body }], details: {} };
+}
+
+/**
+ * An approved plan with work still open: the state the execution guidance is
+ * for. Exported for its test.
+ */
+export function isExecuting(plan: PlanDoc): boolean {
+	if (plan.phase !== "approved") return false;
+	const counts = stepCounts(plan);
+	return counts.pending + counts.in_progress > 0;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -1307,8 +1317,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event) => {
-		if (!active) return;
-		return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanPrompt()}` };
+		if (active) return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanPrompt()}` };
+		// Plan mode ends at approval, which is when execution starts; the
+		// instruction to keep the plan honest must not end with it (HIV-3013).
+		if (isExecuting(doc)) return { systemPrompt: `${event.systemPrompt}\n\n${buildExecutionPrompt()}` };
 	});
 
 	/* ---------------------------------------------------------------------- */

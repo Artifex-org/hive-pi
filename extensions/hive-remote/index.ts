@@ -97,6 +97,7 @@ import {
 } from "./activity.ts";
 import { saveAttachment, textLikeAttachment } from "./attachments.ts";
 import { registerSendAttachmentTool } from "./sendAttachment.ts";
+import { registerSessionTitleTool } from "./sessionTitle.ts";
 import { loadConfig, writeConfig, type RemoteConfig } from "./config.ts";
 import { registerWorkspaceTools } from "./workspace.ts";
 import { collectPatch, collectWorktree, type WorktreePayload } from "./worktree.ts";
@@ -2499,6 +2500,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	// this runs), and are inert until it does, reporting "not attached" rather
 	// than failing. Registered outside start() because a tool is a session-wide
 	// capability, not part of the attach/stream lifecycle start()/stop() manage.
+	// The agent's own retitle (sessionTitle.ts): touches nothing but pi's session
+	// name, which this extension already reports on every conversation refresh.
+	registerSessionTitleTool(pi);
 	registerSendAttachmentTool(pi, {
 		getAuth: () => auth,
 		getSessionID: () => sessionID,
