@@ -15,28 +15,19 @@
  *
  * NOT reimplemented, deliberately: LSP diagnostics (we run the real gate —
  * `hive check --step lint` — which is stronger than editor diagnostics), and
- * complexity/maintainability reports (2 calls, ever). If we later need real
- * reference resolution the answer is an LSP or `ast-grep` as an explicit tool,
- * not a larger regex here.
+ * complexity/maintainability reports (2 calls, ever). Real reference
+ * resolution is an explicit LSP-backed tool, not a larger regex: rename_symbol
+ * and move_file below, over the project's own TypeScript 7 language server.
  */
 
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rename } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { describeMissingFile, isNotFound } from "./locate.ts";
 import { findSymbol, listSymbols, type SymbolSpan } from "./symbols.ts";
-import {
-	applyFileEdits,
-	fileRenameEditsToFileEdits,
-	guardTargets,
-	renameSpansToEdits,
-	type FileRenameEdits,
-	type RenameSpanGroup,
-} from "./refactor.ts";
-import { findTsserver, TsServer, waitForProjectLoad } from "./tsserver.ts";
+import { moveFile, renameSymbol } from "./operations.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { exposureFor } from "../loadout/policy.ts";
 
@@ -230,8 +221,9 @@ export default function (pi: ExtensionAPI) {
 	 * form grep can match, and the model's hand-rolled rename then produces a
 	 * diff that typechecks locally and breaks the whole-project gate.
 	 *
-	 * No bundled LSP: the project's OWN tsserver answers, spawned per call and
-	 * killed after. A project without one gets a clean refusal.
+	 * No bundled LSP: the project's OWN TypeScript 7 language server answers,
+	 * spawned per call and killed after (operations.ts, lsp.ts). A project
+	 * without one gets a clean refusal.
 	 */
 	registerGuardedTool(pi, {
 		capability: { executes: true, writesExemptBecause: "applyFileEdits runs guardTargets over every target file" },
@@ -240,10 +232,10 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Rename a TypeScript symbol across the project, re-exports included",
 		description:
 			"Rename a TypeScript/JavaScript symbol everywhere it is referenced, using the project's own " +
-			"TypeScript language server — including barrel files and re-exports, which a text search cannot " +
+			"TypeScript 7 language server — including barrel files and re-exports, which a text search cannot " +
 			"see. Prefer this over hand-editing call sites: a partially-renamed symbol typechecks in the file " +
-			"you edited and fails the project gate. Requires the project to have TypeScript installed. " +
-			"Reports every file it changed.",
+			"you edited and fails the project gate. Requires TypeScript 7+ installed in the project or a parent " +
+			"directory. Point line/offset at the identifier itself. Reports every file it changed.",
 		parameters: Type.Object({
 			file: Type.String({ description: "File containing the declaration, absolute or relative to cwd" }),
 			line: Type.Number({ description: "1-based line of the symbol" }),
@@ -251,70 +243,19 @@ export default function (pi: ExtensionAPI) {
 			newName: Type.String({ description: "The new name" }),
 		}),
 		prepareArguments: withPathAlias,
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const file = resolve(ctx.cwd, params.file);
-			const tsserverPath = findTsserver(file);
-			if (!tsserverPath) {
-				return text(
-					`No TypeScript language server found for ${params.file}. ` +
-						"This tool uses the project's own `node_modules/typescript`; install it, or rename by hand " +
-						"and run the project's typecheck to catch missed references.",
-				);
-			}
-
-			const server = new TsServer(tsserverPath, ctx.cwd);
+		async execute(_id, params, signal, _onUpdate, ctx) {
 			try {
-				await waitForProjectLoad(server, file);
-				const response = await server.request("rename", {
-					file,
+				const outcome = await renameSymbol({
+					file: resolve(ctx.cwd, params.file),
 					line: params.line,
 					offset: params.offset,
-					findInComments: false,
-					findInStrings: false,
+					newName: params.newName,
+					cwd: ctx.cwd,
+					signal,
 				});
-				if (!response.success) {
-					return text(`tsserver refused the rename: ${String(response.message ?? "(no reason given)")}`);
-				}
-				const body = response.body as
-					| {
-							info?: { canRename?: boolean; localizedErrorMessage?: string; displayName?: string };
-							locs?: RenameSpanGroup[];
-					  }
-					| undefined;
-				if (body?.info?.canRename === false) {
-					return text(
-						`Cannot rename that symbol: ${body.info.localizedErrorMessage ?? "tsserver did not say why"}. ` +
-							"Check the line/offset point at the identifier itself.",
-					);
-				}
-				const locs = body?.locs ?? [];
-				if (locs.length === 0) {
-					return text(
-						`No references found at ${params.file}:${params.line}:${params.offset}. ` +
-							"Check the offset points at the symbol name (1-based column), and that the file is part of the project.",
-					);
-				}
-
-				const applied = await applyFileEdits(renameSpansToEdits(locs, params.newName), "rename_symbol");
-				if (!applied.ok) {
-					return text(
-						applied.blocked
-							? `Refusing to rename: ${applied.blocked.length} target file(s) are guarded.\n\n${applied.reason}`
-							: applied.reason,
-						true,
-					);
-				}
-				const total = applied.files.reduce((n, f) => n + f.edits, 0);
-				const listed = applied.files.map((f) => `  ${relative(ctx.cwd, f.file)} (${f.edits})`).join("\n");
-				return text(
-					`Renamed \`${body?.info?.displayName ?? "symbol"}\` → \`${params.newName}\`: ` +
-						`${total} reference(s) across ${applied.files.length} file(s).\n\n${listed}\n\n` +
-						"Run the project's typecheck to confirm — this updated references the language server knows about.",
-				);
+				return text(outcome.text, outcome.isError);
 			} catch (error) {
 				return text(`Rename failed: ${(error as Error).message}`, true);
-			} finally {
-				server.dispose();
 			}
 		},
 	});
@@ -323,98 +264,38 @@ export default function (pi: ExtensionAPI) {
 	 * move_file — the other half of "the IDE is wired in".
 	 *
 	 * Moving a file is the case where the edit that matters is in files you did
-	 * not touch: every importer's specifier, and every barrel that re-exports
-	 * through the old path. `getEditsForFileRename` asks the language server for
-	 * exactly that set BEFORE the move, which is the only order that works —
-	 * afterwards the old path no longer resolves and the server cannot compute it.
+	 * not touch: every importer's specifier, every barrel that re-exports through
+	 * the old path, and the moved file's own relative imports.
+	 * `workspace/willRenameFiles` asks the language server for exactly that set
+	 * BEFORE the move, which is the only order that works — afterwards the old
+	 * path no longer resolves and the server cannot compute it.
 	 */
 	registerGuardedTool(pi, {
-		capability: { executes: true, writesExemptBecause: "applyFileEdits guards importers; the moved file is guarded explicitly" },
+		capability: { executes: true, writesExemptBecause: "applyFileEdits guards every edited file; the moved file is guarded explicitly" },
 		name: "move_file",
 		label: "Move file",
 		promptSnippet: "Move a TypeScript file and fix every import that points at it",
 		description:
 			"Move or rename a TypeScript/JavaScript FILE and rewrite every import and re-export that " +
-			"referenced it, using the project's own language server. Use this instead of `bash mv` for " +
-			"source files: `mv` leaves every importer pointing at a path that no longer exists, and barrel " +
-			"files make those importers hard to find by search. Requires the project to have TypeScript " +
-			"installed. Reports every file it changed.",
+			"referenced it — and the moved file's own relative imports — using the project's own TypeScript 7 " +
+			"language server. Use this instead of `bash mv` for source files: `mv` leaves every importer pointing " +
+			"at a path that no longer exists, and barrel files make those importers hard to find by search. " +
+			"Requires TypeScript 7+ installed in the project or a parent directory. Reports every file it changed.",
 		parameters: Type.Object({
 			from: Type.String({ description: "Current path, absolute or relative to cwd" }),
 			to: Type.String({ description: "New path, absolute or relative to cwd" }),
 		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const from = resolve(ctx.cwd, params.from);
-			const to = resolve(ctx.cwd, params.to);
-			if (!existsSync(from)) return text(`${params.from} does not exist.`, true);
-			if (existsSync(to)) return text(`${params.to} already exists — refusing to overwrite it.`, true);
-
-			const tsserverPath = findTsserver(from);
-			if (!tsserverPath) {
-				return text(
-					`No TypeScript language server found for ${params.from}. This tool uses the project's own ` +
-						"`node_modules/typescript`; install it, or move by hand and fix importers yourself.",
-				);
-			}
-
-			// The file itself must be guarded too — it is being written (moved),
-			// not merely referenced. guards-bridge cannot see this tool.
-			const selfGuard = guardTargets([from, to], "move_file");
-			if (selfGuard) {
-				return text(`Refusing to move: guarded path.\n\n${selfGuard.reason}`, true);
-			}
-
-			const server = new TsServer(tsserverPath, ctx.cwd);
+		async execute(_id, params, signal, _onUpdate, ctx) {
 			try {
-				await waitForProjectLoad(server, from);
-				// Ask BEFORE moving: afterwards the old path does not resolve and the
-				// server returns nothing, which reads as "no importers" and silently
-				// leaves the tree broken.
-				const response = await server.request("getEditsForFileRename", { oldFilePath: from, newFilePath: to });
-				// `{fileName, textChanges}` here, NOT `rename`'s `{file, locs}` — see
-				// fileRenameEditsToFileEdits. Getting this wrong finds zero importers
-				// and still moves the file.
-				const groups = fileRenameEditsToFileEdits((response.body as FileRenameEdits[] | undefined) ?? []);
-
-				const importerEdits = groups.filter((group) => group.file !== from);
-				if (importerEdits.length > 0) {
-					const applied = await applyFileEdits(importerEdits, "move_file");
-					if (!applied.ok) {
-						return text(
-							applied.blocked
-								? `Refusing to move: ${applied.blocked.length} importer file(s) are guarded.\n\n${applied.reason}`
-								: applied.reason,
-							true,
-						);
-					}
-				}
-
-				// Importers are updated; now move the file itself. Order matters only
-				// in that a failure here leaves rewritten importers pointing at a path
-				// that does not exist yet — so say so rather than reporting success.
-				await mkdir(dirname(to), { recursive: true });
-				try {
-					await rename(from, to);
-				} catch (error) {
-					return text(
-						`Updated ${importerEdits.length} importer file(s), but MOVING the file failed: ` +
-							`${(error as Error).message}. The tree is now inconsistent — check \`git diff\`.`,
-						true,
-					);
-				}
-
-				const changed = importerEdits.map((group) => `  ${relative(ctx.cwd, group.file)} (${group.edits.length})`);
-				return text(
-					`Moved ${relative(ctx.cwd, from)} → ${relative(ctx.cwd, to)}` +
-						(changed.length > 0
-							? `, updating ${changed.length} importer file(s):\n\n${changed.join("\n")}`
-							: " (no importers referenced it)") +
-						"\n\nRun the project's typecheck to confirm.",
-				);
+				const outcome = await moveFile({
+					from: resolve(ctx.cwd, params.from),
+					to: resolve(ctx.cwd, params.to),
+					cwd: ctx.cwd,
+					signal,
+				});
+				return text(outcome.text, outcome.isError);
 			} catch (error) {
 				return text(`Move failed: ${(error as Error).message}`, true);
-			} finally {
-				server.dispose();
 			}
 		},
 	});
