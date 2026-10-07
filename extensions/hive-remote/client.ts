@@ -263,6 +263,7 @@ export interface AttachRequest extends Capabilities {
 export interface AttachResponse {
 	session_id: string;
 	last_seq: number;
+	can_report_identity?: boolean;
 	/** Present (even false) only on servers that understand scanner snapshots. */
 	can_control_you_should_know?: boolean;
 }
@@ -284,6 +285,30 @@ export async function resolveSession(auth: HiveAuth, clientRunID: string): Promi
  *  durable watermark, which is where this client resumes from. */
 export function attach(auth: HiveAuth, sessionID: string, body: AttachRequest): Promise<RequestResult<AttachResponse>> {
 	return request<AttachResponse>(auth, "PUT", `/agent-sessions/${sessionID}/conversation`, body);
+}
+
+export interface RemoteSessionIdentity {
+	title: string;
+	description: string;
+	description_provisional: boolean;
+	identity_revision: number;
+	title_pinned?: boolean;
+	description_locked?: boolean;
+}
+
+export function pinSessionTitle(auth: HiveAuth, sessionID: string, title: string): Promise<RequestResult<void>> {
+	return request<void>(auth, "PATCH", `/agent-sessions/${encodeURIComponent(sessionID)}/title`, { title });
+}
+
+export function getSessionIdentity(auth: HiveAuth, sessionID: string): Promise<RequestResult<RemoteSessionIdentity & { can_report_identity?: boolean }>> {
+	return request<RemoteSessionIdentity & { can_report_identity?: boolean }>(auth, "GET", `/agent-sessions/${encodeURIComponent(sessionID)}/conversation`);
+}
+
+export function putSessionIdentity(auth: HiveAuth, sessionID: string, body: {
+	revision: number; title?: string; description: string; provisional: boolean;
+	source: "initial" | "description" | "pivot"; reason?: string;
+}): Promise<RequestResult<RemoteSessionIdentity>> {
+	return request<RemoteSessionIdentity>(auth, "PUT", `/agent-sessions/${encodeURIComponent(sessionID)}/identity`, body);
 }
 
 export function postEvents(

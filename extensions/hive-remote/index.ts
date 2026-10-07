@@ -79,7 +79,8 @@ import { createWaker } from "../hive-common/waker.ts";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
-import { attach, buildCatalog, claimCommands, fetchCommandAttachment, postActivity, postDelta, postPlan, postEvents, postPull, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
+import { attach, buildCatalog, claimCommands, fetchCommandAttachment, getSessionIdentity, putSessionIdentity, pinSessionTitle, postActivity, postDelta, postPlan, postEvents, postPull, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
+import { announceRemoteOpeningInput, SESSION_IDENTITY_CHANNEL, SESSION_MANUAL_TITLE_CHANNEL, type SessionIdentityUpdate } from "./sessionIdentityBus.ts";
 import { ARGS_BUDGET, budgeted } from "./budget.ts";
 import { readAnnouncedModes } from "./opmodes.ts";
 import {
@@ -100,6 +101,8 @@ import {
 import { saveAttachment, textLikeAttachment } from "./attachments.ts";
 import { registerSendAttachmentTool } from "./sendAttachment.ts";
 import { registerSessionTitleTool } from "./sessionTitle.ts";
+import registerSessionIdentity from "./sessionIdentity.ts";
+import { IdentitySync, IDENTITY_SYNC_ENTRY } from "./identitySync.ts";
 import { loadConfig, writeConfig, type RemoteConfig } from "./config.ts";
 import { registerWorkspaceTools } from "./workspace.ts";
 import { CredentialReceiver, credentialConsumersReady, registerCredentialTools } from "./credentials.ts";
@@ -433,6 +436,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		clientRunID = id;
 		deferredSteers.length = 0;
 		credentials.detach(); credentialAdvertisementPending = false;
+		identitySync.detach();
 		// A new run means a new session row: drop the old binding so the next
 		// attach targets the row telemetry is actually writing to.
 		sessionID = null;
@@ -1335,7 +1339,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// directly); everything else lands in the worktree, where the
 				// agent's own tools can open it — a base64 blob in context helps
 				// nothing and costs everything.
-				let text = cmd.payload;
+				let text = cmd.payload || ((cmd.attachment_ids?.length ?? 0) > 0 ? "Review the attached material" : "");
 				const imageBlocks: { type: "image"; mimeType: string; data: string }[] = [];
 				for (const a of attachments) {
 					const att = a!;
@@ -1363,6 +1367,11 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// documented expansion path; an image-bearing one stays an array.
 				const expand = resolveSkillCommand(cmd.payload, pi.getCommands()) !== null;
 				const deliverAs = cmd.kind === "steer" ? "steer" as const : "followUp" as const;
+				// Only the actual operator task is trusted for opening auto-title; other
+				// extension-origin inputs have no matching announcement and stay ignored.
+				if (cmd.source === "operator" && !pi.getSessionName()) {
+					announceRemoteOpeningInput(pi, text);
+				}
 				if (imageBlocks.length === 0) {
 					pi.sendUserMessage(text, { deliverAs, expandPromptTemplates: expand });
 				} else {
@@ -1853,6 +1862,39 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		}
 	}
 
+	// Identity is a durable serial outbox, distinct from cosmetic title refreshes.
+	let lastIdentityError = "";
+	const identitySync = new IdentitySync({
+		persist: state => pi.appendEntry(IDENTITY_SYNC_ENTRY, state),
+		notice: message => { lastIdentityError = message; },
+		apply: body => {
+			pi.events.emit(SESSION_IDENTITY_CHANNEL, { canonical: {
+				title: body.title, description: body.description, provisional: body.description_provisional,
+				revision: body.identity_revision, titlePinned: body.title_pinned === true,
+			} } satisfies Partial<SessionIdentityUpdate>);
+			if (pi.getSessionName() !== body.title) pi.setSessionName(body.title);
+		},
+	});
+	pi.events.on(SESSION_IDENTITY_CHANNEL, (payload: unknown) => identitySync.update(payload as SessionIdentityUpdate));
+	pi.events.on(SESSION_MANUAL_TITLE_CHANNEL, (value: unknown) => {
+		const title = (value as { title?: unknown })?.title;
+		if (typeof title === "string" && title.trim()) identitySync.rename(title);
+	});
+	let identityLocalSessionID: string | undefined;
+	pi.on("session_start", (_event, ctx) => {
+		const local = ctx.sessionManager.getSessionId();
+		if (local === identityLocalSessionID) return;
+		identityLocalSessionID = local;
+		identitySync.restore(ctx.sessionManager.getBranch());
+	});
+	function attachIdentity(supported: boolean, currentAuth: HiveAuth, currentID: string): void {
+		identitySync.attach(supported, {
+			read: () => getSessionIdentity(currentAuth, currentID),
+			put: body => putSessionIdentity(currentAuth, currentID, body),
+			rename: title => pinSessionTitle(currentAuth, currentID, title),
+		});
+	}
+
 	// ------------------------------------------------------------------ attach
 
 	/**
@@ -1990,6 +2032,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// would wait out its full window for an answer nobody could give —
 				// re-creating, precisely, the stuck chat this feature exists to end.
 				scannerServerSupported = typeof res.body?.can_control_you_should_know === "boolean";
+				attachIdentity(res.body?.can_report_identity === true, auth, resolvedSession);
 				announceRemoteAnswers(cfg.streamDeltas);
 				yskBridge.attach(auth, resolvedSession);
 				// RESUME FROM THE SERVER'S WATERMARK, before anything can be sent.
@@ -2126,13 +2169,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// Kept in lockstep with the attach above, per the whole-record
 						// PUT rule stated a few lines up.
 						...(cfg.reportWorktree ? { can_diff: true } : {}),
-						// Lockstep with the attach above (whole-record PUT rule).
+								// Lockstep with the attach above (whole-record PUT rule).
 						...(cfg.allowSteer ? { can_attach_files: true } : {}),
 						catalog: buildCatalog(pi.getCommands(), availableModels()),
 					}));
 					if (acknowledgement?.ok && credentialCapability && credentials.ready() && current()) {
 						credentialAdvertisementPending = false;
 					}
+					if (acknowledgement?.ok && isCurrentRemoteLifecycle(lifecycle, generation)) attachIdentity(acknowledgement.body?.can_report_identity === true, currentAuth, currentSessionID);
 				} catch {
 					// Failures do not affect the agent loop or regular streaming retries;
 					// credential discovery stays gated until a current-binding refresh succeeds.
@@ -2154,6 +2198,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		yskBridge.detach();
 		invalidateRemoteLifecycle(lifecycle);
 		attaching = false;
+		identitySync.detach();
 		sessionID = null;
 		journal?.close();
 		journal = null;
@@ -2279,7 +2324,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				const previousRun = attachedRunID || attachingRunID || clientRunID;
 				if (clientRunID === previousRun) clientRunID = "";
 				attachedRunID = ""; attachingRunID = "";
-				lifecycle.generation++; attaching = false; sessionID = null;
+				lifecycle.generation++; attaching = false; identitySync.detach(); sessionID = null;
 				deferredSteers.length = 0; compacting = false; polling = false;
 				announceRemoteAnswers(false);
 			}
@@ -2678,6 +2723,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	// capability, not part of the attach/stream lifecycle start()/stop() manage.
 	// The agent's own retitle (sessionTitle.ts): touches nothing but pi's session
 	// name, which this extension already reports on every conversation refresh.
+	registerSessionIdentity(pi);
 	registerSessionTitleTool(pi);
 	registerSendAttachmentTool(pi, {
 		getAuth: () => auth,
@@ -2732,6 +2778,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			} else if (cfg.enabled && !sessionID && lastAttachError) {
 				lines.push("", `Last attach failed: ${lastAttachError}`);
 			}
+			if (lastIdentityError) lines.push("", `Identity sync: ${lastIdentityError}`);
 			ctx.ui.notify(lines.join("\n"));
 		},
 	});

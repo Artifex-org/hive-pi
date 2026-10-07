@@ -74,6 +74,9 @@ function fakeHive(handlers: {
 	toolStarts?: number[];
 	credentialStatuses?: number[];
 	byRun?: Record<string, string>;
+	identity?: Record<string, unknown>;
+	identityWriteGate?: Promise<void>;
+	identityReadGate?: Promise<void>;
 	eventGate?: Promise<void>;
 }) {
 	const calls: Call[] = [];
@@ -81,12 +84,14 @@ function fakeHive(handlers: {
 	const toolStarts = [...(handlers.toolStarts ?? [])];
 	const credentialStatuses = [...(handlers.credentialStatuses ?? [])];
 	const refreshes = [...(handlers.refreshes ?? [])];
+	let canonicalIdentity: Record<string, unknown> = { identity_revision: 0, title: "Session", description: "", ...handlers.identity };
 	let attachCount = 0;
 	let activeAttaches = 0, maxActiveAttaches = 0;
 	const committedCapabilities: boolean[] = [];
 	let acceptsCredentials = false;
 	let commandsServed = false;
 	let eventGateServed = false;
+	let identityWriteGated = false, identityReadGated = false;
 
 	const json = (status: number, body: unknown) =>
 		new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -102,6 +107,20 @@ function fakeHive(handlers: {
 			return json(status, status === 200 ? { items: [] } : { error: "receiver/backend not ready" });
 		}
 		if (path.startsWith("/agent-sessions/by-run/")) return json(200, { id: handlers.byRun?.[path.split("/").pop() ?? ""] ?? SESSION_ID });
+		if (path.endsWith("/identity")) {
+			canonicalIdentity = { ...canonicalIdentity, identity_revision: body?.revision, title: canonicalIdentity.title_pinned ? canonicalIdentity.title : body?.title ?? canonicalIdentity.title, description: body?.description, description_provisional: body?.provisional };
+			if (handlers.identityWriteGate && !identityWriteGated) { identityWriteGated = true; await handlers.identityWriteGate; }
+			return json(200, canonicalIdentity);
+		}
+		if (path.endsWith("/title")) {
+			canonicalIdentity = { ...canonicalIdentity, title: body?.title, title_pinned: true };
+			return json(200, {});
+		}
+		if ((init?.method ?? "GET") === "GET" && path.endsWith("/conversation")) {
+			const captured = { session_id: SESSION_ID, ...canonicalIdentity };
+			if (handlers.identityReadGate && !identityReadGated) { identityReadGated = true; await handlers.identityReadGate; }
+			return json(200, captured);
+		}
 
 		if (path.endsWith("/conversation")) {
 			const a = (attachCount++ > 0 ? refreshes.shift() : undefined) ?? handlers.attach ?? { status: 200, lastSeq: 0, delayMs: 0 };
@@ -111,7 +130,7 @@ function fakeHive(handlers: {
 				if (a.status !== 200) return json(a.status, { error: "nope" });
 				acceptsCredentials = body?.can_receive_credentials === true;
 				committedCapabilities.push(acceptsCredentials);
-				return json(200, { session_id: SESSION_ID, last_seq: a.lastSeq ?? 0 });
+				return json(200, { session_id: SESSION_ID, last_seq: a.lastSeq ?? 0, can_report_identity: handlers.identity?.can_report_identity ?? false });
 			} finally { activeAttaches--; }
 		}
 
@@ -214,6 +233,97 @@ describe("send_attachment wiring", () => {
 		// this asserts remote-off withdraws its target before a queued completion.
 		await fake.emit({ type: "session_shutdown" });
 		expect(hive.attaches()).toHaveLength(1);
+	});
+});
+
+describe("identity wiring", () => {
+	const context = async (goal: string) => {
+		const execute = fake.tools.find(tool => tool.name === "session_context")?.definition.execute;
+		if (typeof execute !== "function") throw new Error("missing session_context");
+		await execute("kickoff", { goal, approach: "Verify" });
+	};
+	it("adopts reconnect context without replaying an opening and preserves manual pins through serialized pivots", async () => {
+		const hive = fakeHive({ identity: { can_report_identity: true, identity_revision: 3, title: "Accepted task", description: "Goal: accepted. Approach: review.", description_provisional: false } });
+		hiveRemote(fake.api, deps()); await attachAndSettle(fake);
+		expect(fake.api.getSessionName()).toBe("Accepted task");
+		await fake.emit({ type: "session_info_changed" });
+		fake.api.events.emit("session-identity:initial", { title: "Stale opening", prompt: "Stale opening" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(call => call.path.endsWith("/title") || call.path.endsWith("/identity"))).toHaveLength(0);
+		fake.api.setSessionName("Operator title");
+		await fake.emit({ type: "session_info_changed" }); await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(call => call.path.endsWith("/title")).map(call => call.body)).toEqual([{ title: "Operator title" }]);
+		await context("Refine accepted objective"); await vi.advanceTimersByTimeAsync(0);
+		const pivot = fake.tools.find(tool => tool.name === "session_title")?.definition.execute;
+		if (typeof pivot !== "function") throw new Error("missing session_title");
+		await pivot("pivot", { title: "New objective", description: "Goal: new. Approach: repair.", reason: "Scope changed" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(call => call.path.endsWith("/identity")).map(call => call.body?.revision)).toEqual([4, 5]);
+		expect(hive.calls.filter(call => call.path.endsWith("/identity")).at(-1)?.body).toMatchObject({ source: "pivot", title: "New objective" });
+		expect(fake.api.getSessionName()).toBe("Operator title");
+		await fake.emit({ type: "session_shutdown" });
+	});
+	it("serializes concurrent context edits and keeps identity attached across a repeated session start", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => { release = resolve; });
+		const hive = fakeHive({ identity: { can_report_identity: true, identity_revision: 0, title: "Session" }, identityWriteGate: gate });
+		hiveRemote(fake.api, deps()); await attachAndSettle(fake);
+		await context("First"); await vi.advanceTimersByTimeAsync(0);
+		await context("Second"); await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(call => call.path.endsWith("/identity"))).toHaveLength(1);
+		release(); await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(call => call.path.endsWith("/identity")).map(call => call.body?.revision)).toEqual([1, 2]);
+		await fake.emit({ type: "session_start", reason: "resume" });
+		await context("Third"); await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(call => call.path.endsWith("/identity")).at(-1)?.body?.revision).toBe(3);
+		await fake.emit({ type: "session_shutdown" });
+	});
+	it("fences a canonical read immediately when telemetry replaces the remote row", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>(resolve => { release = resolve; });
+		const hive = fakeHive({ identity: { can_report_identity: true, identity_revision: 3, title: "Old canonical", description: "Goal: old. Approach: old." }, identityReadGate: gate });
+		hiveRemote(fake.api, deps()); await attachAndSettle(fake);
+		expect(hive.calls.filter(call => call.method === "GET" && call.path.endsWith("/conversation"))).toHaveLength(1);
+		fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "replacement-run" });
+		release(); await vi.advanceTimersByTimeAsync(0);
+		expect(fake.api.getSessionName()).not.toBe("Old canonical");
+		await fake.emit({ type: "session_shutdown" });
+	});
+
+	it("does not read or publish identity when the server capability is false", async () => {
+		const hive = fakeHive({ identity: { can_report_identity: false, identity_revision: 0, title: "Session" } });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		fake.api.events.emit("session-identity:initial", { title: "Opening request", prompt: "Do the requested work" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.some(call => call.path.endsWith("/identity"))).toBe(false);
+		expect(hive.calls.filter(call => call.method === "GET" && call.path.endsWith("/conversation"))).toHaveLength(0);
+		await fake.emit({ type: "session_shutdown" });
+	});
+
+	it("reads canonical identity after a capable attach and publishes session context", async () => {
+		const hive = fakeHive({ identity: { can_report_identity: true, identity_revision: 0, title: "Session" } });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		fake.api.events.emit("session-identity:initial", { title: "Opening request", prompt: "Do the requested work" });
+		await vi.advanceTimersByTimeAsync(0);
+		await Promise.resolve();
+		await Promise.resolve();
+		const identityCalls = hive.calls.filter(call => call.path.endsWith("/identity"));
+		expect(hive.calls.filter(call => call.method === "GET" && call.path.endsWith("/conversation"))).toHaveLength(1);
+		expect(identityCalls).toHaveLength(1);
+		expect(identityCalls[0]?.body).toMatchObject({ revision: 1, title: "Opening request", provisional: true, source: "initial" });
+		const context = fake.tools.find(tool => tool.name === "session_context")!;
+		const execute = context.definition.execute;
+		if (typeof execute !== "function") throw new Error("missing session_context");
+		const result = await execute("kickoff", { goal: "Verify stable identity", approach: "Exercise the real extension" });
+		expect(result.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: expect.stringContaining("Session context saved") })]));
+		await vi.advanceTimersByTimeAsync(0);
+		const authored = hive.calls.filter(call => call.path.endsWith("/identity"));
+		expect(authored).toHaveLength(2);
+		expect(authored[1]?.body).toMatchObject({ revision: 2, source: "description", provisional: false, description: "Goal: Verify stable identity. Approach: Exercise the real extension" });
+		expect(authored[1]?.body).not.toHaveProperty("title");
+		await fake.emit({ type: "session_shutdown" });
 	});
 });
 

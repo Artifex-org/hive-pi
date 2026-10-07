@@ -58,6 +58,9 @@ import {
 } from "../hive-common/channels.ts";
 import { PLAN_ASK_KEY, PLAN_ASK_WAIT_MS, waitForAnswer, type Answers } from "../hive-common/remoteAnswer.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
+import { SESSION_IDENTITY_CHANNEL, SESSION_PLAN_INTRO_CHANNEL, type SessionIdentityUpdate } from "../hive-remote/sessionIdentityBus.ts";
+import { readIdentity } from "../hive-remote/sessionIdentity.ts";
+import { introductionOps, planIntroduction } from "./introduction.ts";
 import { isUnattendedHiveLaunch } from "../hive-common/launch.ts";
 import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
 import { classifyCommand, classifyTool } from "./policy.ts";
@@ -369,6 +372,7 @@ export function isExecuting(plan: PlanDoc): boolean {
 
 export default function (pi: ExtensionAPI) {
 	let doc: PlanDoc = emptyPlan(Date.now());
+	let canonicalIntro: string | undefined;
 	let active = false;
 	/**
 	 * Lint kinds already put to the model about the CURRENT plan.
@@ -581,10 +585,14 @@ export default function (pi: ExtensionAPI) {
 	const persistOps = (base: PlanDoc, ops: readonly PlanOp[], now: number): PlanDoc => {
 		const result = applyOps(base, ops, now);
 		persist(result.doc, base);
-		return result.doc;
+		return doc;
 	};
 
 	const persist = (next: PlanDoc, previous?: PlanDoc) => {
+		if (canonicalIntro && !planIntroduction(next)) {
+			const introOps = introductionOps(next, canonicalIntro);
+			if (introOps.length) next = applyOps(next, introOps, Date.now()).doc;
+		}
 		// A PHASE CHANGE ALWAYS WRITES A SNAPSHOT, whatever the counters say.
 		//
 		// `phase` is approval machinery: `plan_ready` sets it to `ready` and that
@@ -600,6 +608,11 @@ export default function (pi: ExtensionAPI) {
 			next.phase === previous.phase &&
 			next.progress !== previous.progress;
 		doc = next;
+		const intro = doc.phase !== "none" ? planIntroduction(doc) : undefined;
+		if (intro && intro.text !== canonicalIntro) {
+			canonicalIntro = intro.text;
+			pi.events.emit(SESSION_PLAN_INTRO_CHANNEL, { description: intro.text });
+		}
 		try {
 			if (tickOnly) pi.appendEntry(PLAN_TICK_ENTRY_TYPE, tickEntry(next));
 			else pi.appendEntry(PLAN_ENTRY_TYPE, toEntry(next));
@@ -625,6 +638,15 @@ export default function (pi: ExtensionAPI) {
 			/* no bus, or nothing listening */
 		}
 	};
+
+	pi.events.on(SESSION_IDENTITY_CHANNEL, (value: unknown) => {
+		const event = value as SessionIdentityUpdate;
+		const description = event.canonical?.description ?? (event.origin === "session-identity" ? event.description : undefined);
+		if (!description) return;
+		canonicalIntro = description;
+		const ops = introductionOps(doc, description);
+		if (ops.length) persistOps(doc, ops, Date.now());
+	});
 
 	/**
 	 * Cosmetic by definition — never fail a tool call because a widget could
@@ -1397,6 +1419,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", (event, ctx) => {
 		heldCtx = ctx;
+		canonicalIntro = readIdentity(branchEntries(ctx))?.description;
 		const reason = (event as { reason?: string }).reason;
 		if (reason === "new") {
 			// A fresh session inherits nothing — including the mode. Waking up
