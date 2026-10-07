@@ -77,6 +77,18 @@ export function planLoad(
 	return { load, already, refused };
 }
 
+/**
+ * Where MCP tools come from, said only as far as it is true. pi registers
+ * tool_search only when MCP servers are configured, so pointing at it on a
+ * machine with no mcp.json sent an agent hunting for a tool that does not
+ * exist (andreas-mbp, 2026-10-07: "no tool_search callable is exposed").
+ */
+export function mcpHint(pi: Pick<ExtensionAPI, "getAllTools">): string {
+	return pi.getAllTools().some((tool) => tool.name === "tool_search")
+		? "MCP tools load with tool_search."
+		: "this session has no MCP servers configured (no ~/.pi/agent/mcp.json), so there are no MCP tools to load.";
+}
+
 export default function loadout(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: LOAD_TOOL,
@@ -95,10 +107,7 @@ export default function loadout(pi: ExtensionAPI) {
 			if (load.length > 0) lines.push(`Loaded: ${load.join(", ")}. Call them from your next turn.`);
 			if (already.length > 0) lines.push(`Already available: ${already.join(", ")}.`);
 			if (refused.length > 0) {
-				lines.push(
-					`Not loadable here: ${refused.join(", ")}. Use a name from 'Tools loaded on demand'; ` +
-						"MCP tools load with tool_search.",
-				);
+				lines.push(`Not loadable here: ${refused.join(", ")}. Use a name from 'Tools loaded on demand'; ${mcpHint(pi)}`);
 			}
 			return {
 				content: [{ type: "text" as const, text: lines.join("\n") }],

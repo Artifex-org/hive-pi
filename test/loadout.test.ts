@@ -9,7 +9,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import loadoutExtension, { deferredToolNames, LOAD_TOOL, loadoutPrompt, planLoad } from "../extensions/loadout/index.ts";
+import loadoutExtension, { deferredToolNames, LOAD_TOOL, loadoutPrompt, mcpHint, planLoad } from "../extensions/loadout/index.ts";
 import { exposureFor, GATED_TOOLS, restoredLoadout } from "../extensions/loadout/policy.ts";
 import opmodeExtension from "../extensions/opmode/index.ts";
 import planExtension from "../extensions/plan/index.ts";
@@ -119,6 +119,17 @@ describe("load_tools", () => {
 		const bad = await execute("c", { names: ["nope"] });
 		expect(bad.isError).toBe(true);
 		expect(bad.content[0].text).toContain("Not loadable");
+		// No tool_search is registered here, so the hint must not send the
+		// agent looking for one.
+		expect(bad.content[0].text).not.toContain("load with tool_search");
+		expect(bad.content[0].text).toContain("no MCP servers configured");
+	});
+
+	it("points at tool_search only when the session has it", () => {
+		const withSearch = { getAllTools: () => [{ name: "tool_search" }] } as never;
+		const without = { getAllTools: () => [{ name: "read" }] } as never;
+		expect(mcpHint(withSearch)).toBe("MCP tools load with tool_search.");
+		expect(mcpHint(without)).toContain("no MCP servers configured");
 	});
 });
 
