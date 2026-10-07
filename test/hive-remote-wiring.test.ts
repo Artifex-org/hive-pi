@@ -69,11 +69,14 @@ function fakeHive(handlers: {
 	attach?: { status: number; lastSeq?: number };
 	commands?: Array<Record<string, unknown>>;
 	toolStarts?: number[];
+	byRun?: Record<string, string>;
+	eventGate?: Promise<void>;
 }) {
 	const calls: Call[] = [];
 	const events = [...(handlers.events ?? [])];
 	const toolStarts = [...(handlers.toolStarts ?? [])];
 	let commandsServed = false;
+	let eventGateServed = false;
 
 	const json = (status: number, body: unknown) =>
 		new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -83,7 +86,7 @@ function fakeHive(handlers: {
 		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
 		calls.push({ method: String(init?.method ?? "GET"), path, body });
 
-		if (path.startsWith("/agent-sessions/by-run/")) return json(200, { id: SESSION_ID });
+		if (path.startsWith("/agent-sessions/by-run/")) return json(200, { id: handlers.byRun?.[path.split("/").pop() ?? ""] ?? SESSION_ID });
 
 		if (path.endsWith("/conversation")) {
 			const a = handlers.attach ?? { status: 200, lastSeq: 0 };
@@ -112,6 +115,10 @@ function fakeHive(handlers: {
 		}
 
 		if (path.endsWith("/events")) {
+			if (handlers.eventGate && !eventGateServed) {
+				eventGateServed = true;
+				await handlers.eventGate;
+			}
 			const next = events.shift() ?? { status: 200 };
 			if (next.status !== 200) return json(next.status, { error: "rejected" });
 			const sent = (body?.events ?? []) as Array<{ seq: number }>;
@@ -381,6 +388,155 @@ describe("attach", () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(called).toBe(0);
 		expect(fake.messages).toEqual([]);
+	});
+
+	it.each(["manual", "threshold", "overflow"])("reports the actual completed method for %s compaction", async (reason) => {
+		const fromExtension = reason === "threshold";
+		const method = fromExtension ? "Extension summary" : "Pi summary";
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		await fake.emit({
+			type: "session_before_compact",
+			reason,
+			preparation: { tokensBefore: 12345 },
+		});
+		await fake.emit({
+			type: "session_compact",
+			fromExtension,
+			reason,
+			compactionEntry: { summary: "compressed context", tokensBefore: 12600 },
+		});
+		await vi.advanceTimersByTimeAsync(1_200);
+
+		const events = hive.posted().flatMap((call) => (call.body?.events ?? []) as Array<{ text?: string }>);
+		expect(events.some((event) => event.text?.includes(`Compaction completed · method: ${method}`) && event.text.includes(reason) && event.text.includes("12600"))).toBe(true);
+	});
+
+	it.each([true, false])("reports unsuccessful compaction without inventing a method (aborted=%s)", async (aborted) => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		await fake.emit({ type: "session_before_compact", reason: "threshold", preparation: { tokensBefore: 999 } });
+		await fake.emit({ type: "session_compact_failed", reason: "threshold", fromExtension: false, aborted, errorMessage: "stopped before summarization" });
+		await fake.emit({ type: "session_compact", reason: "manual", fromExtension: false, compactionEntry: { tokensBefore: 42 } });
+		await vi.advanceTimersByTimeAsync(1_200);
+		const text = hive.posted().flatMap((call) => (call.body?.events ?? []) as Array<{ text?: string }>).map((e) => e.text).join("\n");
+		expect(text).toContain(`Compaction ${aborted ? "cancelled" : "failed"} · trigger: threshold`);
+		expect(text).not.toContain(`Pi summary ${aborted ? "cancelled" : "failed"}`);
+		expect(text).toContain("tokens before: 42");
+		expect(text).not.toContain("tokens before: 999");
+	});
+
+	it("reports only confirmed handoff seeds and releases its listener on shutdown", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		fake.api.events.emit("hive.context.handoff", { trigger: "threshold" });
+		fake.api.events.emit("hive.context.handoff", { trigger: "untrusted" });
+		await vi.advanceTimersByTimeAsync(1_200);
+		const text = hive.posted().flatMap((call) => (call.body?.events ?? []) as Array<{ text?: string }>).map((e) => e.text).join("\n");
+		expect(text).toContain("Handoff seed written · method: seeded fresh session · trigger: threshold");
+		expect(text).not.toContain("untrusted");
+		await fake.emit({ type: "session_shutdown" });
+		const count = hive.posted().length;
+		fake.api.events.emit("hive.context.handoff", { trigger: "manual" });
+		await vi.advanceTimersByTimeAsync(1_200);
+		expect(hive.posted()).toHaveLength(count);
+	});
+
+	it("flushes a confirmed handoff notice before immediate graceful shutdown", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		fake.api.events.emit("hive.context.handoff", { trigger: "threshold" });
+		// No timer tick: the threshold branch requests shutdown immediately.
+		await fake.emit({ type: "session_shutdown" });
+		const text = hive.posted().flatMap((call) => (call.body?.events ?? []) as Array<{ text?: string }>).map((e) => e.text).join("\n");
+		expect(text).toContain("Handoff seed written · method: seeded fresh session · trigger: threshold");
+	});
+
+	it("joins an in-flight batch before sending the newly queued handoff at shutdown", async () => {
+		let release = () => {};
+		const eventGate = new Promise<void>((resolve) => { release = resolve; });
+		const hive = fakeHive({ eventGate });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		await assistantSays(fake, "previous batch");
+		await vi.advanceTimersByTimeAsync(1_200);
+		expect(hive.posted()).toHaveLength(1);
+		fake.api.events.emit("hive.context.handoff", { trigger: "threshold" });
+		const shuttingDown = fake.emit({ type: "session_shutdown" });
+		release();
+		await shuttingDown;
+		expect(hive.posted()).toHaveLength(2);
+		expect(JSON.stringify(hive.posted()[1]?.body)).toContain("Handoff seed written");
+	});
+
+	it("does not retry a transiently refused shutdown batch indefinitely", async () => {
+		const hive = fakeHive({ events: [{ status: 503 }] });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		fake.api.events.emit("hive.context.handoff", { trigger: "threshold" });
+		await fake.emit({ type: "session_shutdown" });
+		expect(hive.posted()).toHaveLength(1);
+	});
+
+	it("bounds graceful shutdown even if the transport ignores cancellation", async () => {
+		let release = () => {};
+		const eventGate = new Promise<void>((resolve) => { release = resolve; });
+		const hive = fakeHive({ eventGate });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		fake.api.events.emit("hive.context.handoff", { trigger: "threshold" });
+		let finished = false;
+		const shuttingDown = fake.emit({ type: "session_shutdown" }).then(() => { finished = true; });
+		await vi.advanceTimersByTimeAsync(4_001);
+		expect(finished).toBe(true);
+		release();
+		await shuttingDown;
+	});
+
+	it("keeps one handoff listener across session switch and reattachment", async () => {
+		const hive = fakeHive({ byRun: { [RUN_ID]: SESSION_ID, "new-run": "sess-2" } });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		fake.api.events.emit("hive.context.handoff", { trigger: "manual" });
+		await vi.advanceTimersByTimeAsync(1_200);
+		await fake.emit({ type: "session_before_switch", reason: "resume" });
+		await fake.emit({ type: "session_start", reason: "resume" }, { sessionId: "new-local-session" });
+		fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "new-run" });
+		await vi.advanceTimersByTimeAsync(400);
+		fake.api.events.emit("hive.context.handoff", { trigger: "threshold" });
+		await vi.advanceTimersByTimeAsync(1_200);
+		const notices = hive.posted().flatMap((call) =>
+			((call.body?.events ?? []) as Array<{ text?: string }>).filter((e) => e.text?.startsWith("Handoff seed written")).map((e) => ({ path: call.path, text: e.text })),
+		);
+		expect(notices).toEqual([
+			{ path: "/agent-sessions/sess-1/events", text: "Handoff seed written · method: seeded fresh session · trigger: manual" },
+			{ path: "/agent-sessions/sess-2/events", text: "Handoff seed written · method: seeded fresh session · trigger: threshold" },
+		]);
+	});
+
+	it.each(["success", "failure", "cancel"])("clears the actual compaction heartbeat on %s, then reports retry work", async (outcome) => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ reportActivity: true })));
+		await attachAndSettle(fake);
+		await fake.emit({ type: "session_before_compact", reason: "overflow", preparation: { tokensBefore: 12345 } });
+		await vi.advanceTimersByTimeAsync(10);
+		expect(hive.calls.filter((c) => c.path.endsWith("/activity")).at(-1)?.body?.phase).toBe("compacting");
+		await fake.emit(outcome === "success"
+			? { type: "session_compact", reason: "overflow", fromExtension: false, compactionEntry: { tokensBefore: 12345 } }
+			: { type: "session_compact_failed", reason: "overflow", fromExtension: false, aborted: outcome === "cancel" });
+		await vi.advanceTimersByTimeAsync(10);
+		const idle = hive.calls.filter((c) => c.path.endsWith("/activity")).at(-1)?.body;
+		expect(idle?.phase).toBe("idle");
+		expect(idle?.detail).toBeUndefined();
+		await fake.emit({ type: "turn_start" });
+		await vi.advanceTimersByTimeAsync(10);
+		const retry = hive.calls.filter((c) => c.path.endsWith("/activity")).at(-1)?.body;
+		expect(retry?.phase).toBe("working");
+		expect(retry?.detail).toBeUndefined();
 	});
 
 	it("compacts through Pi rather than sending /compact to the model", async () => {

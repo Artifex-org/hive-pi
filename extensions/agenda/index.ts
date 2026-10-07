@@ -81,6 +81,8 @@ import {
 } from "./conductor.ts";
 import {
 	AGENT_STATUS_CHANNEL,
+	HIVE_HANDOFF_CHANNEL,
+	type HiveHandoffEvent,
 	CONDUCTOR_CHANNEL,
 	PLAN_APPROVED_CHANNEL,
 	PLAN_CONTROL_CHANNEL,
@@ -1275,6 +1277,11 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				/* session going away is exactly when a handoff happens */
 			}
+			try {
+				pi.events.emit(HIVE_HANDOFF_CHANNEL, { trigger: "manual" } satisfies HiveHandoffEvent);
+			} catch {
+				/* reporting cannot turn a written seed into a failed handoff */
+			}
 			return { path };
 		} catch (err) {
 			return { error: String(err) };
@@ -1458,6 +1465,11 @@ export default function (pi: ExtensionAPI) {
 		}
 		// No seed, no cancel. The fallback stays intact.
 		if (!seeded) return;
+		try {
+			pi.events.emit(HIVE_HANDOFF_CHANNEL, { trigger: "threshold" } satisfies HiveHandoffEvent);
+		} catch {
+			/* reporting cannot invalidate a successfully written seed */
+		}
 		try {
 			ctx.ui.notify(
 				`Context threshold reached. Seed written to ${seeded}; ending cleanly instead of compacting.`,

@@ -36,6 +36,8 @@ import {
 	type HiveStdinWaitEvent,
 	HIVE_PLAN_CHANNEL,
 	HIVE_SESSION_CHANNEL,
+	HIVE_HANDOFF_CHANNEL,
+	type HiveHandoffEvent,
 	HIVE_SESSION_END_CHANNEL,
 	FAST_CONTROL_CHANNEL,
 	FAST_STATE_CHANNEL,
@@ -273,6 +275,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	let surfacePublisher: BrowserSurfacePublisher | null = null;
 	let terminalPublisher: TerminalSurfacePublisher | null = null;
 	let sending = false;
+	let sendingPromise: Promise<boolean> | null = null;
 
 	/**
 	 * Whether this server understands reasoning, learned from its answers.
@@ -640,6 +643,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * accumulate forever with nothing draining it.
 	 */
 	const CONDUCTOR_STAGES = new Set(["idle", "frame", "plan", "execute", "verify", "consolidate", "done"]);
+	let unsubscribeHandoff: (() => void) | undefined;
+	unsubscribeHandoff = pi.events.on(HIVE_HANDOFF_CHANNEL, (data: unknown) => {
+		if (!cfg.enabled) return;
+		const trigger = (data as HiveHandoffEvent | undefined)?.trigger;
+		if (trigger !== "manual" && trigger !== "threshold") return;
+		foldNotice(transcript, `Handoff seed written · method: seeded fresh session · trigger: ${trigger}`, Date.now(), "compaction");
+		kick();
+	});
 	let unsubscribeConductor: (() => void) | undefined;
 	unsubscribeConductor = pi.events.on(CONDUCTOR_CHANNEL, (data: unknown) => {
 		if (!cfg.enabled) return;
@@ -1125,14 +1136,22 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	// ------------------------------------------------------------------ sending
 
-	/** flush sends one batch. Never awaited by anything pi controls. */
-	async function flush(): Promise<void> {
-		if (sending || !auth || !sessionID) return;
+	/** flush sends one batch. Ordinary callers remain detached from pi handlers. */
+	function flush(): Promise<boolean> {
+		if (sendingPromise) return sendingPromise;
+		if (!auth || !sessionID || transcript.queue.length === 0) return Promise.resolve(false);
+		sendingPromise = sendBatch().finally(() => { sendingPromise = null; });
+		return sendingPromise;
+	}
+
+	async function sendBatch(): Promise<boolean> {
+		if (!auth || !sessionID) return false;
 		const batch = drain(transcript, BATCH_MAX);
-		if (batch.length === 0) return;
 		sending = true;
+		const targetAuth = auth;
+		const targetSession = sessionID;
 		try {
-			const res = await postEvents(auth, sessionID, batch);
+			const res = await postEvents(targetAuth, targetSession, batch);
 			if (res.ok) {
 				// The server answers every post with its watermark. A 2xx therefore
 				// does NOT mean "stored" — events at or below the watermark are
@@ -1171,7 +1190,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// operator sees when the credential expires sent them to a command
 				// that does not exist.
 				stop("authentication failed — run /hive-login");
-					return;
+					return false;
 				}
 				// A server that predates reasoning rejects the WHOLE batch with
 				// "unknown event kind", and a permanent rejection is dropped — so
@@ -1181,12 +1200,23 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				if (res.permanent && thinkingEvents && batch.some((e) => e.kind === "thinking")) {
 					thinkingEvents = false;
 					requeue(transcript, batch.filter((e) => e.kind !== "thinking"));
-					return;
+					return false;
 				}
 				if (!res.permanent) requeue(transcript, batch);
 			}
+			return res.ok;
 		} finally {
 			sending = false;
+		}
+	}
+
+	async function drainBeforeShutdown(): Promise<void> {
+		// Joining the active send is not queue progress: it already drained its
+		// batch, and the handoff notice may have arrived while it was in flight.
+		if (sendingPromise && !await sendingPromise) return;
+		while (auth && sessionID && transcript.queue.length > 0) {
+			const before = transcript.queue.length;
+			if (!await flush() || transcript.queue.length >= before) return;
 		}
 	}
 
@@ -2080,6 +2110,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		// Same for the workflow doorbell, and for the same reason.
 		unsubscribeConductor?.();
 		unsubscribeConductor = undefined;
+		unsubscribeHandoff?.();
+		unsubscribeHandoff = undefined;
 		unsubscribeInjection?.();
 		unsubscribeInjection = undefined;
 		unsubscribeStatus?.();
@@ -2433,14 +2465,24 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		pi.on("session_before_compact", (event, ctx) => {
 			remember(ctx);
 			compacting = true;
-			compactionStarted(activity, Date.now(), event?.reason, event?.preparation?.tokensBefore);
+			compactionStarted(activity, Date.now(), event.reason, event.preparation?.tokensBefore);
 			beat();
 		});
-		pi.on("session_compact", () => {
+		pi.on("session_compact", (event) => {
+			const method = event.fromExtension === true ? "Extension summary" : event.fromExtension === false ? "Pi summary" : "unreported";
+			const tokensBefore = event.compactionEntry?.tokensBefore;
+			const tokens = typeof tokensBefore === "number" ? ` · tokens before: ${tokensBefore}` : "";
+			foldNotice(transcript, `Compaction completed · method: ${method} · trigger: ${event.reason}${tokens}`, Date.now(), "compaction");
+			kick();
 			compactionEnded(activity, Date.now());
 			beat();
 		});
-		pi.on("session_compact_failed", () => {
+		pi.on("session_compact_failed", (event) => {
+			// Cancellation may precede method selection (e.g. threshold handoff).
+			const outcome = event.aborted ? "cancelled" : "failed";
+			const detail = event.errorMessage ? ` · ${event.errorMessage}` : "";
+			foldNotice(transcript, `Compaction ${outcome} · trigger: ${event.reason}${detail}`, Date.now(), "compaction");
+			kick();
 			compactionEnded(activity, Date.now());
 			beat();
 		});
@@ -2535,8 +2577,19 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			});
 		}
 
-		pi.on("session_shutdown", () => {
-			cleanup();
+		pi.on("session_shutdown", async () => {
+			// Terminal-only drain: no live turn is delayed. The overall bound
+			// also holds for a transport that fails to honour AbortSignal.
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					drainBeforeShutdown(),
+					new Promise<void>((resolve) => { timer = setTimeout(resolve, 4_000); }),
+				]);
+			} finally {
+				if (timer) clearTimeout(timer);
+				cleanup();
+			}
 		});
 	}
 

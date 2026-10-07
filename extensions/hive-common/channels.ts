@@ -22,6 +22,14 @@
  */
 export const HIVE_SESSION_CHANNEL = "hive.session";
 
+/** A handoff seed was successfully written. Configuration/intent is not an
+ * outcome, and this does not claim that a successor has started. No prose or
+ * seed path crosses the process-local reporting boundary. */
+export const HIVE_HANDOFF_CHANNEL = "hive.context.handoff";
+export interface HiveHandoffEvent {
+	trigger: "manual" | "threshold";
+}
+
 export interface HiveSessionEvent {
 	/** Opaque client-minted id; the server maps it to a session via /by-run. */
 	clientRunID: string;
