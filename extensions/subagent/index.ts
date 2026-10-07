@@ -36,6 +36,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { randomUUID } from "node:crypto";
+import { lastSubagentId } from "../background/journal.ts";
 import {
 	DECK_SECTION_CHANNEL,
 	DECK_SYNC_CHANNEL,
@@ -1514,6 +1516,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: SubagentParams,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const ownerSessionId = params.background ? ctx.sessionManager.getSessionId() : "";
+			const recordedBackgroundSeq = params.background ? lastSubagentId(ctx.sessionManager.getBranch(), ownerSessionId) : 0;
 			startSubagentWidget(pi, toolCallId);
 			const reportUpdate: OnUpdateCallback | undefined = onUpdate || ctx.mode === "tui"
 				? (update) => {
@@ -1775,15 +1779,16 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
-				backgroundSeq += 1;
+				backgroundSeq = Math.max(backgroundSeq, recordedBackgroundSeq) + 1;
 				const jobId = `sub-${backgroundSeq}`;
+				const jobIdentity = { id: jobId, sessionId: ownerSessionId, executionId: randomUUID() };
 				const what = (params.what ?? "").trim();
 				const controller = new AbortController();
 				backgroundAborts.set(jobId, controller);
 
 				pi.events.emit(BACKGROUND_JOB_CHANNEL, {
 					action: "start",
-					id: jobId,
+					...jobIdentity,
 					what,
 					kind: "subagent",
 					detail: `${agentName}: ${(params.task as string).slice(0, 200)}`,
@@ -1842,13 +1847,13 @@ export default function (pi: ExtensionAPI) {
 						if (summary) {
 							pi.events.emit(BACKGROUND_JOB_CHANNEL, {
 								action: "output",
-								id: jobId,
+								...jobIdentity,
 								chunk: summary,
 							} satisfies BackgroundJobEvent);
 						}
 						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
 							action: "finish",
-							id: jobId,
+							...jobIdentity,
 							// An aborted run is reported as CANCELED rather than failed:
 							// the exit code of a killed worker says nothing about the work,
 							// and calling it a failure would send the model debugging a
@@ -1862,12 +1867,12 @@ export default function (pi: ExtensionAPI) {
 					.catch((err: unknown) => {
 						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
 							action: "output",
-							id: jobId,
+							...jobIdentity,
 							chunk: `The delegation threw: ${(err as Error)?.message ?? String(err)}`,
 						} satisfies BackgroundJobEvent);
 						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
 							action: "finish",
-							id: jobId,
+							...jobIdentity,
 							status: "failed",
 							exitCode: 1,
 						} satisfies BackgroundJobEvent);

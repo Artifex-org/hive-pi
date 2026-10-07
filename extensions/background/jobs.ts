@@ -302,7 +302,9 @@ function verbFor(job: Job): string {
 		case "timeout":
 			return "was stopped at its time limit";
 		case "unconfirmed":
-			return `ended without a verdict (exit ${job.exitCode ?? "?"}): the watch lost the run before it finished, so this is NOT a failure`;
+			return job.kind === "watch" && job.exitCode !== undefined
+				? `ended without a verdict (exit ${job.exitCode}): the watch lost the run before it finished, so this is NOT a failure`
+				: "has an unconfirmed outcome: execution evidence was interrupted; this is NOT a success or failure";
 		case "canceled":
 			return "was canceled";
 		default:

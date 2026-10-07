@@ -1,3 +1,24 @@
+# PR132 conflict integration — 2026-10-07
+
+User requested resolution of the new main conflict. Both PRs remain open; they
+were initially published as drafts then marked ready externally, not by this
+agent. Current main0a24abb adds durable background recovery and generation fences.
+Four background/index.ts conflicts were composed, not resolved by discarding a
+side: journal before spawn, existing generation fences, per-child credential
+environment, redaction before retained output/journal/notifications and consumer
+release only at shutdown are retained. TypeScript and60 focused background,
+recovery, credential integration and non-login-shell tests passed. Full native
+validation (bg-30) passed TypeScript +4,746 tests/289 files,13 existing skips.
+No test or gate was suppressed; all merged source was exercised before push.
+
+Review continuation: overlapping conversation metadata refreshes need controlled
+ordering/persistent-failure coverage in both clients. This is separate from the
+requested text conflict and is not declared solved. Native earlier publication
+head5dd6acb passed all GitHub checks. Hive8313/c55e4387 CI12713 is being watched;
+no source snapshot test result is a claim that an old live process recovered.
+
+---
+
 # Final-source acceptance — 2026-10-07
 
 Final local native gate (bg-25): TypeScript and 4,725 tests/288 files passed;

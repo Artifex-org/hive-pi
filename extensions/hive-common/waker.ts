@@ -33,9 +33,11 @@
  *     `agent_settled`) → hold the notice in memory and deliver it with the idle
  *     rule from `agent_settled`, or as streaming if the run continued instead.
  *
- * Nothing is dropped: a held notice is in the transcript, in front of the human
- * and the model alike. A held notice that WANTED to wake is announced in the
- * footer so a parked session never looks finished for no reason.
+ * Within a live branch, settling notices remain in memory until they can be
+ * appended. Once appended, a notice held behind human approval is in the
+ * transcript but does not wake the model. Owners need their own journal for
+ * recovery after this extension instance restarts; this waker is not a durable
+ * queue. A held wake is announced in the footer.
  *
  * Each extension builds its own waker (`createWaker(pi, by)`) — extensions are
  * separate module instances, so state cannot be shared. The settle claim
@@ -114,10 +116,12 @@ export interface Waker {
 	/**
 	 * Deliver a notice under the hand-back rule. Throws if the session cannot be
 	 * read or pi refuses the send — the session went away — so a caller that
-	 * tracks "notified" (background) keeps the notice for the next session
+	 * tracks "notified" (background) keeps the notice for its originating session
 	 * instead of losing it.
 	 */
 	deliver(notice: Notice, kind: NoticeKind): void;
+	/** Discard this owner\'s pending notices after a fatal session failure. */
+	close(): void;
 }
 
 interface PendingWake {
@@ -129,6 +133,8 @@ interface PendingWake {
 export function createWaker(pi: ExtensionAPI, by: string): Waker {
 	const claims = trackSettleClaims(pi);
 	let ctx: ExtensionContext | null = null;
+	let closed = false;
+	let ownerSessionId: string | undefined;
 	// An agent run is active from `agent_start` to `agent_settled`. Tracked here
 	// rather than read from `ctx.isIdle()`, which is also false during an idle
 	// compaction — a notice sent then was treated as mid-run and its wake waited
@@ -229,22 +235,36 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 
 	const remember = (next: ExtensionContext) => {
 		ctx = next;
+		ownerSessionId = next.sessionManager.getSessionId();
 	};
 
 	pi.on("session_start", (_event, next) => {
+		const release = ownerSessionId === next.sessionManager.getSessionId() ? held : [];
 		remember(next);
+		closed = false;
 		inRun = false;
 		settling = false;
 		pending = [];
 		parked.clear();
 		paintParked(); // clears a footer the replaced session left behind
-		// A notice held through a settle the session never finished (replaced
-		// mid-settle) was already counted as delivered by its caller — background
-		// marks the job notified — so it goes to the new session, never nowhere.
-		const release = held;
+		// Preserve same-session notices while this instance survives. Only owners
+		// with their own journal can recover after the extension itself restarts.
+		// A tree move explicitly clears held notices below; a fork changes owner.
 		held = [];
 		for (const item of release) sendIdle(item.notice, item.kind, false);
 	});
+
+	const forgetBranch = (discardHeld = true) => {
+		closed = true;
+		ctx = null;
+		inRun = false;
+		settling = false;
+		pending = [];
+		if (discardHeld) held = [];
+		parked.clear();
+	};
+	pi.on("session_shutdown", () => forgetBranch(false));
+	pi.on("session_tree", (_event, next) => { forgetBranch(); remember(next); closed = false; paintParked(); });
 
 	pi.on("agent_start", (_event, next) => {
 		remember(next);
@@ -304,7 +324,9 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 	});
 
 	return {
+		close: () => forgetBranch(),
 		deliver(notice, kind) {
+			if (closed) throw new Error("Cannot deliver notice after session shutdown");
 			if (settling) {
 				held.push({ notice, kind });
 				return;

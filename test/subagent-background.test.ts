@@ -109,7 +109,7 @@ describe("refusals happen BEFORE anything is spawned", () => {
 			{ background: true, what: "auditing", agent: ROLE, task: "look" },
 			undefined,
 			undefined,
-			{ mode: "headless", cwd: process.cwd(), isProjectTrusted: () => true, hasUI: false },
+			{ mode: "headless", cwd: process.cwd(), sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] }, isProjectTrusted: () => true, hasUI: false },
 		);
 		expect(result.isError).toBe(true);
 		expect(result.content?.[0]?.text).toContain("headless");
@@ -123,7 +123,7 @@ describe("refusals happen BEFORE anything is spawned", () => {
 			{ background: true, what: "auditing", chain: [{ agent: ROLE, task: "look" }] },
 			undefined,
 			undefined,
-			{ mode: "tui", cwd: process.cwd(), isProjectTrusted: () => true, hasUI: false },
+			{ mode: "tui", cwd: process.cwd(), sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] }, isProjectTrusted: () => true, hasUI: false },
 		);
 		expect(result.isError).toBe(true);
 		expect(result.content?.[0]?.text).toContain("single mode only");
@@ -137,7 +137,7 @@ describe("refusals happen BEFORE anything is spawned", () => {
 			{ background: true, agent: ROLE, task: "look" },
 			undefined,
 			undefined,
-			{ mode: "tui", cwd: process.cwd(), isProjectTrusted: () => true, hasUI: false },
+			{ mode: "tui", cwd: process.cwd(), sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] }, isProjectTrusted: () => true, hasUI: false },
 		);
 		expect(result.isError).toBe(true);
 		expect(result.content?.[0]?.text).toContain("`what`");
@@ -153,7 +153,7 @@ describe("refusals happen BEFORE anything is spawned", () => {
 			{ background: true, what: "auditing", agent: "no-such-role", task: "look" },
 			undefined,
 			undefined,
-			{ mode: "tui", cwd: process.cwd(), isProjectTrusted: () => true, hasUI: false },
+			{ mode: "tui", cwd: process.cwd(), sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] }, isProjectTrusted: () => true, hasUI: false },
 		);
 		const starts = pi.busEvents.filter(
 			(event) => event.name === BACKGROUND_JOB_CHANNEL && (event.payload as { action?: string }).action === "start",
@@ -176,7 +176,7 @@ describe("a well-formed background delegation", () => {
 			{ background: true, what: "auditing the migration", agent: ROLE, task: "look at it" },
 			undefined,
 			undefined,
-			{ mode: "tui", cwd: process.cwd(), isProjectTrusted: () => true, hasUI: false },
+			{ mode: "tui", cwd: process.cwd(), sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] }, isProjectTrusted: () => true, hasUI: false },
 		);
 		const elapsed = Date.now() - started;
 
@@ -207,7 +207,7 @@ describe("a well-formed background delegation", () => {
 		// counters cannot see each other. Unbounded, this path is the fork bomb
 		// the constant's own comment warns about.
 		const pi = boot();
-		const ctx = { mode: "tui", cwd: process.cwd(), isProjectTrusted: () => true, hasUI: false };
+		const ctx = { mode: "tui", cwd: process.cwd(), sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] }, isProjectTrusted: () => true, hasUI: false };
 		const params = { background: true, what: "auditing", agent: ROLE, task: "look" };
 		for (let i = 0; i < MAX_CONCURRENT; i += 1) {
 			await subagentTool(pi).execute(`c${i}`, params, undefined, undefined, ctx);
@@ -226,7 +226,7 @@ describe("a well-formed background delegation", () => {
 
 	it("mints a fresh id per delegation", async () => {
 		const pi = boot();
-		const ctx = { mode: "tui", cwd: process.cwd(), isProjectTrusted: () => true, hasUI: false };
+		const ctx = { mode: "tui", cwd: process.cwd(), sessionManager: { getSessionId: () => "fake-session", getBranch: () => [] }, isProjectTrusted: () => true, hasUI: false };
 		const params = { background: true, what: "auditing", agent: ROLE, task: "look" };
 		await subagentTool(pi).execute("c1", params, undefined, undefined, ctx);
 		await subagentTool(pi).execute("c2", params, undefined, undefined, ctx);

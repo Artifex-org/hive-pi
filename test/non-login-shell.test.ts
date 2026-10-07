@@ -59,6 +59,7 @@ describe.runIf(realBashAvailable())("spawned commands keep the session PATH", ()
 	it("a background job finds a tool only the session PATH has", async () => {
 		const pi = createFakePi();
 		background(pi.api);
+		await pi.emit({ type: "session_start" }, { mode: "tui", cwd: dir });
 		const tool = pi.tools.find((entry) => entry.name === "background_bash");
 		if (!tool) throw new Error("background_bash not registered");
 		const execute = (tool.definition as { execute: (...args: unknown[]) => Promise<unknown> }).execute;

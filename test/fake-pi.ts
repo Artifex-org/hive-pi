@@ -109,6 +109,9 @@ export interface SessionEntryLike {
 
 export interface FakeCtxOptions {
 	sessionId?: string;
+	sessionFile?: string;
+	/** Use a real native read interface in persistence-boundary tests. */
+	sessionManager?: ExtensionContext["sessionManager"];
 	model?: ExtensionContext["model"];
 	/** What `ctx.modelRegistry` is. Defaults to an empty object: most extensions never touch it. */
 	modelRegistry?: unknown;
@@ -291,8 +294,9 @@ function makeCtx(
 				sinks.editorTexts.push(text);
 			},
 		},
-		sessionManager: {
+		sessionManager: options.sessionManager ?? {
 			getSessionId: () => options.sessionId ?? "fake-session",
+			getSessionFile: () => options.sessionFile,
 			// `entries` defaults to `branch`, so every existing test keeps its old
 			// behaviour — but the two can now DIFFER, which is the whole point.
 			//
