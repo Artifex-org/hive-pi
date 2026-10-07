@@ -116,15 +116,12 @@ export interface RemoteConfig {
 	 * Let the AGENT request a mid-session workspace grant — add another repo to
 	 * this sandboxed session and clone it into scratch (`request_workspace`).
 	 *
-	 * Defaults FALSE, unlike its siblings, and that break is deliberate. Every
-	 * other flag here governs what the OPERATOR can do to a session they are
-	 * already watching; this one hands the running agent a new capability —
-	 * pulling a second repo into its writable scratch and opening a channel to
-	 * ask a human (or the handsfree judge) to widen its scope. That is a bigger
-	 * step than being steerable, so it is off until the owner turns it on, and it
-	 * gates BOTH tool execution and the `can_add_workspace` capability this
-	 * client declares at attach. Without opt-in, the tools are discoverable but
-	 * return diagnostics only — no request or clone runs.
+	 * Defaults TRUE: request availability is separate from authorization and
+	 * approval. An explicit false withdraws BOTH tool execution and the
+	 * `can_add_workspace` capability declared at attach. Disabled tools remain
+	 * discoverable but return diagnostics only — no request or clone runs.
+	 * Remote reporting/attachment still has its own opt-in; this default does
+	 * not enable it or automatically approve access.
 	 */
 	allowAddWorkspace: boolean;
 }
@@ -144,7 +141,7 @@ const DEFAULTS: RemoteConfig = {
 	streamThinking: true,
 	reportActivity: true,
 	reportWorktree: true,
-	allowAddWorkspace: false,
+	allowAddWorkspace: true,
 };
 
 export function configPath(): string {
@@ -172,10 +169,9 @@ export function loadConfig(): RemoteConfig {
 		streamThinking: raw.streamThinking !== false,
 		reportActivity: raw.reportActivity !== false,
 		reportWorktree: raw.reportWorktree !== false,
-		// OPT-IN, not opt-out: this one grants the agent a new power rather than
-		// withdrawing an operator control, so it must be turned on explicitly —
-		// `=== true`, the same shape as `enabled`, never the `!== false` default.
-		allowAddWorkspace: raw.allowAddWorkspace === true,
+		// Requests default on; explicit opt-outs (and malformed flag values)
+		// remain fail-closed. Server authorization and approval are unchanged.
+		allowAddWorkspace: raw.allowAddWorkspace === undefined ? DEFAULTS.allowAddWorkspace : raw.allowAddWorkspace === true,
 	};
 }
 
