@@ -158,6 +158,34 @@ cannot grade severity, suppress a grounded highlight, authorize a destination or
 alter routing. Its non-context shadow entries retain baseline/verdict pairs for
 future evaluation; this change does not promote it based on unmeasured relevance.
 
+## Opt-in pre-extraction experiment
+
+`PI_YOU_SHOULD_KNOW_JEV_PREFILTER=shadow` additionally opts into a bounded,
+redacted **shadow-only** pre-extraction classifier when the existing TypeSafe
+config explicitly enables JEV and a key is available. Absent/unknown values
+(including `active`) make no new calls. This does not enable JEV globally.
+Fixed choices are `scan`, `skip`, `abstain`; confidence below 0.95 abstains.
+Important cues, failed tools and incomplete/oversized evidence always retain
+extraction. Missing consent/key, timeout/error, malformed answers, cancellation
+and a previous pending JEV transport cannot prevent extraction.
+
+The detached observational call starts before and concurrently with extraction;
+it never delays or suppresses the low-tier call, changes the 20-attempt cap,
+authorizes recording, grades severity or routes findings. Non-context local
+`you-should-know.prefilter` entries pair the verdict with pre-dedup baseline
+note counts and completed usage, **not evidence text**. Failed extraction is an
+unknown baseline, never a safe skip. `/you-should-know status` reports the latest
+shadow result/latency/usage independently of extraction cost. Shadow avoids zero
+actual calls and adds JEV calls. Ignored-abort transport ownership is preserved
+across branch changes without blocking the extractor.
+
+See [the evaluation and remaining review gate](prefilter-evaluation.md): 24
+synthetic labels, 2 would-skips, 0/16 IMPORTANT false negatives, but all live
+low-model baselines failed under a confirmed endpoint policy refusal. Potential
+token savings are **unknown**. No actual filtering was implemented or promoted;
+a new authorized paired replay, stronger recall evidence and explicit review
+are required before considering it.
+
 ## Verification
 
 `test/you-should-know.test.ts` tests quote grounding/control-character validation,
@@ -177,11 +205,18 @@ examples (routine chatter, a buried caveat, a resolved caveat and a quoted
 example):
 
 ```sh
-PI_YOU_SHOULD_KNOW_EVAL=1 node --experimental-strip-types test/you-should-know-eval.mjs
+PI_YOU_SHOULD_KNOW_EVAL=1 node --experimental-transform-types test/you-should-know-eval.mjs
 ```
 
 This consumes your configured provider's quota. It reads the selected model from
 `$PI_CODING_AGENT_DIR/settings.json` (defaults to `~/.pi/agent`); use
 `YSK_EVAL_PROVIDER` and `YSK_EVAL_MODEL` to override. It is not run by CI.
+The independent `test/you-should-know-prefilter.test.ts` suite protects consent,
+fixed/redacted choices, floor bounds, malformed/uncertain decisions, cancellation
+races and busy transport, concurrent baseline extraction, branch/fork/detach,
+recording separation, and unchanged attempted-scan budgets. The synthetic paired
+prefilter evaluator is separately opt-in; its quota and results are in the linked
+report above. It is not run by CI.
+
 Model relevance is heuristic: neither scripted tests nor four live samples claim
 that every model will classify every caveat correctly.

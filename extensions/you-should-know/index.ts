@@ -9,6 +9,7 @@ import { validFinding, type CapturedFinding, type FindingReceipt } from "../hive
 import { loadConfig } from "../typesafe-common/config.ts";
 import { readApiKey } from "../typesafe-common/key.ts";
 import { createJevShadow } from "./jev.ts";
+import { createJevPrefilter, type PrefilterOutcome } from "./prefilter.ts";
 import { assistantEvidence, failedToolEvidence, redactEvidence, stableFindingID, type SourceEvidence } from "./evidence.ts";
 import { excerpt, fingerprint, outputText, parseNotes, SCAN_SYSTEM, type Note } from "./scan.ts";
 
@@ -78,6 +79,11 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	// at session_start. A credential alone is never consent to use Jev.
 	const jevConfig = loadConfig(), jevKey = jevConfig.enabled ? readApiKey() : null;
 	let classify = createJevShadow(jevConfig, jevKey);
+	const prefilterEnabled = process.env.PI_YOU_SHOULD_KNOW_JEV_PREFILTER === "shadow";
+	const prefilter = createJevPrefilter(jevConfig, jevKey, prefilterEnabled);
+	const prefilterControllers = new Set<AbortController>();
+	let prefilterDetail = prefilterEnabled ? "shadow; waiting" : "disabled";
+	let incompleteSources = false;
 	let jev = jevConfig.enabled ? (jevKey ? "shadow" : "unavailable") : "disabled";
 	let jevDetail = jevConfig.enabled ? (jevKey ? "waiting" : "no usable key") : "configuration disabled";
 	let model = process.env.PI_YOU_SHOULD_KNOW_MODEL || "catalog:low";
@@ -114,7 +120,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 		ctx.ui.setWidget(KEY, state.enabled && state.notes.length ? ["You should know · earlier output (model notes) · /you-should-know show · dismiss", ...state.notes.slice(-3).map(n => `[${n.kind}] ${n.text}`)] : undefined);
 		ctx.ui.setStatus(KEY, !state.enabled ? undefined : active ? "YSK: scanning…" : transportBusy ? "YSK: awaiting canceled provider · /you-should-know status" : failure ? "YSK: scan failed · /you-should-know status" : state.scans >= cfg.maxScans ? "YSK: scan budget reached" : `YSK: on · ${state.scans}/${cfg.maxScans}`);
 	};
-	const cancel = () => { generation++; if (timer) clearTimeout(timer); timer = undefined; active?.abort(); active = undefined; sources = []; latestCtx = undefined; };
+	const cancel = () => { generation++; if (timer) clearTimeout(timer); timer = undefined; active?.abort(); active = undefined; for (const controller of prefilterControllers) controller.abort(); prefilterControllers.clear(); sources = []; incompleteSources = false; latestCtx = undefined; };
 	const record = (enabled: boolean, ctx: ExtensionContext) => {
 		state.desiredRecording = enabled; state.recording = enabled;
 		if (policyReady && serverSessionId) {
@@ -185,9 +191,13 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	const run = async (ctx: ExtensionContext) => {
 		const gen = generation;
 		let deadline: ReturnType<typeof setTimeout> | undefined;
+		let prefilterRequest: Promise<PrefilterOutcome> | undefined;
+		let prefilterController: AbortController | undefined;
+		let baseline: { checked: boolean; notes?: number; tokens?: number } = { checked: false };
 		try {
 			if (!sources.length || !eligible(ctx) || active || transportBusy) return;
 			const captured = sources; sources = [];
+			const incomplete = incompleteSources; incompleteSources = false;
 			const source = excerpt(captured.map(x => x.evidence.text).join("\n\n"));
 			const scanRecording = state.recording === true && policyReady && !pendingControl;
 			const scanRevision = recordingRevision;
@@ -196,6 +206,12 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 				controller.signal.addEventListener("abort", () => reject(new Error("scan canceled or timed out")), { once: true });
 				deadline = setTimeout(() => controller.abort(), cfg.timeoutMs);
 			});
+			// Begin the observational pre-extraction call first, but NEVER wait for
+			// it to start extraction. Its transport/budget cannot gate the low lane.
+			if (prefilterEnabled) {
+				prefilterController = new AbortController(); prefilterControllers.add(prefilterController);
+				prefilterRequest = prefilter({ source, hasTool: captured.some(x => x.evidence.type === "tool"), incomplete }, prefilterController.signal);
+			}
 			const request = scanner(ctx, { source, seen: state.seen.slice(-25) }, controller.signal);
 			transportBusy = true;
 			const release = () => { transportBusy = false; try { if (latestCtx) { paint(latestCtx); schedule(latestCtx); } } catch { /* replaced runtime */ } };
@@ -205,7 +221,9 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 			state.tokens += response.usage.totalTokens; state.cost += response.usage.cost.total;
 			model = `${response.provider}/${response.model}`;
 			if (["error", "aborted", "length"].includes(response.stopReason)) throw new Error("scanner could not finish its response");
-			const notes = parseNotes(assistantText(response), source).filter(n => !state.seen.includes(fingerprint(n.quote)));
+			const extracted = parseNotes(assistantText(response), source);
+			baseline = { checked: true, notes: extracted.length, tokens: response.usage.totalTokens };
+			const notes = extracted.filter(n => !state.seen.includes(fingerprint(n.quote)));
 			const findings: CapturedFinding[] = [];
 			for (const note of notes) {
 				const origin = captured.find(x => x.evidence.text.includes(note.quote));
@@ -233,13 +251,26 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 			if (gen !== generation) return;
 			const known = ["scanner returned invalid JSON", "scanner returned no notes array", "scanner returned too many notes", "scanner returned an invalid note", "scanner returned an invalid or ungrounded note", "scanner could not finish its response", "scan canceled or timed out", "no Hive catalog auth", "Hive catalog has no low model", "invalid low model spec", "low model is unavailable in this registry", "low model credentials unavailable"];
 			failure = `Scan failed: ${error instanceof Error && known.includes(error.message) ? error.message : "provider request failed"}; this excerpt was not checked.`; save();
-		} finally { if (deadline) clearTimeout(deadline); if (gen === generation) { active = undefined; try { paint(ctx); schedule(ctx); } catch { /* replaced runtime */ } } }
+		} finally {
+			// Pair with the baseline off the extraction path. Failed extraction is
+			// UNKNOWN, never a safe skip label. No evidence text/recording writes.
+			if (prefilterRequest && prefilterController) {
+				const controller = prefilterController, comparison = baseline, sessionId = state.sessionId;
+				void prefilterRequest.then(shadow => {
+					if (gen !== generation || controller.signal.aborted) return;
+					pi.appendEntry("you-should-know.prefilter", { version: 1, sessionId, mode: "shadow", baseline: comparison, shadow });
+					prefilterDetail = `shadow · ${shadow.decision} (${shadow.reason}) · ${shadow.latencyMs} ms · ${shadow.inputTokens === undefined ? "usage unreported" : `${shadow.inputTokens + (shadow.outputTokens ?? 0)} reported tokens`} · actual calls avoided: 0`;
+				}).catch(() => { /* runtime replaced; no agent-loop failure */ }).finally(() => prefilterControllers.delete(controller));
+			}
+			if (deadline) clearTimeout(deadline); if (gen === generation) { active = undefined; try { paint(ctx); schedule(ctx); } catch { /* replaced runtime */ } }
+		}
 	};
 	const load = (ctx: ExtensionContext) => {
 		const sameSession = state.sessionId === ctx.sessionManager.getSessionId();
 		if (!sameSession) { serverSessionId = undefined; remoteAvailable = false; }
 		cancel(); state = fresh(cfg.enabled); appliedCommandId = undefined; state.sessionId = ctx.sessionManager.getSessionId(); failure = ""; recordingFailure = ""; lastStart = -Infinity;
 		ledger = []; pendingControl = undefined; policyReady = false; recordingRevision = 0;
+		prefilterDetail = prefilterEnabled ? "shadow; waiting" : "disabled";
 		classify = createJevShadow(jevConfig, jevKey);
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom") continue;
@@ -265,6 +296,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	const buffer = (evidence: SourceEvidence, ctx: ExtensionContext) => {
 		if (!eligible(ctx) || !evidence.text.trim()) return;
 		sources.push({ evidence: { ...evidence, text: excerpt(evidence.text) }, recording: state.recording === true && policyReady && !pendingControl, revision: recordingRevision, serverSessionId });
+		if (sources.length > 20) incompleteSources = true;
 		sources = sources.slice(-20); schedule(ctx);
 	};
 	pi.on("message_end", (event, ctx) => {
@@ -287,7 +319,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 				case "record-on": case "record-off": record(args.trim().toLowerCase() === "record-on", ctx); ctx.ui.notify(`Recording ${state.recording ? "requested" : "stopped locally"}. Destination writes require an authenticated supported Hive attachment; queued is not delivered.`); return;
 				case "dismiss": apply("dismiss", ctx); ctx.ui.notify("Notes dismissed. Durable findings and real receipts are retained; repeated quotes stay suppressed."); return;
 				case "show": ctx.ui.notify(state.notes.length ? "Earlier output — model interpretations, not current verified blockers:\n\n" + state.notes.map(n => `[${n.kind}] ${n.text}\nSource: ${n.quote}`).join("\n\n") : "No notes. Silence does not mean the work was verified."); return;
-				case "": case "status": ctx.ui.notify(`You should know: ${state.enabled ? "on" : "off"} · ${state.scans}/${cfg.maxScans} scans · ${state.tokens} side-call tokens · $${state.cost.toFixed(4)} reported extraction cost.\nModel: ${model} · recording: ${state.recording ? "on" : "off"}${policyReady ? ` (revision ${recordingRevision})` : " (not negotiated)"} · Jev: ${jev} (${jevDetail}).\n${failure || "Only future captured evidence is scanned; no independent verification."}${recordingFailure ? `\n${recordingFailure}` : ""}${transportBusy && !active ? "\nFurther calls wait for the canceled provider request to settle." : ""}\n/you-should-know on | off | show | dismiss | record-on | record-off`); return;
+				case "": case "status": ctx.ui.notify(`You should know: ${state.enabled ? "on" : "off"} · ${state.scans}/${cfg.maxScans} scans · ${state.tokens} side-call tokens · $${state.cost.toFixed(4)} reported extraction cost.\nModel: ${model} · recording: ${state.recording ? "on" : "off"}${policyReady ? ` (revision ${recordingRevision})` : " (not negotiated)"} · Jev: ${jev} (${jevDetail}).\nJev prefilter: ${prefilterDetail}.\n${failure || "Only future captured evidence is scanned; no independent verification."}${recordingFailure ? `\n${recordingFailure}` : ""}${transportBusy && !active ? "\nFurther calls wait for the canceled provider request to settle." : ""}\n/you-should-know on | off | show | dismiss | record-on | record-off`); return;
 				default: ctx.ui.notify("Usage: /you-should-know on | off | status | show | dismiss | record-on | record-off", "warning");
 			}
 		},
