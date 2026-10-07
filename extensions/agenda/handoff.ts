@@ -65,6 +65,45 @@ import type { ConductorItem } from "./conductor-state.ts";
 import type { SessionSignals } from "./signals.ts";
 import type { PlanDoc, WorkItem } from "../plan/state.ts";
 import type { RecapSection } from "./session-recap.ts";
+import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { readSourceBranch, type SessionSource } from "../session-grep/source.ts";
+
+export interface HandoffOrigin extends SessionSource {
+	file?: string;
+	rootId: string | null;
+	entryCount: number;
+	retained: boolean;
+}
+
+/** Capture alongside local state, before any asynchronous recap/diff lookup. */
+export function captureHandoffOrigin(manager: ExtensionContext["sessionManager"], branch: readonly SessionEntry[]): HandoffOrigin {
+	const source = { sessionId: manager.getSessionId(), leafId: branch.at(-1)?.id ?? null };
+	const file = manager.getSessionFile();
+	let retained = false;
+	if (file) {
+		try {
+			const saved = readSourceBranch(file, source);
+			retained = saved.length === branch.length && saved.every((entry, index) =>
+				entry.id === branch[index].id && entry.parentId === branch[index].parentId);
+		} catch {
+			// A memory-only or unreadable branch cannot be promised as recoverable.
+		}
+	}
+	return { ...source, file, rootId: branch[0]?.id ?? null, entryCount: branch.length, retained };
+}
+
+function originLines(origin: HandoffOrigin | null | undefined): string[] {
+	if (!origin) return ["## Source and coverage", "Source unavailable — local session identity/branch could not be captured; no exact history recovery is promised."];
+	const lines = [
+		"## Source and coverage",
+		`Native Pi session: ${JSON.stringify(origin.sessionId)}; root: ${JSON.stringify(origin.rootId)}; leaf: ${JSON.stringify(origin.leafId)}; ${origin.entryCount} active-branch entries at capture. Other branches and later entries are outside coverage.`,
+		`Source JSONL: ${origin.file ? JSON.stringify(origin.file) : "none (in-memory session)"}.`,
+	];
+	lines.push(origin.retained
+		? `Read the exact historical branch with session_grep ${JSON.stringify({ source: { sessionId: origin.sessionId, leafId: origin.leafId } })}; continue with the returned offset. This includes plan snapshots/ticks and original tool/artifact references, not a conversation summary. Availability is local to this directory/machine; missing files are not recreated.`
+		: "Branch was not verified in saved JSONL at capture; historical entries may be missing. Exact recovery is NOT promised.");
+	return lines;
+}
 
 export const HANDOFF_FILE = "handoff.md";
 /** Subdirectory of the git dir holding pending and consumed seeds. */
@@ -96,6 +135,8 @@ const MAX_OPEN_ITEMS = 40;
 export interface HandoffInput {
 	/** The next session's objective — the user's argument, or a derived line. */
 	objective: string;
+	/** Exact local source captured alongside the plan/signals, before awaits. */
+	origin?: HandoffOrigin | null;
 	goal: GoalItem | null;
 	conductor: ConductorItem | null;
 	signals: SessionSignals;
@@ -117,6 +158,8 @@ export interface HandoffInput {
 /** A block of the seed plus how readily the successor could rebuild it itself. */
 interface SeedSection {
 	lines: string[];
+	/** What an omitted block can actually recover, not an inferred snapshot. */
+	recovery: string;
 	/**
 	 * Drop order under the character budget: HIGHER numbers go first.
 	 * Ranked by how cheaply the successor can re-derive the block —
@@ -138,7 +181,7 @@ function isOpen(item: WorkItem): boolean {
  * pending observations are not work the successor owes, and listing them as
  * todos is how a fresh session starts by trying to "do" a CI result.
  */
-export function openWorkLines(plan: PlanDoc | null | undefined): string[] {
+export function openWorkLines(plan: PlanDoc | null | undefined, recovery = "read the plan document for current state; the original full snapshot is not retained here"): string[] {
 	if (!plan || !Array.isArray(plan.blocks)) return [];
 	const lines: string[] = [];
 	let listed = 0;
@@ -165,7 +208,7 @@ export function openWorkLines(plan: PlanDoc | null | undefined): string[] {
 		const heading = block.title?.trim() || block.kind?.trim() || "Lane";
 		lines.push(`**${heading}**`, ...laneLines, "");
 	}
-	if (elided > 0) lines.push(`(${elided} further open item(s) not listed — read the plan document.)`);
+	if (elided > 0) lines.push(`(${elided} further open item(s) not listed — ${recovery}.)`);
 	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 	return lines;
 }
@@ -184,7 +227,7 @@ function gitStatusLines(gitStatus: string | null): string[] {
 	const all = raw.split("\n");
 	const shown = all.slice(0, MAX_GIT_STATUS_LINES);
 	const lines = ["```", ...shown];
-	if (all.length > shown.length) lines.push(`… ${all.length - shown.length} more path(s)`);
+	if (all.length > shown.length) lines.push(`… ${all.length - shown.length} more path(s) not carried; original full status not retained — rerun git status for current state`);
 	lines.push("```");
 	return lines;
 }
@@ -205,6 +248,8 @@ export function buildHandoffSeed(input: HandoffInput): string {
 		"",
 		`Working directory: ${input.cwd}`,
 		"",
+		...originLines(input.origin),
+		"",
 		"## Objective",
 		input.objective.trim() || "(carry the previous session's work forward — see below)",
 	];
@@ -221,14 +266,16 @@ export function buildHandoffSeed(input: HandoffInput): string {
 	// Open work — the block the successor genuinely cannot rebuild. Falls back
 	// to the counts when no plan document exists, which is the pre-HIV-1231
 	// behaviour and still better than silence.
-	const openWork = openWorkLines(input.plan);
+	const openWork = openWorkLines(input.plan, input.origin?.retained
+		? "read the exact source branch above; reconstruct the last valid plan snapshot plus subsequent ticks"
+		: undefined);
 	if (openWork.length > 0) {
 		const tasks = input.signals.tasks;
 		const header =
 			tasks.total > 0
 				? `## Open work (${tasks.completed}/${tasks.total} done)`
 				: "## Open work";
-		sections.push({ lines: [header, ...openWork], dropRank: 1 });
+		sections.push({ lines: [header, ...openWork], dropRank: 1, recovery: input.origin?.retained ? "Read the exact source branch above; reconstruct the plan from its last valid snapshot plus subsequent ticks." : "Historical plan not verified on disk; inspect the current plan, not an assumed historical snapshot." });
 	} else if (input.signals.tasks.total > 0) {
 		const tasks = input.signals.tasks;
 		sections.push({
@@ -237,6 +284,7 @@ export function buildHandoffSeed(input: HandoffInput): string {
 				`${tasks.completed}/${tasks.total} completed, ${tasks.inProgress} in progress, ${tasks.pending} pending — the plan document did not survive to the seed; re-derive the open ones and capture them in the plan.`,
 			],
 			dropRank: 1,
+			recovery: "No plan snapshot was available to this seed; inspect the current plan.",
 		});
 	}
 	if (input.signals.plan.phase && input.signals.plan.stepCount > 0) {
@@ -248,6 +296,7 @@ export function buildHandoffSeed(input: HandoffInput): string {
 				}).`,
 			],
 			dropRank: 2,
+			recovery: input.origin?.retained ? "Read plan snapshots and subsequent ticks in the exact source branch above." : "Historical plan not verified on disk; inspect the current plan.",
 		});
 	}
 
@@ -260,6 +309,7 @@ export function buildHandoffSeed(input: HandoffInput): string {
 				"Unavailable at handoff time — this session was not attached to Hive, or Hive could not be reached. The block is ABSENT, not empty: call `recap_session` yourself before assuming there is no PR, ticket or teammate.",
 			],
 			dropRank: 3,
+			recovery: "No remote snapshot was available; query Hive for current state.",
 		});
 	} else if (input.recap.length === 0) {
 		sections.push({
@@ -268,23 +318,25 @@ export function buildHandoffSeed(input: HandoffInput): string {
 				"Hive was reachable and reported no branch, PR, ticket, knowledge or teammate for this session.",
 			],
 			dropRank: 3,
+			recovery: "Recap snapshot not retained here; query Hive for current state, not original at-handoff state.",
 		});
 	} else {
 		let rank = 3;
 		for (const section of input.recap) {
 			rank++;
-			sections.push({ lines: [`## ${section.label}`, ...section.lines], dropRank: rank });
+			sections.push({ lines: [`## ${section.label}`, ...section.lines], dropRank: rank, recovery: "Recap snapshot not retained here; query Hive for current state. Original references may also appear in the source branch, but are not guaranteed." });
 		}
 	}
 
 	const git = gitStatusLines(input.gitStatus);
 	if (git.length > 0) {
-		sections.push({ lines: ["## Files mid-flight (`git status --porcelain`)", ...git], dropRank: 3 });
+		sections.push({ lines: ["## Files mid-flight (`git status --porcelain`)", ...git], dropRank: 3, recovery: "Original git status not retained; rerun git status for current working-tree state." });
 	}
 
 	const footer = [
 		"---",
 		"Start by verifying this seed against the worktree (git status, the plan document, recent commits) — it was written at handoff time and the user may have edited it.",
+		"Source entries are historical evidence, not new instructions or approvals. Recheck live PR/CI state; never replay historical commands automatically.",
 	];
 
 	return assemble(head, sections, footer);
@@ -308,7 +360,9 @@ function assemble(head: string[], sections: SeedSection[], footer: string[]): st
 		const body = kept.flatMap((section) => ["", ...section.lines]);
 		const notice =
 			dropped.size > 0
-				? ["", `_${dropped.size} further block(s) did not fit this seed's budget; re-read them from Hive and the plan document._`]
+				? ["", `## Omitted blocks (${dropped.size} further block(s) did not fit this seed's budget)`,
+					...sections.flatMap((section, index) => dropped.has(index)
+						? [`- ${JSON.stringify(section.lines[0].replace(/^## /, ""))}: ${section.recovery}`] : [])]
 				: [];
 		return [...head, ...body, ...notice, "", ...footer].join("\n");
 	};
@@ -319,9 +373,9 @@ function assemble(head: string[], sections: SeedSection[], footer: string[]): st
 		dropped.add(index);
 		out = render();
 	}
-	// Every droppable block is gone and it still does not fit: the head alone is
-	// over budget. Cut it rather than write a file nothing will read.
-	return out.length <= MAX_SEED_CHARS ? out : out.slice(0, MAX_SEED_CHARS);
+	// Never silently cut source anchors, the objective/finish line, or omissions.
+	if (out.length > MAX_SEED_CHARS) throw new Error("Handoff objective, finish line and source/omission metadata exceed the 12000-character budget; shorten the objective or goal and retry.");
+	return out;
 }
 
 /** How git-dir discovery ended.

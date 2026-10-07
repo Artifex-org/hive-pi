@@ -32,7 +32,7 @@ import {
 import { createDriftPolicy, driftJevClient } from "./drift.ts";
 import { createGatePolicy } from "./gate.ts";
 import { looksUnverifiable, parseGoalCommand } from "./goal-command.ts";
-import { buildHandoffSeed, legacyHandoffPath, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
+import { buildHandoffSeed, captureHandoffOrigin, legacyHandoffPath, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
 import {
 	createGoal,
 	reviseGoal,
@@ -1212,17 +1212,24 @@ export default function (pi: ExtensionAPI) {
 	 * file against the active branch — and test/branch-scoped-state.test.ts pins
 	 * this file to exactly one all-entries read, so a second one has to
 	 * arrive as a diff somebody justifies. The automatic threshold path needs the
-	 * same signals as `/handoff`, so it calls THIS rather than repeating the pair.
+	 * same local snapshot as `/handoff`, captured synchronously before awaits.
 	 */
-	function handoffSignals(ctx: ExtensionContext): SessionSignals {
+	function handoffSnapshot(ctx: ExtensionContext) {
 		try {
-			return deriveSignals(
-				ctx.sessionManager.getEntries() as readonly unknown[],
-				ctx.sessionManager.getBranch() as readonly unknown[],
-			);
+			const manager = ctx.sessionManager;
+			const branch = manager.getBranch();
+			const signals = deriveSignals(manager.getEntries(), branch);
+			const plan = rehydratePlan(branch);
+			let origin: ReturnType<typeof captureHandoffOrigin> | null = null;
+			try {
+				origin = captureHandoffOrigin(manager, branch);
+			} catch {
+				/* Optional identity failure must not discard an already-read plan. */
+			}
+			return { signals, plan, origin };
 		} catch {
-			/* unreadable session — the seed still carries goal/conductor/git state */
-			return emptySignals;
+			/* unreadable source is explicit in the seed; no guessed branch */
+			return { signals: emptySignals, plan: null, origin: null };
 		}
 	}
 
@@ -1230,7 +1237,9 @@ export default function (pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		objective: string,
 	): Promise<{ path: string } | { error: string }> {
-		const signals = handoffSignals(ctx);
+		const { signals, plan, origin } = handoffSnapshot(ctx);
+		const capturedGoal = structuredClone(goal);
+		const capturedConductor = structuredClone(conductor);
 		const cwd = ctx.cwd;
 
 		// The open work items live only on this machine — Hive parses the plan
@@ -1239,13 +1248,6 @@ export default function (pi: ExtensionAPI) {
 		// From the ACTIVE BRANCH, not the whole file (HIV-1972): a session is a
 		// tree, `/tree` moves the leaf, and the newest plan snapshot in the file
 		// may belong to a branch the operator abandoned.
-		let plan = null;
-		try {
-			plan = rehydratePlan(branchEntries(ctx));
-		} catch {
-			/* an unreadable plan degrades to the counts, not to a failed handoff */
-		}
-
 		// `resolveAuth` does blocking I/O. Safe from a command handler and from a
 		// tool `execute`, both of which are already async call sites — but NOT
 		// from an event handler, where pi awaits serially and this would be the
@@ -1259,17 +1261,18 @@ export default function (pi: ExtensionAPI) {
 			/* unreachable Hive is a thinner seed, never a failed handoff */
 		}
 
-		const seed = buildHandoffSeed({
-			objective: objective.trim(),
-			goal,
-			conductor,
-			signals,
-			gitStatus: await diffStamp(cwd),
-			cwd,
-			plan,
-			recap,
-		});
 		try {
+			const seed = buildHandoffSeed({
+				objective: objective.trim(),
+				origin,
+				goal: capturedGoal,
+				conductor: capturedConductor,
+				signals,
+				gitStatus: await diffStamp(cwd),
+				cwd,
+				plan,
+				recap,
+			});
 			const path = writeHandoff(cwd, seed);
 			// Lineage: the outgoing session records that it handed off.
 			try {
@@ -1436,16 +1439,11 @@ export default function (pi: ExtensionAPI) {
 		// therefore the local half only, and says so in its own objective line.
 		let seeded: string | null = null;
 		try {
-			const signals = handoffSignals(ctx);
-			let plan = null;
-			try {
-				plan = rehydratePlan(branchEntries(ctx));
-			} catch {
-				/* degrades to the counts */
-			}
+			const { signals, plan, origin } = handoffSnapshot(ctx);
 			const seed = buildHandoffSeed({
 				objective:
 					"Continue the previous session's open work — it reached its context threshold and handed off rather than compacting.",
+				origin,
 				goal,
 				conductor,
 				signals,
