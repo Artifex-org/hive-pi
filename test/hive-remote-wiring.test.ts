@@ -343,6 +343,9 @@ describe("attach", () => {
 		await attachAndSettle(fake);
 
 		expect(hive.attaches()[0]?.body).not.toHaveProperty("can_add_workspace");
+		for (const name of ["request_workspace", "list_workspace_catalog"]) {
+			expect(fake.tools.some((tool) => tool.name === name)).toBe(true);
+		}
 	});
 
 	it("re-arms the Detail recap after compaction once attached", async () => {

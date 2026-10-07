@@ -76,6 +76,9 @@ describe("findNativeServer", () => {
 	it("names the platform package when a 7.x install lacks its binary", () => {
 		const repo = join(root, "noplatform");
 		fakeTypescript(repo, "7.0.2", false);
+		// Ensure resolution finds this fixture's package rather than NODE_PATH's
+		// real ancestor dependency; leave out its binary to exercise the failure.
+		write(join(repo, "node_modules", PLATFORM_PACKAGE, "package.json"), JSON.stringify({ name: PLATFORM_PACKAGE }));
 		const found = findNativeServer(repo, repo);
 		expect(!found.ok && found.reason).toContain(PLATFORM_PACKAGE);
 	});

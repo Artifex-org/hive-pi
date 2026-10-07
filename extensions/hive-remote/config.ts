@@ -122,8 +122,9 @@ export interface RemoteConfig {
 	 * pulling a second repo into its writable scratch and opening a channel to
 	 * ask a human (or the handsfree judge) to widen its scope. That is a bigger
 	 * step than being steerable, so it is off until the owner turns it on, and it
-	 * gates BOTH the agent-facing tools and the `can_add_workspace` capability
-	 * this client declares at attach.
+	 * gates BOTH tool execution and the `can_add_workspace` capability this
+	 * client declares at attach. Without opt-in, the tools are discoverable but
+	 * return diagnostics only — no request or clone runs.
 	 */
 	allowAddWorkspace: boolean;
 }

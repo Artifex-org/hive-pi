@@ -66,6 +66,7 @@ is frozen and shared — see [hive-common](../hive-common/README.md).
 | `url` | — | endpoint fallback; the credential's URL wins |
 | `flushIntervalMs` | `2000` | transcript flush cadence (floor 500) |
 | `allowSteer` | `true` | accept steer / follow-up from the browser |
+| `allowAddWorkspace` | `false` | operator opt-in to workspace requests; restart after changing |
 | `allowInterrupt` | `true` | accept interrupt (`ctx.abort()`) |
 | `allowKill` | `true` | accept kill — ends the **session**, not the turn |
 | `streamDeltas` | `true` | stream partial assistant text for smooth rendering |
@@ -90,6 +91,21 @@ careful about what it repeats.
 codebase that a file list can carry. It is also the only reporter that costs
 subprocesses (three `git` calls) rather than cached numbers, which is why it runs
 at turn end plus a 60s backstop rather than on the 5s status tick.
+
+### Workspace grants
+
+`request_workspace` and `list_workspace_catalog` are deferred native pi tools,
+not Hive MCP tools. Discover them with `load_tools` or `tool_search`. When
+`allowAddWorkspace` is off, both return diagnostics without any network or clone
+work. `/hive-remote-on` does not opt into grants. Only the operator may enable
+that setting, followed by a session restart; no workspace capability is declared
+while it is off. Server policy and approval still apply when it is on.
+
+An approved grant's value is delivered once. A repeated request returning HTTP
+410 means **delivered**, not proof the clone succeeded: inspect the earlier tool
+result for its checkout path or clone error. A transient fetch failure is
+reported separately and can rejoin the same decision. Never request another repo
+or clone outside the authorized workspace to work around a missing grant.
 
 ## What is sent
 

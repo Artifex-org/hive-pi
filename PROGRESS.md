@@ -1,3 +1,19 @@
+# Workspace grant papercuts — 2026-10-07
+
+Branch: `fix/grants-judge-papercuts`, baseline `3cbd8465c`. Companion judge restoration: `fix/grants-registry-judge` in Hive (separate draft PR, still in progress).
+
+Confirmed mechanisms: default-off workspace consent hid both native deferred tools despite CLI advice naming them; an approved one-shot grant value fetch preserves the approved verdict, so HTTP 410 bypassed the old error-only delivery handling. Tools now remain diagnostic-only without opt-in, preserve absent `can_add_workspace`, and distinguish delivery from successful cloning and transient fetch failures. No operator configuration changed.
+
+Verification: standalone baseline/reverification `scripts/grant-papercut-probe.mjs`; focused grant/goal judge tests 239 passed; real SDK `load_tools` and `tool_search` discovery 2 passed with zero model/auth/network calls. `npm run check` passed TypeScript and 4,643 tests (13 existing skips; 281 passed/4 skipped files). Full-suite LSP fixture was made independent of ancestor platform-package resolution; the shutdown failure did not reproduce and no production LSP changes were made. Independent read-only review found no issues. `quality_gate` ran but reported no adapter in this repo; the actual package gate is `npm run check`.
+
+Limits: goal-judge regression tests establish fast-pass/inherited-thinking confirmation, error separation and pause behavior, not live paid-provider or deployed judge behavior. An initial CLI discovery probe used `ctx.executeTool` outside tool context, failed before assertions, and unintentionally invoked an inherited OpenRouter model with read/bash tools; it was terminated. Its transcript showed read-only tool activity, the process check found no surviving probe, and no tracked modifications resulted. It is NOT discovery evidence; the isolated SDK test replaces it. Approval judge remains disabled; grant opt-in unchanged. No merge/deploy/live judge activation authorized.
+
+Delivery: task-owned changes only; raw telemetry/logs excluded. Draft PR and final-head checks pending.
+
+---
+
+# Preserved upstream checkpoint
+
 # YSK implementation — verified, publication pending
 
 Branch: `feat/ysk-findings`. Backend/UI companion: Hive branch `agents/hive-a6a897b1`, worktree `/home/joan/repos/hive__worktrees/agents-hive-a6a897b1` (full evidence in its `PROGRESS.md`).

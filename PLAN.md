@@ -1,3 +1,15 @@
+# Workspace grant papercuts and judge verification — 2026-10-07
+
+- Preserve default-off workspace execution while making native grant diagnostics discoverable.
+- Explain approved one-shot value delivery and transient fetch failures without suggesting unauthorized clones or scope widening.
+- Verify actual deferred discovery using isolated model-free SDK sessions, focused grant/goal judge regressions, and the full manifest gate.
+- Restore registry-backed approval transport and shadow advisory Jev in the separate Hive branch; retain deployed judge-off state.
+- Review, publish linked draft PRs, record final-head check evidence and live-provider/DB verification limits. No merge, deployment, live activation or operator config changes.
+
+---
+
+# Preserved upstream plan
+
 # HIV-3757 — native pi follow-ups
 
 ## Delivery
