@@ -50,6 +50,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { credentialChildState, registerCredentialConsumer } from "../hive-remote/credential-runtime.ts";
 import { randomUUID } from "node:crypto";
 import { JOB_RECORD, assertRecordedBranch, jobRecord, recoverJobs } from "./journal.ts";
 import { Type } from "typebox";
@@ -135,6 +136,7 @@ export default function background(pi: ExtensionAPI) {
 	 * importers would get two registries and the second would silently never see
 	 * the first's jobs.
 	 */
+	const releaseCredentialConsumer = registerCredentialConsumer("background");
 	const jobs = new Map<string, Job>();
 	const procs = new Map<string, ChildProcess>();
 	const timers = new Map<string, NodeJS.Timeout>();
@@ -440,7 +442,7 @@ export default function background(pi: ExtensionAPI) {
 		try { ctx?.ui.notify(`Session persistence failed: ${String(error)}. Restart/resume the saved session from disk, not /reload.`, "error"); }
 		finally { ctx?.shutdown(); }
 	};
-	pi.on("session_shutdown", stopGeneration);
+	pi.on("session_shutdown", () => { releaseCredentialConsumer(); stopGeneration(); });
 	pi.on("session_tree", (_event, ctx) => {
 		stopGeneration();
 		restore(ctx);
@@ -512,6 +514,9 @@ export default function background(pi: ExtensionAPI) {
 		}
 		const startedGeneration = generation;
 		const current = (): boolean => generation === startedGeneration;
+		let localSessionID: string | undefined;
+		try { localSessionID = latestCtx?.sessionManager.getSessionId(); } catch { /* stale context receives no credentials */ }
+		const credentialChild = credentialChildState(localSessionID, process.env);
 		let proc: ChildProcess;
 		try {
 			// `-c`, never `-lc`, exactly as pi's own bash tool runs a command. A
@@ -524,7 +529,7 @@ export default function background(pi: ExtensionAPI) {
 			// carries the session's environment, which is all a job needs.
 			proc = spawn("bash", ["-c", spec.command], {
 				cwd: spec.cwd,
-				env: process.env,
+				env: credentialChild.env,
 				// Its own process group, so killTree can take the whole tree.
 				detached: true,
 				stdio: ["ignore", "pipe", "pipe"],
@@ -538,13 +543,13 @@ export default function background(pi: ExtensionAPI) {
 
 		procs.set(id, proc);
 
-		const absorb = (chunk: Buffer): void => {
+		const appendSafe = (chunk: Buffer): void => {
 			if (!current()) return;
 			const job = jobs.get(id);
-			if (job) jobs.set(id, appendOutput(job, chunk.toString("utf8")));
+			if (job && chunk.length) jobs.set(id, appendOutput(job, chunk.toString("utf8")));
 		};
-		proc.stdout?.on("data", absorb);
-		proc.stderr?.on("data", absorb);
+		proc.stdout?.on("data", (chunk: Buffer) => appendSafe(credentialChild.push("stdout", chunk)));
+		proc.stderr?.on("data", (chunk: Buffer) => appendSafe(credentialChild.push("stderr", chunk)));
 
 		proc.on("error", (err) => {
 			if (!current()) return;
@@ -586,6 +591,7 @@ export default function background(pi: ExtensionAPI) {
 			})();
 		};
 		proc.on("close", (code) => {
+			appendSafe(credentialChild.flush());
 			if (exitGrace) clearTimeout(exitGrace);
 			settleFromExit(code);
 		});

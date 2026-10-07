@@ -72,6 +72,7 @@ const READ_ONLY: Record<string, string> = {
 	list_symbols: "parses a file it reads",
 	load_tools: "changes which registered tools are declared to the model; touches nothing else",
 	list_workspace_catalog: "hive API read",
+	list_credential_catalog: "owner-bound Hive catalog names read; never claims values or installs credentials",
 	ls: "read-only listing",
 	plan_ask: "returns the question as text",
 	plan_ready: "persists a plan entry; leaves read-only mode",

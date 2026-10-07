@@ -22,7 +22,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createBashToolDefinition, createLocalBashOperations, type ExtensionAPI, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 
 import prettyTools from "../extensions/pretty-tools.ts";
 import { createFakePi } from "./fake-pi.ts";
@@ -35,6 +35,7 @@ type Executable = {
 		params: Record<string, unknown>,
 		signal: AbortSignal | undefined,
 		onUpdate: undefined,
+		ctx?: ExtensionToolContext,
 	) => Promise<{ content: Array<{ type: string; text?: string }> }>;
 };
 
@@ -46,8 +47,8 @@ function bashTool(): Executable {
 	return registered.definition as unknown as Executable;
 }
 
-async function runBash(params: Record<string, unknown>): Promise<string> {
-	const result = await bashTool().execute("c1", params, new AbortController().signal, undefined);
+async function runBash(params: Record<string, unknown>, ctx?: ExtensionToolContext): Promise<string> {
+	const result = await bashTool().execute("c1", params, new AbortController().signal, undefined, ctx);
 	return result.content.map((part) => part.text ?? "").join("");
 }
 
@@ -94,6 +95,79 @@ describe.runIf(realBashAvailable())("the bash tool's cwd", () => {
 		expect(out).toContain(dir);
 		expect(out).toContain("[harness]");
 		expect(out).toContain("`cwd`");
+	});
+
+	it("proves the public SDK exec seam can override child env and redact before accumulation", async () => {
+		const token = "SYNTHETIC_CREDENTIAL_SENTINEL_9f2a";
+		const before = process.env.SYNTHETIC_TEST_SECRET;
+		const base = createLocalBashOperations();
+		const seen: string[] = [];
+		const operations = {
+			...base,
+			exec(command: string, cwd: string, options: Parameters<typeof base.exec>[2]) {
+				return base.exec(command, cwd, {
+					...options,
+					env: { ...options.env, SYNTHETIC_TEST_SECRET: token },
+					onData: (chunk) => {
+						const redacted = Buffer.from(chunk.toString().split(token).join("[redacted]"));
+						seen.push(redacted.toString());
+						options.onData(redacted);
+					},
+				});
+			},
+		};
+		const tool = createBashToolDefinition(dir, { operations });
+		const result = await tool.execute("credential-seam", {
+			command: `printf '%s' "$SYNTHETIC_TEST_SECRET"`,
+		}, new AbortController().signal, undefined, {
+			cwd: dir,
+			model: undefined,
+			sessionManager: { getSessionId: () => "synthetic-session", getSessionFile: () => undefined },
+		} as unknown as ExtensionToolContext);
+		const output = result.content.map((part) => ("text" in part ? part.text : "")).join("");
+		expect(seen.join("")).toBe("[redacted]");
+		expect(output).toBe("[redacted]");
+		expect(process.env.SYNTHETIC_TEST_SECRET).toBe(before);
+	});
+
+	it("forwards SDK session metadata and context cwd to the stock bash backend", async () => {
+		const context = {
+			cwd: dir,
+			model: { provider: "synthetic-provider", id: "synthetic-model" },
+			thinkingLevel: "high",
+			sessionManager: { getSessionId: () => "synthetic-session", getSessionFile: () => "/tmp/synthetic-session.jsonl" },
+		} as unknown as ExtensionToolContext;
+		const out = await runBash({
+			command: `printf '%s|%s|%s|%s|%s|%s' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL" "$PWD"`,
+		}, context);
+		expect(out).toContain(`synthetic-session|/tmp/synthetic-session.jsonl|synthetic-provider|synthetic-model|high|${dir}`);
+	});
+
+	it("preserves inherited and non-enumerable session fields with explicit cwd", async () => {
+		const context = Object.create({
+			model: { provider: "synthetic-provider", id: "synthetic-model" },
+			sessionManager: { getSessionId: () => "inherited-session", getSessionFile: () => undefined },
+		}, {
+			cwd: { value: process.cwd() },
+			thinkingLevel: { value: "high" },
+		}) as ExtensionToolContext;
+		const out = await runBash({
+			command: `printf "%s|%s|%s|%s" "$PI_SESSION_ID" "$PI_PROVIDER" "$PI_REASONING_LEVEL" "$PWD"`,
+			cwd: dir,
+		}, context);
+		expect(out).toContain(`inherited-session|synthetic-provider|high|${dir}`);
+	});
+
+	it("explicit cwd takes precedence over SDK context cwd", async () => {
+		const other = realpathSync(mkdtempSync(`${tmpdir()}/bash-cwd-explicit-`));
+		try {
+			const context = { cwd: dir, sessionManager: { getSessionId: () => "synthetic-session", getSessionFile: () => undefined } } as unknown as ExtensionToolContext;
+			const out = await runBash({ command: "pwd", cwd: other }, context);
+			expect(out).toContain(other);
+			expect(out).not.toContain(dir);
+		} finally {
+			rmSync(other, { recursive: true, force: true });
+		}
 	});
 
 	it("leaves a call that named no directory exactly where it was", async () => {

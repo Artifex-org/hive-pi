@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL } from "../extensions/hive-common/channels.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
+import { CredentialReceiver } from "../extensions/hive-remote/credentials.ts";
+import { registerCredentialConsumer } from "../extensions/hive-remote/credential-runtime.ts";
 import { createFakePi, type FakeCtxOptions, type FakePi, type SessionEntryLike } from "./fake-pi.ts";
 
 /**
@@ -66,15 +68,21 @@ interface Call {
  */
 function fakeHive(handlers: {
 	events?: Array<{ status: number; lastSeq?: number }>;
-	attach?: { status: number; lastSeq?: number };
+	attach?: { status: number; lastSeq?: number; delayMs?: number };
+	refreshes?: Array<{ status: number; lastSeq?: number; delayMs?: number }>;
 	commands?: Array<Record<string, unknown>>;
 	toolStarts?: number[];
+	credentialStatuses?: number[];
 	byRun?: Record<string, string>;
 	eventGate?: Promise<void>;
 }) {
 	const calls: Call[] = [];
 	const events = [...(handlers.events ?? [])];
 	const toolStarts = [...(handlers.toolStarts ?? [])];
+	const credentialStatuses = [...(handlers.credentialStatuses ?? [])];
+	const refreshes = [...(handlers.refreshes ?? [])];
+	let attachCount = 0;
+	let acceptsCredentials = false;
 	let commandsServed = false;
 	let eventGateServed = false;
 
@@ -86,11 +94,18 @@ function fakeHive(handlers: {
 		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
 		calls.push({ method: String(init?.method ?? "GET"), path, body });
 
+		if (path.endsWith("/credential-catalog")) return json(200, { entries: [] });
+		if (path.endsWith("/credential-grants")) {
+			const status = credentialStatuses.shift() ?? (acceptsCredentials ? 200 : 409);
+			return json(status, status === 200 ? { items: [] } : { error: "receiver/backend not ready" });
+		}
 		if (path.startsWith("/agent-sessions/by-run/")) return json(200, { id: handlers.byRun?.[path.split("/").pop() ?? ""] ?? SESSION_ID });
 
 		if (path.endsWith("/conversation")) {
-			const a = handlers.attach ?? { status: 200, lastSeq: 0 };
+			const a = (attachCount++ > 0 ? refreshes.shift() : undefined) ?? handlers.attach ?? { status: 200, lastSeq: 0, delayMs: 0 };
+			if (a.delayMs) await new Promise(resolve => setTimeout(resolve, a.delayMs));
 			if (a.status !== 200) return json(a.status, { error: "nope" });
+			acceptsCredentials = body?.can_receive_credentials === true;
 			return json(200, { session_id: SESSION_ID, last_seq: a.lastSeq ?? 0 });
 		}
 
@@ -131,6 +146,7 @@ function fakeHive(handlers: {
 
 	return {
 		calls,
+		acceptsCredentials: () => acceptsCredentials,
 		posted: () => calls.filter((c) => c.path.endsWith("/events")),
 		attaches: () => calls.filter((c) => c.path.endsWith("/conversation")),
 		worktrees: () => calls.filter((c) => c.path.endsWith("/worktree")),
@@ -194,6 +210,84 @@ describe("send_attachment wiring", () => {
 });
 
 describe("attach", () => {
+	it.each([{ refresh: { status: 200, delayMs: 9_000 } }, { refresh: { status: 503 } }])("retains recovered binding until refresh acknowledgement $refresh", async ({ refresh }) => {
+		const release = registerCredentialConsumer("bash");
+		const binds = vi.spyOn(CredentialReceiver.prototype, "bind");
+		const hive = fakeHive({ credentialStatuses: [503, 409], refreshes: [refresh] });
+		const pollStates: boolean[] = [], originalPoll = CredentialReceiver.prototype.poll;
+		const polls = vi.spyOn(CredentialReceiver.prototype, "poll").mockImplementation(async function(this: CredentialReceiver) {
+			pollStates.push(hive.acceptsCredentials());
+			await originalPoll.call(this);
+		});
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		try {
+			await attachAndSettle(fake, { sessionId: "ack-local" });
+			await vi.advanceTimersByTimeAsync(18_000);
+			expect(binds).toHaveBeenCalledOnce();
+			expect(pollStates.length).toBeGreaterThan(0);
+			expect(pollStates).not.toContain(false);
+			expect(hive.attaches().at(-1)?.body?.can_receive_credentials).toBe(true);
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); binds.mockRestore(); polls.mockRestore(); }
+	});
+	it.each([{ statuses: [503, 409] }, { statuses: [409, 503, 409] }])("recovers credential readiness after transient statuses $statuses", async ({ statuses }) => {
+		const release = registerCredentialConsumer("bash");
+		const hive = fakeHive({ credentialStatuses: statuses });
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		try {
+			await attachAndSettle(fake, { sessionId: "recovery-local" });
+			await vi.advanceTimersByTimeAsync(11_000);
+			expect(hive.calls.filter(c => c.path.endsWith("/credential-grants")).length).toBeGreaterThanOrEqual(statuses.length);
+			expect(hive.attaches().at(-1)?.body?.can_receive_credentials).toBe(true);
+			const execute = fake.tools.find(tool => tool.name === "list_credential_catalog")?.definition.execute;
+			if (typeof execute !== "function") throw new Error("missing credential catalog tool");
+			expect(JSON.stringify(await execute("fixture-call", {}))).toContain("No credentials are configured");
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); }
+	});
+	it("keeps a ready receiver on repeated session_start for the same local identity", async () => {
+		const release = registerCredentialConsumer("bash");
+		const hive = fakeHive({});
+		const binds = vi.spyOn(CredentialReceiver.prototype, "bind");
+		const detaches = vi.spyOn(CredentialReceiver.prototype, "detach");
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		const list = async () => {
+			const execute = fake.tools.find(tool => tool.name === "list_credential_catalog")?.definition.execute;
+			if (typeof execute !== "function") throw new Error("missing credential catalog tool");
+			return JSON.stringify(await execute("fixture-call", {}));
+		};
+		try {
+			await attachAndSettle(fake, { sessionId: "local-a" });
+			expect(hive.attaches()[0]?.body?.can_receive_credentials).toBe(true);
+			expect(await list()).toContain("No credentials are configured");
+			await fake.emit({ type: "session_start", reason: "resume" }, { sessionId: "local-a" });
+			expect(binds).toHaveBeenCalledTimes(1);
+			expect(detaches).toHaveBeenCalledTimes(2);
+			expect(hive.attaches()).toHaveLength(1);
+			expect(await list()).toContain("No credentials are configured");
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); binds.mockRestore(); detaches.mockRestore(); }
+	});
+	it.each([true, false])("rebinds a new local session with telemetry announcement before start=%s", async before => {
+		const release = registerCredentialConsumer("bash");
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		try {
+			await attachAndSettle(fake, { sessionId: "local-a" });
+			fake.staleCurrentCtx();
+			if (before) fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "run-next" });
+			await fake.emit({ type: "session_start", reason: "resume" }, { sessionId: "local-b" });
+			if (!before) {
+				await vi.advanceTimersByTimeAsync(400);
+				expect(hive.attaches()).toHaveLength(1);
+				fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "run-next" });
+			}
+			await vi.advanceTimersByTimeAsync(400);
+			expect(hive.attaches()).toHaveLength(2);
+			expect(hive.attaches()[1]?.body?.can_receive_credentials).toBe(true);
+			const execute = fake.tools.find(tool => tool.name === "list_credential_catalog")?.definition.execute;
+			if (typeof execute !== "function") throw new Error("missing credential catalog");
+			expect(JSON.stringify(await execute("fixture-call", {}))).toContain("No credentials are configured");
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); }
+	});
+
 	it("reports only a pull URL created by gh pr create", async () => {
 		const hive = fakeHive({});
 		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
