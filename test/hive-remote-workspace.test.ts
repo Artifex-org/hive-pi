@@ -246,7 +246,7 @@ describe("request_workspace tool approval flow", () => {
 				return { code: 0, stdout: "", stderr: "" };
 			},
 		};
-		registerWorkspaceTools(pi as never, { getAuth: () => auth, getSessionID: () => "sess-1" });
+		registerWorkspaceTools(pi as never, { enabled: true, getAuth: () => auth, getSessionID: () => "sess-1" });
 
 		const tool = tools.get("request_workspace");
 		expect(tool).toBeDefined();
@@ -256,6 +256,47 @@ describe("request_workspace tool approval flow", () => {
 		expect(phases).toEqual(["catalog", "requested", "approved", "grant-fetched", "provisioned", "tool-completed"]);
 		expect(result.content[0]?.text).toContain("Workspace granted (approve).");
 	});
+});
+
+describe("workspace diagnostics", () => {
+	it("keeps disabled tools discoverable without auth, HTTP, or execution", async () => {
+		const tools = new Map<string, { execute: (id: string, params: unknown) => Promise<{ content: Array<{ text: string }> }> }>();
+		const pi = { registerTool: (tool: { name: string; execute: (id: string, params: unknown) => Promise<{ content: Array<{ text: string }> }> }) => tools.set(tool.name, tool), exec: vi.fn() };
+		const getAuth = vi.fn();
+		const getSessionID = vi.fn();
+		const fetch = vi.fn();
+		vi.stubGlobal("fetch", fetch);
+		registerWorkspaceTools(pi as never, { enabled: false, getAuth, getSessionID });
+		for (const name of ["request_workspace", "list_workspace_catalog"]) {
+			const result = await tools.get(name)!.execute("disabled", { repo: "hive" });
+			expect(result.content[0]?.text).toContain("allowAddWorkspace is off");
+			expect(result.content[0]?.text).toContain("Ask the operator");
+		}
+		expect(getAuth).not.toHaveBeenCalled();
+		expect(getSessionID).not.toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+		expect(pi.exec).not.toHaveBeenCalled();
+	});
+
+	it.each([["approve", 410], ["auto", 410], ["approve", 503]] as const)(
+		"explains an approved %s grant fetch failure (%s) without cloning",
+		async (verdict, status) => {
+			const tools = new Map<string, { execute: (id: string, params: unknown) => Promise<{ content: Array<{ text: string }> }> }>();
+			const pi = { registerTool: (tool: { name: string; execute: (id: string, params: unknown) => Promise<{ content: Array<{ text: string }> }> }) => tools.set(tool.name, tool), exec: vi.fn() };
+			vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+				if (String(url).endsWith("/workspace-catalog")) return json(200, { entries: [{ name: "hive", repo: "Artifex-org/hive" }] });
+				if (init?.method === "POST") return json(200, { id: "g1", verdict });
+				return json(status, { detail: status === 410 ? "already delivered" : "unavailable" });
+			});
+			registerWorkspaceTools(pi as never, { enabled: true, getAuth: () => auth, getSessionID: () => "sess-1" });
+			const result = await tools.get("request_workspace")!.execute("retry", { repo: "hive" });
+			const text = result.content[0]?.text;
+			expect(text).toContain(status === 410 ? "was already granted and delivered" : "grant could not be fetched");
+			expect(text).not.toContain("returned no repo");
+			expect(text).not.toContain("clone it manually");
+			expect(pi.exec).not.toHaveBeenCalled();
+		},
+	);
 });
 
 describe("expandTargetDir", () => {

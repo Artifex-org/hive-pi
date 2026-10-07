@@ -2494,9 +2494,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	// ------------------------------------------------------------------- tools
 
-	// Register the workspace grant tools once, at init, gated on the frozen flag.
-	// Their existence IS the consent — when the flag is off there is no tool and
-	// no capability. They read `auth`/`sessionID` live (a session attaches after
+	// Register discoverable workspace diagnostics even when opt-in is off.
+	// The frozen flag gates all tool I/O and the declared capability, not
+	// discovery. They read `auth`/`sessionID` live (a session attaches after
 	// this runs), and are inert until it does, reporting "not attached" rather
 	// than failing. Registered outside start() because a tool is a session-wide
 	// capability, not part of the attach/stream lifecycle start()/stop() manage.
@@ -2515,12 +2515,11 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			kick();
 		},
 	});
-	if (workspaceEnabled) {
-		registerWorkspaceTools(pi, {
-			getAuth: () => auth,
-			getSessionID: () => sessionID,
-		});
-	}
+	registerWorkspaceTools(pi, {
+		enabled: workspaceEnabled,
+		getAuth: () => auth,
+		getSessionID: () => sessionID,
+	});
 
 	// ----------------------------------------------------------------- commands
 
@@ -2532,7 +2531,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				`attached: ${sessionID ? `yes (${sessionID})` : "no"}${resumedFrom !== null ? ` — resumed from event ${resumedFrom}` : ""}`,
 				`queued:   ${transcript.queue.length} event(s)${transcript.dropped ? `, ${transcript.dropped} dropped` : ""}, next seq ${transcript.seq + 1}`,
 				`steer:    ${cfg.allowSteer}   interrupt: ${cfg.allowInterrupt}   kill: ${cfg.allowKill}   deltas: ${cfg.streamDeltas}`,
-				`workspace: ${workspaceEnabled} (request_workspace ${workspaceEnabled ? "registered" : "off"})`,
+				`workspace: ${workspaceEnabled} (request_workspace ${workspaceEnabled ? "enabled" : "diagnostic-only"})`,
 			];
 			// Only when non-zero, and never silently: an acknowledged-but-unstored
 			// event is the one failure here that leaves no trace in the transcript

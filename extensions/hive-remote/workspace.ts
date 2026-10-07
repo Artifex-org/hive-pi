@@ -13,8 +13,9 @@
  * `request_workspace(repo, reason?)` asks (the owner approves in the same widget
  * credentials use, or the handsfree judge does), waits, and on approval clones
  * the granted repo(s) into scratch. `list_workspace_catalog` shows what is
- * grantable. Both are gated on `allowAddWorkspace` at registration — off by
- * default, and when off neither tool exists nor is the capability declared.
+ * grantable. Both are gated on `allowAddWorkspace` at execution — off by
+ * default. When off the tools only explain the missing opt-in; no network or
+ * clone work runs, and no workspace capability is declared.
  *
  * These tools do subprocess and network work, but they are TOOLS, not event
  * handlers — pi runs a tool's `execute` off the agent loop and hands it the
@@ -52,6 +53,8 @@ const DECISION_TIMEOUT_MS = 10 * 60_000;
 const CLONE_TIMEOUT_MS = 5 * 60_000;
 
 interface WorkspaceDeps {
+	/** Frozen operator opt-in. False keeps both tools diagnostic-only. */
+	enabled: boolean;
 	/** The live auth, or null before this session has attached. */
 	getAuth: () => HiveAuth | null;
 	/** The live server session id, or null before attach. */
@@ -168,12 +171,18 @@ const DEPS_NOTE =
 /**
  * registerWorkspaceTools wires the agent-callable request + catalog tools.
  *
- * Called only when `allowAddWorkspace` is set, so the tools' mere existence is
- * the consent. `getAuth`/`getSessionID` are read live at each call rather than
+ * Registered even without opt-in so CLI guidance names a discoverable tool.
+ * `enabled` gates all I/O; registration alone never grants access.
+ * `getAuth`/`getSessionID` are read live at each call rather than
  * captured, because a session attaches AFTER the tools register (and can
  * re-attach to a new row on resume) — a captured null would strand the tool.
  */
 export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): void {
+	const disabled =
+		"Workspace grants are disabled for this client (allowAddWorkspace is off). " +
+		"Ask the operator to opt in via ~/.pi/agent/hive-telemetry/hive-remote.config.json " +
+		"and restart the session; /hive-remote-on alone does not enable workspace grants. " +
+		"Do not change this setting or widen access yourself. No request or clone was made.";
 	pi.registerTool({
 		name: "list_workspace_catalog", exposure: exposureFor("list_workspace_catalog"),
 		label: "List grantable repos",
@@ -183,6 +192,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 		promptSnippet: "List the repos you can request access to mid-session",
 		parameters: Type.Object({}),
 		async execute() {
+			if (deps.enabled !== true) return fail(disabled);
 			const auth = deps.getAuth();
 			const sessionID = deps.getSessionID();
 			if (!auth || !sessionID) {
@@ -217,6 +227,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 			reason: Type.Optional(Type.String({ description: "One sentence: why this task needs the repo. Shown to the approver." })),
 		}),
 		async execute(_id, params, signal) {
+			if (deps.enabled !== true) return fail(disabled);
 			const auth = deps.getAuth();
 			const sessionID = deps.getSessionID();
 			if (!auth || !sessionID) {
@@ -259,15 +270,16 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 				case "timeout":
 					return fail(`No decision on "${repoName}" within the wait window — it may still be pending. Continue with other work; request it again later to rejoin the decision.`);
 				case "error":
-					if (decision.gone) {
-						// The one-shot value was already delivered: the earlier grant's
-						// checkout almost certainly already exists in scratch.
-						return fail(`"${repoName}" was already granted and delivered once in this session — the checkout should already be under ~/.hive/scratch/. If you cannot find it, request a different repo or clone it manually.`);
-					}
 					return fail(`The workspace request for "${repoName}" could not be completed: ${decision.error ?? "unknown error"}.`);
 			}
 
-			// approve | auto
+			// approve | auto. A failed value fetch retains the approved verdict.
+			if (decision.gone) {
+				return fail(`"${repoName}" was already granted and delivered once in this session. Check the earlier request_workspace result for its checkout path or clone error. Delivery does not prove the clone succeeded; if no checkout exists, ask the operator for a new grant. Nothing was cloned by this call.`);
+			}
+			if (decision.error) {
+				return fail(`"${repoName}" was approved, but the grant could not be fetched: ${decision.error}. No repo was cloned; retry this request to rejoin the same decision.`);
+			}
 			const grant = decision.grant;
 			if (!grant || !Array.isArray(grant.repos) || grant.repos.length === 0) {
 				return fail(`"${repoName}" was granted but Hive returned no repo to clone${decision.error ? ` (${decision.error})` : ""}. Nothing was cloned.`);
