@@ -91,8 +91,9 @@ describe.runIf(realBashAvailable())("the mode gate", () => {
 	});
 
 	it("allows tui and rpc", async () => {
-		for (const mode of ["tui", "rpc"]) {
+		for (const mode of ["tui", "rpc"] as const) {
 			const pi = boot();
+			await pi.emit({ type: "session_start" }, { mode });
 			const out = await call(pi, "background_bash", { command: "true", what: "a no-op" }, { mode, cwd: process.cwd() });
 			expect(out).toContain("Started background job");
 		}
