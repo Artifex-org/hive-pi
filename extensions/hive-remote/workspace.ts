@@ -171,7 +171,7 @@ const DEPS_NOTE =
 /**
  * registerWorkspaceTools wires the agent-callable request + catalog tools.
  *
- * Registered even without opt-in so CLI guidance names a discoverable tool.
+ * Registered even when explicitly disabled so CLI guidance names a discoverable tool.
  * `enabled` gates all I/O; registration alone never grants access.
  * `getAuth`/`getSessionID` are read live at each call rather than
  * captured, because a session attaches AFTER the tools register (and can
@@ -180,7 +180,7 @@ const DEPS_NOTE =
 export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): void {
 	const disabled =
 		"Workspace grants are disabled for this client (allowAddWorkspace is off). " +
-		"Ask the operator to opt in via ~/.pi/agent/hive-telemetry/hive-remote.config.json " +
+		"Ask the operator to re-enable it via ~/.pi/agent/hive-telemetry/hive-remote.config.json " +
 		"and restart the session; /hive-remote-on alone does not enable workspace grants. " +
 		"Do not change this setting or widen access yourself. No request or clone was made.";
 	pi.registerTool({

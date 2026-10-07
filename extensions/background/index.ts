@@ -50,6 +50,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { credentialChildState, registerCredentialConsumer } from "../hive-remote/credential-runtime.ts";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -133,6 +134,7 @@ export default function background(pi: ExtensionAPI) {
 	 * importers would get two registries and the second would silently never see
 	 * the first's jobs.
 	 */
+	const releaseCredentialConsumer = registerCredentialConsumer("background");
 	const jobs = new Map<string, Job>();
 	const procs = new Map<string, ChildProcess>();
 	const timers = new Map<string, NodeJS.Timeout>();
@@ -362,6 +364,7 @@ export default function background(pi: ExtensionAPI) {
 	 * would have received the message is on its way out.
 	 */
 	pi.on("session_shutdown", () => {
+		releaseCredentialConsumer();
 		for (const id of [...procs.keys()]) killTree(id);
 		for (const timer of timers.values()) clearTimeout(timer);
 		timers.clear();
@@ -422,6 +425,9 @@ export default function background(pi: ExtensionAPI) {
 			runID: spec.runID,
 		}));
 
+		let localSessionID: string | undefined;
+		try { localSessionID = latestCtx?.sessionManager.getSessionId(); } catch { /* stale context receives no credentials */ }
+		const credentialChild = credentialChildState(localSessionID, process.env);
 		let proc: ChildProcess;
 		try {
 			// `-c`, never `-lc`, exactly as pi's own bash tool runs a command. A
@@ -434,7 +440,7 @@ export default function background(pi: ExtensionAPI) {
 			// carries the session's environment, which is all a job needs.
 			proc = spawn("bash", ["-c", spec.command], {
 				cwd: spec.cwd,
-				env: process.env,
+				env: credentialChild.env,
 				// Its own process group, so killTree can take the whole tree.
 				detached: true,
 				stdio: ["ignore", "pipe", "pipe"],
@@ -448,12 +454,12 @@ export default function background(pi: ExtensionAPI) {
 
 		procs.set(id, proc);
 
-		const absorb = (chunk: Buffer): void => {
+		const appendSafe = (chunk: Buffer): void => {
 			const job = jobs.get(id);
-			if (job) jobs.set(id, appendOutput(job, chunk.toString("utf8")));
+			if (job && chunk.length) jobs.set(id, appendOutput(job, chunk.toString("utf8")));
 		};
-		proc.stdout?.on("data", absorb);
-		proc.stderr?.on("data", absorb);
+		proc.stdout?.on("data", (chunk: Buffer) => appendSafe(credentialChild.push("stdout", chunk)));
+		proc.stderr?.on("data", (chunk: Buffer) => appendSafe(credentialChild.push("stderr", chunk)));
 
 		proc.on("error", (err) => {
 			const job = jobs.get(id);
@@ -494,6 +500,7 @@ export default function background(pi: ExtensionAPI) {
 			})();
 		};
 		proc.on("close", (code) => {
+			appendSafe(credentialChild.flush());
 			if (exitGrace) clearTimeout(exitGrace);
 			settleFromExit(code);
 		});

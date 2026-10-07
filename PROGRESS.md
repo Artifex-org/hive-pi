@@ -1,4 +1,146 @@
-# Workspace grant papercuts — 2026-10-07
+# Final-source acceptance — 2026-10-07
+
+Final local native gate (bg-25): TypeScript and 4,725 tests/288 files passed;
+13 existing skips remain. Final Factory gate (bg-26): 169 tests/15 files,
+pinned Pi1.0.2 typecheck and every shipped module load, actual synthetic shell
+smoke, refreshed Factory Go embedding race suite, metrics and file-length passed.
+Final pre-publication Hive fleet snapshot passed lint:
+https://app.hiveci.io/runs/ebb1f752-39eb-4bea-bd31-852164de4c3f
+Other fleet steps were NOT RUN in that snapshot: Hive ignores mode=thorough and
+uses named steps; this was the single permitted fleet dispatch. Required PR CI
+at the publication head remains the authoritative full delivery gate.
+
+Native npm run check passed 4,721 tests/288 files with 13 existing skipped tests
+at 85dd491. Final review added four regression cases, not skips: independent
+same-session detach, local and generation replacement; delayed/failed capability
+refresh. Instrumentation reproduced discovery before acknowledgement and a
+second bind. Current code gates discovery until a successful, current-identity
+whole-record capability PUT; both reproductions pass. Focused TypeScript and
+75 focused tests passed; the final full rerun result above supersedes earlier counts.
+
+Managed-session Postgres Go acceptance (bg-23): all 12 selected package targets
+passed race testing (five package targets reran, six reused unchanged cached
+results; judge-runtime-smoke has no tests) and subsequent vet passed. API and MCP
+actually ran against the explicitly supplied managed DB. Prior dedicated request,
+discovery, ownership/readiness and atomic one-shot tests also exercised that DB.
+Final Factory embedding/type/load/shell acceptance passed (bg-26), as recorded
+above. Native/Factory receiver and runtime are byte-identical.
+
+Secret scans of task history and staged files passed; one purely synthetic
+fixture was rewritten to an unmistakable repeating literal, with assertions
+unchanged and no scanner exclusion. Raw papercuts.json is not published.
+Native quality_gate has no repository adapter: npm run check plus configured
+GitHub checks are the real native gate, not a claimed absent-adapter pass.
+Final Hive fleet snapshot and exact-current-head draft PR checks remain delivery
+requirements; no historical #127 check substitutes for them.
+
+Delivery limits: no merge, rollout, live/local consent or machine configuration
+change, original-session recovery, live broker/provider/Jev round trip, or
+production Node22 execution. HIVE_JUDGE_ENABLED stays false. Request defaults do
+not grant access: ownership/tenant/scopes/approval/opt-outs/prerequisites remain.
+Output protection covers accidental literal output, not deliberate exfiltration.
+Archives and earlier receipts below are preserved; later receipts supersede them.
+
+---
+
+# Rebased review checkpoint — 2026-10-07
+
+Native follow-up branch is fix/grant-receivers-defaults; #127 was externally
+merged, not by this agent. Rebase preserves upstream compaction/deferred-steer
+and generation guards. Full native gate passed 4,715 tests (13 existing skips)
+at 4ea6778, before the final review-driven recovery tests and actual pretty-tools
+PTY/retry integration. Latest focused TypeScript plus 71 tests passed.
+
+Initial 503 and post-attach 503 failures formerly left no re-probe path while
+conversation identity remained attached. Instrumented entrypoint regressions
+proved the stopped HTTP counters; current bounded, identity-checked recovery
+passes both cases and rejects stale/incompatible responses. Stateful fixtures now
+model pre-attach 409 and post-attach 200. Same-session resume and new-local-session
+announcement ordering are covered. Actual registered pretty-tools Bash tests use
+a real PTY/raw sink under an isolated temporary home and force the stock retry;
+no operator home/configuration is written. Native and Factory receiver/runtime
+modules were compared across the actual repository paths, byte-identical.
+
+Factory final-source acceptance (bg-21): 169 tests/15 files passed, published
+Pi 1.0.2 image-contract typecheck and all shipped extension loads passed, and the
+actual synthetic credential-shell smoke passed (split/interleaved streams,
+updates/result/spill, detach and unchanged parent env). Stage modules match source.
+Local Hive metrics and file-length passed. Final native/managed-DB Go gates,
+one final Hive fleet snapshot and linked draft/current-head CI remain pending.
+
+Limits remain: no live broker/provider/Jev round trip, production Node22 runtime
+execution, original-session recovery, merge/deployment, judge activation, or live
+consent/local machine configuration change. HIVE_JUDGE_ENABLED remains false;
+credential broker remains opt-in and approval/tenant/ownership/scopes are intact.
+Literal-output protection is not containment of deliberately malicious commands.
+Archives below are preserved and superseded where noted.
+
+---
+
+# Receiver integration checkpoint — 2026-10-07
+
+Native credential requests and MCP-origin metadata discovery now share a one-shot
+coordinator. Values are installed only into future shell children bound to the
+local SDK session, Hive session and generation. A process-local symbol bridges
+isolated extension loaders. Catalog mappings, reserved keys, expiry, duplicate
+and extra bindings are validated; stale responses cannot install. Expiry timers
+and identity-checked detach discard overrides without touching process.env,
+existing provider/MCP processes, consent files or machine configuration.
+
+Stock SDK Bash, pretty-tools PTY/retry, and background consumers protect literal
+output before SDK accumulation, retained output and raw terminal sinks. Independent
+stdout/stderr redactors plus a combined-output redactor cover split UTF-8,
+interleaved streams and overlap. Per-child snapshots survive receiver detach or
+expiry. This is accidental literal-output protection, NOT containment against
+commands deliberately encoding, writing or transmitting secrets.
+
+Current focused gate: TypeScript and 60 tests across receiver/runtime/real-shell/
+capability/wiring passed. Actual SDK shell tests include updates, returned output,
+and spilled files; actual background tests cover notifications/retained output
+after detach. Earlier full gate ran 4,679 passing tests and one failure solely for
+the undeclared read-only list_credential_catalog; its reviewed read-only metadata
+is now added and the conformance test passes. Final full gate still required.
+
+PR #127 was externally merged; this agent did not merge it. Its prior green SHA
+is historical, not acceptance of this expanded tree. A NEW follow-up draft and
+Hive companion draft remain to publish and verify. No live broker credential,
+provider/Jev round trip, original-session sandbox recovery, deployment or live
+judge activation is claimed. HIVE_JUDGE_ENABLED remains false. Archives below
+are preserved and superseded where noted.
+
+---
+
+# Grant defaults and papercuts — 2026-10-07
+
+Latest authorized scope: default request availability for workspace, credential,
+and host grants in supported sessions. This supersedes the earlier source
+workspace opt-in policy, not authorization/approval or explicit opt-outs. No
+operator config, consent file, deployment, or live judge setting was changed.
+
+Current checkpoint: workspace defaults on for existing configs without a flag;
+explicit false and malformed flag values remain disabled. Remote enablement
+stays off by default. Focused config/workspace/wiring/real-SDK discovery: 61
+passed. Credential receiver/consumer lifecycle, counterpart Factory wiring,
+final combined checks, and delivery of the expanded scope remain pending.
+
+Shell prerequisite: pretty-tools now forwards SDK context through stock/PTY and
+fallback execution while retaining explicit cwd precedence. Parent replaced the
+initial double-unknown call adapter with a public ToolDefinition binding. A
+plain-object spread introduced during cleanup lost inherited/non-enumerable
+context fields; failing real-shell regression plus actual-expression probe
+confirmed the cause. A typed cwd shadow now preserves the context prototype.
+Same probe and all 7 cwd/metadata cases pass; TypeScript passes. Earlier parent
+focused wrapper run passed 16 tests; delegate's earlier 7-file run passed 120.
+No live credential was delivered. API counterpart discovery test only compiled
+and skipped for lack of managed DB; no native/MCP credential wiring is proven.
+
+Draft #127 exists at fe58376 (previous required checks green); that SHA predates
+these uncommitted default changes. Earlier package results below are historical,
+not final-tree evidence. Companion Hive draft has not yet been opened.
+
+---
+
+## Earlier workspace-discovery checkpoint — 2026-10-07
 
 Branch: `fix/grants-judge-papercuts`, baseline `3cbd8465c`. Companion judge restoration: `fix/grants-registry-judge` in Hive (separate draft PR, still in progress).
 

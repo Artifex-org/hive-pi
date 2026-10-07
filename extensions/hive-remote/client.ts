@@ -76,10 +76,12 @@ export interface Capabilities {
 	 * running ahead of the server is the normal state of this pair. A server that
 	 * predates this field would reject the WHOLE attach if it always arrived — the
 	 * HIV-1163 failure class that costs a session its entire conversation. So the
-	 * default-off case (everyone, until the owner opts in) sends a body
-	 * byte-identical to today's: the field is spread in ONLY when true.
+	 * explicitly disabled case omits the field rather than advertising a
+	 * receiver the owner withdrew: the field is spread in ONLY when true.
 	 */
 	can_add_workspace?: boolean;
+	/** Only a ready, session-bound shell receiver on a compatible backend. */
+	can_receive_credentials?: boolean;
 	/**
 	 * Consume a browser answer to a blocked interactive prompt (HIV-1765).
 	 *
@@ -565,6 +567,8 @@ export interface RequestRow {
 	/** The grant id — the path segment the one-shot value fetch is keyed on. */
 	id: string;
 	client_call_id?: string;
+	credentials?: string[];
+	expires_at?: string;
 	verdict: RequestVerdict;
 }
 
@@ -653,8 +657,11 @@ export async function requestAndWait<G = unknown>(
 	sessionID: string,
 	clientCallID: string,
 	body: Record<string, unknown>,
-	opts: { pollMs: number; timeoutMs: number; signal?: AbortSignal },
+	opts: { pollMs: number; timeoutMs: number; signal?: AbortSignal;
+		isCurrent?: () => boolean; deliver?: (row: RequestRow) => Promise<Decision<G>> },
+
 ): Promise<Decision<G>> {
+	if (opts.isCurrent && !opts.isCurrent()) return { verdict: "error", error: "session changed" };
 	const paths = REQUEST_PATHS[kind];
 	const base = `/agent-sessions/${encodeURIComponent(sessionID)}`;
 
@@ -669,6 +676,7 @@ export async function requestAndWait<G = unknown>(
 	let row = created.body;
 	const deadline = Date.now() + opts.timeoutMs;
 	while (!isTerminalVerdict(row.verdict)) {
+		if (opts.isCurrent && !opts.isCurrent()) return { verdict: "error", error: "session changed" };
 		if (opts.signal?.aborted) return { verdict: "error", error: "interrupted" };
 		if (Date.now() >= deadline) return { verdict: "timeout" };
 		await sleep(opts.pollMs);
@@ -691,6 +699,9 @@ export async function requestAndWait<G = unknown>(
 
 	if (row.verdict === "deny" || row.verdict === "expired") return { verdict: row.verdict };
 
+	if (opts.isCurrent && !opts.isCurrent()) return { verdict: "error", error: "session changed" };
+	// Credential native requests and discovery share the same one-shot owner.
+	if (opts.deliver) return opts.deliver(row);
 	// approve | auto → fetch the one-shot value, keyed on the grant id.
 	const value = await request<G>(auth, "GET", `${base}/${paths.grants}/${encodeURIComponent(row.id)}/value`);
 	if (!value.ok || value.body === undefined) {

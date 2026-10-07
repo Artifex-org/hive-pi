@@ -102,6 +102,7 @@ import { registerSendAttachmentTool } from "./sendAttachment.ts";
 import { registerSessionTitleTool } from "./sessionTitle.ts";
 import { loadConfig, writeConfig, type RemoteConfig } from "./config.ts";
 import { registerWorkspaceTools } from "./workspace.ts";
+import { CredentialReceiver, credentialConsumersReady, registerCredentialTools } from "./credentials.ts";
 import { collectPatch, collectWorktree, type WorktreePayload } from "./worktree.ts";
 import { createDeltaQueue, type DeltaQueue } from "./deltaQueue.ts";
 import { openJournal, type Journal } from "./journal.ts";
@@ -347,13 +348,28 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	 * agent loop is not.
 	 */
 	let latestCtx: ExtensionContext | null = null;
+	let rememberedLocalSessionID: string | null = null;
+	let credentialAdvertisementPending = false;
+	const credentials = new CredentialReceiver({
+		enabled: cfg.allowReceiveCredentials === undefined || cfg.allowReceiveCredentials === true,
+		localSessionID: liveLocalSessionID,
+		isCurrent: binding => sessionID === binding.hiveSessionID && lifecycle.generation === binding.generation,
+		consumersReady: () => credentialConsumersReady(pi),
+		onUnavailable: () => { credentialAdvertisementPending = false; queueConversationRefresh(); },
+		notice: text => { pi.sendMessage({ customType: "credential-receipt", content: text, display: true }, { triggerTurn: false }); },
+	});
+	registerCredentialTools(pi, credentials);
 	const teamWaker = createWaker(pi, "team-message");
 	const remember = (ctx: ExtensionContext) => {
 		latestCtx = ctx;
+		try { rememberedLocalSessionID = ctx.sessionManager.getSessionId(); } catch { rememberedLocalSessionID = null; }
 	};
 	/** Read the live session directory synchronously. A retained context can go
 	 * stale during resume/fork/reload; absence is not permission to fall back to
 	 * the process launch root, which may be a different checkout entirely. */
+	function liveLocalSessionID(): string | null {
+		try { return latestCtx?.sessionManager.getSessionId() ?? null; } catch { return null; }
+	}
 	const liveCwd = (): string | null => {
 		try {
 			return latestCtx?.cwd ?? null;
@@ -400,12 +416,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	let lastAttachError = "";
 
 	let clientRunID = "";
+	let attachedRunID = "", attachingRunID = "";
 	let unsubscribeSession: (() => void) | undefined;
 	unsubscribeSession = pi.events.on(HIVE_SESSION_CHANNEL, (data: unknown) => {
 		const id = (data as HiveSessionEvent | undefined)?.clientRunID;
 		if (typeof id !== "string" || !id || id === clientRunID) return;
 		clientRunID = id;
 		deferredSteers.length = 0;
+		credentials.detach(); credentialAdvertisementPending = false;
 		// A new run means a new session row: drop the old binding so the next
 		// attach targets the row telemetry is actually writing to.
 		sessionID = null;
@@ -1796,6 +1814,15 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	async function pollOnce(): Promise<void> {
 		if (!auth || !sessionID || polling) return;
+		const credentialAuth = auth, credentialSession = sessionID, credentialGeneration = lifecycle.generation;
+		void (async () => {
+			if (await credentials.recover(credentialAuth, credentialSession, credentialGeneration)) credentialAdvertisementPending = true;
+			if (credentialAdvertisementPending) {
+				queueConversationRefresh(); // Retry until a current-identity capability PUT succeeds.
+				return;
+			}
+			await credentials.poll();
+		})().catch(() => { /* No raw delivery errors in logs/transcript. */ });
 		polling = true;
 		const generation = lifecycle.generation;
 		const targetSession = sessionID;
@@ -1832,6 +1859,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		if (!cwd) return;
 		attaching = true;
 		const generation = lifecycle.generation;
+		const attachRunID = clientRunID, attachLocalID = liveLocalSessionID();
+		attachingRunID = attachRunID;
+		const attachIsCurrent = () => isCurrentRemoteLifecycle(lifecycle, generation) && clientRunID === attachRunID && liveLocalSessionID() === attachLocalID;
 		try {
 			const resolved = readAuth(cfg.url);
 			if (!resolved) {
@@ -1846,13 +1876,15 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			// the case /hive-remote-status reports explicitly rather than silently
 			// looking enabled while doing nothing.
 			if (!clientRunID) return;
-			const resolvedSession = await resolveSession(auth, clientRunID);
-			if (!isCurrentRemoteLifecycle(lifecycle, generation)) return;
+			const resolvedSession = await resolveSession(auth, attachRunID);
+			if (!attachIsCurrent()) return;
 			if (!resolvedSession) {
 				lastAttachError = "Hive does not know this run id yet — waiting for hive-telemetry's first flush";
 				return;
 			}
 
+			const credentialCapable = await credentials.probe(auth, resolvedSession);
+			if (!attachIsCurrent()) return;
 			const project = resolveProject(cwd);
 			// Blocking (a subprocess, for a session nobody launched) — which is
 			// why it is HERE, on the attach timer, and not in a handler.
@@ -1902,6 +1934,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// class that costs a session its conversation. Off (the default) must
 				// send a body byte-identical to today's.
 				...(workspaceEnabled ? { can_add_workspace: true } : {}),
+				...(credentialCapable ? { can_receive_credentials: true } : {}),
 				// Same spread-only-when-true rule, same HIV-1163 reason. Gated on a
 				// LISTENER having announced itself — never on config alone: this flag
 				// draws an answer form, and a form nothing is waiting behind is worse
@@ -1924,9 +1957,12 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				...(cfg.allowSteer ? { can_attach_files: true } : {}),
 				catalog: buildCatalog(pi.getCommands(), availableModels()),
 			});
-			if (!isCurrentRemoteLifecycle(lifecycle, generation)) return;
+			if (!attachIsCurrent()) return;
 			if (res.ok) {
+				attachedRunID = attachRunID;
 				sessionID = resolvedSession;
+				credentialAdvertisementPending = false;
+				if (credentialCapable) credentials.bind(auth, resolvedSession, generation);
 				lastAttachError = "";
 				// The journal is named after the session, so this is the first
 				// moment it can exist. A re-attach replaces it rather than
@@ -1993,7 +2029,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		}
 	}
 
-	/** Re-attach with the latest title after Pi session metadata changes. */
+	/** Refresh the whole record; receiver discovery awaits its acknowledgement. */
 	function queueConversationRefresh(): void {
 		if (!auth || !sessionID || lifecycle.titleTimer) return;
 		const generation = lifecycle.generation;
@@ -2015,7 +2051,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 					// spawning anything. This runs on a detached timer, never inside a
 					// handler, so the fallback's subprocess cannot stall the agent loop.
 					const terminal = resolveTerminal();
-					await attach(currentAuth, currentSessionID, {
+					const credentialCapability = credentials.ready();
+					const acknowledgement = await attach(currentAuth, currentSessionID, {
 						title: pi.getSessionName() ?? project.projectHint,
 						branch: resolveBranch(cwd),
 						worktree: cwd,
@@ -2061,6 +2098,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// first title refresh, exactly as the terminal comment warns.
 						// Still spread conditionally: an old server must see today's body.
 						...(workspaceEnabled ? { can_add_workspace: true } : {}),
+						...(credentialCapability ? { can_receive_credentials: true } : {}),
 						// Same spread-only-when-true rule, same HIV-1163 reason. Gated on a
 						// LISTENER having announced itself — never on config alone: this
 						// flag draws an answer form, and a form nothing is waiting behind is
@@ -2075,9 +2113,13 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						...(cfg.allowSteer ? { can_attach_files: true } : {}),
 						catalog: buildCatalog(pi.getCommands(), availableModels()),
 					});
+					if (acknowledgement.ok && credentialCapability && credentials.ready() &&
+						currentAuth === auth && currentSessionID === sessionID && isCurrentRemoteLifecycle(lifecycle, generation)) {
+						credentialAdvertisementPending = false;
+					}
 				} catch {
-					// A title refresh is cosmetic. It must never affect the agent loop
-					// or stop the regular attach/streaming retry path.
+					// Failures do not affect the agent loop or regular streaming retries;
+					// credential discovery stays gated until a current-identity refresh succeeds.
 				}
 			})();
 		}, 0);
@@ -2088,6 +2130,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		deferredSteers.length = 0;
 		compacting = false;
 		polling = false;
+		credentials.detach(); credentialAdvertisementPending = false;
 		yskBridge.detach();
 		invalidateRemoteLifecycle(lifecycle);
 		attaching = false;
@@ -2207,7 +2250,19 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		// A compact command may arrive before the first turn. Retain the session
 		// context so the capability declared at attach is immediately actionable.
 		pi.on("session_start", (_event, ctx) => {
+			const previousLocal = rememberedLocalSessionID;
 			remember(ctx);
+			if (previousLocal && previousLocal !== liveLocalSessionID()) {
+				credentials.detach(); credentialAdvertisementPending = false;
+				// A fresh telemetry announcement may arrive before this handler.
+				// Keep that id, but never bind the new local session to the old run.
+				const previousRun = attachedRunID || attachingRunID || clientRunID;
+				if (clientRunID === previousRun) clientRunID = "";
+				attachedRunID = ""; attachingRunID = "";
+				lifecycle.generation++; attaching = false; sessionID = null;
+				deferredSteers.length = 0; compacting = false; polling = false;
+				announceRemoteAnswers(false);
+			}
 		});
 
 		// Detail-rail recap after compaction. Gated on THIS extension being on

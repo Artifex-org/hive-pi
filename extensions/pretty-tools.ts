@@ -4,6 +4,8 @@ import { dirname, relative, resolve } from "node:path";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
 	createBashTool,
+	createBashToolDefinition,
+	createLocalBashOperations,
 	createEditTool,
 	createFindTool,
 	createGrepTool,
@@ -24,6 +26,7 @@ import { blockedNote, ptyAvailable, ptyBashOperations } from "./pty-exec/ops.ts"
 import type { BlockedVerdict } from "./pty-exec/stdinWatch.ts";
 import { TerminalSurfaceBridge } from "./pty-exec/terminalSurface.ts";
 import { exposureFor } from "./loadout/policy.ts";
+import { credentialOperations, credentialRedactor, registerCredentialConsumer } from "./hive-remote/credential-runtime.ts";
 
 const PREVIEW_LINES = 4;
 
@@ -458,9 +461,11 @@ export function builtinMeta<P>(tool: BuiltinMeta<P>): BuiltinMeta<P> {
 }
 
 export default function prettyTools(pi: ExtensionAPI) {
+	const releaseCredentialConsumer = registerCredentialConsumer("bash");
+	pi.on("session_shutdown", () => releaseCredentialConsumer());
 	const cwd = process.cwd();
 	const read = createReadTool(cwd);
-	const bash = createBashTool(cwd);
+	const bash: ToolDefinition<ReturnType<typeof createBashTool>["parameters"]> = createBashTool(cwd);
 	const edit = createEditTool(cwd);
 	const write = createWriteTool(cwd);
 	const grep = createGrepTool(cwd);
@@ -539,7 +544,9 @@ export default function prettyTools(pi: ExtensionAPI) {
 		 * all untouched and guards-bridge still matches `bash` on `tool_call`
 		 * exactly as before.
 		 */
-		execute: (id, params, signal, onUpdate) => {
+		execute: (id, params, signal, onUpdate, ctx) => {
+			// Keep explicit cwd precedence while retaining SDK session metadata.
+			const runContext: typeof ctx = params.cwd && ctx ? Object.create(ctx, { cwd: { value: params.cwd } }) : ctx;
 			// WHERE IT RUNS, decided before either backend sees the command, so the
 			// pty path and the stock fallback cannot disagree about it. The rules
 			// are in toolcwd/cwd.ts, pure and tested; the note is null for the
@@ -551,7 +558,8 @@ export default function prettyTools(pi: ExtensionAPI) {
 			const withNote = <T extends { content: unknown }>(result: T): T =>
 				cwdNote ? { ...result, content: appendHint(result.content, `\n\n[harness] ${cwdNote}`) } : result;
 
-			if (!ptyAvailable()) return bash.execute(id, runParams, signal, onUpdate).then(withNote);
+			const stock = () => createBashToolDefinition(cwd, { operations: credentialOperations(createLocalBashOperations(), runContext?.sessionManager?.getSessionId?.()) });
+			if (!ptyAvailable()) return stock().execute(id, runParams, signal, onUpdate, runContext).then(withNote);
 
 			/**
 			 * `onUpdate` fires only when output arrives — which is precisely never
@@ -600,9 +608,13 @@ export default function prettyTools(pi: ExtensionAPI) {
 			const geometry = surface?.geometry();
 			surface?.beginCommand(id, runParams.command, cwd);
 
+			const ptyRawRedactor = credentialRedactor(runContext?.sessionManager?.getSessionId?.());
 			const operations = ptyBashOperations({
 				onBlocked,
-				onRaw: surface ? (chunk) => surface.writeOutput(chunk) : undefined,
+				onRaw: surface ? (chunk) => {
+					const safe = ptyRawRedactor.push(chunk);
+					if (safe.length > 0) surface.writeOutput(safe);
+				} : undefined,
 				// A human at the terminal owns the session: never close stdin from
 				// under someone who is typing.
 				hasHuman: surface ? () => surface.hasLease() : undefined,
@@ -623,17 +635,21 @@ export default function prettyTools(pi: ExtensionAPI) {
 						}
 					: undefined,
 			});
-			if (!operations) return bash.execute(id, runParams, signal, onUpdate).then(withNote);
+			if (!operations) return stock().execute(id, runParams, signal, onUpdate, runContext).then(withNote);
 
 			// Constructed PER CALL: each call needs its own watch, its own raw sink
 			// and its own tty file. Mirrors the gondolin example's shape.
-			const tool = createBashTool(cwd, { operations });
-			return tool.execute(id, runParams, signal, forward).then(
+			const tool = createBashToolDefinition(cwd, { operations: credentialOperations(operations, runContext?.sessionManager?.getSessionId?.()) });
+			return tool.execute(id, runParams, signal, forward, runContext).then(
 				(result) => {
+					const tail = ptyRawRedactor.flush();
+					if (tail.length) surface?.writeOutput(tail);
 					surface?.endCommand(id, 0);
 					return withNote(result);
 				},
 				(err: unknown) => {
+					const tail = ptyRawRedactor.flush();
+					if (tail.length) surface?.writeOutput(tail);
 					surface?.endCommand(id, null);
 					throw err;
 				},
@@ -641,7 +657,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 				// `script` missing or unrunnable. PTY mode has latched itself off, so
 				// retrying on the stock backend costs one command, not every command.
 				if (err instanceof Error && err.message === "pty-unavailable") {
-					return bash.execute(id, runParams, signal, onUpdate).then(withNote);
+					return stock().execute(id, runParams, signal, onUpdate, runContext).then(withNote);
 				}
 				throw err;
 			});

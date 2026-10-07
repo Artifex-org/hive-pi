@@ -55,6 +55,41 @@ its project, and the transcript follows it live.
 | `/hive-remote-off` | stop reporting; keeps the credential |
 | `/hive-remote-status` | enabled / attached / queued events / capabilities / **last attach error** |
 
+### Credential receipt
+
+`list_credential_catalog` and `request_credential` remain discoverable for safe
+diagnostics. `allowReceiveCredentials` defaults on when absent; explicit false
+or malformed values fail closed. Remote consent is independently opt-in. A
+credential capability is advertised only with a local/Hive session binding,
+actual protected shell consumers and a compatible, configured backend. The
+backend readiness probe accepts 200 or 409 (receiver not attached yet), never
+404/503. Owner approval and catalog policy remain mandatory. A successful 200
+must carry the discovery schema; 409 is the ready-backend/no-receiver handshake.
+Readiness retries at most once per existing command-poll tick, with one probe in
+flight. Initial or later backend failure withdraws capability without dropping
+conversation identity. Recovery revalidates the current local/Hive/generation
+binding and waits for a successful current-identity capability acknowledgement
+before discovery, retrying failed refreshes on the existing timer; it never reclaims
+consumed values or changes consent. Repeated starts of the same local session keep
+the binding, while actual replacement invalidates pending work.
+
+Native and MCP-origin requests share one one-shot delivery coordinator. A grant
+installs only into future shell children for that local session/generation;
+it does not mutate parent `process.env`, existing LLM/provider authentication,
+MCP processes or configuration files. Fresh catalog names/env mappings are
+validated and protected launch/identity/provider/runtime keys are rejected.
+Expiry and detach remove overrides. In-flight stale replies cannot install.
+
+Literal output is redacted before SDK accumulation/temp files, PTY raw sinks,
+background notifications and retained logs, with child snapshots surviving
+expiry/detach. This protects accidental literal output, **not containment of
+arbitrary shell code**: an authorized command can deliberately encode, write or
+transmit a secret. A consumed/failed/lost one-shot value requires a fresh request
+and approval; approved is not installed. A transient catalog failure before the
+value fetch may retry. Each attached receiver retains at most 512 receipt/status
+entries and 32 active grants; exhausted receiver state requires an operator
+restart, not self-reconfiguration.
+
 ### Config
 
 `~/.pi/agent/hive-telemetry/hive-remote.config.json` (0600). The directory name
@@ -66,7 +101,8 @@ is frozen and shared — see [hive-common](../hive-common/README.md).
 | `url` | — | endpoint fallback; the credential's URL wins |
 | `flushIntervalMs` | `2000` | transcript flush cadence (floor 500) |
 | `allowSteer` | `true` | accept steer / follow-up from the browser |
-| `allowAddWorkspace` | `false` | operator opt-in to workspace requests; restart after changing |
+| `allowReceiveCredentials` | `true` | allow native/MCP credential requests to be received into future shell children; does not enable remote reporting or auto-approval |
+| `allowAddWorkspace` | `true` | request availability only; explicit false/malformed values disable requests, not diagnostic discovery |
 | `allowInterrupt` | `true` | accept interrupt (`ctx.abort()`) |
 | `allowKill` | `true` | accept kill — ends the **session**, not the turn |
 | `streamDeltas` | `true` | stream partial assistant text for smooth rendering |
@@ -94,11 +130,17 @@ at turn end plus a 60s backstop rather than on the 5s status tick.
 
 ### Workspace grants
 
+`allowAddWorkspace` defaults to `true`; malformed non-boolean settings are
+rejected as disabled. This default changes request availability, not approval
+or the remote reporting/transcript consent boundary.
+
 `request_workspace` and `list_workspace_catalog` are deferred native pi tools,
 not Hive MCP tools. Discover them with `load_tools` or `tool_search`. When
 `allowAddWorkspace` is off, both return diagnostics without any network or clone
-work. `/hive-remote-on` does not opt into grants. Only the operator may enable
-that setting, followed by a session restart; no workspace capability is declared
+work. Workspace request availability defaults on once remote integration is
+enabled; it does not enable remote reporting or approve access. An explicit
+`allowAddWorkspace: false` remains an opt-out. The operator can re-enable that
+setting, followed by a session restart; no workspace capability is declared
 while it is off. Server policy and approval still apply when it is on.
 
 An approved grant's value is delivered once. A repeated request returning HTTP
