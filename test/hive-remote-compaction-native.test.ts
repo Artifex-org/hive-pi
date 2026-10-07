@@ -16,11 +16,16 @@ afterEach(async () => {
 
 // Real SDK + offline provider: ExtensionAPI.sendUserMessage is VOID and catches
 // rejected prompts internally. Awaiting it in a fake would hide this bug.
-it.each(["success", "cancel"] as const)("delivers a remote continue after manual compaction %s", async (outcome) => {
+it.each(["success", "failure", "cancel"] as const)("delivers a remote continue after manual compaction %s", async (outcome) => {
 	const cwd = await mkdtemp(join(tmpdir(), "hive-remote-compact-"));
 	cleanups.push(() => rm(cwd, { recursive: true, force: true }));
 	const faux = fauxProvider({ provider: "remote-compact-test", models: [{ id: "test", name: "test", reasoning: false, input: ["text"], contextWindow: 16000, maxTokens: 1000 }] });
-	faux.setResponses([fauxAssistantMessage("Initial task done. ".repeat(200)), fauxAssistantMessage("Ready to continue."), fauxAssistantMessage("Continued successfully.")]);
+	faux.setResponses([
+		fauxAssistantMessage("Initial task done. ".repeat(200)),
+		fauxAssistantMessage("Ready to continue."),
+		...(outcome === "failure" ? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "fixture compaction failure" })] : []),
+		fauxAssistantMessage("Continued successfully."),
+	]);
 	const runtime = await ModelRuntime.create({ authPath: join(cwd, "auth.json"), modelsPath: null, modelsStorePath: join(cwd, "models-store.json"), refreshOnCreate: false });
 	runtime.registerNativeProvider(faux.provider);
 	const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 100 } });
@@ -54,6 +59,7 @@ it.each(["success", "cancel"] as const)("delivers a remote continue after manual
 			entered = true;
 			await held;
 			if (outcome === "cancel") return { cancel: true };
+			if (outcome === "failure") return; // run the real summarizer against the failing faux response
 			return { compaction: { summary: "Initial task done.", firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore } };
 		});
 	};
@@ -83,7 +89,7 @@ it.each(["success", "cancel"] as const)("delivers a remote continue after manual
 	if (outcome === "success") expect(result).toHaveProperty("summary", "Initial task done.");
 	else expect(result).toBeInstanceOf(Error);
 	await vi.waitFor(() => expect(session.getLastAssistantText()).toBe("Continued successfully."), { timeout: 3500 });
-	expect(faux.state.callCount).toBe(3);
+	expect(faux.state.callCount).toBe(outcome === "failure" ? 4 : 3);
 	expect(session.messages.filter((message) => message.role === "user" && (typeof message.content === "string" ? message.content === "continue" : message.content.some((part) => part.type === "text" && part.text === "continue")))).toHaveLength(1);
 	expect(errors.filter((error) => error.includes("Cannot submit a prompt while compaction"))).toEqual([]);
 }, 12000);
