@@ -19,8 +19,11 @@ Initial full local check: 4601 passed / 30 failed / 13 unchanged skips, 11 error
 Failures include sandbox-blocked Unix sockets (EPERM), shared scratch paths (EROFS),
 and loopback requests inherited through the egress proxy. Focused watchdog suite
 passes all 5 with local proxy isolation. Final full suite with loopback NO_PROXY
-is running; Unix-socket/shared-path policy is not bypassed. Publication/final-head
-GitHub gate pending at this checkpoint.
+also failed locally: 4604 passed / 30 failed / 13 unchanged skips, 11 errors, in
+six existing socket/surface/watchdog files. Unix-socket/shared-path policy is not
+bypassed. Focused 134 YSK tests and typecheck pass. Source commit 6e2371c is
+published at https://github.com/Artifex-org/hive-pi/pull/124 (draft); final-head
+GitHub check and gitleaks are being watched outside the sandbox.
 
 Live synthetic replay: 24 frozen labels, 16 IMPORTANT; 9 JEV calls, 4310 input +
 378 output reported tokens, median 250ms/p95 406ms. Would skip 2/24, IMPORTANT
@@ -34,3 +37,6 @@ See extensions/you-should-know/prefilter-evaluation.md for evidence/caveats.
 Controller received approach, quota, measured results and policy blocker via
 steer_agent follow_up. No actual filtering or deployment claimed; keep session
 available for controller review/steering after PR delivery.
+
+KB journal persisted directly: knowledge-base/journal/2026-10-07-ysk-prefilter-shadow.md,
+commit 8fed032bc2ff3c31e04811533db028eec60fa962. No merge/deployment authorized.
