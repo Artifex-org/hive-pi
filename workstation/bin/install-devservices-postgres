@@ -12,23 +12,35 @@
 # (initdb + server + psql round trip; harmless "no version information"
 # warnings on stderr).
 #
+# The same project publishes macOS builds (aarch64/x86_64-apple-darwin), so the
+# target is picked from the host instead of always fetching the Linux x86_64
+# one, which on a Mac produced binaries that cannot execute (andreas-mbp,
+# 2026-10-07: readiness "dev postgres absent" with no way to fix it).
+#
 # Idempotent: re-running replaces the version dir and repoints the symlink.
 set -euo pipefail
 
 VER="${1:-18.4.0}"
 ROOT="$HOME/.hive/tools"
 DEST="$ROOT/postgres-$VER"
-URL="https://github.com/theseus-rs/postgresql-binaries/releases/download/$VER/postgresql-$VER-x86_64-unknown-linux-gnu.tar.gz"
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64) TARGET=x86_64-unknown-linux-gnu ;;
+  Linux/aarch64 | Linux/arm64) TARGET=aarch64-unknown-linux-gnu ;;
+  Darwin/arm64) TARGET=aarch64-apple-darwin ;;
+  Darwin/x86_64) TARGET=x86_64-apple-darwin ;;
+  *) echo "install-devservices-postgres: no portable build for $(uname -s)/$(uname -m)" >&2; exit 1 ;;
+esac
+URL="https://github.com/theseus-rs/postgresql-binaries/releases/download/$VER/postgresql-$VER-$TARGET.tar.gz"
 
 mkdir -p "$ROOT"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-echo "downloading postgresql $VER (glibc portable build)..." >&2
+echo "downloading postgresql $VER ($TARGET portable build)..." >&2
 curl -fsSL -o "$tmp/pg.tar.gz" "$URL"
 tar -xzf "$tmp/pg.tar.gz" -C "$tmp"
 rm -rf "$DEST"
-mv "$tmp/postgresql-$VER-x86_64-unknown-linux-gnu" "$DEST"
+mv "$tmp/postgresql-$VER-$TARGET" "$DEST"
 
 # Arch compat: libxml2 soname moved from .so.2 to .so.16 upstream.
 if [ ! -e /usr/lib/libxml2.so.2 ] && [ -e /usr/lib/libxml2.so.16 ]; then
