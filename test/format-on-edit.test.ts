@@ -284,7 +284,9 @@ function script(path: string, body: string): void {
 }
 
 /** A prettier stand-in that collapses runs of spaces — enough to change a file. */
-const COLLAPSE_SPACES = 'for f in "$@"; do case "$f" in -*) ;; *) sed -i "s/  */ /g" "$f";; esac; done';
+// Not `sed -i`: BSD sed (macOS) reads the next argument as a backup suffix and
+// failed every case here with "invalid command code".
+const COLLAPSE_SPACES = 'for f in "$@"; do case "$f" in -*) ;; *) sed "s/  */ /g" "$f" > "$f.tmp" && mv "$f.tmp" "$f";; esac; done';
 
 function formatPlan(command: string, cwd: string, file: string, label = "prettier --write"): Extract<Plan, { kind: "format" }> {
 	return { kind: "format", formatter: "prettier", steps: [{ label, command, args: [file], cwd }] };

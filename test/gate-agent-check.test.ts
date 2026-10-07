@@ -9,6 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -261,9 +262,15 @@ describe("the vendored gate stays reachable", () => {
 		const dir = await gitDir("abort-gate-");
 		await executable(join(dir, "vendor", "quality-gate", "quality-gate"), `echo run >> "${dir}/runs"\nsleep 30`);
 		const controller = new AbortController();
-		setTimeout(() => controller.abort(), 300);
 		execCalls = 0;
-		const result = await call(dir, { mode: "quick" }, controller.signal);
+		const pending = call(dir, { mode: "quick" }, controller.signal);
+		// Abort once the gate has demonstrably started, not after a fixed 300ms:
+		// on macOS the spawn had not reached its first line by then, so `runs`
+		// never existed and the run-once assertion below had nothing to read.
+		const deadline = Date.now() + 10_000;
+		while (!existsSync(join(dir, "runs")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+		controller.abort();
+		const result = await pending;
 		expect(execCalls).toBe(0);
 		expect(text(result)).toMatch(/^NO VERDICT — the gate was terminated/);
 		expect(await readFile(join(dir, "runs"), "utf8")).toBe("run\n");
