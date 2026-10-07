@@ -55,6 +55,8 @@ export interface ProbeDeps {
 	now: () => number;
 	env: Record<string, string | undefined>;
 	home: string;
+	/** process.platform when omitted; injected so a test can be any OS. */
+	platform?: NodeJS.Platform;
 	cwd: string;
 	exists: (path: string) => boolean;
 	listDir: (path: string) => string[];
@@ -573,8 +575,24 @@ function installHint(version: string | null): string {
 	return `run \`npx playwright-core@${version ?? "<pinned>"} install chromium-headless-shell\` on the host`;
 }
 
+/**
+ * Where playwright keeps its browsers, resolved the way playwright does:
+ * PLAYWRIGHT_BROWSERS_PATH, else `~/Library/Caches/ms-playwright` on macOS,
+ * else `$XDG_CACHE_HOME/ms-playwright` or `~/.cache/ms-playwright`. Reading
+ * only the Linux path told every Mac its installed browser was absent
+ * (andreas-mbp, 2026-10-07). "0" means "inside node_modules", which this
+ * probe does not resolve, so it falls back to the default.
+ */
+export function playwrightCacheRoot(deps: Pick<ProbeDeps, "env" | "home" | "platform">): string {
+	const override = deps.env.PLAYWRIGHT_BROWSERS_PATH?.trim();
+	if (override && override !== "0") return override;
+	if ((deps.platform ?? process.platform) === "darwin") return `${deps.home}/Library/Caches/ms-playwright`;
+	const xdg = deps.env.XDG_CACHE_HOME?.trim();
+	return `${xdg || `${deps.home}/.cache`}/ms-playwright`;
+}
+
 export const browserProbe: Probe = async (deps) => {
-	const root = `${deps.home}/.cache/ms-playwright`;
+	const root = playwrightCacheRoot(deps);
 	if (!deps.exists(root)) {
 		return {
 			id: "browser",

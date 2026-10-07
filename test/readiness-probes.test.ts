@@ -18,6 +18,7 @@ import {
 	mcpServerProbes,
 	nativeToolCount,
 	openrouterProbe,
+	playwrightCacheRoot,
 	postgresProbe,
 	repoProbe,
 	runProbe,
@@ -33,6 +34,8 @@ function deps(overrides: Partial<ProbeDeps> = {}): ProbeDeps {
 		now: () => NOW,
 		env: {},
 		home: "/home/test",
+		// Pinned so these Linux-shaped fixtures mean the same on a Mac runner.
+		platform: "linux",
 		cwd: "/repo",
 		exists: () => false,
 		listDir: () => [],
@@ -438,6 +441,35 @@ describe("devservices postgres", () => {
 		const out = await postgresProbe(deps());
 		expect(out.status).toBe("absent");
 		expect(out.hint).toContain("install-devservices-postgres");
+	});
+});
+
+describe("playwrightCacheRoot", () => {
+	// Playwright's own resolution. Reading only the Linux path told every Mac
+	// its installed browser was absent (andreas-mbp, 2026-10-07).
+	it("follows the OS default, XDG_CACHE_HOME and an explicit override", () => {
+		expect(playwrightCacheRoot({ env: {}, home: "/Users/a", platform: "darwin" })).toBe("/Users/a/Library/Caches/ms-playwright");
+		expect(playwrightCacheRoot({ env: {}, home: "/home/a", platform: "linux" })).toBe("/home/a/.cache/ms-playwright");
+		expect(playwrightCacheRoot({ env: { XDG_CACHE_HOME: "/x" }, home: "/home/a", platform: "linux" })).toBe("/x/ms-playwright");
+		expect(playwrightCacheRoot({ env: { PLAYWRIGHT_BROWSERS_PATH: "/pw" }, home: "/Users/a", platform: "darwin" })).toBe("/pw");
+		// "0" is "inside node_modules", which the probe does not resolve.
+		expect(playwrightCacheRoot({ env: { PLAYWRIGHT_BROWSERS_PATH: "0" }, home: "/home/a", platform: "linux" })).toBe(
+			"/home/a/.cache/ms-playwright",
+		);
+	});
+
+	it("finds a browser installed in the macOS cache", async () => {
+		const root = "/Users/test/Library/Caches/ms-playwright";
+		const out = await browserProbe(
+			deps({
+				home: "/Users/test",
+				platform: "darwin",
+				exists: (p) => p === root || p === `${root}/chromium_headless_shell-1234/INSTALLATION_COMPLETE`,
+				listDir: (p) => (p === root ? ["chromium_headless_shell-1234", "ffmpeg-1011"] : []),
+			}),
+		);
+		expect(out.status).toBe("ready");
+		expect(out.detail).toBe("chromium_headless_shell-1234");
 	});
 });
 
