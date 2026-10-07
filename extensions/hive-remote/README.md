@@ -69,8 +69,10 @@ Readiness retries at most once per existing command-poll tick, with one probe in
 flight. Initial or later backend failure withdraws capability without dropping
 conversation identity. Recovery revalidates the current local/Hive/generation
 binding and waits for a successful current-identity capability acknowledgement
-before discovery, retrying failed refreshes on the existing timer; it never reclaims
-consumed values or changes consent. Repeated starts of the same local session keep
+before discovery. Initial attach and refresh writes serialize within this client
+instance even across lifecycle replacement; updates coalesce and ACKs must match
+the binding revision. Failed refreshes retry on the existing timer; recovery never
+reclaims consumed values or changes consent. Repeated starts of the same local session keep
 the binding, while actual replacement invalidates pending work.
 
 Native and MCP-origin requests share one one-shot delivery coordinator. A grant

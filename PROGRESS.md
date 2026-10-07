@@ -1,3 +1,64 @@
+# Durable ordering regression completion — 2026-10-07
+
+Factory now retains six permanent real-entrypoint/HTTP receiver regressions in
+hive-remote/refresh-ordering.test.ts and a minimal serial event fixture outside
+the shipping extension source directories (test-support/refresh-fixture.ts).
+Only SDK shell construction is mocked there; the separate pinned real-shell
+smoke and earlier actual staged entrypoint probes passed. No capability/receiver
+or HTTP stubs bypass readiness. Source-specific tests run in the normal piext gate.
+
+The sixth case reproduced queued initial attach caching consumer readiness after
+the consumer was lost. Both clients revalidate protected consumers at dispatch,
+and withdraw capability on ACK if the initial bind cannot become current. That
+same failing predicate now passes in native and Factory; no assertions loosened.
+Native final gate bg38 passed TypeScript +4,753 tests/289 files,13 existing
+skips. Factory final gate bg39 includes all latest code/tests. Older Hive12713
+test5 attempt1 was lost, not a measured assertion failure; attempt2 is running.
+Promise-tail serialization is within one extension instance; HTTP timeout or
+lost response can leave server commit outcome ambiguous, not solved by client
+ordering. No cross-process/server-CAS guarantee or live recovery claim.
+
+---
+
+# Refresh ordering follow-up — 2026-10-07
+
+Isolated follow-up after conflict repair09abf475 (PR132 MERGEABLE, GitHub
+check + both scans green; REVIEW_REQUIRED, not merge/release authorization).
+Independent investigation confirmed server omission clears credential capability.
+Three failing instrumented probes measured reversed [false,true,false,false]
+commits,4 concurrent PUTs/10 requests under persistent503, and3 discoveries
+released by a previous same-lifecycle binding's ACK.
+
+Initial attach and refresh now share a retained promise tail across cleanup.
+Refresh updates coalesce into one dirty bit; no queued payload backlog and no
+new retry timer. ACKs must match the current receiver binding revision as well
+as auth/session/lifecycle. Five behavioral probes passed on native and the
+actual freshly staged Factory1.0.2 entrypoint: delayed false→true, persistent503,
+same-lifecycle replacement, replacement attach ordering and shutdown discard.
+Factory probe used the native fake-Pi fixture, changed only module imports and
+initial backend503 (Factory registers its own shell consumer); scratch fixture
+removed, no production fake/stub consumer. Native permanent regressions retained.
+
+Native focused types/79 tests passed; bg34 full gate4749 passed/13 existing
+skips. New terminal-journal/recovery and generation-fenced child assertions pass;
+final full gate bg36 passed4,752 tests/289 files,13 existing skips.
+PR132 was subsequently externally MERGED at09abf475, not by this agent;
+ordering work is published separately, never pushed to its closed branch. Factory bg35:169 tests/15 files, pinned types/every module
+load, actual synthetic shell smoke, Go Factory embedding race all passed; metrics
+was NOT RUN due my invalid --check flag, then correct default metrics invocation
+passed. File-length/diff checks passed. Shared receiver sources byte-identical.
+Read-only reviewer found no scoped actionable gap and did not execute tests.
+
+Hive12713/c55e4387 is still watched (bg33 after bg31 watch timeout), not green
+acceptance yet:15/18 finished, test5 running and two coverage gates pending at
+last observation. No second fleet snapshot dispatched. Client ordering does not
+resolve an ambiguous HTTP outcome or provide cross-process server revisions;
+no claim of live broker/provider/Jev round trips, original-session recovery or
+production Node22 verification. Judge remains false; no merge/deploy/config or
+consent change. Cam owns separate title/identity work and has been coordinated.
+
+---
+
 # PR132 conflict integration — 2026-10-07
 
 User requested resolution of the new main conflict. Both PRs remain open; they

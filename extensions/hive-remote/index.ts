@@ -350,6 +350,15 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	let latestCtx: ExtensionContext | null = null;
 	let rememberedLocalSessionID: string | null = null;
 	let credentialAdvertisementPending = false;
+	let refreshActive = false, refreshDirty = false;
+	// Keep the write tail across cleanup: old in-flight PUTs must settle before
+	// a replacement lifecycle can publish to the same conversation record.
+	let conversationWrite = Promise.resolve();
+	function publishConversation(current: () => boolean, write: () => ReturnType<typeof attach>): Promise<Awaited<ReturnType<typeof attach>> | null> {
+		const next = conversationWrite.then(() => current() ? write() : null);
+		conversationWrite = next.then(() => {}, () => {});
+		return next;
+	}
 	const credentials = new CredentialReceiver({
 		enabled: cfg.allowReceiveCredentials === undefined || cfg.allowReceiveCredentials === true,
 		localSessionID: liveLocalSessionID,
@@ -1889,7 +1898,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			// Blocking (a subprocess, for a session nobody launched) — which is
 			// why it is HERE, on the attach timer, and not in a handler.
 			const terminal = resolveTerminal();
-			const res = await attach(auth, resolvedSession, {
+			const attachAuth = auth;
+			const res = await publishConversation(attachIsCurrent, () => attach(attachAuth, resolvedSession, {
 				title: pi.getSessionName() ?? project.projectHint,
 				branch: resolveBranch(cwd),
 				worktree: cwd,
@@ -1934,7 +1944,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// class that costs a session its conversation. Off (the default) must
 				// send a body byte-identical to today's.
 				...(workspaceEnabled ? { can_add_workspace: true } : {}),
-				...(credentialCapable ? { can_receive_credentials: true } : {}),
+				...(credentialCapable && credentialConsumersReady(pi) ? { can_receive_credentials: true } : {}),
 				// Same spread-only-when-true rule, same HIV-1163 reason. Gated on a
 				// LISTENER having announced itself — never on config alone: this flag
 				// draws an answer form, and a form nothing is waiting behind is worse
@@ -1956,13 +1966,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// when steer is on — an attachment is a steer argument.
 				...(cfg.allowSteer ? { can_attach_files: true } : {}),
 				catalog: buildCatalog(pi.getCommands(), availableModels()),
-			});
-			if (!attachIsCurrent()) return;
+			}));
+			if (!res || !attachIsCurrent()) return;
 			if (res.ok) {
 				attachedRunID = attachRunID;
 				sessionID = resolvedSession;
 				credentialAdvertisementPending = false;
 				if (credentialCapable) credentials.bind(auth, resolvedSession, generation);
+				if (credentialCapable && !credentials.ready()) queueConversationRefresh();
 				lastAttachError = "";
 				// The journal is named after the session, so this is the first
 				// moment it can exist. A re-attach replaces it rather than
@@ -2031,7 +2042,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	/** Refresh the whole record; receiver discovery awaits its acknowledgement. */
 	function queueConversationRefresh(): void {
-		if (!auth || !sessionID || lifecycle.titleTimer) return;
+		if (!auth || !sessionID) return;
+		refreshDirty = true;
+		if (lifecycle.titleTimer || refreshActive) return;
 		const generation = lifecycle.generation;
 		lifecycle.titleTimer = setTimeout(() => {
 			lifecycle.titleTimer = undefined;
@@ -2041,6 +2054,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 			const cwd = liveCwd();
 			if (!cwd) return;
+			refreshDirty = false;
+			refreshActive = true;
 			void (async () => {
 				try {
 					const project = resolveProject(cwd);
@@ -2051,8 +2066,10 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 					// spawning anything. This runs on a detached timer, never inside a
 					// handler, so the fallback's subprocess cannot stall the agent loop.
 					const terminal = resolveTerminal();
-					const credentialCapability = credentials.ready();
-					const acknowledgement = await attach(currentAuth, currentSessionID, {
+					const credentialCapability = credentials.ready(), credentialRevision = credentials.revision();
+					const current = (): boolean => currentAuth === auth && currentSessionID === sessionID &&
+						isCurrentRemoteLifecycle(lifecycle, generation) && credentialRevision === credentials.revision();
+					const acknowledgement = await publishConversation(current, () => attach(currentAuth, currentSessionID, {
 						title: pi.getSessionName() ?? project.projectHint,
 						branch: resolveBranch(cwd),
 						worktree: cwd,
@@ -2112,14 +2129,16 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// Lockstep with the attach above (whole-record PUT rule).
 						...(cfg.allowSteer ? { can_attach_files: true } : {}),
 						catalog: buildCatalog(pi.getCommands(), availableModels()),
-					});
-					if (acknowledgement.ok && credentialCapability && credentials.ready() &&
-						currentAuth === auth && currentSessionID === sessionID && isCurrentRemoteLifecycle(lifecycle, generation)) {
+					}));
+					if (acknowledgement?.ok && credentialCapability && credentials.ready() && current()) {
 						credentialAdvertisementPending = false;
 					}
 				} catch {
 					// Failures do not affect the agent loop or regular streaming retries;
-					// credential discovery stays gated until a current-identity refresh succeeds.
+					// credential discovery stays gated until a current-binding refresh succeeds.
+				} finally {
+					refreshActive = false;
+					if (refreshDirty) queueConversationRefresh();
 				}
 			})();
 		}, 0);
@@ -2127,6 +2146,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	}
 
 	function cleanup(): void {
+		refreshDirty = false;
 		deferredSteers.length = 0;
 		compacting = false;
 		polling = false;
