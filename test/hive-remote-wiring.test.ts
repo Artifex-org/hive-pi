@@ -436,6 +436,35 @@ describe("attach", () => {
 		expect(fake.userMessages).toEqual([]);
 	});
 
+	it.each(["claim", "attachment"])("discards a late %s response after session replacement", async (lane) => {
+		fakeHive({ commands: [{ id: "old", kind: "steer", payload: "old-session input", attachment_ids: ["att-1"] }] });
+		const originalFetch = globalThis.fetch;
+		let release!: () => void;
+		let entered = false;
+		const held = new Promise<void>((resolve) => { release = resolve; });
+		vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+			const path = String(url);
+			if (path.includes("/by-run/replacement-run")) {
+				return new Response(JSON.stringify({ id: "replacement-session" }), { status: 200 });
+			}
+			if (!entered && (lane === "claim" ? path.endsWith("/commands/claim") : path.endsWith("/attachments/att-1"))) {
+				entered = true;
+				await held;
+			}
+			return originalFetch(url, init);
+		});
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		await vi.advanceTimersByTimeAsync(2200);
+		expect(entered).toBe(true);
+		fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "replacement-run" });
+		await fake.emit({ type: "session_start" }, { idle: true });
+		await vi.advanceTimersByTimeAsync(400);
+		release();
+		await vi.advanceTimersByTimeAsync(2400);
+		expect(fake.userMessages).toEqual([]);
+	});
+
 	it("delivers a deferred steer into an automatic compaction retry without waiting for idle", async () => {
 		fakeHive({ commands: [{ id: "retry", kind: "steer", payload: "continue" }] });
 		hiveRemote(fake.api, deps());
