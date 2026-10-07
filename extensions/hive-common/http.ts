@@ -141,6 +141,13 @@ export async function request<T = unknown>(
 		);
 		if (!res.ok) {
 			const { authFailed, permanent } = classify(res.status);
+			// Identity PUT uses 409 to return the authoritative revision alongside
+			// its conflict. Preserve that structured body for the caller without
+			// consuming the response before the normal error extraction.
+			let conflictBody: T | undefined;
+			if (res.status === 409) {
+				try { conflictBody = (await res.clone().json()) as T; } catch { /* status/error remains authoritative */ }
+			}
 			return {
 				ok: false,
 				status: res.status,
@@ -148,6 +155,7 @@ export async function request<T = unknown>(
 				permanent,
 				retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")),
 				error: await serverError(res),
+				...(conflictBody === undefined ? {} : { body: conflictBody }),
 			};
 		}
 		let parsed: T | undefined;

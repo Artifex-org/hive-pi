@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import autoTitle, { deriveTitle } from "../extensions/auto-title.ts";
+import sessionIdentity from "../extensions/hive-remote/sessionIdentity.ts";
+import { REMOTE_OPENING_INPUT_CHANNEL } from "../extensions/hive-remote/sessionIdentityBus.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 describe("deriveTitle", () => {
@@ -37,6 +39,44 @@ describe("auto-title extension", () => {
 
 		expect(fake.sessionNames).toEqual(["Plan automatic Pi session naming"]);
 		expect(fake.entries).toEqual([{ customType: "auto-title", data: { assigned: true } }]);
+	});
+
+	it("uses a deterministic fallback for image-only input", async () => {
+		const fake = createFakePi();
+		autoTitle(fake.api);
+
+		await fake.emit({ type: "session_start", reason: "startup" });
+		await fake.emit({ type: "input", text: "", images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }], source: "interactive" });
+
+		expect(fake.sessionNames).toEqual(["Review attached image"]);
+	});
+
+	it("commits automatic title provenance before the SDK name event, never pinning it", async () => {
+		const fake = createFakePi();
+		sessionIdentity(fake.api);
+		autoTitle(fake.api);
+
+		await fake.emit({ type: "session_start", reason: "startup" });
+		await fake.emit({ type: "input", text: "Review the attached image", source: "interactive" });
+		await fake.emit({ type: "session_info_changed" });
+
+		expect(fake.busEvents.map(event => event.name)).not.toContain("session-identity:manual-title");
+		const identity = fake.entries.filter(entry => entry.customType === "session-identity").at(-1)?.data as { title?: string; titlePinned?: boolean };
+		expect(identity.title).toBe("Review the attached image");
+		expect(identity.titlePinned).not.toBe(true);
+	});
+
+	it("titles a trusted remote opening input but ignores unmatched synthetic extension input", async () => {
+		const fake = createFakePi();
+		autoTitle(fake.api);
+
+		await fake.emit({ type: "session_start", reason: "startup" });
+		await fake.emit({ type: "input", text: "Synthetic extension note", source: "extension" });
+		fake.api.events.emit(REMOTE_OPENING_INPUT_CHANNEL, { text: "Inspect the attached screenshot" });
+		await fake.emit({ type: "input", text: "Inspect the attached screenshot", source: "extension" });
+		await fake.emit({ type: "input", text: "Later remote follow-up", source: "extension" });
+
+		expect(fake.sessionNames).toEqual(["Inspect the attached screenshot"]);
 	});
 
 	it("preserves an explicit session name", async () => {

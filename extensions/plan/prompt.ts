@@ -75,7 +75,7 @@ After the user approves, the plan stays live and you keep it honest:
 - when the approach itself changes, patch the affected blocks
 - before you report the work done, close every step: \`done\`, \`skipped\`,
   \`failed\` or \`blocked\`, each with a note — never leave one \`in_progress\`
-- when the work has changed shape, retitle the session with \`session_title\`
+- if the task fundamentally pivots, use \`session_title\` with the new title, goal/approach paragraph, and reason; never rename merely to report completion
 
 A plan that still describes what you *intended* two hours after you did
 something else is worse than no plan, because the next reader — human or agent —
@@ -88,6 +88,7 @@ export function buildExecutionPrompt(): string {
 
 export function buildPlanPrompt(): string {
 	return `${PLAN_MODE_MARKER}
+At kickoff, call \`session_context\` with a concise goal and approach paragraph. Put the intro prose first in the plan as well; it becomes the canonical session description. When no formal plan is warranted, use \`session_context\` without creating or activating a plan.
 # Plan mode
 
 You are producing an implementation plan. Nothing you do in this mode changes

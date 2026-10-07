@@ -30,6 +30,22 @@ this client: older backends do not support `/output-attachments`. Older clients
 still report text but cannot populate historical screenshot references; the
 update does not reconstruct attachments omitted by a previous client.
 
+## Stable identity and kickoff context
+
+The opening task title is sanitized once. Later user inputs and completion do
+not retitle; `session_title` requires an explicit substantive pivot, a goal and
+approach description, and a reason. Operator `/name` pins win across reconnects.
+`session_context` authors the canonical kickoff paragraph even without formal
+planning; the plan extension synchronizes its actual persisted introduction
+without creating or activating a plan.
+
+A positive server `can_report_identity` capability enables the persisted serial
+identity outbox. It reads the existing conversation endpoint, writes monotonic
+revisions, retries exact payloads, fences replies after session replacement,
+serializes manual title PATCHes, and quarantines conflicting unpublished edits
+until a fresh context/pivot. `/hive-remote-status` explains sync exhaustion.
+Older servers receive no added attach-request field or identity endpoint calls.
+
 ## Setup, start to finish
 
 ```

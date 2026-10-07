@@ -1,49 +1,29 @@
-/**
- * session_title — lets the agent keep its own session title current.
- *
- * pi titles a session ONCE, from its first prompt, and never again; that is
- * the name an operator reads the session by in the Hive agents workspace, so
- * it went on describing the opening question for hours after the work became
- * something else. Nothing let the agent fix that: the server's rename is an
- * operator gesture that PINS the title, and an agent overwriting an operator's
- * chosen name would be wrong. So this goes through pi's own session name — the
- * value hive-remote already reports on every conversation refresh — and the
- * server's pin keeps an operator rename in place regardless.
- *
- * The same file lives in hive's cmd/factory-exec/piext/hive-remote/ (the cloud
- * interactive copy); keep them alike.
- */
-
+/** Explicit session identity pivot; ordinary completion is not a rename. */
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { exposureFor } from "../loadout/policy.ts";
 import { MAX_SESSION_TITLE, normalizeSessionTitle } from "./sessionTitleText.ts";
+import { SESSION_IDENTITY_CHANNEL, type SessionIdentityUpdate } from "./sessionIdentityBus.ts";
 
 export function registerSessionTitleTool(pi: ExtensionAPI): void {
 	registerGuardedTool(pi, {
-		capability: { writesExemptBecause: "renames this session in pi's own metadata; writes no file" },
-		name: "session_title",
-		// Deferred (the direct-tool budget is full): Hive's hygiene nudges name it
-		// exactly, and load_tools finds it by that name.
-		exposure: exposureFor("session_title"),
-		label: "Set session title",
-		promptSnippet: "Keep this session's title current: retitle when the work changes shape, and by outcome when you finish",
-		description:
-			"Set this session's title — the one line an operator reads it by in the Hive agents workspace. " +
-			"Call it when the work has changed shape so the first prompt no longer describes it, and once more when you finish, naming the outcome " +
-			`(e.g. "Fixed runs-table sort drift — PR #8123"). Plain text, at most ${MAX_SESSION_TITLE} characters. ` +
-			"An operator who renamed the session keeps their name; yours is then only local.",
+		capability: { writesExemptBecause: "records an explicitly requested session identity pivot in Pi metadata" },
+		name: "session_title", exposure: exposureFor("session_title"), label: "Pivot session identity",
+		promptSnippet: "Use session_title only for an explicit task pivot; provide a new title, goal/approach description, and reason.",
+		description: `Explicitly pivot the session's identity when the task fundamentally changes. Requires title (at most ${MAX_SESSION_TITLE} characters), goal/approach description, and reason. Do not call merely to report completion.`,
 		parameters: Type.Object({
-			title: Type.String({ description: `The new title: what this session is doing or did, at most ${MAX_SESSION_TITLE} characters.` }),
+			title: Type.String({ description: "New session title." }),
+			description: Type.String({ minLength: 1, description: "Canonical goal and approach paragraph." }),
+			reason: Type.String({ minLength: 1, description: "Why the session's task has pivoted." }),
 		}),
-		async execute(_id, params: { title: string }) {
-			const title = normalizeSessionTitle(String(params.title ?? ""));
-			if (!title) {
-				return { content: [{ type: "text" as const, text: "No title given. Pass one plain-text line naming what this session is doing." }], isError: true, details: { title: "" } };
-			}
-			pi.setSessionName(title);
-			return { content: [{ type: "text" as const, text: `Session titled "${title}".` }], details: { title } };
+		async execute(_id, params: { title: string; description: string; reason: string }) {
+			const title = normalizeSessionTitle(params.title);
+			const description = params.description.trim();
+			const reason = params.reason.trim();
+			if (!title || !description || !reason) throw new Error("A pivot requires title, description, and reason.");
+			pi.events.emit(SESSION_IDENTITY_CHANNEL, { title, description, reason, source: "pivot", provisional: false, revision: 0 } satisfies SessionIdentityUpdate);
+			return { content: [{ type: "text" as const, text: `Session pivot recorded: ${title}` }], details: { title, description, reason } };
 		},
 	});
 }
