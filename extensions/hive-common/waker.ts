@@ -129,6 +129,7 @@ interface PendingWake {
 export function createWaker(pi: ExtensionAPI, by: string): Waker {
 	const claims = trackSettleClaims(pi);
 	let ctx: ExtensionContext | null = null;
+	let closed = false;
 	// An agent run is active from `agent_start` to `agent_settled`. Tracked here
 	// rather than read from `ctx.isIdle()`, which is also false during an idle
 	// compaction — a notice sent then was treated as mid-run and its wake waited
@@ -233,18 +234,29 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 
 	pi.on("session_start", (_event, next) => {
 		remember(next);
+		closed = false;
 		inRun = false;
 		settling = false;
 		pending = [];
 		parked.clear();
 		paintParked(); // clears a footer the replaced session left behind
-		// A notice held through a settle the session never finished (replaced
-		// mid-settle) was already counted as delivered by its caller — background
-		// marks the job notified — so it goes to the new session, never nowhere.
-		const release = held;
+		// Held notices belong to the originating branch. Persisted completion
+		// evidence lets its owner recover them there; never transport them into
+		// an unrelated session or fork.
 		held = [];
-		for (const item of release) sendIdle(item.notice, item.kind, false);
 	});
+
+	const forgetBranch = () => {
+		closed = true;
+		ctx = null;
+		inRun = false;
+		settling = false;
+		pending = [];
+		held = [];
+		parked.clear();
+	};
+	pi.on("session_shutdown", forgetBranch);
+	pi.on("session_tree", (_event, next) => { forgetBranch(); remember(next); closed = false; paintParked(); });
 
 	pi.on("agent_start", (_event, next) => {
 		remember(next);
@@ -305,6 +317,7 @@ export function createWaker(pi: ExtensionAPI, by: string): Waker {
 
 	return {
 		deliver(notice, kind) {
+			if (closed) throw new Error("Cannot deliver notice after session shutdown");
 			if (settling) {
 				held.push({ notice, kind });
 				return;

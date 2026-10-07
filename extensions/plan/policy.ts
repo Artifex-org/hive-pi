@@ -62,6 +62,8 @@ const READ_ONLY_TOOLS = new Set([
 	"web_fetch",
 	"subagent", // read-only roles are enforced by the role, not here
 	"advisor", // one plain completion: no tools, no session, no recursion
+	"background_list", // reads session-owned job state; never starts or stops work
+	"background_result", // reads retained output, including recovered results
 	// Asking the user a question writes nothing — and plan mode is the mode that
 	// most needs it. Denying it was the same defect HIV-1313 found with
 	// `advisor`: an allowlist that omits a read-only tool does not merely

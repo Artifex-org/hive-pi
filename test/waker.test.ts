@@ -180,12 +180,15 @@ describe("settling", () => {
 		expect(pi.messages).toEqual([{ ...done, options: { deliverAs: "followUp", triggerTurn: true } }]);
 	});
 
-	it("hands a notice held through a settle the session never finished to the next session", async () => {
+	it("does not transport a held notice to an unrelated session", async () => {
 		await at("agent_start", { idle: false });
 		await at("agent_before_settle", { idle: false, branch: plainStop });
 		waker.deliver(done, "completion");
-		await at("session_start", { branch: [] }, { reason: "new" });
-		expect(pi.messages).toEqual([{ ...done, options: { deliverAs: "followUp", triggerTurn: true } }]);
+		await at("session_shutdown", {}, { reason: "new" });
+		await at("session_start", { branch: [], sessionId: "different-session" }, { reason: "new" });
+		expect(pi.messages).toEqual([]);
+		await at("agent_settled", { branch: [], sessionId: "different-session" });
+		expect(pi.messages).toEqual([]);
 	});
 
 	it("parks it instead when the settled turn handed back", async () => {

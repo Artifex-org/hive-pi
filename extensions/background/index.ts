@@ -50,6 +50,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { JOB_RECORD, jobRecord, recoverJobs } from "./journal.ts";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -137,9 +139,17 @@ export default function background(pi: ExtensionAPI) {
 	const procs = new Map<string, ChildProcess>();
 	const timers = new Map<string, NodeJS.Timeout>();
 	let latestCtx: ExtensionContext | undefined;
+	let sessionId: string | undefined;
+	let generation = 0;
+	const executions = new Map<string, string>();
 	const waker = createWaker(pi, "background");
 
 	const allJobs = (): Job[] => [...jobs.values()];
+	const record = (job: Job): void => {
+		const executionId = executions.get(job.id);
+		if (!sessionId || !executionId) throw new Error("Background job has no active session owner");
+		pi.appendEntry(JOB_RECORD, jobRecord(sessionId, executionId, job));
+	};
 
 	/**
 	 * Touch the live ctx, tolerating a stale one.
@@ -216,7 +226,8 @@ export default function background(pi: ExtensionAPI) {
 					customType: "background",
 					content,
 					display: true,
-					details: { id: job.id, status: job.status, exitCode: job.exitCode, what: job.what },
+					details: { id: job.id, status: job.status, exitCode: job.exitCode, what: job.what,
+						sessionId, executionId: executions.get(job.id) },
 				},
 				"completion",
 			);
@@ -275,8 +286,9 @@ export default function background(pi: ExtensionAPI) {
 		if (!job?.runID) return;
 		const auth = resolveAuth();
 		if (!auth) return;
+		const ownerGeneration = generation;
 		const note = await runStateNote(job.runID, { baseURL: auth.url, token: auth.token, getJSON: fetchJSON });
-		if (!note) return;
+		if (!note || generation !== ownerGeneration) return;
 		const current = jobs.get(id);
 		if (current) jobs.set(id, appendOutput(current, `\n${note}\n`));
 	}
@@ -284,15 +296,35 @@ export default function background(pi: ExtensionAPI) {
 	const settle = (id: string, status: Exclude<Job["status"], "running">, exitCode?: number): void => {
 		const job = jobs.get(id);
 		if (!job || job.status !== "running") return;
-		const finished = finishJob(job, { status, exitCode, endedAtMs: Date.now() });
+		let finished = finishJob(job, { status, exitCode, endedAtMs: Date.now() });
+		try {
+			record(finished); // evidence before notification; never persist `notified`
+		} catch (error) {
+			finished = appendOutput(finished, `\n[Background result was NOT saved for recovery: ${String(error)}]\n`);
+		}
 		jobs.set(id, finished);
 		releaseHandles(id);
 		paintFooter();
 		notify(finished);
 	};
 
-	pi.on("session_start", (_event, ctx) => {
+	const restore = (ctx: ExtensionContext): void => {
 		latestCtx = ctx;
+		sessionId = ctx.sessionManager.getSessionId();
+		jobs.clear();
+		executions.clear();
+		for (const recovered of recoverJobs(ctx.sessionManager.getBranch(), sessionId)) {
+			jobs.set(recovered.job.id, recovered.job);
+			executions.set(recovered.job.id, recovered.executionId);
+		}
+	};
+
+	pi.on("session_start", (_event, ctx) => {
+		if (sessionId !== ctx.sessionManager.getSessionId()) {
+			if (sessionId !== undefined) stopGeneration();
+			restore(ctx);
+		}
+		else latestCtx = ctx;
 		paintFooter();
 
 		// Deliver anything that finished while there was no session to tell.
@@ -321,7 +353,8 @@ export default function background(pi: ExtensionAPI) {
 	 */
 	pi.events.on(BACKGROUND_JOB_CHANNEL, (payload) => {
 		const event = payload as BackgroundJobEvent | undefined;
-		if (!event || typeof event.id !== "string") return;
+		if (!event || typeof event.id !== "string" || event.sessionId !== sessionId || typeof event.executionId !== "string") return;
+		if (event.action !== "start" && executions.get(event.id) !== event.executionId) return;
 		switch (event.action) {
 			case "start": {
 				if (jobs.has(event.id)) return; // duplicate start — keep the original
@@ -335,12 +368,16 @@ export default function background(pi: ExtensionAPI) {
 						startedAtMs: Date.now(),
 					}),
 				);
+				executions.set(event.id, event.executionId);
+				try { record(jobs.get(event.id)!); } catch (error) {
+					withCtx((ctx) => ctx.ui.notify(`Background start was NOT saved for recovery: ${String(error)}`, "error"));
+				}
 				paintFooter();
 				return;
 			}
 			case "output": {
 				const job = jobs.get(event.id);
-				if (job) jobs.set(event.id, appendOutput(job, event.chunk));
+				if (job?.status === "running") jobs.set(event.id, appendOutput(job, event.chunk));
 				return;
 			}
 			case "finish": {
@@ -361,10 +398,24 @@ export default function background(pi: ExtensionAPI) {
 	 * Every running job is killed, and nothing is notified: the session that
 	 * would have received the message is on its way out.
 	 */
-	pi.on("session_shutdown", () => {
+	const stopGeneration = (): void => {
+		generation++; // fence callbacks BEFORE killing; do not manufacture a verdict
+		for (const job of allJobs()) {
+			if (job.kind === "subagent" && job.status === "running") pi.events.emit(BACKGROUND_CANCEL_CHANNEL, { id: job.id });
+		}
+		latestCtx = undefined;
 		for (const id of [...procs.keys()]) killTree(id);
 		for (const timer of timers.values()) clearTimeout(timer);
 		timers.clear();
+		procs.clear();
+		sessionId = undefined;
+	};
+	pi.on("session_shutdown", stopGeneration);
+	pi.on("session_tree", (_event, ctx) => {
+		stopGeneration();
+		restore(ctx);
+		paintFooter();
+		for (const job of pendingNotifications(allJobs())) notify(job);
 	});
 
 	/**
@@ -422,6 +473,14 @@ export default function background(pi: ExtensionAPI) {
 			runID: spec.runID,
 		}));
 
+		executions.set(id, randomUUID());
+		try { record(jobs.get(id)!); } catch (error) {
+			jobs.delete(id);
+			executions.delete(id);
+			return textResult(`Could not record background job; command was NOT started: ${String(error)}`, true);
+		}
+		const startedGeneration = generation;
+		const current = (): boolean => generation === startedGeneration;
 		let proc: ChildProcess;
 		try {
 			// `-c`, never `-lc`, exactly as pi's own bash tool runs a command. A
@@ -442,13 +501,14 @@ export default function background(pi: ExtensionAPI) {
 				// ends, which is the moment the job must NOT die.
 			});
 		} catch (err) {
-			jobs.delete(id);
+			settle(id, "failed", 1);
 			return textResult(`Could not start background job: ${(err as Error).message}`, true);
 		}
 
 		procs.set(id, proc);
 
 		const absorb = (chunk: Buffer): void => {
+			if (!current()) return;
 			const job = jobs.get(id);
 			if (job) jobs.set(id, appendOutput(job, chunk.toString("utf8")));
 		};
@@ -456,6 +516,7 @@ export default function background(pi: ExtensionAPI) {
 		proc.stderr?.on("data", absorb);
 
 		proc.on("error", (err) => {
+			if (!current()) return;
 			const job = jobs.get(id);
 			if (job) jobs.set(id, appendOutput(job, `\n${err.message}\n`));
 			settle(id, "failed", 1);
@@ -473,7 +534,7 @@ export default function background(pi: ExtensionAPI) {
 		 */
 		let expiring = false;
 		const settleFromExit = (code: number | null): void => {
-			if (expiring) return;
+			if (!current() || expiring) return;
 			if (!spec.runID) {
 				settle(id, statusForExit(code), code ?? undefined);
 				return;
@@ -489,7 +550,7 @@ export default function background(pi: ExtensionAPI) {
 				try {
 					await annotateWatchTimeout(id);
 				} finally {
-					settle(id, status, code ?? undefined);
+					if (current()) settle(id, status, code ?? undefined);
 				}
 			})();
 		};
@@ -516,7 +577,9 @@ export default function background(pi: ExtensionAPI) {
 		 * a cancel or a timeout winning this race makes the timer a no-op.
 		 */
 		proc.on("exit", (code) => {
+			if (!current()) return;
 			exitGrace = setTimeout(() => {
+				if (!current()) return;
 				const job = jobs.get(id);
 				if (!job || job.status !== "running") return;
 				jobs.set(
@@ -540,6 +603,7 @@ export default function background(pi: ExtensionAPI) {
 		});
 
 		const timer = setTimeout(() => {
+			if (!current()) return;
 			expiring = true;
 			killTree(id);
 			// A watch that hit its clock says nothing about WHY: the tail is
@@ -552,7 +616,7 @@ export default function background(pi: ExtensionAPI) {
 				try {
 					await annotateWatchTimeout(id);
 				} finally {
-					settle(id, "timeout");
+					if (current()) settle(id, "timeout");
 				}
 			})();
 		}, timeoutMs);

@@ -87,6 +87,7 @@ function fakeHive(behaviour: string): void {
 }
 
 async function watch(pi: FakePi, timeoutSeconds?: number): Promise<void> {
+	await pi.emit({ type: "session_start" }, { mode: "tui", cwd: dir });
 	const tool = pi.tools.find((entry) => entry.name === "hive_watch_run");
 	if (!tool) throw new Error("hive_watch_run not registered");
 	const execute = (tool.definition as { execute: (...args: unknown[]) => Promise<{ content: { text: string }[] }> }).execute;
