@@ -1,0 +1,633 @@
+{
+  "generatedAt": "2026-10-07T01:36:38.519Z",
+  "extractionModel": "meta/muse-spark-1.3-contributor",
+  "config": {
+    "model": "jev-latest",
+    "timeoutMs": 3000
+  },
+  "summary": {
+    "corpus": "24 frozen synthetic author-labelled cases; not production prevalence or a holdout",
+    "fixtures": 24,
+    "important": 16,
+    "importantFalseNegatives": [],
+    "importantRecall": 1,
+    "jevClassifiedImportant": 5,
+    "wouldAvoidCalls": 2,
+    "actualAvoidedCalls": 0,
+    "potentialCompletedExtractionTokensAvoided": null,
+    "wouldSkipUnknownBaseline": [
+      "routine",
+      "redacted-routine"
+    ],
+    "wouldSkipWithExtractorNotes": [],
+    "extractionFailures": [
+      "routine",
+      "success",
+      "buried",
+      "implicit-gap",
+      "blocker",
+      "implicit-blocker",
+      "action",
+      "implicit-action",
+      "decision",
+      "implicit-decision",
+      "resolved",
+      "quoted",
+      "hypothetical",
+      "resolved-plus-gap",
+      "secret",
+      "adversarial-important",
+      "adversarial-routine",
+      "tool-permission",
+      "tool-runtime",
+      "tool-lookup",
+      "redacted-routine",
+      "truncated-head",
+      "buried-boundary",
+      "source-overflow"
+    ],
+    "abstentions": 2,
+    "reasons": {
+      "classified": 7,
+      "important_evidence": 10,
+      "uncertain": 2,
+      "tool_evidence": 2,
+      "incomplete_evidence": 3
+    },
+    "jevCallsWithReportedUsage": 9,
+    "jevReportedInputTokens": 4310,
+    "jevReportedOutputTokens": 378,
+    "jevLatencyMedianMs": 250,
+    "jevLatencyP95Ms": 406,
+    "extractionReportedTokens": 0,
+    "monetarySavings": "NOT MEASURED; shadow adds calls and avoids zero actual extraction calls",
+    "promotion": "NOT AUTHORIZED"
+  },
+  "rows": [
+    {
+      "id": "routine",
+      "category": "routine",
+      "important": false,
+      "shadow": {
+        "decision": "skip",
+        "reason": "classified",
+        "wouldSkip": true,
+        "confidence": 0.96,
+        "model": "jev-1.13.0",
+        "latencyMs": 406,
+        "inputTokens": 479,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 41,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "success",
+      "category": "success",
+      "important": false,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 6,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "buried",
+      "category": "caveat",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "implicit-gap",
+      "category": "caveat",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "classified",
+        "wouldSkip": false,
+        "confidence": 0.99,
+        "model": "jev-1.13.0",
+        "latencyMs": 213,
+        "inputTokens": 480,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "blocker",
+      "category": "blocker",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "implicit-blocker",
+      "category": "blocker",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "classified",
+        "wouldSkip": false,
+        "confidence": 1,
+        "model": "jev-1.13.0",
+        "latencyMs": 354,
+        "inputTokens": 479,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "action",
+      "category": "action",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "implicit-action",
+      "category": "action",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "classified",
+        "wouldSkip": false,
+        "confidence": 1,
+        "model": "jev-1.13.0",
+        "latencyMs": 269,
+        "inputTokens": 477,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "decision",
+      "category": "decision",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "implicit-decision",
+      "category": "decision",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "classified",
+        "wouldSkip": false,
+        "confidence": 0.99,
+        "model": "jev-1.13.0",
+        "latencyMs": 234,
+        "inputTokens": 479,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "resolved",
+      "category": "resolved",
+      "important": false,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 6,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "quoted",
+      "category": "quoted",
+      "important": false,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "hypothetical",
+      "category": "hypothetical",
+      "important": false,
+      "shadow": {
+        "decision": "abstain",
+        "reason": "uncertain",
+        "wouldSkip": false,
+        "latencyMs": 257,
+        "confidence": 0.91,
+        "model": "jev-1.13.0",
+        "inputTokens": 483,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 3,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "resolved-plus-gap",
+      "category": "caveat",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "secret",
+      "category": "redaction",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 3,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "adversarial-important",
+      "category": "adversarial",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "classified",
+        "wouldSkip": false,
+        "confidence": 0.98,
+        "model": "jev-1.13.0",
+        "latencyMs": 219,
+        "inputTokens": 485,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 3,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "adversarial-routine",
+      "category": "adversarial",
+      "important": false,
+      "shadow": {
+        "decision": "scan",
+        "reason": "important_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "tool-permission",
+      "category": "tool",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "tool_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 2,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "tool-runtime",
+      "category": "tool",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "tool_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 3,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "tool-lookup",
+      "category": "excluded-tool",
+      "important": false,
+      "shadow": {
+        "decision": "abstain",
+        "reason": "uncertain",
+        "wouldSkip": false,
+        "latencyMs": 250,
+        "confidence": 0.28,
+        "model": "jev-1.13.0",
+        "inputTokens": 471,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "redacted-routine",
+      "category": "redaction",
+      "important": false,
+      "shadow": {
+        "decision": "skip",
+        "reason": "classified",
+        "wouldSkip": true,
+        "confidence": 0.99,
+        "model": "jev-1.13.0",
+        "latencyMs": 219,
+        "inputTokens": 477,
+        "outputTokens": 42
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "truncated-head",
+      "category": "truncation",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "incomplete_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 5,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "buried-boundary",
+      "category": "truncation",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "incomplete_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    },
+    {
+      "id": "source-overflow",
+      "category": "truncation",
+      "important": true,
+      "shadow": {
+        "decision": "scan",
+        "reason": "incomplete_evidence",
+        "wouldSkip": false,
+        "latencyMs": 0
+      },
+      "extraction": {
+        "checked": false,
+        "latencyMs": 4,
+        "stopReason": "error",
+        "tokens": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "reportedCost": 0
+      }
+    }
+  ],
+  "evidenceNote": "All would-skip baselines were unchecked; original zero sum of completed tokens is UNKNOWN savings, not zero. api.meta.ai proxy probe independently returned 403 blocked-by-allowlist after replay."
+}
