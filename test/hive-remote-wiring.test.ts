@@ -393,6 +393,61 @@ describe("attach", () => {
 		expect(fake.userMessages).toEqual([]);
 	});
 
+	it.each(["session_compact", "session_compact_failed"])("retains steers through %s until the SDK really leaves compaction", async (type) => {
+		const hive = fakeHive({ commands: [
+			{ id: "s1", kind: "steer", payload: "first", attachment_ids: ["att-1"] },
+			{ id: "s2", kind: "follow_up", payload: "second" },
+			{ id: "interrupt", kind: "interrupt", payload: "" },
+		] });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		let interrupts = 0;
+		const ctxOptions = { idle: false, onAbort: () => { interrupts++; } };
+		await fake.emit({ type: "session_before_compact" }, ctxOptions);
+		await vi.advanceTimersByTimeAsync(2200);
+		expect(interrupts).toBe(1); // control commands still land during compaction
+		expect(fake.userMessages).toEqual([]);
+		expect(hive.posted().flatMap((c) => (c.body?.events ?? []) as Array<{ role?: string }>).filter((e) => e.role === "user")).toEqual([]);
+		await fake.emit({ type }, ctxOptions);
+		await vi.advanceTimersByTimeAsync(2200);
+		expect(fake.userMessages).toEqual([]); // event fires before controller cleanup
+		ctxOptions.idle = true;
+		await vi.advanceTimersByTimeAsync(2200);
+		expect(fake.userMessages.map((m) => m.options?.deliverAs)).toEqual(["steer", "followUp"]);
+		expect(fake.userMessages[0]?.content).toEqual([
+			{ type: "text", text: "first" },
+			{ type: "image", mimeType: "image/png", data: Buffer.from("image-bytes").toString("base64") },
+		]);
+		expect(fake.userMessages[1]?.content).toBe("second");
+		await vi.advanceTimersByTimeAsync(2200);
+		expect(fake.userMessages).toHaveLength(2);
+	});
+
+	it("drops compaction-deferred messages on session replacement", async () => {
+		fakeHive({ commands: [{ id: "old", kind: "steer", payload: "old-session input" }] });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		await fake.emit({ type: "session_before_compact" }, { idle: false });
+		await vi.advanceTimersByTimeAsync(2200);
+		expect(fake.userMessages).toEqual([]);
+		fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "replacement-run" });
+		await fake.emit({ type: "session_start" }, { idle: true });
+		await vi.advanceTimersByTimeAsync(2400);
+		expect(fake.userMessages).toEqual([]);
+	});
+
+	it("delivers a deferred steer into an automatic compaction retry without waiting for idle", async () => {
+		fakeHive({ commands: [{ id: "retry", kind: "steer", payload: "continue" }] });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		await fake.emit({ type: "session_before_compact" }, { idle: false });
+		await vi.advanceTimersByTimeAsync(2200);
+		await fake.emit({ type: "session_compact" }, { idle: false });
+		await fake.emit({ type: "turn_start" }, { idle: false });
+		await vi.advanceTimersByTimeAsync(2200);
+		expect(fake.userMessages.map((m) => m.content)).toEqual(["continue"]);
+	});
+
 	it("echoes attachment-only incoming steer IDs into the transcript", async () => {
 		const hive = fakeHive({ commands: [{ id: "img-1", kind: "steer", payload: "", attachment_ids: ["att-1"] }] });
 		hiveRemote(fake.api, deps());

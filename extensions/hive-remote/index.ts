@@ -402,6 +402,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		const id = (data as HiveSessionEvent | undefined)?.clientRunID;
 		if (typeof id !== "string" || !id || id === clientRunID) return;
 		clientRunID = id;
+		deferredSteers.length = 0;
 		// A new run means a new session row: drop the old binding so the next
 		// attach targets the row telemetry is actually writing to.
 		sessionID = null;
@@ -1236,14 +1237,37 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		}
 	}
 
+	let compacting = false;
+	let polling = false;
+	const deferredSteers: RemoteCommand[] = [];
+
+	function compactionBlocksDelivery(): boolean {
+		// session_compact fires BEFORE the SDK clears its compaction controller.
+		// Check on the detached poll, never submit from the serial event handler.
+		if (compacting && latestCtx?.isIdle()) compacting = false;
+		return compacting;
+	}
+
 	async function applyCommand(cmd: RemoteCommand): Promise<void> {
 		switch (cmd.kind) {
 			case "steer":
 			case "follow_up": {
 				if (!cfg.allowSteer || !auth || !sessionID) return;
+				if (deferredSteers.length > 0 || compactionBlocksDelivery()) {
+					deferredSteers.push(cmd);
+					return;
+				}
+				const generation = lifecycle.generation;
+				const targetSession = sessionID;
 				const attachments = await Promise.all(
 					(cmd.attachment_ids ?? []).map((id) => fetchCommandAttachment(auth as HiveAuth, sessionID as string, id)),
 				);
+				if (!isCurrentRemoteLifecycle(lifecycle, generation) || targetSession !== sessionID) return;
+				// Compaction can start while the attachment fetch is in flight.
+				if (deferredSteers.length > 0 || compactionBlocksDelivery()) {
+					deferredSteers.push(cmd);
+					return;
+				}
 				if (attachments.some((a) => a === null)) {
 					foldNotice(transcript, "could not retrieve attachment from Hive", Date.now(), "hive");
 					kick();
@@ -1741,9 +1765,26 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	}
 
 	async function pollOnce(): Promise<void> {
-		if (!auth || !sessionID) return;
-		const cmds = await claimCommands(auth, sessionID);
-		for (const cmd of cmds) await applyCommand(cmd);
+		if (!auth || !sessionID || polling) return;
+		polling = true;
+		const generation = lifecycle.generation;
+		const targetSession = sessionID;
+		try {
+			if (!compactionBlocksDelivery()) {
+				for (const cmd of deferredSteers.splice(0)) {
+					if (!isCurrentRemoteLifecycle(lifecycle, generation) || targetSession !== sessionID) return;
+					await applyCommand(cmd);
+				}
+			}
+			if (!isCurrentRemoteLifecycle(lifecycle, generation) || targetSession !== sessionID) return;
+			const cmds = await claimCommands(auth, sessionID);
+			for (const cmd of cmds) {
+				if (!isCurrentRemoteLifecycle(lifecycle, generation) || targetSession !== sessionID) return;
+				await applyCommand(cmd);
+			}
+		} finally {
+			if (isCurrentRemoteLifecycle(lifecycle, generation)) polling = false;
+		}
 	}
 
 	// ------------------------------------------------------------------ attach
@@ -2014,6 +2055,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	}
 
 	function cleanup(): void {
+		deferredSteers.length = 0;
+		compacting = false;
+		polling = false;
 		yskBridge.detach();
 		invalidateRemoteLifecycle(lifecycle);
 		attaching = false;
@@ -2370,6 +2414,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 		pi.on("turn_start", (_event, ctx) => {
 			remember(ctx);
+			// An automatic compaction may immediately retry instead of going idle.
+			compacting = false;
 			turnStartedAtMs = Date.now();
 			turnToolCalls = 0;
 			// `working`, not `thinking`: the model is at the provider and has not
@@ -2384,7 +2430,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		// the whole summarisation reported `idle` and sent no beats — minutes of
 		// a session that looked stuck (see activity.ts `compacting`). Pure state
 		// changes plus the detached beat; nothing here may block pi's loop.
-		pi.on("session_before_compact", (event) => {
+		pi.on("session_before_compact", (event, ctx) => {
+			remember(ctx);
+			compacting = true;
 			compactionStarted(activity, Date.now(), event?.reason, event?.preparation?.tokensBefore);
 			beat();
 		});

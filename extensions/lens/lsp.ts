@@ -426,6 +426,9 @@ export class NativeServer {
 	}
 
 	dispose(): void {
+		// Retire requests synchronously: a reply can arrive before the child's
+		// exit event, even after SIGTERM was sent, and must not win that race.
+		this.fail(new Error("the TypeScript language server was disposed"));
 		try {
 			this.proc.kill("SIGTERM");
 		} catch {
