@@ -2,6 +2,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBashTool, createLocalBashOperations, type ToolDefinition, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import background from "../extensions/background/index.ts";
+import { JOB_RECORD, recoverJobs } from "../extensions/background/journal.ts";
 import { ptyBashOperations } from "../extensions/pty-exec/ops.ts";
 import { bindCredentialSession, clearCredentialGrants, credentialOperations, credentialRedactor, installCredentialGrant } from "../extensions/hive-remote/credential-runtime.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
@@ -71,7 +72,26 @@ describe("real shell credential boundaries", () => {
 			clearCredentialGrants();
 			await vi.waitFor(() => expect(fake.messages.length).toBeGreaterThan(0), { timeout: 4000 });
 			expectSafe(JSON.stringify(fake.messages));
+			const records = fake.entries.filter(entry => entry.customType === JOB_RECORD).map(entry => ({ type: "custom", ...entry }));
+			expect(records).toHaveLength(2); // journal-before-spawn and safe terminal evidence
+			expectSafe(JSON.stringify(records));
+			expectSafe(JSON.stringify(recoverJobs(records, "background-local")));
 			expectSafe(await invoke(fake, "background_result", { id: "bg-1" }));
+			expect(process.env.FIXTURE_CREDENTIAL).toBeUndefined();
+		} finally { await fake.emit({ type: "session_shutdown" }); }
+	});
+	it("fences credential-bearing child callbacks from the replacement session journal", async () => {
+		const fake = createFakePi(); background(fake.api);
+		await fake.emit({ type: "session_start" }, { sessionId: "background-local", mode: "tui" });
+		install("background-local");
+		try {
+			expect(await invoke(fake, "background_bash", { command: `sleep 0.2; ${interleave}`, what: "a generation boundary test" })).toContain("Started");
+			await fake.emit({ type: "session_tree" }, { sessionId: "replacement-local", mode: "tui" });
+			clearCredentialGrants();
+			await new Promise(resolve => setTimeout(resolve, 400));
+			expect(fake.entries.filter(entry => entry.customType === JOB_RECORD)).toHaveLength(1);
+			expect(fake.messages).toHaveLength(0);
+			expect(JSON.stringify(fake.entries)).not.toContain(secret);
 			expect(process.env.FIXTURE_CREDENTIAL).toBeUndefined();
 		} finally { await fake.emit({ type: "session_shutdown" }); }
 	});

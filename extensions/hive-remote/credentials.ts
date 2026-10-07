@@ -75,6 +75,8 @@ export class CredentialReceiver {
 			this.deps.localSessionID() === binding.localSessionID && this.deps.isCurrent(binding) && this.deps.consumersReady();
 	}
 	ready(): boolean { return !!this.binding && this.current(this.binding); }
+	/** Monotonic within this receiver, including same-lifecycle detach/rebind. */
+	revision(): number { return this.bindingVersion; }
 	private async catalog(auth: HiveAuth, binding: CredentialBinding): Promise<CatalogEntry[] | null> {
 		const res = await request<{ entries?: CatalogEntry[] }>(auth, "GET", `/agent-sessions/${encodeURIComponent(binding.hiveSessionID)}/credential-catalog`);
 		if (!this.current(binding) || !res.ok || !Array.isArray(res.body?.entries)) return null;

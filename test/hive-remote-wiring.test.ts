@@ -82,6 +82,8 @@ function fakeHive(handlers: {
 	const credentialStatuses = [...(handlers.credentialStatuses ?? [])];
 	const refreshes = [...(handlers.refreshes ?? [])];
 	let attachCount = 0;
+	let activeAttaches = 0, maxActiveAttaches = 0;
+	const committedCapabilities: boolean[] = [];
 	let acceptsCredentials = false;
 	let commandsServed = false;
 	let eventGateServed = false;
@@ -103,10 +105,14 @@ function fakeHive(handlers: {
 
 		if (path.endsWith("/conversation")) {
 			const a = (attachCount++ > 0 ? refreshes.shift() : undefined) ?? handlers.attach ?? { status: 200, lastSeq: 0, delayMs: 0 };
-			if (a.delayMs) await new Promise(resolve => setTimeout(resolve, a.delayMs));
-			if (a.status !== 200) return json(a.status, { error: "nope" });
-			acceptsCredentials = body?.can_receive_credentials === true;
-			return json(200, { session_id: SESSION_ID, last_seq: a.lastSeq ?? 0 });
+			activeAttaches++; maxActiveAttaches = Math.max(maxActiveAttaches, activeAttaches);
+			try {
+				if (a.delayMs) await new Promise(resolve => setTimeout(resolve, a.delayMs));
+				if (a.status !== 200) return json(a.status, { error: "nope" });
+				acceptsCredentials = body?.can_receive_credentials === true;
+				committedCapabilities.push(acceptsCredentials);
+				return json(200, { session_id: SESSION_ID, last_seq: a.lastSeq ?? 0 });
+			} finally { activeAttaches--; }
 		}
 
 		if (path.endsWith("/tool-starts")) {
@@ -147,6 +153,8 @@ function fakeHive(handlers: {
 	return {
 		calls,
 		acceptsCredentials: () => acceptsCredentials,
+		maxActiveAttaches: () => maxActiveAttaches,
+		committedCapabilities,
 		posted: () => calls.filter((c) => c.path.endsWith("/events")),
 		attaches: () => calls.filter((c) => c.path.endsWith("/conversation")),
 		worktrees: () => calls.filter((c) => c.path.endsWith("/worktree")),
@@ -210,6 +218,100 @@ describe("send_attachment wiring", () => {
 });
 
 describe("attach", () => {
+	it("does not advertise a consumer lost while replacement attach is queued", async () => {
+		const hive = fakeHive({ refreshes: [{ status: 200, delayMs: 9_000 }] });
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		let release = () => {};
+		try {
+			await attachAndSettle(fake, { sessionId: "previous-local" });
+			await fake.emit({ type: "session_info_changed" });
+			await vi.advanceTimersByTimeAsync(1);
+			release = registerCredentialConsumer("bash");
+			fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "replacement-run" });
+			await fake.emit({ type: "session_start", reason: "resume" }, { sessionId: "replacement-local" });
+			await vi.advanceTimersByTimeAsync(400);
+			release();
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(hive.attaches().at(-1)?.body?.can_receive_credentials).not.toBe(true);
+			expect(hive.acceptsCredentials()).toBe(false);
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); }
+	});
+	it("serializes a delayed false capability before recovered true capability", async () => {
+		const hive = fakeHive({ refreshes: [{ status: 200, delayMs: 9_000 }] });
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		let release = () => {};
+		try {
+			await attachAndSettle(fake, { sessionId: "ordered-local" });
+			await fake.emit({ type: "session_info_changed" });
+			await vi.advanceTimersByTimeAsync(1);
+			release = registerCredentialConsumer("bash");
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(hive.maxActiveAttaches()).toBe(1);
+			expect(hive.committedCapabilities).toEqual([false, false, true]);
+			expect(hive.acceptsCredentials()).toBe(true);
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); }
+	});
+	it("bounds refresh concurrency and keeps discovery gated during persistent 503", async () => {
+		const release = registerCredentialConsumer("bash");
+		const hive = fakeHive({ credentialStatuses: [503, 409], refreshes: Array.from({ length: 8 }, () => ({ status: 503, delayMs: 7_000 })) });
+		const polls = vi.spyOn(CredentialReceiver.prototype, "poll");
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		try {
+			await attachAndSettle(fake, { sessionId: "failure-local" });
+			await vi.advanceTimersByTimeAsync(18_000);
+			expect(hive.maxActiveAttaches()).toBe(1);
+			expect(hive.attaches().length).toBeLessThanOrEqual(4);
+			expect(polls).not.toHaveBeenCalled();
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); polls.mockRestore(); }
+	});
+	it("requires a fresh acknowledgement after same-lifecycle binding replacement", async () => {
+		const release = registerCredentialConsumer("bash");
+		const hive = fakeHive({ credentialStatuses: [503, 409], refreshes: [{ status: 200, delayMs: 9_000 }, { status: 200, delayMs: 9_000 }] });
+		const binds = vi.spyOn(CredentialReceiver.prototype, "bind"), polls = vi.spyOn(CredentialReceiver.prototype, "poll");
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		try {
+			await attachAndSettle(fake, { sessionId: "revision-local" });
+			await vi.advanceTimersByTimeAsync(3_000);
+			const receiver = binds.mock.contexts[0];
+			if (!(receiver instanceof CredentialReceiver)) throw new Error("missing recovered receiver");
+			receiver.detach();
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(binds).toHaveBeenCalledTimes(2);
+			expect(polls).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(12_000);
+			expect(polls).toHaveBeenCalled();
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); binds.mockRestore(); polls.mockRestore(); }
+	});
+	it("orders replacement attach behind a previous lifecycle's in-flight refresh", async () => {
+		const hive = fakeHive({ refreshes: [{ status: 200, delayMs: 9_000 }] });
+		hiveRemote(fake.api, deps(config({ allowReceiveCredentials: true })));
+		let release = () => {};
+		try {
+			await attachAndSettle(fake, { sessionId: "previous-local" });
+			await fake.emit({ type: "session_info_changed" });
+			await vi.advanceTimersByTimeAsync(1);
+			release = registerCredentialConsumer("bash");
+			fake.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: "replacement-run" });
+			await fake.emit({ type: "session_start", reason: "resume" }, { sessionId: "replacement-local" });
+			await vi.advanceTimersByTimeAsync(400);
+			expect(hive.attaches()).toHaveLength(2);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(hive.maxActiveAttaches()).toBe(1);
+			expect(hive.acceptsCredentials()).toBe(true);
+			expect(hive.committedCapabilities).toEqual([false, false, true]);
+		} finally { await fake.emit({ type: "session_shutdown" }); release(); }
+	});
+	it("discards dirty refresh work after shutdown", async () => {
+		const hive = fakeHive({ refreshes: [{ status: 200, delayMs: 9_000 }] });
+		hiveRemote(fake.api, deps(config()));
+		await attachAndSettle(fake);
+		await fake.emit({ type: "session_info_changed" });
+		await vi.advanceTimersByTimeAsync(1);
+		await fake.emit({ type: "session_info_changed" });
+		await fake.emit({ type: "session_shutdown" });
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(hive.attaches()).toHaveLength(2);
+	});
 	it.each([{ refresh: { status: 200, delayMs: 9_000 } }, { refresh: { status: 503 } }])("retains recovered binding until refresh acknowledgement $refresh", async ({ refresh }) => {
 		const release = registerCredentialConsumer("bash");
 		const binds = vi.spyOn(CredentialReceiver.prototype, "bind");
