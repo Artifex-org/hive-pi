@@ -68,6 +68,10 @@ describe("the start message", () => {
 	});
 });
 
+function emitJob(pi: FakePi, event: { id: string; [key: string]: unknown }): void {
+	pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { ...event, sessionId: "fake-session", executionId: `execution-${event.id}` });
+}
+
 describe("the bus between the two extensions", () => {
 	function boot(): FakePi {
 		const pi = createFakePi();
@@ -89,7 +93,7 @@ describe("the bus between the two extensions", () => {
 		const pi = boot();
 		await pi.emit({ type: "session_start" }, { mode: "tui" });
 
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, {
+		emitJob(pi, {
 			action: "start",
 			id: "sub-1",
 			what: "auditing the migration",
@@ -100,8 +104,8 @@ describe("the bus between the two extensions", () => {
 		expect(await call(pi, "background_list")).toContain("auditing the migration");
 		expect(pi.statuses.at(-1)?.text).toBe("1 bg job");
 
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "output", id: "sub-1", chunk: "found three problems" });
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "finish", id: "sub-1", status: "done", exitCode: 0 });
+		emitJob(pi, { action: "output", id: "sub-1", chunk: "found three problems" });
+		emitJob(pi, { action: "finish", id: "sub-1", status: "done", exitCode: 0 });
 
 		expect(pi.messages).toHaveLength(1);
 		expect(pi.messages[0].content).toContain("found three problems");
@@ -117,7 +121,7 @@ describe("the bus between the two extensions", () => {
 		// writer past a gate that has not actually opened.
 		const pi = boot();
 		await pi.emit({ type: "session_start" }, { mode: "tui" });
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, {
+		emitJob(pi, {
 			action: "start",
 			id: "sub-1",
 			what: "a long audit",
@@ -136,7 +140,7 @@ describe("the bus between the two extensions", () => {
 		expect(await call(pi, "background_list")).toContain("running");
 		expect(pi.messages).toHaveLength(0);
 
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "finish", id: "sub-1", status: "canceled" });
+		emitJob(pi, { action: "finish", id: "sub-1", status: "canceled" });
 		expect(pi.messages).toHaveLength(1);
 		expect(pi.messages[0].content).toContain("canceled");
 	});
@@ -148,8 +152,8 @@ describe("the bus between the two extensions", () => {
 		// `notify` only marks a job notified after sendMessage returns, so the
 		// loss is recoverable; this is the sweep that recovers it.
 		const pi = boot();
-		// No session_start yet: the very first delivery has no live session, and
-		// the fake's sendMessage is recorded regardless, so force a real throw.
+		// A delivery may fail before it is committed; retry only in its own session.
+		await pi.emit({ type: "session_start" }, { mode: "tui" });
 		let failNext = true;
 		const original = pi.api.sendMessage.bind(pi.api);
 		(pi.api as { sendMessage: unknown }).sendMessage = (...args: unknown[]) => {
@@ -160,14 +164,14 @@ describe("the bus between the two extensions", () => {
 			return (original as (...a: unknown[]) => unknown)(...args);
 		};
 
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, {
+		emitJob(pi, {
 			action: "start",
 			id: "sub-1",
 			what: "an audit",
 			kind: "subagent",
 			detail: "research: look",
 		});
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "finish", id: "sub-1", status: "done", exitCode: 0 });
+		emitJob(pi, { action: "finish", id: "sub-1", status: "done", exitCode: 0 });
 		expect(pi.messages).toHaveLength(0); // the throw ate it
 
 		await pi.emit({ type: "session_start" }, { mode: "tui" });
@@ -184,27 +188,28 @@ describe("the bus between the two extensions", () => {
 		// completed job from a stray event would put a notification in front of
 		// the model for work it cannot then look up.
 		const pi = boot();
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "finish", id: "sub-99", status: "done", exitCode: 0 });
+		emitJob(pi, { action: "finish", id: "sub-99", status: "done", exitCode: 0 });
 		expect(pi.messages).toHaveLength(0);
 	});
 
-	it("keeps the original job when a duplicate start arrives", () => {
+	it("keeps the original job when a duplicate start arrives", async () => {
 		const pi = boot();
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, {
+		await pi.emit({ type: "session_start" }, { mode: "tui" });
+		emitJob(pi, {
 			action: "start",
 			id: "sub-1",
 			what: "the first one",
 			kind: "subagent",
 			detail: "research: look",
 		});
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, {
+		emitJob(pi, {
 			action: "start",
 			id: "sub-1",
 			what: "a confusing second one",
 			kind: "subagent",
 			detail: "research: look again",
 		});
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "finish", id: "sub-1", status: "done", exitCode: 0 });
+		emitJob(pi, { action: "finish", id: "sub-1", status: "done", exitCode: 0 });
 		expect(pi.messages).toHaveLength(1);
 		expect(pi.messages[0].content).toContain("the first one");
 	});
@@ -216,7 +221,7 @@ describe("the bus between the two extensions", () => {
 		const pi = boot();
 		await pi.emit({ type: "session_start" }, { mode: "tui" });
 		await call(pi, "background_bash", { command: "sleep 5", what: "a shell job" });
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, {
+		emitJob(pi, {
 			action: "start",
 			id: "sub-1",
 			what: "a delegation",

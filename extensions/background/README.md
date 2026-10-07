@@ -32,10 +32,7 @@ That composition was already possible. **The session had `background_bash` and u
 
 ## Completion is pushed. Status is pulled.
 
-A finished job injects itself **once**, via `sendMessage({deliverAs: "followUp", triggerTurn: true})` — the `agmsg` shape, for `agmsg`'s reasons:
-
-- **`followUp`** so the message never cuts in between a tool call and its result.
-- **`triggerTurn`** so an *idle* session acts on it, rather than sitting on it until the human types something.
+A finished job uses the shared waker (`hive-common/waker.ts`). Streaming notices never request a follow-up turn; idle notices wake only if the active branch has not handed control to a person. Plan approvals and pending grants remain gates, including after recovery. Settling notices wait for classification.
 
 Everything else is a tool the model calls when it wants, plus a footer segment that costs no context at all.
 
@@ -61,7 +58,21 @@ Retention keeps the **tail**. A build that fails prints its error last; keeping 
 - **Refuses in headless/`-p` mode.** The session is replaced after settle, so a completion message would have nowhere to land. A job that runs, finishes and tells nobody is *worse* than no backgrounding, because the model believes it will be told.
 - **The tool call's `AbortSignal` is not forwarded.** Surviving the turn that started it is the whole feature. This is the one place in the harness where dropping the signal is correct rather than a bug — which is exactly why `session_shutdown` reaping is not optional.
 - **8 concurrent jobs**, 30-minute default wall clock, 4-hour ceiling.
-- **No persistence across restarts.** Jobs die with the session, by design.
+- **No process recovery or command replay.** Graceful shutdown reaps owned processes. After abrupt process death a detached command may still be running or may already have performed external effects; its unrecorded outcome is **unconfirmed**, not canceled or failed.
+
+## Recorded-result recovery
+
+`journal.ts` stores versioned start and terminal records using Pi's `appendEntry`, with bounded retained output and a UUID per execution. Terminal evidence is recorded before notification. On resume/reload, only the active branch and original session owner are restored: abandoned branches and forks do not inherit jobs. Recorded completions remain available through `background_list` and `background_result`, including in discussion/plan mode; execution and cancellation remain prohibited there.
+
+Persisted background messages carry that execution identity. Recovery suppresses notices already present in the transcript, but a notice queued or held only in memory is retried through the waker. This is **not an exactly-once external-effect guarantee**: neither commands nor uncertain effects are replayed. An interrupted start is restored as unconfirmed, with explicit advice to verify effects before retrying.
+
+Pi 1.0.2 synchronously appends JSONL after a user/assistant message exists, without `fsync`. This restores records surviving a **process restart**, not guaranteed power-loss durability. In-memory sessions have no disk recovery. A start-record failure prevents spawning a locally owned shell/watch job; externally owned delegations remain their owner's responsibility and registration errors are surfaced to the UI. A terminal-record failure remains visible in the live result and UI rather than silently promising recovery. Pi mutates its in-memory tree before attempting a disk write, leaving parent ids that may not exist on disk. Before each journal write, notification acceptance, and recovery, the active branch is checked against canonical JSONL ids and parents. A missing ancestor or known write failure cancels owned jobs, discards pending notices, and requests graceful shutdown. A same-manager `/reload` cannot repair this: restart/resume a healthy saved session through a fresh native manager (or explicitly repair/select a valid saved branch). Failed payload metadata identifies unsafe in-memory state; it does not repair ancestry. Native send failures are asynchronous runtime errors, so validation also blocks later background writes after an unacknowledged failed send. This is not a transactional/exactly-once delivery guarantee for Pi or other extensions.
+
+Ancestry validation deliberately performs a synchronous full JSONL scan. A local five-pass benchmark with mostly abandoned branches measured means of 0.84 ms at 1 MiB, 6.02 ms at 8 MiB, and 82.69 ms at 64 MiB. Cost grows with history and repeats at lifecycle/write boundaries; long sessions or bursts of completions can block the event loop. This first slice accepts that measured safety tradeoff, not an incremental-index performance guarantee. Native transactional append/commit acknowledgement remains the cleaner follow-up.
+
+Shutdown is a **request to the host**. Tests establish that subsequent background journal writes are blocked and that fresh-manager recovery preserves ancestry. They do not establish that Pi tool-result persistence, other extensions, or every host stop writing after that request.
+
+`test/background-recovery.test.ts` kills real processes after command effects but before the terminal record, after the record but before notification, and after notification persistence but before the volatile notification flag. It resumes through Pi's real SessionManager and checks retained evidence, deduplication, and that effects happen only once. It also checks approval-held recovery in the real Pi runtime, process death with native streaming/settling queues, native reload deduplication, and a real JSONL write failure after Pi has mutated memory.
 
 ## Reaping, and the test that was worth nothing
 

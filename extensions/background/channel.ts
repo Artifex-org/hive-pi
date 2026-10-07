@@ -33,7 +33,7 @@ export const BACKGROUND_JOB_CHANNEL = "background.job";
 /** Registry → owner: the model asked for this job to stop. */
 export const BACKGROUND_CANCEL_CHANNEL = "background.cancel";
 
-export type BackgroundJobEvent =
+export type BackgroundJobEvent = { sessionId: string; executionId: string } & (
 	| {
 			action: "start";
 			/**
@@ -53,7 +53,7 @@ export type BackgroundJobEvent =
 			id: string;
 			status: Exclude<JobStatus, "running">;
 			exitCode?: number;
-	  };
+	  });
 
 export interface BackgroundCancelEvent {
 	id: string;

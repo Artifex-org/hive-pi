@@ -54,7 +54,14 @@ describe("tool classification", () => {
 		}
 	});
 
-	it("allows this extension's own tools", () => {
+	it("allows background inspection in read-only modes without permitting execution or cancellation", () => {
+		for (const classify of [classifyTool, classifyDiscussionTool]) {
+			for (const tool of ["background_list", "background_result"]) expect(classify(tool, {}).allowed).toBe(true);
+			for (const tool of ["background_bash", "background_cancel", "hive_watch_run"]) expect(classify(tool, {}).allowed).toBe(false);
+		}
+	});
+
+	it("allows this extension\'s own tools", () => {
 		expect(classifyTool("plan_write").allowed).toBe(true);
 		expect(classifyTool("plan_ask").allowed).toBe(true);
 	});
