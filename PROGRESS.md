@@ -12,7 +12,11 @@ the consumer was lost. Both clients revalidate protected consumers at dispatch,
 and withdraw capability on ACK if the initial bind cannot become current. That
 same failing predicate now passes in native and Factory; no assertions loosened.
 Native final gate bg38 passed TypeScript +4,753 tests/289 files,13 existing
-skips. Factory final gate bg39 includes all latest code/tests. Older Hive12713
+skips. Factory final gate bg39 passed175 tests/16 files, pinned1.0.2 types and
+all module loads, actual shell smoke, Factory embedding race, metrics/file-length.
+Native follow-up draft is https://github.com/Artifex-org/hive-pi/pull/133, linked
+with https://github.com/Artifex-org/hive/pull/8313 . Exact-head CI remains watched.
+Older Hive12713
 test5 attempt1 was lost, not a measured assertion failure; attempt2 is running.
 Promise-tail serialization is within one extension instance; HTTP timeout or
 lost response can leave server commit outcome ambiguous, not solved by client
