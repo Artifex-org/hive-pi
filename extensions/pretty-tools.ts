@@ -528,7 +528,14 @@ export default function prettyTools(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "bash", exposure: exposureFor("bash"), label: "Bash", description: bash.description, parameters: bashParameters,
+		name: "bash", exposure: exposureFor("bash"), label: "Bash",
+		description: bash.description +
+			"\n\nIn this harness, codemode's tools.bash returns text on success, not an object with output/exit_code. " +
+			"A nonzero exit or timeout rejects with an Error; with Promise.allSettled, print String(result.reason) " +
+			"for rejected results (JSON-stringifying an Error loses its message). " +
+			"Use background_bash for commands expected to take more than about 30 seconds; " +
+			"after a timeout, check side effects before retrying.",
+		parameters: bashParameters,
 		...builtinMeta(bash),
 		/**
 		 * Runs the command on a real pty when one is available, so an interactive

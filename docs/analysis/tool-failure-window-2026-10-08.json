@@ -1,0 +1,1336 @@
+{
+  "window": {
+    "since_inclusive": "2026-10-01T21:04:17.532580+00:00",
+    "until_exclusive": "2026-10-08T21:16:00+00:00"
+  },
+  "sessions": 145,
+  "outer_by_model_day": [
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-04",
+      "tool": "bash",
+      "results": 820,
+      "errors": 42
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-04",
+      "tool": "codemode",
+      "results": 54,
+      "errors": 4
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-05",
+      "tool": "bash",
+      "results": 1733,
+      "errors": 70
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-05",
+      "tool": "codemode",
+      "results": 321,
+      "errors": 16
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-06",
+      "tool": "bash",
+      "results": 195,
+      "errors": 4
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-06",
+      "tool": "codemode",
+      "results": 2,
+      "errors": 0
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-07",
+      "tool": "bash",
+      "results": 81,
+      "errors": 3
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-07",
+      "tool": "codemode",
+      "results": 2,
+      "errors": 1
+    },
+    {
+      "model": "meta/muse-spark-1.3-contributor",
+      "day": "2026-10-08",
+      "tool": "bash",
+      "results": 12,
+      "errors": 1
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-01",
+      "tool": "bash",
+      "results": 7,
+      "errors": 0
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-02",
+      "tool": "bash",
+      "results": 490,
+      "errors": 66
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-03",
+      "tool": "bash",
+      "results": 255,
+      "errors": 29
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-04",
+      "tool": "bash",
+      "results": 585,
+      "errors": 92
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-04",
+      "tool": "codemode",
+      "results": 673,
+      "errors": 78
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-05",
+      "tool": "bash",
+      "results": 666,
+      "errors": 90
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-05",
+      "tool": "codemode",
+      "results": 2530,
+      "errors": 280
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-06",
+      "tool": "bash",
+      "results": 260,
+      "errors": 26
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-06",
+      "tool": "codemode",
+      "results": 1400,
+      "errors": 131
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-07",
+      "tool": "bash",
+      "results": 1612,
+      "errors": 247
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-07",
+      "tool": "codemode",
+      "results": 5026,
+      "errors": 649
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-08",
+      "tool": "bash",
+      "results": 441,
+      "errors": 47
+    },
+    {
+      "model": "openai-codex/gpt-6.1-sol",
+      "day": "2026-10-08",
+      "tool": "codemode",
+      "results": 1100,
+      "errors": 108
+    }
+  ],
+  "nested_by_tool_status": [
+    {
+      "tool": "TodoWrite",
+      "status": "ok",
+      "calls": 414
+    },
+    {
+      "tool": "advisor",
+      "status": "error",
+      "calls": 4
+    },
+    {
+      "tool": "advisor",
+      "status": "ok",
+      "calls": 100
+    },
+    {
+      "tool": "artifact_list",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "author_maestro_flow",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "background_bash",
+      "status": "ok",
+      "calls": 139
+    },
+    {
+      "tool": "background_cancel",
+      "status": "ok",
+      "calls": 20
+    },
+    {
+      "tool": "background_list",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "background_list",
+      "status": "ok",
+      "calls": 26
+    },
+    {
+      "tool": "background_result",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "background_result",
+      "status": "ok",
+      "calls": 445
+    },
+    {
+      "tool": "bash",
+      "status": "error",
+      "calls": 458
+    },
+    {
+      "tool": "bash",
+      "status": "ok",
+      "calls": 5020
+    },
+    {
+      "tool": "bash",
+      "status": "unfinished",
+      "calls": 25
+    },
+    {
+      "tool": "browser_click",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "browser_click",
+      "status": "ok",
+      "calls": 61
+    },
+    {
+      "tool": "browser_console",
+      "status": "ok",
+      "calls": 10
+    },
+    {
+      "tool": "browser_evaluate",
+      "status": "ok",
+      "calls": 121
+    },
+    {
+      "tool": "browser_navigate",
+      "status": "ok",
+      "calls": 92
+    },
+    {
+      "tool": "browser_screenshot",
+      "status": "ok",
+      "calls": 9
+    },
+    {
+      "tool": "browser_snapshot",
+      "status": "ok",
+      "calls": 31
+    },
+    {
+      "tool": "browser_type",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "browser_wait_for",
+      "status": "error",
+      "calls": 23
+    },
+    {
+      "tool": "browser_wait_for",
+      "status": "ok",
+      "calls": 72
+    },
+    {
+      "tool": "bugfix_evidence",
+      "status": "ok",
+      "calls": 64
+    },
+    {
+      "tool": "bugfix_root_cause",
+      "status": "ok",
+      "calls": 15
+    },
+    {
+      "tool": "compact_schedule",
+      "status": "ok",
+      "calls": 51
+    },
+    {
+      "tool": "dev_db_start",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "edit",
+      "status": "error",
+      "calls": 80
+    },
+    {
+      "tool": "edit",
+      "status": "ok",
+      "calls": 1668
+    },
+    {
+      "tool": "find",
+      "status": "error",
+      "calls": 5
+    },
+    {
+      "tool": "find",
+      "status": "ok",
+      "calls": 470
+    },
+    {
+      "tool": "goal_set",
+      "status": "error",
+      "calls": 20
+    },
+    {
+      "tool": "goal_set",
+      "status": "ok",
+      "calls": 107
+    },
+    {
+      "tool": "grep",
+      "status": "error",
+      "calls": 255
+    },
+    {
+      "tool": "grep",
+      "status": "ok",
+      "calls": 3850
+    },
+    {
+      "tool": "grep",
+      "status": "unfinished",
+      "calls": 8
+    },
+    {
+      "tool": "handoff",
+      "status": "ok",
+      "calls": 127
+    },
+    {
+      "tool": "hive_watch_run",
+      "status": "ok",
+      "calls": 81
+    },
+    {
+      "tool": "kernel",
+      "status": "error",
+      "calls": 4
+    },
+    {
+      "tool": "kernel",
+      "status": "ok",
+      "calls": 185
+    },
+    {
+      "tool": "knowledge_collections",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "knowledge_get",
+      "status": "error",
+      "calls": 3
+    },
+    {
+      "tool": "knowledge_get",
+      "status": "ok",
+      "calls": 174
+    },
+    {
+      "tool": "knowledge_multi_get",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "knowledge_search",
+      "status": "error",
+      "calls": 34
+    },
+    {
+      "tool": "knowledge_search",
+      "status": "ok",
+      "calls": 419
+    },
+    {
+      "tool": "list_workspace_catalog",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "load_tools",
+      "status": "error",
+      "calls": 4
+    },
+    {
+      "tool": "load_tools",
+      "status": "ok",
+      "calls": 15
+    },
+    {
+      "tool": "ls",
+      "status": "error",
+      "calls": 11
+    },
+    {
+      "tool": "ls",
+      "status": "ok",
+      "calls": 129
+    },
+    {
+      "tool": "mcp__asfam__asfam_canary_compare",
+      "status": "ok",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__asfam__asfam_deploy_last",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__asfam__asfam_exchange_positions",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_alerts",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_allocations_chart",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_balance_parity",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_cell_ledger",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_churn_decomposition",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_execution_quality_series",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_exposure_history",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_intent_effectiveness",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_liquidation_distance",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_liquidation_history",
+      "status": "ok",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_outcome_streaks",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__asfam__asfam_qis_target_vs_actual",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__add_teammate",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__add_teammate",
+      "status": "ok",
+      "calls": 24
+    },
+    {
+      "tool": "mcp__hive__answer_question",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__assign_teammate_squad",
+      "status": "ok",
+      "calls": 8
+    },
+    {
+      "tool": "mcp__hive__cancel_run",
+      "status": "ok",
+      "calls": 9
+    },
+    {
+      "tool": "mcp__hive__cancel_task",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__claim_communication",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__claim_ticket",
+      "status": "error",
+      "calls": 14
+    },
+    {
+      "tool": "mcp__hive__claim_ticket",
+      "status": "ok",
+      "calls": 19
+    },
+    {
+      "tool": "mcp__hive__comment_ticket",
+      "status": "ok",
+      "calls": 27
+    },
+    {
+      "tool": "mcp__hive__create_communication",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__create_communication",
+      "status": "ok",
+      "calls": 48
+    },
+    {
+      "tool": "mcp__hive__create_squad",
+      "status": "ok",
+      "calls": 13
+    },
+    {
+      "tool": "mcp__hive__create_team",
+      "status": "ok",
+      "calls": 8
+    },
+    {
+      "tool": "mcp__hive__diagnose_agent_session",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__diagnose_agent_session",
+      "status": "ok",
+      "calls": 191
+    },
+    {
+      "tool": "mcp__hive__encounter_communication",
+      "status": "ok",
+      "calls": 18
+    },
+    {
+      "tool": "mcp__hive__end_agent_session",
+      "status": "ok",
+      "calls": 56
+    },
+    {
+      "tool": "mcp__hive__evaluate_pipeline",
+      "status": "ok",
+      "calls": 5
+    },
+    {
+      "tool": "mcp__hive__explain_failure",
+      "status": "ok",
+      "calls": 190
+    },
+    {
+      "tool": "mcp__hive__find_related_work",
+      "status": "ok",
+      "calls": 7
+    },
+    {
+      "tool": "mcp__hive__fleet_status",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__get_agent_command",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_agent_command",
+      "status": "ok",
+      "calls": 23
+    },
+    {
+      "tool": "mcp__hive__get_cache_health",
+      "status": "error",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__get_communication",
+      "status": "error",
+      "calls": 14
+    },
+    {
+      "tool": "mcp__hive__get_communication",
+      "status": "ok",
+      "calls": 224
+    },
+    {
+      "tool": "mcp__hive__get_databases",
+      "status": "error",
+      "calls": 10
+    },
+    {
+      "tool": "mcp__hive__get_host_request",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_host_request",
+      "status": "ok",
+      "calls": 20
+    },
+    {
+      "tool": "mcp__hive__get_named_queue_wait",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__get_occupancy",
+      "status": "error",
+      "calls": 6
+    },
+    {
+      "tool": "mcp__hive__get_occupancy",
+      "status": "ok",
+      "calls": 312
+    },
+    {
+      "tool": "mcp__hive__get_origin_pull",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_origin_pull",
+      "status": "ok",
+      "calls": 84
+    },
+    {
+      "tool": "mcp__hive__get_pipeline",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__get_pipeline_graph",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_project_goal_activity",
+      "status": "ok",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__get_project_goal_work",
+      "status": "ok",
+      "calls": 26
+    },
+    {
+      "tool": "mcp__hive__get_project_goals",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_pull",
+      "status": "error",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__get_pull",
+      "status": "ok",
+      "calls": 513
+    },
+    {
+      "tool": "mcp__hive__get_run",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_run",
+      "status": "ok",
+      "calls": 902
+    },
+    {
+      "tool": "mcp__hive__get_run_reports",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_run_reports",
+      "status": "ok",
+      "calls": 37
+    },
+    {
+      "tool": "mcp__hive__get_run_tests",
+      "status": "error",
+      "calls": 17
+    },
+    {
+      "tool": "mcp__hive__get_run_tests",
+      "status": "ok",
+      "calls": 502
+    },
+    {
+      "tool": "mcp__hive__get_task",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__get_task_logs",
+      "status": "error",
+      "calls": 10
+    },
+    {
+      "tool": "mcp__hive__get_task_logs",
+      "status": "ok",
+      "calls": 711
+    },
+    {
+      "tool": "mcp__hive__get_ticket",
+      "status": "ok",
+      "calls": 149
+    },
+    {
+      "tool": "mcp__hive__get_work_context",
+      "status": "ok",
+      "calls": 41
+    },
+    {
+      "tool": "mcp__hive__hold_autofix",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__hold_autofix",
+      "status": "ok",
+      "calls": 20
+    },
+    {
+      "tool": "mcp__hive__knowledge_collections",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__knowledge_get",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__knowledge_get",
+      "status": "ok",
+      "calls": 31
+    },
+    {
+      "tool": "mcp__hive__knowledge_grep",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__knowledge_multi_get",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__knowledge_multi_get",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__knowledge_search",
+      "status": "error",
+      "calls": 5
+    },
+    {
+      "tool": "mcp__hive__knowledge_search",
+      "status": "ok",
+      "calls": 15
+    },
+    {
+      "tool": "mcp__hive__knowledge_write",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__knowledge_write",
+      "status": "ok",
+      "calls": 95
+    },
+    {
+      "tool": "mcp__hive__launch_teammate",
+      "status": "error",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__launch_teammate",
+      "status": "ok",
+      "calls": 58
+    },
+    {
+      "tool": "mcp__hive__list_agent_flows",
+      "status": "ok",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__list_agent_launches",
+      "status": "ok",
+      "calls": 23
+    },
+    {
+      "tool": "mcp__hive__list_agent_sessions",
+      "status": "ok",
+      "calls": 32
+    },
+    {
+      "tool": "mcp__hive__list_cases",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__list_cases",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__list_clusters",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__list_communications",
+      "status": "error",
+      "calls": 29
+    },
+    {
+      "tool": "mcp__hive__list_communications",
+      "status": "ok",
+      "calls": 859
+    },
+    {
+      "tool": "mcp__hive__list_credential_catalog",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__list_host_catalog",
+      "status": "ok",
+      "calls": 7
+    },
+    {
+      "tool": "mcp__hive__list_images",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__list_linear_teams",
+      "status": "error",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__list_pipelines",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__list_projects",
+      "status": "ok",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__list_pulls",
+      "status": "error",
+      "calls": 5
+    },
+    {
+      "tool": "mcp__hive__list_pulls",
+      "status": "ok",
+      "calls": 42
+    },
+    {
+      "tool": "mcp__hive__list_queues",
+      "status": "error",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__list_resources",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__list_resources",
+      "status": "ok",
+      "calls": 26
+    },
+    {
+      "tool": "mcp__hive__list_run_artifacts",
+      "status": "error",
+      "calls": 5
+    },
+    {
+      "tool": "mcp__hive__list_run_artifacts",
+      "status": "ok",
+      "calls": 96
+    },
+    {
+      "tool": "mcp__hive__list_runs",
+      "status": "error",
+      "calls": 4
+    },
+    {
+      "tool": "mcp__hive__list_runs",
+      "status": "ok",
+      "calls": 152
+    },
+    {
+      "tool": "mcp__hive__list_team_projects",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__list_team_projects",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__list_teammates",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__list_teammates",
+      "status": "ok",
+      "calls": 103
+    },
+    {
+      "tool": "mcp__hive__list_teams",
+      "status": "ok",
+      "calls": 8
+    },
+    {
+      "tool": "mcp__hive__message_teammate",
+      "status": "error",
+      "calls": 26
+    },
+    {
+      "tool": "mcp__hive__message_teammate",
+      "status": "ok",
+      "calls": 3134
+    },
+    {
+      "tool": "mcp__hive__move_ticket_state",
+      "status": "ok",
+      "calls": 7
+    },
+    {
+      "tool": "mcp__hive__offload_to_factory",
+      "status": "ok",
+      "calls": 5
+    },
+    {
+      "tool": "mcp__hive__patch_communication",
+      "status": "ok",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__post_team_note",
+      "status": "error",
+      "calls": 11
+    },
+    {
+      "tool": "mcp__hive__post_team_note",
+      "status": "ok",
+      "calls": 924
+    },
+    {
+      "tool": "mcp__hive__read_agent_transcript",
+      "status": "error",
+      "calls": 5
+    },
+    {
+      "tool": "mcp__hive__read_agent_transcript",
+      "status": "ok",
+      "calls": 134
+    },
+    {
+      "tool": "mcp__hive__read_inbox",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__read_inbox",
+      "status": "ok",
+      "calls": 746
+    },
+    {
+      "tool": "mcp__hive__read_team_notes",
+      "status": "error",
+      "calls": 6
+    },
+    {
+      "tool": "mcp__hive__read_team_notes",
+      "status": "ok",
+      "calls": 503
+    },
+    {
+      "tool": "mcp__hive__recap_session",
+      "status": "ok",
+      "calls": 242
+    },
+    {
+      "tool": "mcp__hive__remove_teammate",
+      "status": "ok",
+      "calls": 50
+    },
+    {
+      "tool": "mcp__hive__reply_communication",
+      "status": "error",
+      "calls": 7
+    },
+    {
+      "tool": "mcp__hive__reply_communication",
+      "status": "ok",
+      "calls": 349
+    },
+    {
+      "tool": "mcp__hive__repo_log",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__report_issue",
+      "status": "ok",
+      "calls": 15
+    },
+    {
+      "tool": "mcp__hive__request_host",
+      "status": "ok",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__request_resource",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__request_resource",
+      "status": "ok",
+      "calls": 38
+    },
+    {
+      "tool": "mcp__hive__request_team_project",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__search_tickets",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__search_tickets",
+      "status": "ok",
+      "calls": 118
+    },
+    {
+      "tool": "mcp__hive__sentry_search_events",
+      "status": "error",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__sentry_search_events",
+      "status": "ok",
+      "calls": 3
+    },
+    {
+      "tool": "mcp__hive__sentry_search_issues",
+      "status": "ok",
+      "calls": 9
+    },
+    {
+      "tool": "mcp__hive__steer_agent",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__hive__steer_agent",
+      "status": "ok",
+      "calls": 32
+    },
+    {
+      "tool": "mcp__hive__trigger_run",
+      "status": "ok",
+      "calls": 6
+    },
+    {
+      "tool": "mcp__hive__wait_for_run",
+      "status": "ok",
+      "calls": 8
+    },
+    {
+      "tool": "mcp__hive__watch_ticket",
+      "status": "ok",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__whoami",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "mcp__hive__whoami",
+      "status": "ok",
+      "calls": 43
+    },
+    {
+      "tool": "mcp__linear__get_issue",
+      "status": "ok",
+      "calls": 6
+    },
+    {
+      "tool": "mcp__linear__list_comments",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__linear__list_issues",
+      "status": "ok",
+      "calls": 65
+    },
+    {
+      "tool": "mcp__linear__list_teams",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__linear__prepare_attachment_upload",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "mcp__linear__save_comment",
+      "status": "ok",
+      "calls": 56
+    },
+    {
+      "tool": "mcp__linear__save_issue",
+      "status": "error",
+      "calls": 5
+    },
+    {
+      "tool": "mcp__linear__save_issue",
+      "status": "ok",
+      "calls": 108
+    },
+    {
+      "tool": "orchestrate",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "orchestrate_result",
+      "status": "ok",
+      "calls": 20
+    },
+    {
+      "tool": "papercut",
+      "status": "ok",
+      "calls": 150
+    },
+    {
+      "tool": "plan_write",
+      "status": "error",
+      "calls": 3
+    },
+    {
+      "tool": "plan_write",
+      "status": "ok",
+      "calls": 487
+    },
+    {
+      "tool": "quality_gate",
+      "status": "ok",
+      "calls": 45
+    },
+    {
+      "tool": "read",
+      "status": "error",
+      "calls": 270
+    },
+    {
+      "tool": "read",
+      "status": "ok",
+      "calls": 7516
+    },
+    {
+      "tool": "read",
+      "status": "unfinished",
+      "calls": 64
+    },
+    {
+      "tool": "read_symbol",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "read_symbol",
+      "status": "ok",
+      "calls": 1581
+    },
+    {
+      "tool": "readiness",
+      "status": "ok",
+      "calls": 5
+    },
+    {
+      "tool": "report_dev_server",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "request_workspace",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "session_context",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "session_context",
+      "status": "ok",
+      "calls": 7
+    },
+    {
+      "tool": "session_grep",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "session_title",
+      "status": "error",
+      "calls": 2
+    },
+    {
+      "tool": "session_title",
+      "status": "ok",
+      "calls": 45
+    },
+    {
+      "tool": "subagent",
+      "status": "ok",
+      "calls": 32
+    },
+    {
+      "tool": "worker_send",
+      "status": "error",
+      "calls": 5
+    },
+    {
+      "tool": "worker_send",
+      "status": "ok",
+      "calls": 22
+    },
+    {
+      "tool": "workflow_write",
+      "status": "ok",
+      "calls": 1
+    },
+    {
+      "tool": "write",
+      "status": "error",
+      "calls": 1
+    },
+    {
+      "tool": "write",
+      "status": "ok",
+      "calls": 1182
+    }
+  ],
+  "discovery_error_sessions": 80,
+  "discovery_errors_by_day": {
+    "2026-10-04": 15,
+    "2026-10-05": 36,
+    "2026-10-06": 14,
+    "2026-10-07": 80,
+    "2026-10-08": 22
+  },
+  "timeout_signatures": {
+    "outer_bash": 55,
+    "outer_codemode": 24,
+    "nested_bash": 10
+  },
+  "coverage": {
+    "scripts_with_nested_record": 10924,
+    "incomplete_nested_records": 341,
+    "model_only_discovery_errors": 167,
+    "completed_scripts_with_nested_errors": 320,
+    "nested_errors_in_completed_scripts": 400,
+    "scripts_without_nested_record": 184
+  }
+}

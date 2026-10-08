@@ -253,6 +253,19 @@ export const HINTS: readonly ToolHint[] = [
 			"skills and model habit still carry the old form",
 	},
 	{
+		id: "codemode-model-only-search",
+		tools: ["codemode"],
+		match: /(?:^|\n)TypeError: tools\.tool_search does not exist\./,
+		hint:
+			"`tool_search` is model-only, not a member of `tools` in scripts. Use " +
+			"`await searchTools(\"<words>\")`, then `await describeTool(\"<exact name>\")`; " +
+			"searchTools is async, so await it before using array methods. " +
+			"Earlier calls in this script may already have run: inspect their effects before retrying side effects.",
+		evidence:
+			"2026-10-01..08 frozen workstation transcript window: 167 tools.tool_search TypeErrors across 80 sessions; " +
+			"reproduced against pi 1.0.2: native tool_search has model-only exposure and is absent from ALL_TOOLS",
+	},
+	{
 		id: "mcp-schema-rejection",
 		tools: ["codemode"],
 		toolMatch: (name) => name.startsWith("mcp__"),

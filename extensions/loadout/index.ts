@@ -50,7 +50,10 @@ export function loadoutPrompt(names: readonly string[]): string {
 		"",
 		`These harness tools exist but are not declared until loaded. Load the ones you need with \`${LOAD_TOOL}\` ` +
 			`(e.g. \`{"names": ["browser_navigate", "browser_snapshot"]}\`); they are callable from your next turn. ` +
-			"MCP server tools are found with `tool_search` instead.",
+			"For MCP discovery outside scripts, use `tool_search` when declared. " +
+			"Inside `codemode`, use `await searchTools(\"<words>\")` and `await describeTool(\"<exact name>\")`; " +
+			"never `tools.tool_search` (it is model-only). Deferred harness tools are already callable as " +
+			"`tools.<name>(args)` inside scripts; they do not need `load_tools` first.",
 		"",
 		names.join(", "),
 	].join("\n");
@@ -85,7 +88,7 @@ export function planLoad(
  */
 export function mcpHint(pi: Pick<ExtensionAPI, "getAllTools">): string {
 	return pi.getAllTools().some((tool) => tool.name === "tool_search")
-		? "MCP tools load with tool_search."
+		? "MCP tools load with tool_search outside codemode; inside scripts use await searchTools(query)."
 		: "this session has no MCP servers configured (no ~/.pi/agent/mcp.json), so there are no MCP tools to load.";
 }
 
