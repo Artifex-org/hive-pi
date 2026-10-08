@@ -92,5 +92,9 @@ export async function resolveBriefModel(
 		// answer here: fall through to the role's pin.
 	}
 
-	return rolePin ? { spec: rolePin, source: "role" } : null;
+	// A host that knows what it can run checks the pin too: a role pinned to a
+	// provider this host holds no credential for is not a fallback, it is a
+	// worker that dies on its first request.
+	if (!rolePin || (host.isConfigured && !host.isConfigured(rolePin))) return null;
+	return { spec: rolePin, source: "role" };
 }

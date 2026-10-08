@@ -4,7 +4,7 @@
  * stdout, what persists, and what the driver reads from the spool.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -12,7 +12,7 @@ import { createGoal, type GoalItem } from "../extensions/agenda/goal-state.ts";
 import type { OneShotOptions, OneShotResult } from "../extensions/agenda/spawn.ts";
 import { stopDecision } from "../claude/hooks/stop.ts";
 import { createSpool } from "../claude/spool.ts";
-import { makeLaunch, runCli, startFakeHive, writeTranscript, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
+import { CLI, makeLaunch, REPO, runCli, startFakeHive, writeTranscript, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
 
 const JUDGE = "You are grading whether a stated completion condition has been met.";
 const DRIFT = "You are checking whether an agent's RECENT ACTIVITY still serves its stated goal.";
@@ -69,11 +69,16 @@ describe("hook stop", () => {
 		expect(goal().ledger.turnsEvaluated).toBe(1);
 
 		const [call] = launch.calls();
-		expect(call.argv).toEqual(expect.arrayContaining(["--mode", "json", "-p", "--no-session", "--no-tools"]));
+		expect(call.argv).toEqual(expect.arrayContaining(["--mode", "json", "-p", "--no-session", "--no-tools", "--no-extensions"]));
+		// MCP-free: no built-in MCP extension is named.
+		expect(call.argv.some((a) => a.startsWith("builtin:"))).toBe(false);
 		expect(call.argv[call.argv.indexOf("--model") + 1]).toBe("zai/glm-low"); // catalog `low`, leased
 		expect(call.argv[call.argv.indexOf("--thinking") + 1]).toBe("off");
 		expect(call.agentDir).toBe(launch.agentDir); // the lease itself, never a mirror
 		expect(call.worker).toBe("1");
+		// The prompt — the session's transcript — never rides argv.
+		expect(call.stdin).toContain("You are grading whether a stated completion condition has been met.");
+		expect(call.argv.join(" ")).not.toContain("grading whether");
 
 		const records = launch.spoolRecords();
 		expect(records).toContainEqual(expect.objectContaining({ v: 1, kind: "usage", role: "goal-judge", model: "zai/glm-low", input: 100, output: 20, cacheRead: 3, cacheWrite: 0, cost: 0.0015, turns: 1 }));
@@ -82,6 +87,16 @@ describe("hook stop", () => {
 			expect(Number.isSafeInteger(record.ms)).toBe(true);
 			expect(typeof record.at).toBe("string");
 		}
+	});
+
+	it("still judges while Claude is mid-write and past a corrupt line — never exits on the transcript", async () => {
+		setGoal();
+		launch.setReplies([{ match: JUDGE, text: '{"ok": false, "reason": "not yet"}' }]);
+		appendFileSync(transcript, '{corrupt}\n{"type":"assistant","message":{"id":"m9","role":"assist');
+		const result = await stop();
+		expect(result.code).toBe(0);
+		expect(JSON.parse(result.stdout).reason).toContain("Goal not yet met: not yet");
+		expect(result.stderr).toContain("skipped");
 	});
 
 	it("confirms a fast 'met' with an explicit thinking level and then lets the stop through", async () => {
@@ -217,6 +232,28 @@ describe("hook stop", () => {
 		// maxInjections: 1 — the next settle reports, but does not inject.
 		const again = await runCli(["hook", "stop"], launch.env, JSON.stringify({ transcript_path: transcript, cwd: repo }));
 		expect(again.stdout).toBe("");
+	});
+});
+
+describe("hook stop terminated mid-check", () => {
+	it("kills the repo gate's whole process group when the hook itself is killed", async () => {
+		const { execFileSync, spawn } = await import("node:child_process");
+		const { existsSync, mkdirSync } = await import("node:fs");
+		const repo = join(launch.root, "slowgate");
+		mkdirSync(join(repo, ".pi"), { recursive: true });
+		execFileSync("git", ["init", "-q", repo]);
+		const marker = join(launch.root, "gate-child.pid");
+		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: `sleep 60 & echo $! > ${marker}; wait` }));
+		const hook = spawn(process.execPath, [CLI, "hook", "stop"], { cwd: REPO, env: launch.env, stdio: ["pipe", "ignore", "ignore"] });
+		hook.stdin.end(JSON.stringify({ transcript_path: transcript, cwd: repo }));
+		const deadline = Date.now() + 15_000;
+		while (Date.now() < deadline && !(existsSync(marker) && readFileSync(marker, "utf8").trim())) await new Promise((r) => setTimeout(r, 50));
+		const sleeper = Number.parseInt(readFileSync(marker, "utf8"), 10);
+		const closed = new Promise((done) => hook.on("close", done));
+		hook.kill("SIGTERM");
+		await closed;
+		await new Promise((r) => setTimeout(r, 100));
+		expect(() => process.kill(sleeper, 0)).toThrow();
 	});
 });
 

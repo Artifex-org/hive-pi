@@ -5,7 +5,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -16,12 +16,14 @@ import { emptyLedger } from "../extensions/agenda/ledger.ts";
 import { getPiInvocation } from "../extensions/agenda/spawn.ts";
 import { turnFailureOf } from "../extensions/agenda/turn-outcome.ts";
 import { tryLock } from "../claude/state.ts";
+import { nodeGateHost } from "../claude/mcp/gate-tool.ts";
 import { classifyHandback } from "../extensions/hive-common/handback.ts";
 import { killTree, treeSpawnOptions } from "../extensions/hive-common/child-tree.ts";
-import { cheapLaneMode } from "../extensions/subagent/model.ts";
+import { cheapLaneMode, chooseWorkerModel } from "../extensions/subagent/model.ts";
+import { resolveBriefModel } from "../extensions/brief/model.ts";
 import { isConfiguredWith } from "../claude/models.ts";
 import { createSpool, fitWakeText, MAX_RECORD_BYTES } from "../claude/spool.ts";
-import { readAppendedLines, toPiEntries, withFinalAssistant } from "../claude/transcript.ts";
+import { readAppendedLines, readClaudeTranscript, toPiEntries, withFinalAssistant } from "../claude/transcript.ts";
 
 function tmp(): string {
 	return mkdtempSync(join(tmpdir(), "claude-units-"));
@@ -57,6 +59,19 @@ describe("spool", () => {
 		const line = JSON.stringify({ v: 1, kind: "wake", source: "subagent", job: "sub-1", text: fitted, at: new Date().toISOString() });
 		expect(Buffer.byteLength(`${line}\n`)).toBeLessThan(MAX_RECORD_BYTES);
 		expect(fitted.endsWith("[truncated]")).toBe(true);
+	});
+
+	it("validates the model exactly as the driver does, and caps cost", () => {
+		const path = join(tmp(), "v.jsonl");
+		const said: string[] = [];
+		const spool = createSpool(path, (l) => said.push(l));
+		const u = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		for (const bad of ["zai/", "/x", "za i/x", "-zai/x", "zai/-x"]) spool.usage("r", bad, u, 1);
+		spool.usage("r", "zai/glm", { ...u, cost: 1e6 }, 1);
+		expect(said).toHaveLength(6);
+		spool.usage("r", "openrouter/openai/gpt-5.6-luna", u, 1);
+		spool.usage("r", "meta/muse-spark@2:latest", u, 1);
+		expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(2);
 	});
 
 	it("refuses a job id the driver could never match", () => {
@@ -127,10 +142,23 @@ describe("Claude transcript → pi entries", () => {
 		expect(turnFailureOf(entries)).toBe("error");
 	});
 
-	it("throws on a malformed line rather than reading it as empty", () => {
+	it("skips a corrupt middle line (once, on stderr) and moves the cursor past it", () => {
 		const path = join(tmp(), "bad.jsonl");
-		writeFileSync(path, "{nope}\n");
-		expect(() => readAppendedLines(path, 0)).toThrow(/line 1 is not JSON/);
+		writeFileSync(path, `${JSON.stringify(lines[0])}\n{nope}\n${JSON.stringify(lines[6])}\n`);
+		const said: string[] = [];
+		const read = readAppendedLines(path, 0, (l) => said.push(l));
+		expect(read.lines).toHaveLength(2);
+		expect(read.next).toBe(readFileSync(path).length);
+		expect(said).toEqual([expect.stringContaining("transcript line 2 skipped")]);
+	});
+
+	it("reads a whole transcript past a corrupt line and ignores a half-written last line", () => {
+		const path = join(tmp(), "t.jsonl");
+		writeFileSync(path, `${JSON.stringify(lines[0])}\n{nope}\n${JSON.stringify(lines[6])}\n{"type":"assistant","mess`);
+		const said: string[] = [];
+		const entries = readClaudeTranscript(path, (l) => said.push(l));
+		expect(entries.map((e) => e.message.role)).toEqual(["user", "assistant"]);
+		expect(said).toHaveLength(1); // the corrupt middle line; the partial tail is not an error
 	});
 });
 
@@ -151,13 +179,14 @@ describe("cheap lane on a leased store", () => {
 
 describe("process-group kill for a Claude helper's children", () => {
 	it("spawns detached only for a Claude helper", () => {
-		expect(treeSpawnOptions({ HIVE_PI_AGENT_DIR: "/lease" })).toEqual({ detached: true });
-		expect(treeSpawnOptions({})).toEqual({ detached: false });
+		expect(treeSpawnOptions({ HIVE_PI_HELPER_CHILD: "1" })).toEqual({ detached: true });
+		// The lease variable alone is inherited by every process in the launch.
+		expect(treeSpawnOptions({ HIVE_PI_AGENT_DIR: "/lease" })).toEqual({ detached: false });
 	});
 
 	it("kills the grandchild too", async () => {
 		const marker = join(tmp(), "grandchild.pid");
-		const tree = treeSpawnOptions({ HIVE_PI_AGENT_DIR: "/lease" });
+		const tree = treeSpawnOptions({ HIVE_PI_HELPER_CHILD: "1" });
 		const child = spawn("bash", ["-c", `sleep 30 & echo $! > ${marker}; wait`], { stdio: "ignore", ...tree });
 		const deadline = Date.now() + 5_000;
 		while (Date.now() < deadline) {
@@ -234,5 +263,44 @@ describe("tryLock", () => {
 		expect(taken).not.toBeNull();
 		expect(readFileSync(path, "utf8")).toBe(String(process.pid));
 		taken?.();
+	});
+});
+
+describe("quality_gate's buffered fallback runner", () => {
+	it("runs in the given cwd", async () => {
+		const dir = tmp();
+		const res = await nodeGateHost.exec("pwd", [], { timeout: 5_000, cwd: dir });
+		expect(res.stdout.trim()).toBe(realpathSync(dir));
+		expect(res).toMatchObject({ code: 0, killed: false });
+	});
+
+	it("kills the whole group at the ceiling and reports it as killed, not as a clean exit", async () => {
+		const marker = join(tmp(), "gc.pid");
+		const previous = process.env.HIVE_PI_HELPER_CHILD;
+		process.env.HIVE_PI_HELPER_CHILD = "1";
+		try {
+			const res = await nodeGateHost.exec("bash", ["-c", `sleep 30 & echo $! > ${marker}; wait`], { timeout: 300, cwd: tmp() });
+			expect(res).toMatchObject({ code: null, killed: true });
+			const grandchild = Number.parseInt(readFileSync(marker, "utf8"), 10);
+			await new Promise((r) => setTimeout(r, 100));
+			expect(() => process.kill(grandchild, 0)).toThrow();
+		} finally {
+			if (previous === undefined) delete process.env.HIVE_PI_HELPER_CHILD;
+			else process.env.HIVE_PI_HELPER_CHILD = previous;
+		}
+	});
+});
+
+describe("model choice on a leased store", () => {
+	it("does not fall back to a role pin whose provider is not leased", async () => {
+		const pick = await resolveBriefModel(undefined, "xai/grok", { auth: null, isConfigured: () => false });
+		expect(pick).toBeNull();
+		expect(await resolveBriefModel(undefined, "zai/glm", { auth: null, isConfigured: () => true })).toEqual({ spec: "zai/glm", source: "role" });
+	});
+
+	it("never spawns a worker on a bare model id under requireExplicitModel", async () => {
+		const env = { isConfigured: (spec: string) => (spec.includes("/") ? spec.startsWith("zai/") : null), catalog: async () => [{ key: "low", model: "zai/low" }], requireExplicitModel: true };
+		expect((await chooseWorkerModel({ requested: "glm-low", roleName: "r" }, env)).refusal).toContain("not configured");
+		expect(await chooseWorkerModel({ preferred: "glm-low", roleName: "r" }, env)).toMatchObject({ spec: "zai/low" });
 	});
 });

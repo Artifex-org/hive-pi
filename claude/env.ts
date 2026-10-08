@@ -12,6 +12,7 @@
  */
 
 import { join } from "node:path";
+import { HELPER_MARKER } from "../extensions/hive-common/child-tree.ts";
 
 export interface AdapterEnv {
 	hiveUrl?: string;
@@ -56,15 +57,23 @@ export function modelUnavailableReason(env: AdapterEnv): string | null {
 
 /**
  * Point every pi child this process spawns at the leased store and the
- * pinned binary. Set on `process.env` once, at entry, because every spawner
- * the adapter reuses (`runOneShot`, `runRoleAgent`, the subagent worker)
- * merges `process.env` into the child — and `mcp-common`'s `agentDir()`, which
- * builds the workers' MCP mirror, reads the same variable.
+ * pinned binary, and mark this process (and so its children) as a Claude
+ * helper. Set on `process.env` once, at entry, because every spawner the
+ * adapter reuses (`runOneShot`, `runRoleAgent`, the subagent worker) merges
+ * `process.env` into the child.
  *
- * `PI_AGENDA_WORKER=1` is set on each child by those spawners; it is not set
- * here, because this process is not a worker and nothing in it reads it.
+ * - `PI_CODING_AGENT_DIR` is only ever the lease itself: no tmp mirror
+ *   (mcp-common/config.ts stands its mirror down for a helper), because
+ *   Hive's node accepts a helper child only on that store.
+ * - `HIVE_PI_HELPER_CHILD=1` is the explicit helper marker
+ *   (hive-common/child-tree.ts): children spawn as process groups and
+ *   one-shots skip extension discovery. It is NOT inferred from
+ *   `HIVE_PI_AGENT_DIR`, which every process in the launch inherits.
+ * - `PI_AGENDA_WORKER=1` is set by those spawners on each child, not here:
+ *   this process is not a worker.
  */
 export function applyPiChildEnv(env: AdapterEnv): void {
+	process.env[HELPER_MARKER] = "1";
 	if (env.piAgentDir) process.env.PI_CODING_AGENT_DIR = env.piAgentDir;
 	if (env.piBin) process.env.PI_HOUSE_PI_BIN = env.piBin;
 }

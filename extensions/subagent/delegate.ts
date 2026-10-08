@@ -24,7 +24,7 @@ import * as path from "node:path";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { getPiInvocation } from "../agenda/spawn.ts";
 import { guardWorkerCwd, workerCwdRefusal } from "../guards-common/capability.ts";
-import { killTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
+import { killTree, trackTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
 import { distillFailure } from "../harness/distill.ts";
 import { frame } from "../harness/framing.ts";
 import { emptyJsonRunState, foldJsonLine, type WorkerRetries } from "../harness/json-protocol.ts";
@@ -72,6 +72,20 @@ export interface StructuredSupport {
 	structuredInstruction(schema: unknown): string;
 	parseStructuredResult(schema: unknown, output: string): SchemaValidation;
 	structuredRetryTask(originalTask: string, error: string): string;
+}
+
+/**
+ * A worker stopped by its abort signal. The message is the one this path has
+ * always thrown; the partial result rides along so a host can still account
+ * for what the worker spent before it was stopped.
+ */
+export class DelegationAborted extends Error {
+	readonly result: SingleResult;
+	constructor(result: SingleResult) {
+		super("Subagent was aborted");
+		this.name = "DelegationAborted";
+		this.result = result;
+	}
 }
 
 export const MAX_PARALLEL_TASKS = 8;
@@ -683,6 +697,7 @@ export async function runSingleAgent(
 				// A Claude helper's worker is a process group (hive-common/child-tree.ts).
 				...tree,
 			});
+			trackTree(proc, tree.detached);
 			let buffer = "";
 			let closed = false;
 			let seenWorkerEvent = false;
@@ -795,7 +810,7 @@ export async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new Error("Subagent was aborted");
+		if (wasAborted) throw new DelegationAborted(currentResult);
 		if (writerLock && !isFailedResult(currentResult) && writerMadeNoChange(stampBefore, await treeStamp(executionCwd))) {
 			currentResult.stopReason = "error";
 			currentResult.errorMessage = NO_CHANGE_ERROR;

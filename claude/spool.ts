@@ -36,8 +36,10 @@ let warnedMissing = false;
 /** The background-job id shape the driver accepts. */
 export const JOB_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-/** `<provider>/<non-empty id>` — the only model shape the driver accepts. */
-const MODEL_SPEC = /^[^/\s]+\/\S+$/;
+/** `<provider>/<id>`, exactly the shape the driver's validator accepts. */
+export const MODEL_SPEC = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+/** The driver drops a record whose cost is not below this (dollars). */
+export const MAX_COST = 1e6;
 
 /** A token or call count: a non-negative safe integer (usage folds can carry fractions or NaN-free floats). */
 function count(value: number): number {
@@ -81,8 +83,8 @@ export function createSpool(path: string | undefined, stderr: (line: string) => 
 				stderr(`hive-pi: usage record for ${role} not written: model ${JSON.stringify(model)} is not <provider>/<id>`);
 				return;
 			}
-			if (!Number.isFinite(usage.cost) || usage.cost < 0) {
-				stderr(`hive-pi: usage record for ${role} not written: cost ${String(usage.cost)} is not a finite non-negative number`);
+			if (!Number.isFinite(usage.cost) || usage.cost < 0 || usage.cost >= MAX_COST) {
+				stderr(`hive-pi: usage record for ${role} not written: cost ${String(usage.cost)} is not a finite number in [0, ${MAX_COST})`);
 				return;
 			}
 			write({

@@ -47,7 +47,7 @@ export interface LaunchEnv {
 	env: Record<string, string>;
 	setReplies(replies: FakeReply[]): void;
 	/** Every fake-pi invocation so far. */
-	calls(): { argv: string[]; input: string; pid: number; agentDir: string | undefined; worker: string | undefined }[];
+	calls(): { argv: string[]; input: string; stdin: string; pid: number; agentDir: string | undefined; worker: string | undefined }[];
 	spoolRecords(): Record<string, unknown>[];
 	writeControl(control: unknown): void;
 }
@@ -56,10 +56,13 @@ const FAKE_PI = (log: string, script: string) => `#!${process.execPath}
 const fs = require("node:fs");
 const argv = process.argv.slice(2);
 let input = argv.join(" ");
+// One-shots send their prompt on stdin (never argv); workers get /dev/null.
+const stdin = fs.readFileSync(0, "utf8");
+if (stdin) input += "\\n" + stdin;
 for (const a of argv) if (a.startsWith("@")) input += "\\n" + fs.readFileSync(a.slice(1), "utf8");
 const at = argv.indexOf("--append-system-prompt");
 if (at >= 0 && fs.existsSync(argv[at + 1])) input += "\\n" + fs.readFileSync(argv[at + 1], "utf8");
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, input, pid: process.pid, agentDir: process.env.PI_CODING_AGENT_DIR, worker: process.env.PI_AGENDA_WORKER }) + "\\n");
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, input, stdin, pid: process.pid, agentDir: process.env.PI_CODING_AGENT_DIR, worker: process.env.PI_AGENDA_WORKER }) + "\\n");
 const replies = fs.existsSync(${JSON.stringify(script)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(script)}, "utf8")) : [];
 const reply = replies.find((r) => input.includes(r.match)) ?? { text: "ok" };
 setTimeout(() => {

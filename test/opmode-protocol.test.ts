@@ -37,6 +37,26 @@ describe("bugfix evidence protocol", () => {
 	});
 });
 
+describe("leaving bugfix mode", () => {
+	it("resets the evidence machine with the root cause — a reproduction never carries into the next investigation", async () => {
+		const pi = createFakePi();
+		opmodeExtension(pi.api);
+		await pi.emit({ type: "session_start", reason: "startup" });
+		await pi.runCommand("mode", "bugfix");
+		const record = evidence(pi);
+		await result(pi, "fail-1", "bash", true);
+		await record("e1", { phase: "reproduce", tool_call_id: "fail-1", reproduction_key: "k" });
+		expect((await record("e2", { phase: "hypothesize", tool_call_id: "fail-1", hypothesis: "h" })).details.hive_widget?.spec?.stage).toBe("instrument");
+
+		await pi.runCommand("mode", "build");
+		await pi.runCommand("mode", "bugfix");
+		// Back at the start: "instrument" is out of order again.
+		const out = await record("e3", { phase: "instrument", tool_call_id: "fail-1" });
+		expect(out.details.hive_widget).toBeUndefined();
+		expect(out.content[0]?.text).toContain('it is waiting for phase "reproduce"');
+	});
+});
+
 /** Start a session already in bugfix mode, and hand back its evidence tool. */
 async function inBugfix(pi: ReturnType<typeof createFakePi>): Promise<Execute> {
 	opmodeExtension(pi.api);

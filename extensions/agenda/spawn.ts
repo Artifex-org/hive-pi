@@ -19,9 +19,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { addUsage, budgetTokens, emptyUsage, type Usage, type WireUsage } from "../harness/usage.ts";
-import { killTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
+import { isClaudeHelper, killTree, trackTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
 import { oneShotMcpEnv } from "../mcp-common/config.ts";
-import { nativeToolGrants, workerMcpEnv } from "../subagent/worker.ts";
+import { nativeToolGrants, workerExtensionPaths, workerMcpEnv } from "../subagent/worker.ts";
 
 export function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	// Explicit override, checked first.
@@ -134,6 +134,16 @@ export interface OneShotOptions {
  */
 export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 	const args = ["--mode", "json", "-p", "--no-session", "--no-tools"];
+	// A Claude helper's one-shot reads the LEASED store as its agent dir (the
+	// only one Hive's node accepts), so the no-server mirror is not available —
+	// and pi's built-in MCP would connect every server the lease names. It runs
+	// with no extension discovery instead: the worker allowlist only (providers
+	// such as meta, no built-in MCP), which for a --no-tools call is everything
+	// it needs.
+	if (isClaudeHelper()) {
+		args.push("--no-extensions");
+		for (const path of workerExtensionPaths()) args.push("-e", path);
+	}
 	if (options.model) args.push("--model", options.model);
 	if (options.thinking) args.push("--thinking", options.thinking);
 	let systemDir: string | null = null;
@@ -144,7 +154,10 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 		args.push("--append-system-prompt", file);
 	}
 	for (const file of options.promptFiles ?? []) args.push(`@${file}`);
-	args.push(options.prompt);
+	// The prompt goes in on STDIN, never argv: a judge's prompt carries up to
+	// 16k characters of the session, and argv is readable by every process on
+	// the machine (/proc/<pid>/cmdline). pi reads piped stdin as the message
+	// (before any @file text), byte for byte.
 	const cleanup = () => {
 		if (systemDir) rmSync(systemDir, { recursive: true, force: true });
 	};
@@ -157,18 +170,26 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 		const child = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["pipe", "pipe", "pipe"],
 			// One-shots load the full extension set, built-in MCP included; the
 			// no-server mirror keeps a --no-tools helper from connecting anything.
 			env: { ...process.env, ...oneShotMcpEnv(), ...options.env },
 			...tree,
 		});
+		trackTree(child, tree.detached);
 
 		const texts: string[] = [];
 		let usage = emptyUsage();
 		let stderr = "";
 		let buffer = "";
 		let timedOut = false;
+
+		// A child that dies before reading its prompt closes the pipe (EPIPE);
+		// that is the child's failure, reported through its exit, not a crash here.
+		child.stdin.on("error", (error) => {
+			stderr += `[stdin] ${String(error)}\n`;
+		});
+		child.stdin.end(options.prompt);
 
 		const timer = setTimeout(() => {
 			timedOut = true;
@@ -303,6 +324,7 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 			env: { ...process.env, ...roleEnv, ...options.env },
 			...tree,
 		});
+		trackTree(child, tree.detached);
 
 		const texts: string[] = [];
 		let usage = emptyUsage();

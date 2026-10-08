@@ -22,6 +22,7 @@ import type { Usage } from "../../extensions/harness/usage.ts";
 import { backgroundRefusal } from "../../extensions/subagent/background.ts";
 import {
 	backgroundCompletion,
+	DelegationAborted,
 	describeAgentForRecovery,
 	requestedAgentNames,
 	runAgentWithSchema,
@@ -161,6 +162,11 @@ export function opModeRefusal(mode: OpMode, roles: readonly AgentConfig[]): stri
 				"Delegate to a read-only role, or ask the user to switch the session to build mode.";
 }
 
+/** The wake for a job the helper server's restart cancelled. */
+export function restartedText(jobId: string, agent: string, what: string): string {
+	return `Background job ${jobId} (${agent} — ${what}) was cancelled because the helper server restarted; delegate it again.`;
+}
+
 export interface SubagentHost {
 	/** The session's operating mode (control.json), read per call. */
 	opMode(): OpMode;
@@ -291,12 +297,22 @@ export async function runSubagentTool(args: Record<string, unknown>, host: Subag
 				const result = await runAgentWithSchema(host.cwd, agents, agentName, params.task as string, params.cwd, undefined, jobSignal, undefined, makeDetails("single"), undefined, params.model, host.modelEnv);
 				spoolResults(host.spool, [result]);
 				const completion = backgroundCompletion(result, jobSignal.aborted);
-				text = [`Background delegation \`${jobId}\` (${agentName} — ${what}) ${completion.status}${completion.exitCode !== undefined ? ` (exit ${completion.exitCode})` : ""}.`, completion.summary].filter(Boolean).join("\n\n");
+				text = jobSignal.aborted
+					? restartedText(jobId, agentName, what)
+					: [`Background delegation \`${jobId}\` (${agentName} — ${what}) ${completion.status}${completion.exitCode !== undefined ? ` (exit ${completion.exitCode})` : ""}.`, completion.summary].filter(Boolean).join("\n\n");
 			} catch (error) {
-				text = `Background delegation \`${jobId}\` (${agentName} — ${what}) failed: the delegation threw: ${error instanceof Error ? error.message : String(error)}`;
+				if (error instanceof DelegationAborted) {
+					// The only abort is the server shutting down (the driver restarts
+					// Claude on a credential renewal or account switch). The spend so
+					// far still counts, and the model must hear that the job is gone —
+					// otherwise it waits for a completion that will never come.
+					spoolResults(host.spool, [error.result]);
+					text = restartedText(jobId, agentName, what);
+				} else {
+					text = `Background delegation \`${jobId}\` (${agentName} — ${what}) failed: the delegation threw: ${error instanceof Error ? error.message : String(error)}`;
+				}
 			}
-			// A job cancelled because the server is exiting has nobody to wake.
-			if (!jobSignal.aborted) host.spool.wake(jobId, text);
+			host.spool.wake(jobId, text);
 		});
 		return {
 			// The `hive-pi-job:` line is the driver's handshake: it delivers a wake

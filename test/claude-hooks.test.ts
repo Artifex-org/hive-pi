@@ -123,6 +123,28 @@ describe("hook pre-tool", () => {
 		expect(preToolDecision({ tool_name: "mcp__hive__get_run", tool_input: {} }, control("discuss"))).toBeNull();
 	});
 
+	it("classifies every tool in the read-only postures: MCP by pi's classifiers, Claude read-only built-ins by name, unknowns denied", () => {
+		const deny = (name: string, mode: Control["opMode"], input: Record<string, unknown> = {}) =>
+			(preToolDecision({ tool_name: name, tool_input: input }, control(mode)) as { hookSpecificOutput?: { permissionDecision?: string } } | null)?.hookSpecificOutput?.permissionDecision === "deny";
+		for (const mode of ["plan", "discuss", "orchestrate"] as const) {
+			expect(deny("mcp__github__create_issue", mode)).toBe(true);
+			expect(deny("KillShell", mode)).toBe(true);
+			for (const ok of ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite", "Task", "TaskCreate", "ExitPlanMode", "AskUserQuestion"]) {
+				expect(deny(ok, mode)).toBe(false);
+			}
+		}
+		// pi's plan allowlist: subagent and advisor, not goal_set or quality_gate.
+		expect(deny("mcp__hive-pi__subagent", "plan")).toBe(false);
+		expect(deny("mcp__hive-pi__advisor", "plan")).toBe(false);
+		expect(deny("mcp__hive-pi__goal_set", "plan")).toBe(true);
+		expect(deny("mcp__hive-pi__quality_gate", "plan")).toBe(true);
+		// discuss admits pi's reviewed read-only Hive cards.
+		expect(deny("mcp__hive__get_run", "discuss")).toBe(false);
+		expect(deny("mcp__hive__trigger_run", "discuss")).toBe(true);
+		// build gates nothing of this.
+		expect(deny("mcp__github__create_issue", "build")).toBe(false);
+	});
+
 	it("only ever denies or stays silent — never allow or ask (a Hive launch has no human at the prompt)", () => {
 		const modes: Control["opMode"][] = ["build", "plan", "discuss", "bugfix", "orchestrate"];
 		const calls = [

@@ -340,7 +340,12 @@ export default function (pi: ExtensionAPI) {
 		// Entering or leaving bugfix resets the gate. A root cause is about ONE
 		// investigation, and carrying it into the next one would silently unlock
 		// edits for a bug nobody has diagnosed.
-		if (previous === "bugfix" || next === "bugfix") rootCause = null;
+		// The evidence machine goes with it: a reproduction bound in one
+		// investigation must not be re-verified, or confirmed, in the next.
+		if (previous === "bugfix" || next === "bugfix") {
+			rootCause = null;
+			evidence = INITIAL_EVIDENCE;
+		}
 
 		if (!silent && (previous === "plan" || next === "plan")) {
 			try {

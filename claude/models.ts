@@ -98,9 +98,28 @@ function catalogFailure(outcome: CatalogOutcome | { kind: "no-auth" }): string {
  * is RETURNED with its reason — the caller reports it; nothing here falls back
  * to a default route.
  */
-export async function resolveCheapLane(env: AdapterEnv, override: string | undefined, providers: ReadonlySet<string>): Promise<ModelResolution> {
+/**
+ * The leased providers, read when first needed. A malformed lease is an
+ * answer (`ok: false`) for the model-backed caller that asked, never an
+ * exception that takes the whole command — and the model-free features with
+ * it — down.
+ */
+export type LeaseRead = () => ReadonlySet<string>;
+
+export function lazyLease(piAgentDir: string | undefined): LeaseRead {
+	let read: ReadonlySet<string> | undefined;
+	return () => (read ??= piAgentDir ? leasedProviders(piAgentDir) : new Set<string>());
+}
+
+export async function resolveCheapLane(env: AdapterEnv, override: string | undefined, lease: LeaseRead): Promise<ModelResolution> {
 	const explicit = override?.trim();
 	if (explicit) return { ok: true, pick: { spec: explicit, source: "override" } };
+	let providers: ReadonlySet<string>;
+	try {
+		providers = lease();
+	} catch (error) {
+		return { ok: false, reason: `the leased credential store is unreadable: ${(error as Error).message}` };
+	}
 	const outcome = await readCatalog(env);
 	if (outcome.kind !== "ok") return { ok: false, reason: catalogFailure(outcome) };
 	const mode = cheapLaneMode<AgentMode>(outcome.catalog.modes, isConfiguredWith(providers));
@@ -112,11 +131,11 @@ export async function resolveCheapLane(env: AdapterEnv, override: string | undef
 }
 
 /** The goal judge's, drift probe's and recap's evaluator (`PI_AGENDA_EVALUATOR_MODEL` overrides). */
-export function resolveEvaluator(env: AdapterEnv, providers: ReadonlySet<string>): Promise<ModelResolution> {
-	return resolveCheapLane(env, process.env.PI_AGENDA_EVALUATOR_MODEL, providers);
+export function resolveEvaluator(env: AdapterEnv, lease: LeaseRead): Promise<ModelResolution> {
+	return resolveCheapLane(env, process.env.PI_AGENDA_EVALUATOR_MODEL, lease);
 }
 
 /** You Should Know's scanner (`PI_YOU_SHOULD_KNOW_MODEL` overrides). */
-export function resolveYskModel(env: AdapterEnv, providers: ReadonlySet<string>): Promise<ModelResolution> {
-	return resolveCheapLane(env, process.env.PI_YOU_SHOULD_KNOW_MODEL, providers);
+export function resolveYskModel(env: AdapterEnv, lease: LeaseRead): Promise<ModelResolution> {
+	return resolveCheapLane(env, process.env.PI_YOU_SHOULD_KNOW_MODEL, lease);
 }

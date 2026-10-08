@@ -6,6 +6,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { killTree, trackTree, treeSpawnOptions } from "../../extensions/hive-common/child-tree.ts";
 import { runQualityGate, type GateHost, type QualityGateParams } from "../../extensions/gate/tool.ts";
 import type { ToolDefinition, ToolResult } from "./protocol.ts";
 
@@ -34,33 +35,60 @@ export const QUALITY_GATE_TOOL: ToolDefinition = {
 	},
 };
 
-/** pi's `exec` contract on plain node: buffered, killed (SIGTERM) at `timeout`, abortable. */
+/** After the ceiling's SIGTERM, how long the group gets before SIGKILL, and the pipes before we stop waiting. */
+const KILL_GRACE_MS = 2_000;
+
+/**
+ * pi's `exec` contract on plain node: buffered, in `cwd`, killed at `timeout`
+ * or on abort. The command runs as its own process group (a gate spawns
+ * linters, test runners, `hive check`), the kill goes to the whole group, a
+ * group that ignores SIGTERM gets SIGKILL after a grace, and the result is
+ * settled on exit — or after the grace, should an orphan keep the pipes open.
+ */
 export const nodeGateHost: GateHost = {
 	publishDeck: () => {},
 	exec: (command, args, options) =>
 		new Promise((resolve) => {
-			const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], signal: options.signal });
+			const tree = treeSpawnOptions();
+			const child = spawn(command, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"], ...tree });
+			trackTree(child, tree.detached);
 			let stdout = "";
 			let stderr = "";
 			let killed = false;
-			const timer = setTimeout(() => {
+			let settled = false;
+			let escalation: ReturnType<typeof setTimeout> | undefined;
+			let drain: ReturnType<typeof setTimeout> | undefined;
+			const settle = (code: number | null, extraErr = "") => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				if (escalation) clearTimeout(escalation);
+				if (drain) clearTimeout(drain);
+				options.signal?.removeEventListener("abort", stop);
+				resolve({ stdout, stderr: stderr + extraErr, code, killed });
+			};
+			const stop = () => {
+				if (killed) return;
 				killed = true;
-				child.kill("SIGTERM");
-			}, options.timeout);
+				killTree(child, "SIGTERM", tree.detached);
+				escalation = setTimeout(() => killTree(child, "SIGKILL", tree.detached), KILL_GRACE_MS);
+				drain = setTimeout(() => settle(null), KILL_GRACE_MS * 2);
+			};
+			const timer = setTimeout(stop, options.timeout);
+			if (options.signal?.aborted) stop();
+			else options.signal?.addEventListener("abort", stop, { once: true });
 			child.stdout.on("data", (d: Buffer) => {
 				stdout += d.toString();
 			});
 			child.stderr.on("data", (d: Buffer) => {
 				stderr += d.toString();
 			});
-			child.on("error", (error) => {
-				clearTimeout(timer);
-				resolve({ stdout, stderr: stderr + String(error), code: null, killed: killed || options.signal?.aborted === true });
+			child.on("error", (error) => settle(null, String(error)));
+			child.on("exit", (code) => {
+				// The pipes may still be held by a grandchild; give them the grace.
+				if (!drain) drain = setTimeout(() => settle(killed ? null : code), KILL_GRACE_MS);
 			});
-			child.on("close", (code) => {
-				clearTimeout(timer);
-				resolve({ stdout, stderr, code, killed: killed || options.signal?.aborted === true });
-			});
+			child.on("close", (code) => settle(killed ? null : code));
 		}),
 };
 

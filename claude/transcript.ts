@@ -166,8 +166,17 @@ export function toPiEntries(lines: readonly unknown[]): PiEntry[] {
 	return entries;
 }
 
-/** Parse JSONL text. A malformed line throws with its line number: a transcript we cannot read is not an empty one. */
-export function parseJsonl(text: string, firstLineNumber = 1): unknown[] {
+/** Where a skipped line is reported. Hooks and the MCP server log to stderr. */
+export type Warn = (line: string) => void;
+const stderrWarn: Warn = (line) => process.stderr.write(`${line}\n`);
+
+/**
+ * Parse COMPLETE JSONL lines. A corrupt line is skipped with one stderr line
+ * and the rest is read: one bad line must not make every later settle unable
+ * to read the session (the Stop hook would exit non-zero on every stop, and
+ * the goal would silently go unenforced for the rest of it).
+ */
+export function parseJsonl(text: string, firstLineNumber = 1, warn: Warn = stderrWarn): unknown[] {
 	const out: unknown[] = [];
 	const lines = text.split("\n");
 	for (let i = 0; i < lines.length; i++) {
@@ -176,22 +185,28 @@ export function parseJsonl(text: string, firstLineNumber = 1): unknown[] {
 		try {
 			out.push(JSON.parse(line));
 		} catch (error) {
-			throw new Error(`transcript line ${firstLineNumber + i} is not JSON: ${(error as Error).message}`);
+			warn(`hive-pi: transcript line ${firstLineNumber + i} skipped — not JSON: ${(error as Error).message}`);
 		}
 	}
 	return out;
 }
 
-export function readClaudeTranscript(path: string): PiEntry[] {
-	return toPiEntries(parseJsonl(readFileSync(path, "utf8")));
+/** The text up to and including the last newline: a line Claude is still writing is not read yet. */
+function completeLines(text: string): string {
+	const last = text.lastIndexOf("\n");
+	return last < 0 ? "" : text.slice(0, last + 1);
+}
+
+export function readClaudeTranscript(path: string, warn: Warn = stderrWarn): PiEntry[] {
+	return toPiEntries(parseJsonl(completeLines(readFileSync(path, "utf8")), 1, warn));
 }
 
 /**
  * The COMPLETE lines appended since byte `offset`, and the offset after the
  * last of them. A trailing partial line (Claude mid-write) is left for the
- * next read rather than parsed as garbage.
+ * next read; a corrupt complete line is skipped and the cursor moves past it.
  */
-export function readAppendedLines(path: string, offset: number): { lines: unknown[]; next: number } {
+export function readAppendedLines(path: string, offset: number, warn: Warn = stderrWarn): { lines: unknown[]; next: number } {
 	const size = statSync(path).size;
 	// A transcript that shrank was replaced (rewritten, rotated): start over.
 	const from = offset > size ? 0 : offset;
@@ -202,7 +217,7 @@ export function readAppendedLines(path: string, offset: number): { lines: unknow
 		readSync(fd, buffer, 0, buffer.length, from);
 		const lastNewline = buffer.lastIndexOf(0x0a);
 		if (lastNewline < 0) return { lines: [], next: from };
-		return { lines: parseJsonl(buffer.subarray(0, lastNewline + 1).toString("utf8")), next: from + lastNewline + 1 };
+		return { lines: parseJsonl(buffer.subarray(0, lastNewline + 1).toString("utf8"), 1, warn), next: from + lastNewline + 1 };
 	} finally {
 		closeSync(fd);
 	}

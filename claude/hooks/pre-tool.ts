@@ -9,11 +9,10 @@
  *   - the worktree guard: `guards-common/worktree-guard.ts`'s `decide`, exactly
  *     as `guards-bridge.ts` calls it for pi's edit/write.
  *
- * Scope, deliberately the contract's: only Claude's file-mutating tools and
- * Bash are classified. Other Claude-native tools (Read, Grep, Task, …) and MCP
- * tools pass — pi's read-only postures deny UNKNOWN tools, but Claude's tool
- * vocabulary is not pi's, and an allowlist written for pi's names would deny
- * Claude's harmless ones wholesale.
+ * In the read-only postures every tool is classified (see readOnlyDecision):
+ * MCP tools by pi's MCP classifiers, Claude's read-only built-ins by name, and
+ * anything unknown is denied, as pi denies it. Which tools reach this hook is
+ * the plugin's PreToolUse matcher (README.md).
  *
  * Bugfix mode withholds the editors until the episode records a root cause
  * through the MCP tools `bugfix_evidence` → `bugfix_root_cause` (claude/bugfix.ts),
@@ -46,6 +45,62 @@ function editTarget(toolName: string, input: Record<string, unknown>): string | 
 	return typeof raw === "string" && raw ? raw : undefined;
 }
 
+/** The adapter's own MCP server: its tools are pi's tools under Claude's MCP names. */
+const OWN_MCP_PREFIX = "mcp__hive-pi__";
+
+/**
+ * Claude built-ins that read, plan or ask, and change nothing — allowed in the
+ * read-only postures by name. `Task*` (Claude's own subagents and task list)
+ * passes because every tool call those subagents make comes back through this
+ * same hook.
+ */
+const CLAUDE_READ_ONLY = new Set(["Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch", "TodoWrite", "TodoRead", "ExitPlanMode", "AskUserQuestion"]);
+
+function claudeReadOnly(name: string): boolean {
+	return CLAUDE_READ_ONLY.has(name) || name.startsWith("Task");
+}
+
+type ReadOnlyMode = "plan" | "discuss" | "orchestrate";
+
+/** pi's verdict for one tool, by pi's name, in a read-only posture. */
+function readOnlyVerdict(mode: ReadOnlyMode, piName: string, input: Record<string, unknown>) {
+	if (mode === "plan") return planToolVerdict(piName, input);
+	const tool = opModeToolVerdict(mode, piName, input, false);
+	if (!tool.allowed || piName !== "bash") return tool;
+	const command = typeof input.command === "string" ? input.command : "";
+	return opModeShellVerdict(mode, command);
+}
+
+/**
+ * The read-only postures over Claude's WHOLE tool vocabulary, not only the
+ * mutating five: pi's posture denies what it does not know to be read-only,
+ * and an MCP tool can write as surely as Edit can.
+ *   - Edit/MultiEdit/Write/NotebookEdit/Bash: pi's own names, pi's verdict.
+ *   - this server's tools (`mcp__hive-pi__subagent`, …): pi's names for them.
+ *   - any other `mcp__<server>__<tool>`: pi's MCP classifiers (they
+ *     canonicalise the name), so a reviewed read-only card passes and an
+ *     unreviewed or mutating tool is denied.
+ *   - Claude's read-only built-ins: allowed by name.
+ *   - anything else: denied, as pi denies an unknown tool.
+ */
+function readOnlyDecision(mode: ReadOnlyMode, claudeName: string, input: Record<string, unknown>): HookOutput {
+	const mapped = CLAUDE_TO_PI_TOOL[claudeName];
+	if (mapped) {
+		const verdict = readOnlyVerdict(mode, mapped, input);
+		return verdict.allowed ? null : denyToolUse(verdict.reason);
+	}
+	if (claudeName.startsWith(OWN_MCP_PREFIX) || claudeName.startsWith("mcp__")) {
+		const piName = claudeName.startsWith(OWN_MCP_PREFIX) ? claudeName.slice(OWN_MCP_PREFIX.length) : claudeName;
+		const verdict = readOnlyVerdict(mode, piName, input);
+		return verdict.allowed ? null : denyToolUse(verdict.reason);
+	}
+	if (claudeReadOnly(claudeName)) return null;
+	return denyToolUse(
+		`\`${claudeName}\` is not a tool ${mode} mode knows to be read-only, so it is denied rather than assumed safe. ` +
+			"Ask the user to switch the session to build mode if it is needed.",
+	);
+}
+
 /**
  * `rootCauseRecorded` is the bugfix gate's key (claude/bugfix.ts): until the
  * episode records a root cause, bugfix mode denies the file-mutating tools
@@ -53,28 +108,21 @@ function editTarget(toolName: string, input: Record<string, unknown>): string | 
  */
 export function preToolDecision(input: HookInput, control: Control, rootCauseRecorded = false): HookOutput {
 	const claudeName = input.tool_name ?? "";
+	const toolInput = input.tool_input ?? {};
+	const mode = control.opMode;
+	if (mode === "plan" || mode === "discuss" || mode === "orchestrate") {
+		const denied = readOnlyDecision(mode, claudeName, toolInput);
+		if (denied) return denied;
+	}
+
 	const piName = CLAUDE_TO_PI_TOOL[claudeName];
 	if (!piName) return null;
-	const toolInput = input.tool_input ?? {};
-
-	const mode = control.opMode;
-	if (mode === "plan") {
-		const verdict = planToolVerdict(piName, toolInput);
-		if (!verdict.allowed) return denyToolUse(verdict.reason);
-	} else if (mode === "bugfix") {
+	if (mode === "bugfix") {
 		// Bash stays open, exactly as pi leaves it: the investigation IS the
 		// work — repros, instruments, the failing test (opmode/modes.ts,
 		// BUGFIX_WITHHELD_TOOLS). Only the file editors wait for a root cause.
 		const verdict = opModeToolVerdict(mode, piName, toolInput, rootCauseRecorded, CLAUDE_BUGFIX_TOOLS);
 		if (!verdict.allowed) return denyToolUse(verdict.reason);
-	} else if (mode === "discuss" || mode === "orchestrate") {
-		const verdict = opModeToolVerdict(mode, piName, toolInput, false);
-		if (!verdict.allowed) return denyToolUse(verdict.reason);
-		if (piName === "bash") {
-			const command = typeof toolInput.command === "string" ? toolInput.command : "";
-			const shell = opModeShellVerdict(mode, command);
-			if (!shell.allowed) return denyToolUse(shell.reason);
-		}
 	}
 
 	if (piName !== "bash") {

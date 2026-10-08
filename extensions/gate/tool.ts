@@ -28,7 +28,7 @@ export interface GateHost {
 	exec(
 		command: string,
 		args: string[],
-		options: { signal?: AbortSignal; timeout: number },
+		options: { signal?: AbortSignal; timeout: number; cwd: string },
 	): Promise<{ stdout: string; stderr: string; code: number | null; killed: boolean }>;
 }
 
@@ -578,7 +578,7 @@ async function runAgentCheck(
 	} catch {
 		// Same fallback as the vendored path: progress unavailable must not make
 		// the check unavailable. Buffered, so the shorter ceiling.
-		const res = await host.exec(agentCheck, args, { signal, timeout: TIMEOUT_BUFFERED });
+		const res = await host.exec(agentCheck, args, { signal, timeout: TIMEOUT_BUFFERED, cwd });
 		run = {
 			out: `${res.stdout ?? ""}${res.stderr ?? ""}`,
 			stdout: res.stdout ?? "",
@@ -708,12 +708,20 @@ export async function runQualityGate(
 		// UNAVAILABLE because progress is unavailable. The shorter ceiling
 		// applies here, because without progress a long limit is just a
 		// long silence.
-		const res = await host.exec(gate, args, { signal, timeout: TIMEOUT_BUFFERED });
+		// In the checkout being gated, like the streaming path — not wherever
+		// this process happens to be.
+		const res = await host.exec(gate, args, { signal, timeout: TIMEOUT_BUFFERED, cwd });
 		// Same rule as the streaming path: a missing code means the run
-		// did not exit, and substituting 0 would claim it did. This path
-		// cannot say WHICH signal, so it reports the absence and lets
-		// render word it without one.
-		run = { out: `${res.stdout ?? ""}${res.stderr ?? ""}`, code: res.code ?? null, signal: null };
+		// did not exit, and substituting 0 would claim it did. A run the
+		// buffered CEILING killed is reported as one (no exit code, the
+		// ceiling named), never as a clean exit. This path cannot say WHICH
+		// signal, so it reports the absence and lets render word it without one.
+		run = {
+			out: `${res.stdout ?? ""}${res.stderr ?? ""}`,
+			code: res.killed ? null : (res.code ?? null),
+			signal: null,
+			ceilingMs: res.killed && !signal?.aborted ? TIMEOUT_BUFFERED : undefined,
+		};
 	} finally {
 		// The deck shows what is HAPPENING. A finished verdict lives in the
 		// transcript card, and leaving it pinned would push live sections

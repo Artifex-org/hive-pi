@@ -125,7 +125,9 @@ export function ensureWorkerAgentDir(
 	// A Claude launch's helpers run on a LEASED store, and Hive's node accepts
 	// a helper child only when its PI_CODING_AGENT_DIR is that store
 	// (HIVE_PI_AGENT_DIR) — a mirror in tmp would read as a different store.
-	// So no mirror there: children read the lease itself, MCP config included.
+	// So no mirror there: workers read the lease itself, MCP config included,
+	// and one-shots stay MCP-free another way (agenda/spawn.ts runs them with
+	// no extension discovery).
 	if (isClaudeHelper()) return null;
 	try {
 		if (!fs.existsSync(sourceDir)) return null;

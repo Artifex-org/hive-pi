@@ -145,8 +145,11 @@ export async function chooseWorkerModel(
 	env: WorkerModelEnv | undefined,
 ): Promise<WorkerModelChoice> {
 	const requested = opts.requested?.trim();
+	// Under requireExplicitModel "cannot tell" (a bare id, no provider) is not
+	// good enough: pi would resolve a bare id to whatever provider carries it.
+	const configured = (spec: string) => (env?.requireExplicitModel ? env.isConfigured(spec) === true : env?.isConfigured(spec) !== false);
 	if (requested) {
-		if (env && env.isConfigured(requested) === false) {
+		if (env && !configured(requested)) {
 			return {
 				refusal:
 					`model ${requested} is not configured on this machine (no credential for provider ` +
@@ -168,7 +171,7 @@ export async function chooseWorkerModel(
 		};
 	}
 	if (!preferred || !env) return { spec: preferred };
-	if (env.isConfigured(preferred) !== false) return { spec: preferred };
+	if (configured(preferred)) return { spec: preferred };
 
 	// The default cannot run here. Same shape as pickConfiguredAdvisor: prefer
 	// what the catalog ranks, then the session's own model, and say so.

@@ -428,7 +428,9 @@ const SubagentParams = Type.Object({
 
 /** A caller's schema, paired with pi's validator for delegate.ts; none when the caller passed none. */
 function structuredRequest(schema: unknown): StructuredRequest | undefined {
-	return schema === undefined ? undefined : { schema, support: structuredSupport };
+	// `== null`: a JSON caller can send `schema: null`, which has always meant
+	// "no schema" (the worker saw no instruction), never schema mode.
+	return schema == null ? undefined : { schema, support: structuredSupport };
 }
 
 export default function (pi: ExtensionAPI) {

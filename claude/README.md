@@ -49,16 +49,24 @@ the goal it is a judge error on the goal (three pause it). Advisor:
 `pickConfiguredAdvisor` with Claude as an unranked caller (strongest leased
 mode; `PI_ADVISOR_MODEL` overrides). Subagents: `chooseWorkerModel` with
 `requireExplicitModel` (an unpinned role takes the cheapest leased mode, never
-pi's default). Every one-shot passes `--model` and `--thinking` explicitly
-(`oneshot.ts` refuses otherwise): judge fast pass and drift/recap/YSK `off`;
+pi's default; a bare model id never counts as configured). Every one-shot
+passes `--model` and `--thinking` explicitly (`oneshot.ts` refuses otherwise),
+takes its prompt on STDIN (never argv, which `/proc/<pid>/cmdline` exposes),
+and runs with no extension discovery (`--no-extensions` + the worker allowlist)
+so it never connects the lease's MCP servers: judge fast pass and drift/recap/YSK `off`;
 the judge's confirming pass uses the evaluator mode's level, else `low`.
 
 ## Commands (stdin = Claude Code's hook JSON)
 
-- **`hook pre-tool`** — Edit/MultiEdit/Write/NotebookEdit/Bash mapped to pi's
-  names and judged by pi's policy: `discuss`/`orchestrate` via
-  `opModeToolVerdict`/`opModeShellVerdict`, `plan` via `planToolVerdict`; then
-  the worktree guard (`decide`) on the edited path. Prints a `deny` or
+- **`hook pre-tool`** — in `plan`/`discuss`/`orchestrate` EVERY tool is
+  classified: Edit/MultiEdit/Write/NotebookEdit/Bash and this server's tools
+  under pi's names, other `mcp__*` tools by pi's MCP classifiers (reviewed
+  read-only cards pass), Claude's read-only built-ins (Read, Grep, Glob, LS,
+  WebFetch, WebSearch, TodoWrite, Task*, ExitPlanMode, AskUserQuestion) by
+  name, anything else denied. **Plugin matcher needed:**
+  `Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__.*` covers the mutating set and
+  all MCP tools; a built-in outside the matcher is not seen (use `.*` to deny
+  unknown built-ins too). Then the worktree guard (`decide`) on edited paths. Prints a `deny` or
   nothing — never `allow`/`ask`; any internal error (bad `control.json`,
   malformed input) is a `deny` with the cause, since Claude treats a failing
   PreToolUse hook as "proceed". Other Claude tools and MCP tools are not
@@ -109,11 +117,17 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
     refuses writers that do not carry `op_mode: bugfix` themselves.
     `background:true` returns at once with a line `hive-pi-job: <id>`; the
     worker runs detached from the request (aborted and awaited when the server
-    exits) and on completion writes a `wake` with that `job` (plain text).
+    exits) and on completion writes a `wake` with that `job` (plain text). A
+    job cancelled by the server's own shutdown still writes its usage and a
+    wake: "background job <id> was cancelled because the helper server
+    restarted; delegate it again".
   - `advisor` — the transcript serialised by pi's `serializeConversation`,
     capped by `capTranscript` (400k), sent as an `@file`.
   - `goal_set {condition, replace?, budget?{tokens,hours}}`, `goal_status`,
-    `goal_clear` — agenda's rules (`goalSetDecision`, `describeGoal`).
+    `goal_clear` — agenda's rules (`goalSetDecision`, `describeGoal`). The
+    budget is SESSION-scoped: `/hive:goal clear` runs as the model, so a goal
+    set after one was cleared, capped or out of budget revises it and keeps
+    its spent iterations and tokens.
   - `quality_gate` — `gate/tool.ts` (agent-check / vendored gate / `hive check`).
   - `bugfix_evidence {phase, tool_call_id?, reproduction_key?, hypothesis?}`,
     `bugfix_root_cause {summary, evidence}` — opmode's protocol
@@ -121,7 +135,8 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
     root cause (unlocks edits) → reverify. Results are observed from the
     transcript by `tool_use_id`, failed calls included. State is one episode in
     `bugfix.json`, discarded by any reader that finds control.json out of
-    bugfix mode; outside bugfix both tools say there is nothing to record into.
+    bugfix mode (the driver also deletes it whenever it writes a non-bugfix
+    opMode, and owns that reset); outside bugfix both tools say there is nothing to record into.
 
 ## Spool records
 
@@ -134,9 +149,17 @@ stderr):
 
 ## Processes
 
-pi children are spawned as process groups and killed by group on timeout or
-cancel (`hive-common/child-tree.ts`). `PI_CODING_AGENT_DIR` is only ever
-`$HIVE_PI_AGENT_DIR`.
+The adapter marks itself `HIVE_PI_HELPER_CHILD=1` (inherited by its pi
+children only — not inferred from `HIVE_PI_AGENT_DIR`, which every process in
+the launch has). Helper children spawn as process groups and are killed by
+group on timeout or cancel (`hive-common/child-tree.ts`); a hook or `brief`
+told to stop (SIGTERM/SIGINT/SIGHUP) kills every group it started. The MCP
+server on SIGTERM/SIGINT, or when its parent dies (ppid polled every 5 s),
+stops reading, aborts and awaits in-flight requests and background jobs, then
+exits. **Residual:** SIGKILL cannot be caught — detached groups then outlive
+their parent until they finish. `PI_CODING_AGENT_DIR` is only ever
+`$HIVE_PI_AGENT_DIR`. Transcript reads ignore a half-written last line and
+skip (with one stderr line) a corrupt one.
 
 ## Open gaps
 

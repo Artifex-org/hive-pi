@@ -72,14 +72,22 @@ export async function serve(
 	input: NodeJS.ReadableStream,
 	output: NodeJS.WritableStream,
 	log: (line: string) => void,
+	stop?: AbortSignal,
 ): Promise<void> {
 	const inflight = new Map<string, { controller: AbortController; done: Promise<void> }>();
+	// A request the client cancelled gets no response at all (MCP: the
+	// receiver SHOULD NOT answer it); its work is aborted.
+	const cancelled = new Set<string>();
 	let notifications = 0;
 	const send = (message: Record<string, unknown>) => {
 		output.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 	};
-	const reply = (id: Id, result: unknown) => send({ id, result });
-	const fail = (id: Id | null, code: number, message: string) => send({ id, error: { code, message } });
+	const reply = (id: Id, result: unknown) => {
+		if (!cancelled.has(String(id))) send({ id, result });
+	};
+	const fail = (id: Id | null, code: number, message: string) => {
+		if (id === null || !cancelled.has(String(id))) send({ id, error: { code, message } });
+	};
 
 	const handle = async (request: Request, id: Id | undefined, signal: AbortSignal): Promise<void> => {
 		const method = request.method;
@@ -121,7 +129,10 @@ export async function serve(
 				return;
 			case "notifications/cancelled": {
 				const target = params.requestId;
-				if (isId(target)) inflight.get(String(target))?.controller.abort();
+				if (isId(target) && inflight.has(String(target))) {
+					cancelled.add(String(target));
+					inflight.get(String(target))?.controller.abort();
+				}
 				return;
 			}
 			default:
@@ -131,6 +142,9 @@ export async function serve(
 	};
 
 	const lines = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY });
+	// Told to stop (a signal, the parent gone): read no further; every
+	// in-flight request is then aborted and awaited below, as at end of input.
+	stop?.addEventListener("abort", () => lines.close(), { once: true });
 	for await (const line of lines) {
 		if (!line.trim()) continue;
 		let request: Request;
@@ -152,7 +166,10 @@ export async function serve(
 				log(`hive-pi mcp: ${String(request.method)} failed: ${error instanceof Error ? error.message : String(error)}`);
 				if (id !== undefined) fail(id, ERRORS.internal, error instanceof Error ? error.message : String(error));
 			})
-			.finally(() => inflight.delete(key));
+			.finally(() => {
+				inflight.delete(key);
+				cancelled.delete(key);
+			});
 		inflight.set(key, { controller, done });
 	}
 	for (const { controller } of inflight.values()) controller.abort();

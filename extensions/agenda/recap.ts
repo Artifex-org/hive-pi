@@ -19,6 +19,8 @@
  * as it does for the plan document.
  */
 
+import { redactEvidence } from "../hive-common/redact.ts";
+
 export const AGENT_STATUS_ENTRY_TYPE = "agent-status";
 
 /** What the settle left the session in, mechanically derived. */
@@ -123,7 +125,10 @@ function toolCallLine(name: string, args: unknown): string {
 	} catch {
 		json = "(arguments not serializable)";
 	}
-	const bounded = json.length > TOOL_CALL_ARGS_CHARS ? `${json.slice(0, TOOL_CALL_ARGS_CHARS - 1)}…` : json;
+	// Arguments are where a command's inline token or a header's bearer sits;
+	// they are redacted before they can reach any model.
+	const safe = redactEvidence(json);
+	const bounded = safe.length > TOOL_CALL_ARGS_CHARS ? `${safe.slice(0, TOOL_CALL_ARGS_CHARS - 1)}…` : safe;
 	return `[toolCall ${name}] ${bounded}`;
 }
 

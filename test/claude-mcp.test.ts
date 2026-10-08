@@ -23,7 +23,7 @@ interface Rpc {
 }
 
 class McpClient {
-	private readonly child: ChildProcessWithoutNullStreams;
+	readonly child: ChildProcessWithoutNullStreams;
 	private readonly pending = new Map<number, (message: Rpc) => void>();
 	private nextId = 1;
 	stderr = "";
@@ -127,7 +127,8 @@ describe("goal tools", () => {
 		const set = await c.call("goal_set", { condition: "`npm test` exits 0", budget: { tokens: 1000 } });
 		expect(set.isError).toBe(false);
 		expect(set.text).toContain("Goal set: `npm test` exits 0");
-		expect(set.text).toContain("goal_clear");
+		expect(set.text).toContain("/hive:goal clear");
+		expect(set.text).not.toContain("goal_clear");
 		const goal = JSON.parse(readFileSync(join(launch.stateDir, "goal.json"), "utf8"));
 		expect(goal).toMatchObject({ state: "active", ledger: { budget: { tokens: 1000 } } });
 
@@ -141,6 +142,15 @@ describe("goal tools", () => {
 		expect(vague.text).toContain("Goal cleared");
 		const status = await c.call("goal_status");
 		expect(status.text).toContain("Goal (cleared)");
+
+		// Clear-then-set is not a budget reset: the ledger carries over.
+		const spent = JSON.parse(readFileSync(join(launch.stateDir, "goal.json"), "utf8"));
+		writeFileSync(join(launch.stateDir, "goal.json"), JSON.stringify({ ...spent, ledger: { ...spent.ledger, iterations: 5, tokens: 777 } }));
+		const again2 = await c.call("goal_set", { condition: "`npm run build` exits 0" });
+		expect(again2.text).toContain("this session's goal budget carries over (5/8 continuations, 777 evaluator tokens spent)");
+		const revived = JSON.parse(readFileSync(join(launch.stateDir, "goal.json"), "utf8"));
+		expect(revived).toMatchObject({ state: "active", condition: "`npm run build` exits 0", ledger: { iterations: 5, tokens: 777 } });
+		await c.call("goal_clear");
 		expect((await c.call("goal_set", { condition: "make it nice" })).text).toContain("names nothing machine-checkable");
 	});
 
@@ -242,7 +252,7 @@ describe("quality_gate", () => {
 });
 
 describe("shutdown", () => {
-	it("aborts and reaps background workers when its input closes, and wakes nobody", async () => {
+	it("aborts and reaps background workers when its input closes, and tells the model the job is gone", async () => {
 		launch.setReplies([{ match: "Task: long survey", text: "never", delayMs: 30_000 }]);
 		const c = await connect();
 		const started = await c.call("subagent", { agent: "research", task: "long survey", background: true, what: "a long survey" });
@@ -254,7 +264,53 @@ describe("shutdown", () => {
 		expect(await c.close()).toBe(0);
 		expect(Date.now() - closedAt).toBeLessThan(10_000);
 		expect(() => process.kill(worker.pid, 0)).toThrow();
-		expect(launch.spoolRecords().some((r) => r.kind === "wake")).toBe(false);
+		const id = /^hive-pi-job: (\S+)$/m.exec(started.text)?.[1];
+		const wake = launch.spoolRecords().find((r) => r.kind === "wake");
+		expect(wake).toMatchObject({ job: id });
+		expect(String(wake?.text)).toContain(`Background job ${id}`);
+		expect(String(wake?.text)).toContain("was cancelled because the helper server restarted; delegate it again");
+	});
+});
+
+describe("robustness", () => {
+	it("keeps the model-free tools working on a malformed lease; only model tools degrade", async () => {
+		writeFileSync(join(launch.agentDir, "auth.json"), "{not json");
+		const c = await connect();
+		expect((await c.call("goal_status")).text).toBe("No goal set.");
+		const advisor = await c.call("advisor");
+		expect(advisor.isError).toBe(true);
+		expect(advisor.text).toContain("auth.json");
+	});
+
+	it("does not answer a request the client cancelled", async () => {
+		launch.setReplies([{ match: "Task: slow", text: "late", delayMs: 3_000 }]);
+		const c = await connect();
+		let answered = false;
+		void c.request("tools/call", { name: "subagent", arguments: { agent: "research", task: "slow" } }).then(() => {
+			answered = true;
+		});
+		const deadline = Date.now() + 15_000;
+		while (Date.now() < deadline && launch.calls().length === 0) await new Promise((r) => setTimeout(r, 50));
+		c.notify("notifications/cancelled", { requestId: 1 + 1 }); // id 1 was initialize
+		const worker = launch.calls()[0];
+		await new Promise((r) => setTimeout(r, 4_000));
+		expect(answered).toBe(false);
+		expect(() => process.kill(worker.pid, 0)).toThrow(); // its worker was aborted
+		expect((await c.request("ping")).result).toEqual({}); // and the server is fine
+	});
+
+	it("on SIGTERM aborts and awaits an in-flight foreground delegation before exiting", async () => {
+		launch.setReplies([{ match: "Task: long foreground", text: "never", delayMs: 30_000 }]);
+		const c = await connect();
+		void c.request("tools/call", { name: "subagent", arguments: { agent: "research", task: "long foreground" } });
+		const deadline = Date.now() + 15_000;
+		while (Date.now() < deadline && launch.calls().length === 0) await new Promise((r) => setTimeout(r, 50));
+		const worker = launch.calls()[0];
+		const signalledAt = Date.now();
+		c.child.kill("SIGTERM");
+		await c.exited;
+		expect(Date.now() - signalledAt).toBeLessThan(10_000);
+		expect(() => process.kill(worker.pid, 0)).toThrow();
 	});
 });
 

@@ -14,7 +14,7 @@ import { fetchAgentModeCatalog } from "../../extensions/advisor/modes.ts";
 import { discoverAgentsWith } from "../../extensions/harness/roles-core.ts";
 import { cleanupWorkerAgentDir } from "../../extensions/mcp-common/config.ts";
 import { hiveAuth, modelUnavailableReason, stateDir, type AdapterEnv } from "../env.ts";
-import { isConfiguredWith, leasedProviders } from "../models.ts";
+import { isConfiguredWith, lazyLease } from "../models.ts";
 import { accountedOneShot } from "../oneshot.ts";
 import { loadPinnedPi } from "../pi-runtime.ts";
 import { createSpool } from "../spool.ts";
@@ -35,8 +35,10 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 	const spool = createSpool(env.spool, log);
 	const jobs = new BackgroundJobs(log);
 	const cwd = process.cwd();
-	const providers = unavailable ? new Set<string>() : leasedProviders(env.piAgentDir as string);
-	const isConfigured = isConfiguredWith(providers);
+	// Read on first use by a model-backed tool: a malformed lease must not stop
+	// goal_* and quality_gate from answering (they are model-free).
+	const lease = lazyLease(unavailable ? undefined : env.piAgentDir);
+	const isConfigured = (spec: string) => isConfiguredWith(lease())(spec);
 	const pinned = () => loadPinnedPi(env.piBin as string, env.piAgentDir as string);
 	const auth = hiveAuth(env);
 	const catalog = async () => (auth ? ((await fetchAgentModeCatalog(auth))?.modes ?? []) : []);
@@ -77,12 +79,17 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					return dir ? bugfixEvidence(dir, readControl(dir), env.transcript, args) : noState();
 				case "bugfix_root_cause":
 					return dir ? bugfixRootCause(dir, readControl(dir), args) : noState();
-				case "quality_gate":
-					return runGateTool(args, cwd, signal);
+				case "quality_gate": {
+					// A read-only posture never lets the gate install dependencies
+					// (pre-tool also denies the tool there under plan and discuss).
+					const mode = (dir ? readControl(dir) : DEFAULT_CONTROL).opMode;
+					const readOnly = mode === "plan" || mode === "discuss" || mode === "orchestrate";
+					return runGateTool(readOnly ? { ...args, install: false } : args, cwd, signal);
+				}
 				case "advisor": {
 					if (unavailable) return noCredential();
 					const pi = await pinned();
-					return runAdvisor({ env, providers, serializeConversation: pi.serializeConversation, oneShot: accountedOneShot(spool, "advisor"), cwd });
+					return runAdvisor({ env, providers: lease(), serializeConversation: pi.serializeConversation, oneShot: accountedOneShot(spool, "advisor"), cwd });
 				}
 				case "subagent": {
 					if (unavailable) return noCredential();
@@ -99,16 +106,37 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 		await jobs.stopAll();
 		cleanupWorkerAgentDir();
 	};
-	const onSignal = () => {
-		void shutdown().then(() => process.exit(0));
-	};
-	process.once("SIGTERM", onSignal);
-	process.once("SIGINT", onSignal);
+	// SIGTERM/SIGINT, or the parent gone: stop reading, abort and AWAIT every
+	// in-flight request (its worker unwinds, releasing its writer lock and
+	// reaping its pi child) and every background job, then return. SIGKILL
+	// cannot be caught: detached worker groups then outlive the server — the
+	// residual the README names.
+	const stop = new AbortController();
+	const onSignal = () => stop.abort();
+	// `on`, not `once`, until shutdown is done: pi's runtime (loaded for the
+	// role parser) brings signal-exit, which re-raises a signal it believes no
+	// one else handles — and a `once` listener is already gone when it looks.
+	process.on("SIGTERM", onSignal);
+	process.on("SIGINT", onSignal);
+	// Parent-death guard: an MCP server whose Claude died without closing its
+	// stdin is reparented; checking every few seconds is all it costs.
+	const parent = process.ppid;
+	const guard = setInterval(() => {
+		if (process.ppid !== parent) {
+			log("hive-pi mcp: parent process is gone; shutting down");
+			stop.abort();
+		}
+	}, 5_000);
+	guard.unref();
 	try {
-		await serve(server, input, output, log);
+		await serve(server, input, output, log, stop.signal);
 	} finally {
+		clearInterval(guard);
+		await shutdown();
 		process.off("SIGTERM", onSignal);
 		process.off("SIGINT", onSignal);
-		await shutdown();
+		// The input may still be open (a signal, not EOF): let go of it so the
+		// process can exit.
+		if (stop.signal.aborted && "destroy" in input && typeof input.destroy === "function") input.destroy();
 	}
 }

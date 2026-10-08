@@ -76,6 +76,15 @@ describe("pure builders", () => {
 		expect(result).toBe("[toolResult] ok");
 	});
 
+	it("redacts secrets in tool-call arguments before they reach a model", () => {
+		const branch = [
+			{ message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "curl -H 'Authorization: Bearer abcdef0123456789xyz' https://x" } }] } },
+		];
+		const text = recapTranscript(branch);
+		expect(text).toContain("[REDACTED]");
+		expect(text).not.toContain("abcdef0123456789xyz");
+	});
+
 	it("puts the call that produced a result into the goal judge's excerpt", () => {
 		const branch = [
 			{ message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "cat answer.txt" } }] } },

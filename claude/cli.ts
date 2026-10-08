@@ -9,6 +9,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { killAllTrees } from "../extensions/hive-common/child-tree.ts";
 import { applyPiChildEnv, hiveAuth, modelUnavailableReason, readEnv, stateDir, type AdapterEnv } from "./env.ts";
 import { denyToolUse, parseHookInput, readStdin, type HookInput, type HookOutput } from "./hooks/io.ts";
 import { createSpool } from "./spool.ts";
@@ -77,8 +78,8 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 				return;
 			}
 			const { stopDecision } = await import("./hooks/stop.ts");
-			const { leasedProviders, resolveEvaluator } = await import("./models.ts");
-			const providers = unavailable ? new Set<string>() : leasedProviders(env.piAgentDir as string);
+			const { lazyLease, resolveEvaluator } = await import("./models.ts");
+			const providers = lazyLease(unavailable ? undefined : env.piAgentDir);
 			print(
 				await stopDecision(input, {
 					stateDir: dir,
@@ -101,10 +102,10 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 				return;
 			}
 			const { runRecap, runYouShouldKnow } = await import("./hooks/settle.ts");
-			const { leasedProviders, resolveEvaluator, resolveYskModel } = await import("./models.ts");
+			const { lazyLease, resolveEvaluator, resolveYskModel } = await import("./models.ts");
 			const { accountedOneShot } = await import("./oneshot.ts");
 			const { serverSessionId } = await import("./session.ts");
-			const providers = leasedProviders(env.piAgentDir as string);
+			const providers = lazyLease(env.piAgentDir);
 			const auth = hiveAuth(env);
 			let session: ReturnType<typeof serverSessionId> | undefined;
 			const deps = {
@@ -141,8 +142,27 @@ function flag(args: readonly string[], name: string): string | undefined {
 	return at >= 0 ? args[at + 1] : undefined;
 }
 
+/**
+ * A hook or `brief` told to stop (Claude's hook timeout, a cancel) takes its
+ * child trees with it — a gate check or a judge must not keep running after
+ * the hook that started them is gone. The MCP server shuts down gracefully
+ * instead (mcp/server.ts). SIGKILL cannot be caught; see the README.
+ */
+function killChildrenOnTermination(): void {
+	for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+		// `on`: signal-exit (in pi's dependency tree) re-raises a signal it
+		// thinks nobody else handles; a `once` listener would already be gone.
+		process.on(signal, () => {
+			killAllTrees("SIGKILL");
+			process.exit(128 + (signal === "SIGHUP" ? 1 : signal === "SIGINT" ? 2 : 15));
+		});
+	}
+	process.once("exit", () => killAllTrees("SIGKILL"));
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
 	const [command, ...rest] = argv;
+	if (command !== "mcp") killChildrenOnTermination();
 	if (!command || command === "--help" || command === "-h" || command === "help") {
 		process.stdout.write(`${USAGE}\n`);
 		return command ? 0 : 2;
