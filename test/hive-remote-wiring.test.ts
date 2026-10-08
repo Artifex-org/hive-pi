@@ -72,6 +72,7 @@ function fakeHive(handlers: {
 	refreshes?: Array<{ status: number; lastSeq?: number; delayMs?: number }>;
 	commands?: Array<Record<string, unknown>>;
 	toolStarts?: number[];
+	pullStatuses?: number[];
 	credentialStatuses?: number[];
 	byRun?: Record<string, string>;
 	identity?: Record<string, unknown>;
@@ -82,6 +83,7 @@ function fakeHive(handlers: {
 	const calls: Call[] = [];
 	const events = [...(handlers.events ?? [])];
 	const toolStarts = [...(handlers.toolStarts ?? [])];
+	const pullStatuses = [...(handlers.pullStatuses ?? [])];
 	const credentialStatuses = [...(handlers.credentialStatuses ?? [])];
 	const refreshes = [...(handlers.refreshes ?? [])];
 	let canonicalIdentity: Record<string, unknown> = { identity_revision: 0, title: "Session", description: "", ...handlers.identity };
@@ -101,6 +103,10 @@ function fakeHive(handlers: {
 		const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
 		calls.push({ method: String(init?.method ?? "GET"), path, body });
 
+		if (path.endsWith("/conversation/pulls")) {
+			const status = pullStatuses.shift() ?? 201;
+			return json(status, status === 201 ? {} : { error: "pull request project not found" });
+		}
 		if (path.endsWith("/credential-catalog")) return json(200, { entries: [] });
 		if (path.endsWith("/credential-grants")) {
 			const status = credentialStatuses.shift() ?? (acceptsCredentials ? 200 : 409);
@@ -536,6 +542,88 @@ describe("attach", () => {
 		const pulls = hive.calls.filter((call) => call.path.endsWith("/conversation/pulls"));
 		expect(pulls).toHaveLength(1);
 		expect(pulls[0]?.body).toEqual({ url: "https://github.com/Artifex-org/hive-pi/pull/27" });
+	});
+
+	it("reports a background completion without polling and deduplicates replay", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+		const message = { role: "custom", customType: "background", content: "Output was truncated", details: {
+			id: "bg-4", sessionId: "fake-session", executionId: "execution-4", status: "done", exitCode: 0,
+			pullURL: "https://github.com/Artifex-org/hive-pi/pull/138",
+		} };
+		await fake.emit({ type: "message_end", message });
+		await fake.emit({ type: "message_end", message });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(c => c.path.endsWith("/conversation/pulls"))).toMatchObject([
+			{ body: { url: message.details.pullURL } },
+		]);
+	});
+
+	it("retains completion until first attach, but drops it on native session replacement", async () => {
+		for (const replace of [false, true]) {
+			const p = createFakePi(), hive = fakeHive({});
+			hiveRemote(p.api, deps(config({ streamDeltas: true })));
+			await p.emit({ type: "session_start", reason: "startup" }, { sessionId: "early-local" });
+			await p.emit({ type: "message_end", message: { role: "custom", customType: "background", details: {
+				id: "bg-4", sessionId: "early-local", executionId: "execution-4", status: "done", exitCode: 0,
+				pullURL: "https://github.com/Artifex-org/hive-pi/pull/138",
+			} } }, { sessionId: "early-local" });
+			expect(hive.calls.filter(c => c.path.endsWith("/conversation/pulls"))).toHaveLength(0);
+			if (replace) await p.emit({ type: "session_start", reason: "new" }, { sessionId: "new-local" });
+			p.api.events.emit(HIVE_SESSION_CHANNEL, { clientRunID: RUN_ID });
+			await vi.advanceTimersByTimeAsync(400);
+			expect(hive.calls.filter(c => c.path.endsWith("/conversation/pulls"))).toHaveLength(replace ? 0 : 1);
+			await p.emit({ type: "session_shutdown" });
+		}
+	});
+
+	it("rejects unsuccessful, foreign-session and unbound background evidence", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+		const details = { id: "bg-4", sessionId: "fake-session", executionId: "execution-4", status: "done", exitCode: 0,
+			pullURL: "https://github.com/Artifex-org/hive-pi/pull/138" };
+		for (const invalid of [
+			{ status: "failed" }, { status: "canceled" }, { status: "timeout" }, { status: "unconfirmed" },
+			{ exitCode: 1 }, { sessionId: "previous-session" }, { executionId: undefined }, { pullURL: null },
+		]) await fake.emit({ type: "message_end", message: {
+			role: "custom", customType: "background", details: { ...details, ...invalid },
+		} });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(c => c.path.endsWith("/conversation/pulls"))).toHaveLength(0);
+	});
+
+	it("announces association rejection without waking or bypassing access", async () => {
+		const hive = fakeHive({ pullStatuses: [404] });
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+		await fake.emit({ type: "message_end", message: { role: "custom", customType: "background", details: {
+			id: "bg-4", sessionId: "fake-session", executionId: "execution-4", status: "done", exitCode: 0,
+			pullURL: "https://github.com/Artifex-org/hive-pi/pull/138",
+		} } });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(fake.messages.filter(m => m.customType === "hive-delivery-warning")).toMatchObject([
+			{ content: expect.stringContaining("HTTP 404"), options: { triggerTurn: false } },
+		]);
+		expect(hive.calls.filter(c => c.path.endsWith("/conversation/pulls"))).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1_200);
+		const notices = hive.posted().flatMap(c => (c.body?.events ?? []) as Array<{ origin?: string; text?: string }>);
+		expect(notices.some(n => n.origin === "hive" && n.text?.includes("HTTP 404"))).toBe(true);
+	});
+
+	it("preserves created-PR reporting for nested codemode bash events", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+		await fake.emit({ type: "tool_execution_start", toolCallId: "script/1", parentToolCallId: "script", toolName: "bash",
+			args: { command: "gh pr create --draft" } });
+		await fake.emit({ type: "tool_execution_end", toolCallId: "script/1", parentToolCallId: "script", toolName: "bash",
+			result: { content: [{ type: "text", text: "https://github.com/Artifex-org/hive-pi/pull/138" }] }, isError: false });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hive.calls.filter(c => c.path.endsWith("/conversation/pulls"))).toMatchObject([
+			{ body: { url: "https://github.com/Artifex-org/hive-pi/pull/138" } },
+		]);
 	});
 
 	it("retries an interactive question start until Hive acknowledges it", async () => {

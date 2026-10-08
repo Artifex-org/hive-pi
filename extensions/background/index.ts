@@ -60,6 +60,7 @@ import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
 import { announceOwnWork } from "../hive-common/own-work.ts";
+import { createdPullURL } from "../hive-common/pull-delivery.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import { resolveRunUUID, runStateNote, watchCommand } from "./watch-run.ts";
 import { strandedIndexLock } from "./indexlock.ts";
@@ -229,7 +230,10 @@ export default function background(pi: ExtensionAPI) {
 		if (persistenceFaulted || overflowWedged()) return;
 		const content = notificationFor(job, Date.now());
 		const details = { id: job.id, status: job.status, exitCode: job.exitCode, what: job.what,
-			sessionId, executionId: executions.get(job.id) };
+			sessionId, executionId: executions.get(job.id),
+			// Authoritative command/outcome, before the displayed output is truncated.
+			pullURL: job.kind === "bash" && job.status === "done" && job.exitCode === 0
+				? createdPullURL(job.detail, job.output) : null };
 		if (!latestCtx) return;
 		try { assertRecordedBranch(latestCtx.sessionManager.getBranch(), latestCtx.sessionManager.getSessionFile()); }
 		catch (error) { failSession(error); return; }
