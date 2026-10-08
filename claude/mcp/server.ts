@@ -1,13 +1,15 @@
 /**
  * The adapter's MCP server (`cli.ts mcp`): subagent, advisor, goal_set,
- * goal_status, goal_clear, quality_gate, bugfix_evidence, bugfix_root_cause.
+ * goal_status, goal_clear, quality_gate, bugfix_evidence, bugfix_root_cause,
+ * and the session browser with its flow tools (browser-tools.ts).
  *
  * Lifetime: the server lives as long as Claude keeps its stdin open. When the
  * input ends (or the process is told to terminate), every background
  * delegation is aborted and AWAITED — each worker unwinds, releasing its
  * writer lock and reaping its pi child — before the process exits. A detached
  * worker outliving its session is the orphan defect pi's own subagent tool
- * reaps for; this is the same rule.
+ * reaps for; this is the same rule. The session's Chromium is closed the
+ * same way (and its process group killed if it lingers).
  */
 
 import { fetchAgentModeCatalog } from "../../extensions/advisor/modes.ts";
@@ -25,6 +27,7 @@ import { QUALITY_GATE_TOOL, runGateTool } from "./gate-tool.ts";
 import { GOAL_TOOLS, goalClear, goalSet, goalStatus } from "./goal-tools.ts";
 import { serve, type ToolDefinition, type ToolResult, type ToolServer } from "./protocol.ts";
 import { BackgroundJobs, leasedModelEnv, runSubagentTool, subagentToolDefinition } from "./subagent-tool.ts";
+import { BROWSER_TOOLS, BrowserTools } from "./browser-tools.ts";
 
 const SERVER_VERSION = "0.1.0";
 const TOOL_NAMES = new Set(["subagent", "advisor", "goal_set", "goal_status", "goal_clear", "quality_gate", "bugfix_evidence", "bugfix_root_cause"]);
@@ -34,6 +37,9 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 	const unavailable = modelUnavailableReason(env);
 	const spool = createSpool(env.spool, log);
 	const jobs = new BackgroundJobs(log);
+	// Model-free, so offered whatever the lease: the browser launches on its
+	// first call; the flow claim loop runs for the server's lifetime.
+	const browser = new BrowserTools(env, log);
 	const cwd = process.cwd();
 	// Read on first use by a model-backed tool: a malformed lease must not stop
 	// goal_* and quality_gate from answering (they are model-free).
@@ -51,8 +57,8 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 		version: SERVER_VERSION,
 		instructions:
 			"hive-pi's helpers on non-Anthropic models: delegate to role subagents, consult a cross-family advisor, set a goal " +
-			"a judge holds you to, and run the repository's quality gate.",
-		has: (name) => TOOL_NAMES.has(name),
+			"a judge holds you to, run the repository's quality gate, and drive this session's own headless browser (browser_*) and its saved flows.",
+		has: (name) => TOOL_NAMES.has(name) || browser.has(name),
 		async tools(): Promise<ToolDefinition[]> {
 			let roles: Parameters<typeof subagentToolDefinition>[0] = [];
 			if (!unavailable) {
@@ -64,9 +70,10 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					log(`hive-pi mcp: cannot list subagent roles: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
-			return [subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL, ...BUGFIX_TOOLS];
+			return [subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL, ...BUGFIX_TOOLS, ...BROWSER_TOOLS];
 		},
 		async call(name, args, signal) {
+			if (browser.has(name)) return browser.call(name, args, signal);
 			const now = Date.now();
 			switch (name) {
 				case "goal_set":
@@ -103,7 +110,7 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 	};
 
 	const shutdown = async () => {
-		await jobs.stopAll();
+		await Promise.all([jobs.stopAll(), browser.stop()]);
 		cleanupWorkerAgentDir();
 	};
 	// SIGTERM/SIGINT, or the parent gone: stop reading, abort and AWAIT every
@@ -128,6 +135,7 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 		}
 	}, 5_000);
 	guard.unref();
+	browser.start();
 	try {
 		await serve(server, input, output, log, stop.signal);
 	} finally {

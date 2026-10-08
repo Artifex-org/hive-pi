@@ -23,6 +23,8 @@ export interface ToolDefinition {
 export interface ToolResult {
 	text: string;
 	isError?: boolean;
+	/** Images shown with the text (MCP `image` content blocks, ahead of the text — pi's order). */
+	images?: { data: string; mimeType: string }[];
 }
 
 export interface ToolServer {
@@ -122,7 +124,8 @@ export async function serve(
 				} catch (error) {
 					result = { text: error instanceof Error ? error.message : String(error), isError: true };
 				}
-				reply(id, { content: [{ type: "text", text: result.text }], ...(result.isError ? { isError: true } : {}) });
+				const images = (result.images ?? []).map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType }));
+				reply(id, { content: [...images, { type: "text", text: result.text }], ...(result.isError ? { isError: true } : {}) });
 				return;
 			}
 			case "notifications/initialized":
