@@ -22,5 +22,10 @@ jobs:
       # --ignore-scripts deliberately: nothing here needs a postinstall, and a
       # public repo must not run one from a transitive dependency on CI.
       - run: npm ci --ignore-scripts
+      # The pinned headless shell the session browser drives: the real-browser
+      # tests (test/claude-browser.test.ts) fail on CI without it rather than
+      # skip. `--no-install` runs this checkout's playwright-core, so the
+      # browser revision always matches package.json.
+      - run: npx --no-install playwright-core install --with-deps chromium-headless-shell
       - run: npm run typecheck
       - run: npm test
