@@ -1,0 +1,128 @@
+# hive-pi Claude adapter
+
+Gives a Hive-launched **Claude Code** session the hive-pi features that run on
+*other* model families or that pi injects: the opening brief, subagents on the
+catalog ladder, You Should Know, the goal judge and drift probe, the status
+recap, a cross-family advisor, op-mode enforcement, the worktree guard,
+format-on-edit and `quality_gate`.
+
+The Claude loop stays Anthropic. Every outside-model call is a `pi` child
+(`pi --mode json -p --no-session …`) on the launch's **leased** pi store. The
+adapter reuses hive-pi's own cores — nothing here is a second implementation;
+where a core was entangled with pi's runtime it was lifted into a shared
+module (`agenda/chain.ts`, `agenda/goal-tool.ts`, `subagent/delegate.ts`,
+`gate/tool.ts`, `opmode/verdict.ts`, `harness/roles-core.ts`, …) that the pi
+extension and this adapter both import.
+
+Run by the plugin as `$HIVE_NODE $HIVE_PI_BASE/claude/cli.ts <command>` —
+plain Node 24 with type stripping. Nothing here imports `@earendil-works/*` at
+runtime; pi's frontmatter parser and conversation serializer are loaded from
+the **pinned** pi install that `HIVE_PI_BIN` points into (`pi-runtime.ts`).
+
+## Environment (from the launch)
+
+| Variable | Use |
+| --- | --- |
+| `HIVE_URL`, `HIVE_TOKEN` | catalog (`GET /api/v1/agent-modes`) and session REST calls |
+| `HIVE_SESSION_ID` | the session's **client run id**; the server uuid is resolved once via `GET /api/v1/agent-sessions/by-run/{id}` and cached (`session.json`). Unresolved → that settle's Hive posts are skipped (stderr) |
+| `HIVE_PI_BIN` | the pinned `pi`; a `.js` entry runs under this node |
+| `HIVE_PI_AGENT_DIR` | the leased pi store; set as `PI_CODING_AGENT_DIR` for every pi child, never mirrored. **Unset ⇒ every model-backed feature is off**: hooks print one stderr line and exit 0; MCP tools return `isError`. Never falls back to `~/.pi/agent` |
+| `HIVE_PI_BASE` | this checkout (roles in `agents/`) |
+| `HIVE_CLAUDE_CONFIG_DIR` | state lives in `$HIVE_CLAUDE_CONFIG_DIR/hive-pi/` (0700): `goal.json`, `agenda.json`, `ysk.json`, `recap.json`, `session.json`, locks |
+| `HIVE_AUX_SPOOL` | append-only JSONL for the driver; unset ⇒ no records (said once on stderr) |
+| `HIVE_CLAUDE_TRANSCRIPT` | the Claude JSONL, for MCP tools (hooks get `transcript_path`) |
+
+`control.json` in the state dir is the **driver's** (read-only here):
+`{"opMode":"build|plan|discuss|bugfix","ysk":{"enabled":bool,"recording":bool?,"recordingRevision":int?}}`.
+Absent ⇒ defaults; present but invalid ⇒ the hook fails loudly (an unreadable
+op mode is never read as `build`).
+
+## Models
+
+Chosen only by catalog key. "Configured" = the provider has an entry in the
+leased `auth.json`. Judges, drift, recap and YSK take the catalog's `low` mode
+if leased, else the cheapest leased mode (`PI_AGENDA_EVALUATOR_MODEL` /
+`PI_YOU_SHOULD_KNOW_MODEL` override). No resolvable model is reported — for
+the goal it is a judge error on the goal (three pause it). Advisor:
+`pickConfiguredAdvisor` with Claude as an unranked caller (strongest leased
+mode; `PI_ADVISOR_MODEL` overrides). Subagents: `chooseWorkerModel` with
+`requireExplicitModel` (an unpinned role takes the cheapest leased mode, never
+pi's default). Every one-shot passes `--model` and `--thinking` explicitly
+(`oneshot.ts` refuses otherwise): judge fast pass and drift/recap/YSK `off`;
+the judge's confirming pass uses the evaluator mode's level, else `low`.
+
+## Commands (stdin = Claude Code's hook JSON)
+
+- **`hook pre-tool`** — Edit/MultiEdit/Write/NotebookEdit/Bash mapped to pi's
+  names and judged by pi's policy: `discuss`/`orchestrate` via
+  `opModeToolVerdict`/`opModeShellVerdict`, `plan` via `planToolVerdict`; then
+  the worktree guard (`decide`) on the edited path. Prints a `deny` or
+  nothing — never `allow`/`ask`. Other Claude tools and MCP tools are not
+  classified. **Bugfix is not gated here** (see Open gaps).
+- **`hook post-tool`** — format-on-edit (`planFor` + `formatFile`) for
+  Edit/MultiEdit/Write; prints `additionalContext` with pi's note when the
+  file changed or the formatter failed; "not installed" said once per config.
+- **`hook prompt`** — discuss/bugfix: the op mode's prompt as `additionalContext`.
+- **`hook stop`** (sync) — `walkChain` over repo gate (`.pi/harness.json`) →
+  drift (every 5th settle with an active goal) → goal judge; the driver's
+  turn-failure and hand-back guards first. At most one continuation:
+  `{"decision":"block","reason":…}`. Budget 110 s: every model call's timeout
+  is clamped to what is left (a clamped timeout is a judge error,
+  fail-closed), the gate's timeout is capped, and drift is skipped below 100 s
+  left. `stop_hook_active` is **not** a reason to stand down — a goal loop is
+  a chain of such continuations; the persisted caps (goal iterations,
+  no-progress/pending streaks, budget, three judge errors, gate
+  `maxInjections`, drift realignments) bound it, and every charge is written
+  before the block is printed.
+- **`hook settle`** (async) — status recap (`mechanicalTaskState`, recap
+  prompt on the evaluator, `POST /agent-sessions/{id}/activity` with
+  `{phase, since, recap?}`), then You Should Know: assistant prose since a byte
+  cursor, ≥30 s between scans (waits), ≤20 per session, the scanner prompt as
+  `--append-system-prompt`, findings grounded (`groundNotes`) and uploaded by
+  hive-remote's `YouShouldKnowFindingsTransport`. `control.ysk.enabled:false`
+  stops it; `recording`+`recordingRevision` are applied as a remote policy
+  (accepted only if not older than the server's).
+- **`brief --cwd <dir> --prompt-file <file>`** — `{"brief":"<markdown>"}` or
+  `{"brief":null,"reason":"…"}`; detect.ts suppression, per-lane walls,
+  `compileBrief`. One usage record per lane.
+- **`mcp`** — stdio MCP (protocol 2025-06-18, also 2025-03-26/2024-11-05):
+  - `subagent` — pi's delegation (`delegate.ts`): single / parallel ≤8 (4
+    concurrent) / chain; roles from `agents/` + the store's `agents/`; writer
+    lock and worktree guard per worker; 50 KB/task cap. Project-local roles
+    are refused (no trust UI); `schema` is not offered (typebox). **Op mode
+    applies to workers**: discuss/plan/orchestrate refuse writer roles; bugfix
+    refuses writers that do not carry `op_mode: bugfix` themselves.
+    `background:true` returns at once with a line `hive-pi-job: <id>`; the
+    worker runs detached from the request (aborted and awaited when the server
+    exits) and on completion writes a `wake` with that `job` (plain text).
+  - `advisor` — the transcript serialised by pi's `serializeConversation`,
+    capped by `capTranscript` (400k), sent as an `@file`.
+  - `goal_set {condition, replace?, budget?{tokens,hours}}`, `goal_status`,
+    `goal_clear` — agenda's rules (`goalSetDecision`, `describeGoal`).
+  - `quality_gate` — `gate/tool.ts` (agent-check / vendored gate / `hive check`).
+
+## Spool records
+
+One line each, one `write` (O_APPEND), < 4 KiB; integers for token counts,
+`turns` and `ms`, `model` as `<provider>/<id>` (otherwise not written, said on
+stderr):
+`usage` (roles `goal-judge`, `drift`, `ysk`, `recap`, `brief`, `advisor`,
+`subagent:<agent>`; a worker is summed per model with its call count),
+`gate` (`goal`/`drift`: `passed|failed|timed_out|skipped`), `wake`.
+
+## Processes
+
+pi children are spawned as process groups and killed by group on timeout or
+cancel (`hive-common/child-tree.ts`). `PI_CODING_AGENT_DIR` is only ever
+`$HIVE_PI_AGENT_DIR`.
+
+## Open gaps
+
+- **Bugfix tool gating.** pi unlocks edits through its evidence protocol
+  (`bugfix_evidence` → `bugfix_root_cause`), which a Claude session lacks, so
+  pre-tool does not deny edits in bugfix mode and the injected bugfix prompt
+  names those (absent) tools. Workers are covered (see `subagent`).
+- The recap POST carries no `completion_summary_seq` (the driver owns the
+  transcript sequence). Its `idle` phase can land after a Stop-hook
+  continuation has started; the next heartbeat corrects it.
+- Worktree-guard advisory notes (allow-with-note) are not surfaced.
