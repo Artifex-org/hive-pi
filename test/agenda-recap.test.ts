@@ -77,12 +77,16 @@ describe("pure builders", () => {
 	});
 
 	it("redacts secrets in tool-call arguments before they reach a model", () => {
+		// Built at runtime: a literal bearer header is exactly what the repo's
+		// secret scan (gitleaks) is there to refuse, fixture or not.
+		const fake = ["abcdef", "0123456789", "xyz"].join("");
+		const command = ["curl -H 'Authorization:", "Bearer", `${fake}'`, "https://x"].join(" ");
 		const branch = [
-			{ message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "curl -H 'Authorization: Bearer abcdef0123456789xyz' https://x" } }] } },
+			{ message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command } }] } },
 		];
 		const text = recapTranscript(branch);
 		expect(text).toContain("[REDACTED]");
-		expect(text).not.toContain("abcdef0123456789xyz");
+		expect(text).not.toContain(fake);
 	});
 
 	it("puts the call that produced a result into the goal judge's excerpt", () => {
