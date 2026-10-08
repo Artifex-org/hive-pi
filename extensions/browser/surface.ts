@@ -47,6 +47,32 @@ export const AGENT_PAUSED_MESSAGE =
   "The operator has taken control of this browser from Hive's live view. Wait for them to release it, or ask in chat.";
 
 export type SurfaceView = "agent" | "operator";
+/**
+ * Chromium edits text for a key event only when it carries a virtual key
+ * code: without one, Backspace, Delete, the arrows and Enter arrive as keys
+ * that do nothing. Derived from the DOM `code`, which the web viewer sends.
+ */
+const NAMED_KEY_CODES: Record<string, number> = {
+  Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 16, ShiftRight: 16,
+  ControlLeft: 17, ControlRight: 17, AltLeft: 18, AltRight: 18, Escape: 27, Space: 32,
+  PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39,
+  ArrowDown: 40, Insert: 45, Delete: 46, MetaLeft: 91, MetaRight: 92,
+  Semicolon: 186, Equal: 187, Comma: 188, Minus: 189, Period: 190, Slash: 191, Backquote: 192,
+  BracketLeft: 219, Backslash: 220, BracketRight: 221, Quote: 222,
+};
+
+export function keyCodes(code: string | undefined): { windowsVirtualKeyCode?: number; nativeVirtualKeyCode?: number } {
+  if (!code) return {};
+  let vk = NAMED_KEY_CODES[code];
+  const letter = /^Key([A-Z])$/.exec(code);
+  const digit = /^(?:Digit|Numpad)([0-9])$/.exec(code);
+  const fn = /^F([1-9]|1[0-2])$/.exec(code);
+  if (letter) vk = letter[1]!.charCodeAt(0);
+  else if (digit) vk = (code.startsWith("Numpad") ? 96 : 48) + Number(digit[1]);
+  else if (fn) vk = 111 + Number(fn[1]);
+  return vk === undefined ? {} : { windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk };
+}
+
 /** Any character that is not a C0 control or DEL: text that could be a secret. */
 const PRINTABLE = /[^\u0000-\u001f\u007f]/;
 
@@ -854,6 +880,7 @@ export class BrowserSurfaceBridge {
           code: command.code ?? "",
           text: command.text ?? "",
           modifiers: command.modifiers ?? 0,
+          ...keyCodes(command.code),
         });
         return null;
       case "insert_text":

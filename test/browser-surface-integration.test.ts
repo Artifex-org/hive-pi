@@ -232,6 +232,13 @@ describe.skipIf(!enabled)("browser surface FIFO integration", () => {
 		expect(await run({ kind: "key", event_type: "keyDown", key: "!", code: "Digit1", text: "!" })).toMatchObject({ ok: true });
 		expect(await run({ kind: "key", event_type: "keyUp", key: "!", code: "Digit1" })).toMatchObject({ ok: true });
 		expect(await page.inputValue("#t")).toBe("hello!");
+		// Editing keys carry no text: they work only with a virtual key code.
+		expect(await run({ kind: "key", event_type: "rawKeyDown", key: "Backspace", code: "Backspace" })).toMatchObject({ ok: true });
+		expect(await run({ kind: "key", event_type: "keyUp", key: "Backspace", code: "Backspace" })).toMatchObject({ ok: true });
+		expect(await run({ kind: "key", event_type: "rawKeyDown", key: "ArrowLeft", code: "ArrowLeft" })).toMatchObject({ ok: true });
+		expect(await run({ kind: "insert_text", text: "X" })).toMatchObject({ ok: true });
+		expect(await page.inputValue("#t")).toBe("hellXo");
+		await page.fill("#t", "hello!");
 
 		await page.focus("#p");
 		expect(await run({ kind: "insert_text", text: "secret" })).toMatchObject({ ok: false, error: "password_field" });
