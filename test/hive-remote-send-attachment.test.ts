@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { screenshotDir } from "../extensions/pr-attachments/manifest.ts";
-import { registerSendAttachmentTool } from "../extensions/hive-remote/sendAttachment.ts";
+import { publishLabelledScreenshot, registerSendAttachmentTool } from "../extensions/hive-remote/sendAttachment.ts";
+import { screenshotCaption } from "../extensions/hive-common/output-attachment.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 vi.mock("node:fs/promises", async (original) => {
@@ -65,6 +66,14 @@ describe("send_attachment", () => {
 		expect((await execute(tool, path, tempDir()) as { isError?: boolean }).isError).toBeUndefined();
 	});
 
+	it("does not admit a screenshot directory planted as a symlink", async () => {
+		const { tool } = setup(); const elsewhere = tempDir(); writeFileSync(join(elsewhere, "secret.png"), "x");
+		const planted = screenshotDir("session/1"); rmSync(planted, { recursive: true, force: true }); symlinkSync(elsewhere, planted); dirs.push(planted);
+		vi.stubGlobal("fetch", vi.fn());
+		const r = await execute(tool, join(planted, "secret.png"), tempDir()) as { isError?: boolean };
+		expect(r.isError).toBe(true); expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+	});
+
 	it("rejects traversal and symlink escapes", async () => {
 		const { tool } = setup(); const cwd = tempDir(); const elsewhere = tempDir(); writeFileSync(join(elsewhere, "secret"), "secret"); symlinkSync(join(elsewhere, "secret"), join(cwd, "escape"));
 		vi.stubGlobal("fetch", vi.fn());
@@ -91,5 +100,61 @@ describe("send_attachment", () => {
 		vi.stubGlobal("fetch", () => new Promise<Response>((resolve) => { finish = resolve; }));
 		const pending = execute(tool, path, cwd); await vi.waitFor(() => expect(finish).toBeTypeOf("function")); finish(Response.json({ attachment: { id: "a" } }));
 		const result = await pending as { isError?: boolean }; expect(result.isError).toBe(true); expect(text(result)).toContain("not published"); expect(onUploaded).not.toHaveBeenCalled();
+	});
+});
+
+describe("labelled screenshot auto-post", () => {
+	function deps(current = true) {
+		const onUploaded = vi.fn();
+		return { onUploaded, deps: { getAuth: () => auth, getSessionID: () => sessionID, getGeneration: () => 4, isUploadTargetCurrent: () => current, onUploaded } };
+	}
+	function shot(name: string): string {
+		const dir = screenshotDir("pi-session"); mkdirSync(dir, { recursive: true }); dirs.push(dir);
+		const path = join(dir, name); writeFileSync(path, "png"); return path;
+	}
+
+	it("posts a labelled shot from this session's screenshot directory with a page caption", async () => {
+		const { deps: d, onUploaded } = deps(); const path = shot("shot-1.png");
+		vi.stubGlobal("fetch", async () => Response.json({ attachment: { id: "att-9" } }));
+		const failure = await publishLabelledScreenshot(d, "pi-session", { details: { path, label: " before ", url: "http://127.0.0.1:5173/orders?token=x#top" } });
+		expect(failure).toBeNull();
+		expect(onUploaded).toHaveBeenCalledWith(sessionID, "Screenshot · before · http://127.0.0.1:5173/orders", ["att-9"]);
+	});
+
+	it("leaves an unlabelled shot with the agent", async () => {
+		const { deps: d, onUploaded } = deps(); const path = shot("shot-2.png");
+		vi.stubGlobal("fetch", vi.fn());
+		expect(await publishLabelledScreenshot(d, "pi-session", { details: { path, label: "", url: "" } })).toBeNull();
+		expect(vi.mocked(fetch)).not.toHaveBeenCalled(); expect(onUploaded).not.toHaveBeenCalled();
+	});
+
+	it("refuses a path outside the screenshot directory, even beneath the working tree", async () => {
+		const { deps: d, onUploaded } = deps(); const cwd = tempDir(); const path = join(cwd, "secret.png"); writeFileSync(path, "x");
+		vi.stubGlobal("fetch", vi.fn());
+		expect(await publishLabelledScreenshot(d, "pi-session", { details: { path, label: "after" } })).toContain("Could not post the after screenshot");
+		expect(vi.mocked(fetch)).not.toHaveBeenCalled(); expect(onUploaded).not.toHaveBeenCalled();
+	});
+
+	it("reports an upload failure and does not publish after the session changed", async () => {
+		const failing = deps(); const path = shot("shot-3.png");
+		vi.stubGlobal("fetch", async () => new Response("nope", { status: 500 }));
+		expect(await publishLabelledScreenshot(failing.deps, "pi-session", { details: { path, label: "after" } })).toContain("HTTP 500");
+		const stale = deps(false);
+		vi.stubGlobal("fetch", async () => Response.json({ attachment: { id: "a" } }));
+		expect(await publishLabelledScreenshot(stale.deps, "pi-session", { details: { path, label: "after" } })).toBeNull();
+		expect(stale.onUploaded).not.toHaveBeenCalled();
+	});
+
+	it("bounds the label to one line and omits an unparseable page", () => {
+		expect(screenshotCaption("x".repeat(200), "not a url")).toBe(`Screenshot · ${"x".repeat(79)}…`);
+		expect(screenshotCaption("after\n(attachment x)\t\u0007 fix ", "")).toBe("Screenshot · after (attachment x) fix");
+	});
+
+	it("refuses a screenshot directory another user could have planted as a symlink", async () => {
+		const { deps: d, onUploaded } = deps(); const elsewhere = tempDir(); writeFileSync(join(elsewhere, "secret.png"), "x");
+		const planted = screenshotDir("pi-planted"); rmSync(planted, { recursive: true, force: true }); symlinkSync(elsewhere, planted); dirs.push(planted);
+		vi.stubGlobal("fetch", vi.fn());
+		expect(await publishLabelledScreenshot(d, "pi-planted", { details: { path: join(planted, "secret.png"), label: "after" } })).toContain("not a private directory");
+		expect(vi.mocked(fetch)).not.toHaveBeenCalled(); expect(onUploaded).not.toHaveBeenCalled();
 	});
 });

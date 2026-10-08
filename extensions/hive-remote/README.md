@@ -18,6 +18,14 @@ session working directory or its own browser screenshot directory are allowed.
 Files in that working directory can still be sensitive: attach only material
 the operator asked to see. This does not publish an attachment to GitHub.
 
+A `browser_screenshot` taken with a `label` (`before`/`after`, …) is posted the
+same way without the model asking: on its `tool_execution_end`, hive-remote
+uploads the shot (admissible only from this session's screenshot directory,
+never the working tree) and folds an assistant event captioned
+`Screenshot · <label> · <page origin+path>`. Unlabelled shots stay out of the
+chat. A failed auto-post becomes a `hive` notice in the transcript. The
+`browser-use` skill (`skills/browser-use`) tells the agent when to label.
+
 Remote reporting must be enabled and the conversation attached. Incoming
 steering may be disabled without disabling output screenshots. An upload whose
 session changes or whose reporting is disabled before completion is not

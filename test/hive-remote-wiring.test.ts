@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts"
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
 import { CredentialReceiver } from "../extensions/hive-remote/credentials.ts";
 import { registerCredentialConsumer } from "../extensions/hive-remote/credential-runtime.ts";
+import { screenshotDir } from "../extensions/pr-attachments/manifest.ts";
 import { createFakePi, type FakeCtxOptions, type FakePi, type SessionEntryLike } from "./fake-pi.ts";
 
 /**
@@ -145,6 +146,8 @@ function fakeHive(handlers: {
 			return json(status, status >= 400 ? { error: "transient" } : {});
 		}
 
+		if (path.endsWith("/output-attachments")) return json(201, { attachment: { id: "att-shot" } });
+
 		if (/\/attachments\/[^/]+$/.test(path)) {
 			return new Response(Buffer.from("image-bytes"), {
 				status: 200,
@@ -239,6 +242,35 @@ describe("send_attachment wiring", () => {
 		// this asserts remote-off withdraws its target before a queued completion.
 		await fake.emit({ type: "session_shutdown" });
 		expect(hive.attaches()).toHaveLength(1);
+	});
+});
+
+describe("labelled screenshot wiring", () => {
+	it("posts a labelled browser_screenshot to the chat as an assistant attachment event", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		const dir = screenshotDir("fake-session");
+		mkdirSync(dir, { recursive: true });
+		const path = join(dir, "shot-1.png");
+		writeFileSync(path, "png-bytes");
+		try {
+			await fake.emit({
+				type: "tool_execution_end",
+				toolCallId: "shot",
+				toolName: "browser_screenshot",
+				result: { content: [], details: { path, label: "after", url: "http://127.0.0.1:5173/orders" } },
+				isError: false,
+			});
+			await vi.waitFor(() => {
+				const sent = hive.posted().flatMap((c) => (c.body?.events ?? []) as Array<{ role: string; text: string; attachment_ids?: string[] }>);
+				expect(sent).toContainEqual(expect.objectContaining({ role: "assistant", text: "Screenshot · after · http://127.0.0.1:5173/orders", attachment_ids: ["att-shot"] }));
+			});
+			expect(hive.calls.filter((c) => c.path.endsWith("/output-attachments"))).toHaveLength(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+			await fake.emit({ type: "session_shutdown" });
+		}
 	});
 });
 
