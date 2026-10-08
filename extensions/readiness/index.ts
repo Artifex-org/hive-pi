@@ -42,6 +42,7 @@ import { registerGuardedTool } from "../guards-common/capability.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
 import { realDeps, runAll } from "./probes.ts";
 import type { McpServerDef } from "./mcp.ts";
+import { inspectRole, renderRoleInspection } from "./roles.ts";
 import {
 	applyResults,
 	emptyReadiness,
@@ -216,7 +217,7 @@ export default function (pi: ExtensionAPI) {
 			"What this environment can already do: MCP servers, credentials, the disposable Postgres,",
 			"the headless browser, and the checkout. Each row names the tool that uses the capability and,",
 			"when it is not ready, what to do about it. Call it instead of discovering a missing capability",
-			"by failing — and again after fixing one, to confirm.",
+			"by failing — and again after fixing one, to confirm. Supply agent for on-demand role configuration inspection (no probes).",
 		].join(" "),
 		promptSnippet: "Check which environment capabilities are ready before relying on one",
 		promptGuidelines: [
@@ -226,13 +227,33 @@ export default function (pi: ExtensionAPI) {
 			"`unknown` means the probe could not tell, NOT that the capability is missing.",
 		],
 		parameters: Type.Object({
+			agent: Type.Optional(Type.String({ minLength: 1, description: "Inspect this role's grants and worker configuration; no probes or launch." })),
+			agentScope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")], { description: "Role discovery scope (default user); project roles remain trust-gated." })),
 			refresh: Type.Optional(
 				Type.Boolean({ description: "Re-run the probes instead of returning the last result. Default true." }),
 			),
 		}),
 		renderCall: (_args, theme) => new Text(theme.fg("dim", "⛭ readiness"), 0, 0),
-		renderResult: (_result, _options, theme) => new Text(theme.fg("dim", summaryLine(state)), 0, 0),
-		async execute(_id, params) {
+		renderResult: (result, _options, theme) => {
+			const details = result.details;
+			const inspection = details !== null && typeof details === "object";
+			if (inspection && "roleInspectionError" in details) {
+				return new Text(theme.fg("error", result.content.find((item) => item.type === "text")?.text ?? "Role inspection unavailable"), 0, 0);
+			}
+			return new Text(theme.fg("dim", inspection && "roleInspection" in details ? "Role configuration inspected; worker availability unknown" : summaryLine(state)), 0, 0);
+		},
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			if (params.agent !== undefined || params.agentScope !== undefined) {
+				try {
+					if (!params.agent) throw new Error("agentScope requires an agent name.");
+					let registry: string[] | null = null;
+					try { registry = pi.getAllTools().map((tool) => tool.name); } catch { /* unknown, not absent */ }
+					const report = inspectRole(ctx.cwd, params.agentScope ?? "user", params.agent, ctx.isProjectTrusted(), registry);
+					return { content: [{ type: "text", text: renderRoleInspection(report) }], details: { roleInspection: report } };
+				} catch (error) {
+					return { content: [{ type: "text", text: `Role inspection unavailable: ${String(error)}` }], details: { roleInspectionError: true }, isError: true };
+				}
+			}
 			if (params.refresh !== false) await probe();
 			const rows = orderedResults(state);
 			return {

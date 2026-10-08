@@ -42,6 +42,25 @@ the wrong place. The probe reads the run record the updater now writes, and
 judges the **age of the last success** rather than the last exit status — a unit
 that stopped running at all would otherwise report ok forever.
 
+## On-demand role inspection
+
+`readiness({ agent: "research" })` reports the role's declared tools, translated
+native grants, parent registrations, and configured worker extension/MCP loading.
+`agentScope` defaults to `user`; `project`/`both` use the same discovery precedence,
+alias resolution and trust filtering as delegation. Untrusted project shadows
+are withheld, not replaced with a different role. Prompt bodies are not returned.
+
+This route does **not** refresh probes, start a worker/model, connect MCP, or build
+an MCP mirror, even with `refresh: true`. It does not change launch eligibility
+or tool permissions. Parent `registered` means only observed in the parent;
+worker registration, authentication and service health remain **unknown**. Empty
+or unreadable parent registries are unknown, not proof tools are absent. No
+explicit tool list means worker defaults, not zero tools. MCP `configured` means
+launch selection, not a successful connection. This on-demand report is not
+persisted or injected in startup/per-turn snapshots. Existing session-start
+probes still operate independently; inspection neither waits for nor refreshes
+them. `PI_READINESS=0` still disables the whole extension.
+
 ## Five statuses, and `unknown` is not `absent`
 
 `ready` · `warming` · `degraded` · `absent` · `unknown`.
