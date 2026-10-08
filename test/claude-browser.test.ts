@@ -21,7 +21,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { BROWSER_TOOL_NAMES, BROWSER_TOOLS, checkArgs } from "../claude/mcp/browser-tools.ts";
-import { browserInstallCommand, describeLaunchError } from "../extensions/browser/core.ts";
+import { browserInstallCommand, describeLaunchError, SessionBrowser } from "../extensions/browser/core.ts";
 import browserExtension from "../extensions/browser/index.ts";
 import { makeLaunch, McpClient, REPO, startFakeHive, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
 import { createFakePi } from "./fake-pi.ts";
@@ -231,6 +231,25 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		client = undefined;
 		// Every process of the browser's group is gone with the server.
 		await waitFor(() => groupMembers(leader as number).length === 0, 10_000, "the browser's process group to exit");
+	}, 60_000);
+
+	it("finds Chromium's own process group — not another group this process leads — and closes it", async () => {
+		// A helper group of this process, started first, that must not be taken for the browser.
+		const { spawn } = await import("node:child_process");
+		const decoy = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+		const { chromium } = await import("playwright-core");
+		const browser = new SessionBrowser({ chromium: async () => chromium, env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: BROWSERS_PATH }, handleSignals: false });
+		try {
+			await browser.navigate({ url: `${base}/` });
+			const pid = browser.pid as number;
+			expect(pid).not.toBe(decoy.pid);
+			expect(browserLeader(process.pid)).toBe(pid);
+			await browser.dispose();
+			expect(groupMembers(pid)).toEqual([]);
+			await expect(browser.snapshot()).rejects.toThrow("shut down");
+		} finally {
+			decoy.kill("SIGKILL");
+		}
 	}, 60_000);
 
 	it("records a Playwright flow from the browser tools and replays it", async () => {

@@ -13,7 +13,7 @@
  * Erasable TypeScript only, no runtime import of pi or typebox.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Agent as HttpAgent, request as httpRequest } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
@@ -438,8 +438,11 @@ export function createFlowRuntime(host: FlowRuntimeHost) {
 	async function authorMaestro(params: { yaml: string }): Promise<FlowOutput> {
 		const invalid = validateMaestroYAML(params.yaml);
 		if (invalid) throw new Error(invalid);
-		const probe = spawnSync("maestro", ["--version"], { encoding: "utf8", timeout: 5_000 });
-		const maestroAvailable = probe.status === 0;
+		// Asynchronously: a host serving other calls (the adapter's MCP server)
+		// must not stall on a slow binary.
+		const maestroAvailable = await new Promise<boolean>((resolve) => {
+			execFile("maestro", ["--version"], { timeout: 5_000 }, (error) => resolve(error === null));
+		});
 		const mac = process.platform === "darwin";
 		return {
 			text: params.yaml,

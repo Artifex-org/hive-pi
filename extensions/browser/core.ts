@@ -212,8 +212,17 @@ export interface SessionBrowserOptions {
 	onLaunch?: () => void;
 }
 
-/** Processes whose parent is this process and that lead their own group (Linux /proc). */
-function ownGroupLeaders(): Set<number> {
+/** The binaries Playwright launches as Chromium (the headless shell, or a full build). */
+const CHROMIUM_BINARY = /^(chrome|chrome-headless-shell|headless_shell|chromium)$/;
+
+/**
+ * Chromium processes whose parent is this process and that lead their own
+ * group (Linux /proc) — the browser Playwright spawned, and not a helper
+ * group this process started meanwhile (the adapter's workers lead groups
+ * too). Matched on the binary (`/proc/<pid>/exe`): Chromium rewrites its
+ * argv, and `executablePath()` names the full build, not the headless shell.
+ */
+function ownChromiumLeaders(): Set<number> {
 	const leaders = new Set<number>();
 	let entries: string[];
 	try {
@@ -228,7 +237,8 @@ function ownGroupLeaders(): Set<number> {
 			// pid (comm) state ppid pgrp … — comm may hold spaces, so split after ")".
 			const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
 			const pid = Number(entry);
-			if (Number(fields[1]) === process.pid && Number(fields[2]) === pid) leaders.add(pid);
+			if (Number(fields[1]) !== process.pid || Number(fields[2]) !== pid) continue;
+			if (CHROMIUM_BINARY.test(path.basename(fs.readlinkSync(`/proc/${entry}/exe`)))) leaders.add(pid);
 		} catch {
 			// The process exited between readdir and read.
 		}
@@ -243,6 +253,29 @@ export function processGroupAlive(pgid: number): boolean {
 		return true;
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Stop a browser's live view, close it, and — if it has not exited within
+ * CLOSE_TIMEOUT_MS or left helpers behind — SIGKILL its process group.
+ */
+async function closeBrowser(s: Pick<BrowserState, "browser" | "surface" | "pid">): Promise<void> {
+	await (s.surface?.stop() ?? Promise.resolve()).catch(() => {});
+	let timer: NodeJS.Timeout | undefined;
+	await Promise.race([
+		s.browser.close().catch(() => {}),
+		new Promise<void>((done) => {
+			timer = setTimeout(done, CLOSE_TIMEOUT_MS);
+		}),
+	]);
+	clearTimeout(timer);
+	if (s.pid !== null && processGroupAlive(s.pid)) {
+		try {
+			process.kill(-s.pid, "SIGKILL");
+		} catch {
+			// Gone between the check and the kill.
+		}
 	}
 }
 
@@ -282,12 +315,15 @@ export class SessionBrowser {
 	}
 
 	private async launch(): Promise<BrowserState> {
-		if (this.state) await this.state.surface?.stop();
+		// A browser that died: its live view ends and any helper left in its
+		// group goes with it.
+		const dead = this.state;
 		this.state = null;
+		if (dead) await closeBrowser(dead);
 		const env = this.options.env ?? process.env;
 		const plan = buildLaunchPlan(env);
-		const before = ownGroupLeaders();
 		let browser: Browser;
+		const before = ownChromiumLeaders();
 		try {
 			const chromium = await this.options.chromium();
 			browser = await chromium.launch({
@@ -300,7 +336,28 @@ export class SessionBrowser {
 		} catch (error) {
 			throw describeLaunchError(error);
 		}
-		const pid = [...ownGroupLeaders()].find((candidate) => !before.has(candidate)) ?? null;
+		const fresh = [...ownChromiumLeaders()].filter((candidate) => !before.has(candidate));
+		// Two candidates means a concurrent launch elsewhere in this process: no guess.
+		const pid = fresh.length === 1 ? fresh[0] : null;
+		let state: BrowserState;
+		try {
+			state = await this.openPage(browser, pid, env);
+		} catch (error) {
+			// Launched but unusable: never leave it running untracked.
+			await closeBrowser({ browser, surface: null, pid });
+			throw error;
+		}
+		this.state = state;
+		if (this.disposed) {
+			// Disposed while launching: do not leave this browser behind.
+			await this.close();
+			throw new Error("The session browser has been shut down.");
+		}
+		this.options.onLaunch?.();
+		return this.state;
+	}
+
+	private async openPage(browser: Browser, pid: number | null, env: NodeJS.ProcessEnv): Promise<BrowserState> {
 		const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
 		context.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
 		context.setDefaultTimeout(ACTION_TIMEOUT_MS);
@@ -315,14 +372,7 @@ export class SessionBrowser {
 			if (ring.length > CONSOLE_RING_MAX) ring.shift();
 		});
 		const surface = await BrowserSurfaceBridge.start(page, env);
-		this.state = { browser, context, page, console: ring, surface, pid };
-		if (this.disposed) {
-			// Disposed while launching: do not leave this browser behind.
-			await this.close();
-			throw new Error("The session browser has been shut down.");
-		}
-		this.options.onLaunch?.();
-		return this.state;
+		return { browser, context, page, console: ring, surface, pid };
 	}
 
 	private async describePage(page: Page): Promise<{ body: string; truncated: boolean }> {
@@ -438,23 +488,7 @@ export class SessionBrowser {
 	async close(): Promise<void> {
 		const s = this.state;
 		this.state = null;
-		if (!s) return;
-		await (s.surface?.stop() ?? Promise.resolve()).catch(() => {});
-		let timer: NodeJS.Timeout | undefined;
-		await Promise.race([
-			s.browser.close().catch(() => {}),
-			new Promise<void>((done) => {
-				timer = setTimeout(done, CLOSE_TIMEOUT_MS);
-			}),
-		]);
-		clearTimeout(timer);
-		if (s.pid !== null && processGroupAlive(s.pid)) {
-			try {
-				process.kill(-s.pid, "SIGKILL");
-			} catch {
-				// Gone between the check and the kill.
-			}
-		}
+		if (s) await closeBrowser(s);
 	}
 
 	/** Close for good: a launch in flight is closed when it lands, and no call launches again. */

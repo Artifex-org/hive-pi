@@ -110,7 +110,11 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 	};
 
 	const shutdown = async () => {
-		await Promise.all([jobs.stopAll(), browser.stop()]);
+		// Settled, not all: one failing stop must not skip the other cleanup.
+		const outcomes = await Promise.allSettled([jobs.stopAll(), browser.stop()]);
+		for (const outcome of outcomes) {
+			if (outcome.status === "rejected") log(`hive-pi mcp: shutdown: ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`);
+		}
 		cleanupWorkerAgentDir();
 	};
 	// SIGTERM/SIGINT, or the parent gone: stop reading, abort and AWAIT every

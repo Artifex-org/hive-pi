@@ -44,6 +44,9 @@ const SURFACE_TICK_MS = 2_000;
 
 const SPECS: Record<BrowserToolName | FlowToolName, ToolSpec> = { ...BROWSER_TOOL_SPECS, ...FLOW_TOOL_SPECS };
 
+/** Tools that act on the one page: run one at a time, in arrival order. */
+const PAGE_TOOLS: ReadonlySet<string> = new Set([...Object.keys(BROWSER_TOOL_SPECS), "record_playwright_flow", "run_playwright_flow_source"]);
+
 export const BROWSER_TOOL_NAMES: readonly string[] = Object.keys(SPECS);
 
 export const BROWSER_TOOLS: ToolDefinition[] = Object.entries(SPECS).map(([name, spec]) => ({
@@ -88,7 +91,11 @@ export function checkArgs(name: string, args: Record<string, unknown>): string |
 	return null;
 }
 
-/** Resolve a call, or an abort: a cancelled call returns at once and its operation is left to the browser's close. */
+/**
+ * Resolve a call, or an abort: a cancelled call answers at once. Its
+ * operation still runs to its end (or to the browser's close at shutdown);
+ * page tools are serialized, so the next call starts only after it.
+ */
 function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T | "aborted"> {
 	if (signal.aborted) {
 		work.catch(() => {});
@@ -126,6 +133,9 @@ export class BrowserTools {
 	private readonly log: (line: string) => void;
 	private sessionId: string | null = null;
 	private lastBindingError = "";
+	private pageQueue: Promise<void> = Promise.resolve();
+	private ticking = false;
+	private stopping = false;
 
 	constructor(env: AdapterEnv, log: (line: string) => void, processEnv: NodeJS.ProcessEnv = process.env) {
 		this.env = env;
@@ -181,6 +191,16 @@ export class BrowserTools {
 		}
 	}
 
+	/** Run `work` after every page operation already queued, cancelled ones included. */
+	private onPage<T>(work: () => Promise<T>): Promise<T> {
+		const result = this.pageQueue.then(work);
+		this.pageQueue = result.then(
+			() => {},
+			() => {},
+		);
+		return result;
+	}
+
 	private startSurfacePublishing(): void {
 		if (this.surfaceTimer) return;
 		this.surfaceTimer = setInterval(() => void this.tickSurface(), SURFACE_TICK_MS);
@@ -188,14 +208,23 @@ export class BrowserTools {
 	}
 
 	private async tickSurface(): Promise<void> {
-		const binding = await this.binding();
-		await this.publisher.tick(binding?.auth ?? null, binding?.sessionID ?? null);
+		// One tick at a time (a slow Hive must not stack them), and none once
+		// shutdown has begun: a late `ready` would overwrite the `ended` row.
+		if (this.ticking || this.stopping) return;
+		this.ticking = true;
+		try {
+			const binding = await this.binding();
+			if (!this.stopping) await this.publisher.tick(binding?.auth ?? null, binding?.sessionID ?? null);
+		} finally {
+			this.ticking = false;
+		}
 	}
 
 	async call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolResult> {
 		const invalid = checkArgs(name, args);
 		if (invalid) return { text: invalid, isError: true };
-		const result = await untilAborted(this.dispatch(name as BrowserToolName | FlowToolName, args), signal);
+		const run = () => this.dispatch(name as BrowserToolName | FlowToolName, args);
+		const result = await untilAborted(PAGE_TOOLS.has(name) ? this.onPage(run) : run(), signal);
 		if (result === "aborted") return { text: `${name} was cancelled.`, isError: true };
 		return { text: result.text, ...(result.image ? { images: [result.image] } : {}) };
 	}
@@ -245,8 +274,13 @@ export class BrowserTools {
 	 * surface row is ended.
 	 */
 	async stop(): Promise<void> {
-		await this.flows.stop();
-		await this.browser.dispose();
+		this.stopping = true;
+		// The browser's close never waits on Hive: both run at once, and a
+		// failing dev-server report does not stop the rest.
+		const [flows, browser] = await Promise.allSettled([this.flows.stop(), this.browser.dispose()]);
+		for (const outcome of [flows, browser]) {
+			if (outcome.status === "rejected") this.log(`hive-pi mcp: browser shutdown: ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`);
+		}
 		if (this.surfaceTimer) {
 			clearInterval(this.surfaceTimer);
 			this.surfaceTimer = null;
