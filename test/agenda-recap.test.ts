@@ -9,6 +9,8 @@
 import { describe, expect, it } from "vitest";
 import agenda from "../extensions/agenda/index.ts";
 import { contextTreeEnvelope, recapTranscript } from "../extensions/agenda/index.ts";
+import { buildJudgePrompt } from "../extensions/agenda/goal.ts";
+import { TOOL_CALL_ARGS_CHARS } from "../extensions/agenda/recap.ts";
 import {
 	buildRecapPrompt,
 	latestAgentStatus,
@@ -49,6 +51,39 @@ describe("pure builders", () => {
 	it("recapTranscript caps from the end", () => {
 		const branch = [{ message: { role: "assistant", content: "z".repeat(20_000) } }];
 		expect(recapTranscript(branch).length).toBe(12_000);
+	});
+
+	it("shows each tool call, then its result labelled with the tool — the evidence a judge grades", () => {
+		const branch = [
+			{ message: { role: "user", content: "make answer.txt contain 42" } },
+			{ message: { role: "assistant", content: [{ type: "text", text: "Checking." }, { type: "toolCall", id: "c1", name: "bash", arguments: { command: "cat answer.txt" } }] } },
+			{ message: { role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "42" }] } },
+		];
+		const text = recapTranscript(branch);
+		expect(text).toBe('[user] make answer.txt contain 42\n\n[assistant] Checking.\n\n[toolCall bash] {"command":"cat answer.txt"}\n\n[toolResult bash] 42');
+		expect(text.indexOf("[toolCall bash]")).toBeLessThan(text.indexOf("[toolResult bash] 42"));
+	});
+
+	it("bounds a tool call's arguments and labels a result whose tool is unknown plainly", () => {
+		const branch = [
+			{ message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "write", arguments: { content: "x".repeat(5_000) } }] } },
+			{ message: { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "ok" }] } },
+		];
+		const [call, result] = recapTranscript(branch).split("\n\n");
+		expect(call.startsWith("[toolCall write] ")).toBe(true);
+		expect(call.length).toBeLessThanOrEqual("[toolCall write] ".length + TOOL_CALL_ARGS_CHARS);
+		expect(call.endsWith("…")).toBe(true);
+		expect(result).toBe("[toolResult] ok");
+	});
+
+	it("puts the call that produced a result into the goal judge's excerpt", () => {
+		const branch = [
+			{ message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "cat answer.txt" } }] } },
+			{ message: { role: "toolResult", toolCallId: "c1", toolName: "bash", content: [{ type: "text", text: "42" }] } },
+		];
+		const prompt = buildJudgePrompt("`cat answer.txt` prints 42", recapTranscript(branch, 16_000));
+		expect(prompt).toContain('[toolCall bash] {"command":"cat answer.txt"}');
+		expect(prompt.indexOf("[toolCall bash]")).toBeLessThan(prompt.indexOf("[toolResult bash] 42"));
 	});
 });
 

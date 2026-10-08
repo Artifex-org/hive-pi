@@ -92,7 +92,9 @@ describe("Claude transcript → pi entries", () => {
 		expect(entries[2].message).toMatchObject({ role: "toolResult", toolCallId: "t1", toolName: "Bash", content: [{ type: "text", text: "a.ts" }] });
 		expect(entries[3].message).toMatchObject({ stopReason: "stop" });
 		// pi's own folds read it unchanged.
-		expect(recapTranscript(entries)).toBe("[user] fix the bug\n\n[toolResult] a.ts\n\n[assistant] Fixed in a.ts.");
+		expect(recapTranscript(entries)).toBe(
+			'[user] fix the bug\n\n[toolCall Bash] {"command":"ls"}\n\n[toolResult Bash] a.ts\n\n[assistant] Fixed in a.ts.',
+		);
 		expect(classifyHandback(entries).kind).toBe("none");
 	});
 
