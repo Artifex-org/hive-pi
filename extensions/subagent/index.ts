@@ -56,6 +56,7 @@ import {
 	BACKGROUND_JOB_CHANNEL,
 	type BackgroundJobEvent,
 } from "../background/channel.ts";
+import * as structuredSupport from "../harness/structured.ts";
 import { rejectUnsupportedSchema } from "../harness/structured.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
@@ -75,6 +76,8 @@ import {
 	subagentUsageByModel,
 	type DelegationHost,
 	type DelegationOutcome,
+	type DelegationTask,
+	type StructuredRequest,
 	type ModelAuthResolver,
 	type OnUpdateCallback,
 	type SingleResult,
@@ -422,6 +425,11 @@ const SubagentParams = Type.Object({
 		}),
 	),
 });
+
+/** A caller's schema, paired with pi's validator for delegate.ts; none when the caller passed none. */
+function structuredRequest(schema: unknown): StructuredRequest | undefined {
+	return schema === undefined ? undefined : { schema, support: structuredSupport };
+}
 
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_end", (event) => {
@@ -806,7 +814,7 @@ export default function (pi: ExtensionAPI) {
 					// the user has moved on from.
 					undefined,
 					makeDetails("single"),
-					params.schema,
+					structuredRequest(params.schema),
 					params.model,
 					modelEnv,
 				)
@@ -868,12 +876,15 @@ export default function (pi: ExtensionAPI) {
 				...(outcome.isError ? { isError: true } : {}),
 			});
 
-			if (params.chain && params.chain.length > 0) return toToolResult(await runChainDelegation(params.chain, host));
-			if (params.tasks && params.tasks.length > 0) return toToolResult(await runParallelDelegation(params.tasks, params.verify, host));
+			// Each step's schema travels with its validator (delegate.ts's StructuredRequest).
+			const steps = (items: readonly { agent: string; task: string; cwd?: string; model?: string; schema?: unknown }[]): DelegationTask[] =>
+				items.map((item) => ({ agent: item.agent, task: item.task, cwd: item.cwd, model: item.model, schema: structuredRequest(item.schema) }));
+			if (params.chain && params.chain.length > 0) return toToolResult(await runChainDelegation(steps(params.chain), host));
+			if (params.tasks && params.tasks.length > 0) return toToolResult(await runParallelDelegation(steps(params.tasks), params.verify, host));
 			if (params.agent && params.task) {
 				return toToolResult(
 					await runSingleDelegation(
-						{ agent: params.agent, task: params.task, cwd: params.cwd, model: params.model, schema: params.schema },
+						{ agent: params.agent, task: params.task, cwd: params.cwd, model: params.model, schema: structuredRequest(params.schema) },
 						params.verify,
 						host,
 					),

@@ -112,6 +112,16 @@ describe("hook stop", () => {
 		expect(launch.calls()).toHaveLength(2); // a capped goal is not judged again
 	});
 
+	it("reads the mode catalog once per TTL across settles (it is cached in the state dir, not per process)", async () => {
+		setGoal();
+		launch.setReplies([{ match: JUDGE, text: '{"ok": false, "reason": "still red"}' }]);
+		await stop();
+		await stop();
+		await stop();
+		expect(hive.requests.filter((r) => r.path === "/api/v1/agent-modes")).toHaveLength(1);
+		expect(launch.calls()).toHaveLength(3);
+	});
+
 	it("fails closed on judge errors and pauses the goal after three", async () => {
 		setGoal();
 		launch.setReplies([{ match: JUDGE, text: "", exit: 1 }]);
@@ -195,6 +205,29 @@ describe("hook stop", () => {
 });
 
 describe("stopDecision's wall clock", () => {
+	it("does not start the repo gate without time to run it — no block, no charge", async () => {
+		const { execFileSync } = await import("node:child_process");
+		const { mkdirSync } = await import("node:fs");
+		const repo = join(launch.root, "gated");
+		mkdirSync(join(repo, ".pi"), { recursive: true });
+		execFileSync("git", ["init", "-q", repo]);
+		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: "exit 1" }));
+		const out = await stopDecision(
+			{ transcript_path: transcript, cwd: repo },
+			{
+				stateDir: launch.stateDir,
+				spool: createSpool(launch.spool, () => {}),
+				modelUnavailable: null,
+				resolveEvaluator: async () => ({ ok: false, reason: "unused" }),
+				stderr: () => {},
+				budgetMs: 1_000,
+			},
+		);
+		expect(out).toBeNull();
+		const agenda = JSON.parse(readFileSync(join(launch.stateDir, "agenda.json"), "utf8"));
+		expect(agenda.ledger.iterations).toEqual({});
+	});
+
 	it("clamps a slow judge to what is left of the budget — a timeout is a judge error, never a verdict", async () => {
 		setGoal();
 		let seenTimeout = 0;

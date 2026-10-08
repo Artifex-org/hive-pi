@@ -13,10 +13,12 @@
  */
 
 import { join } from "node:path";
-import { fetchAgentModeOutcome, type AgentMode, type CatalogOutcome } from "../extensions/advisor/modes.ts";
+import { CATALOG_TTL_MS, fetchAgentModeOutcome, type AgentMode, type CatalogOutcome } from "../extensions/advisor/modes.ts";
 import { cheapLaneMode, providerOf } from "../extensions/subagent/model.ts";
-import { type AdapterEnv, hiveAuth } from "./env.ts";
-import { readJson } from "./state.ts";
+import { type AdapterEnv, hiveAuth, stateDir } from "./env.ts";
+import { readJson, writeJsonAtomic } from "./state.ts";
+
+const CATALOG_FILE = "catalog.json";
 
 /** Providers the leased store holds a credential for. A missing auth.json is an empty store. */
 export function leasedProviders(piAgentDir: string): Set<string> {
@@ -40,11 +42,41 @@ export interface ModelPick {
 
 export type ModelResolution = { ok: true; pick: ModelPick } | { ok: false; reason: string };
 
-/** The catalog, or why there is none (unreachable vs empty vs no auth are different fixes). */
-export async function readCatalog(env: AdapterEnv): Promise<CatalogOutcome | { kind: "no-auth" }> {
+/**
+ * The catalog, or why there is none (unreachable vs empty vs no auth are
+ * different fixes).
+ *
+ * Cached ON DISK in the state dir for the catalog's own TTL: every hook is a
+ * fresh process, so modes.ts's in-memory cache never survives a settle — and
+ * a cold `/agent-modes` has been measured at 90 s, which a Stop hook with a
+ * 110 s budget cannot afford on every settle. A cache from another Hive URL
+ * is ignored; a failed read is never cached.
+ */
+export async function readCatalog(env: AdapterEnv, now: number = Date.now()): Promise<CatalogOutcome | { kind: "no-auth" }> {
 	const auth = hiveAuth(env);
 	if (!auth) return { kind: "no-auth" };
-	return fetchAgentModeOutcome(auth);
+	const dir = stateDir(env);
+	const path = dir ? join(dir, CATALOG_FILE) : null;
+	if (path) {
+		const cached = readJson(path) as { at?: unknown; url?: unknown; modes?: unknown; subagentKey?: unknown } | undefined;
+		if (
+			cached &&
+			cached.url === auth.url &&
+			typeof cached.at === "number" &&
+			now - cached.at >= 0 &&
+			now - cached.at < CATALOG_TTL_MS &&
+			Array.isArray(cached.modes) &&
+			cached.modes.length > 0 &&
+			cached.modes.every((m) => m && typeof (m as AgentMode).key === "string" && typeof (m as AgentMode).model === "string")
+		) {
+			return { kind: "ok", catalog: { modes: cached.modes as AgentMode[], subagentKey: typeof cached.subagentKey === "string" ? cached.subagentKey : undefined } };
+		}
+	}
+	const outcome = await fetchAgentModeOutcome(auth, now);
+	if (outcome.kind === "ok" && path) {
+		writeJsonAtomic(path, { at: now, url: auth.url, modes: outcome.catalog.modes, subagentKey: outcome.catalog.subagentKey ?? null });
+	}
+	return outcome;
 }
 
 function catalogFailure(outcome: CatalogOutcome | { kind: "no-auth" }): string {

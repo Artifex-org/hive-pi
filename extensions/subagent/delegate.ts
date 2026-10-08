@@ -29,6 +29,7 @@ import { distillFailure } from "../harness/distill.ts";
 import { frame } from "../harness/framing.ts";
 import { emptyJsonRunState, foldJsonLine, type WorkerRetries } from "../harness/json-protocol.ts";
 import { resolveAgent, type AgentConfig, type AgentScope } from "../harness/roles-core.ts";
+import type { SchemaValidation } from "../harness/structured.ts";
 import {
 	citationWarning,
 	diffStamp,
@@ -55,12 +56,22 @@ import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, 
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 
 /**
- * The schema half (`harness/structured.ts`) imports typebox, which does not
- * resolve where the adapter runs. Loaded on first use, which is only ever a
- * call that passed a schema.
+ * A schema the caller wants the final answer validated against, WITH the
+ * validator that does it. The validator (`harness/structured.ts`) needs
+ * typebox, so it arrives from the host rather than being imported here: the
+ * pi tool passes the real module, and a host without typebox (the Claude
+ * adapter) simply never builds a request.
  */
-function loadStructured(): Promise<typeof import("../harness/structured.ts")> {
-	return import("../harness/structured.ts");
+export interface StructuredRequest {
+	schema: unknown;
+	support: StructuredSupport;
+}
+
+export interface StructuredSupport {
+	MAX_SCHEMA_RETRIES: number;
+	structuredInstruction(schema: unknown): string;
+	parseStructuredResult(schema: unknown, output: string): SchemaValidation;
+	structuredRetryTask(originalTask: string, error: string): string;
 }
 
 export const MAX_PARALLEL_TASKS = 8;
@@ -459,7 +470,7 @@ export async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	schema?: unknown,
+	schema?: StructuredRequest,
 	requestedModel?: string,
 	env?: WorkerModelEnv,
 ): Promise<SingleResult> {
@@ -616,8 +627,7 @@ export async function runSingleAgent(
 		// tool to force inside the child — the appended prompt is the only channel.
 		// Last-wins ordering matters; a contract ahead of the role guide competes
 		// with it, which is how typed tools came to be called zero times (P3).
-		const structured = schema ? await loadStructured() : null;
-		const appended = [agent.systemPrompt.trim(), structured ? structured.structuredInstruction(schema) : ""]
+		const appended = [agent.systemPrompt.trim(), schema ? schema.support.structuredInstruction(schema.schema) : ""]
 			.filter(Boolean)
 			.join("\n\n");
 		if (appended) {
@@ -793,8 +803,8 @@ export async function runSingleAgent(
 		// Schema check runs only on a run that otherwise succeeded: a crashed
 		// worker's missing JSON block is not a schema problem, and reporting it as
 		// one would bury the real failure under a formatting complaint.
-		if (structured && !isFailedResult(currentResult)) {
-			const parsed = structured.parseStructuredResult(schema, getFinalOutput(currentResult.messages));
+		if (schema && !isFailedResult(currentResult)) {
+			const parsed = schema.support.parseStructuredResult(schema.schema, getFinalOutput(currentResult.messages));
 			if (parsed.ok) currentResult.structured = parsed.value;
 			else currentResult.structuredError = parsed.error;
 		}
@@ -848,7 +858,7 @@ export async function runAgentWithSchema(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	schema: unknown,
+	schema: StructuredRequest | undefined,
 	requestedModel?: string,
 	env?: WorkerModelEnv,
 ): Promise<SingleResult> {
@@ -943,11 +953,10 @@ export async function runAgentWithSchema(
 
 	if (!schema) return result;
 
-	const structured = await loadStructured();
-	for (let retry = 0; retry < structured.MAX_SCHEMA_RETRIES; retry++) {
+	for (let retry = 0; retry < schema.support.MAX_SCHEMA_RETRIES; retry++) {
 		if (!result.structuredError || isFailedResult(result)) break;
 		if (!readOnly) break;
-		attemptTask = structured.structuredRetryTask(task, result.structuredError);
+		attemptTask = schema.support.structuredRetryTask(task, result.structuredError);
 		const retried = await runSingleAgent(
 			defaultCwd,
 			agents,
@@ -1091,7 +1100,7 @@ export interface DelegationTask {
 	task: string;
 	cwd?: string;
 	model?: string;
-	schema?: unknown;
+	schema?: StructuredRequest;
 }
 
 /** What a mode needs from the harness running it. */

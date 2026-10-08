@@ -40,7 +40,9 @@ op mode is never read as `build`).
 ## Models
 
 Chosen only by catalog key. "Configured" = the provider has an entry in the
-leased `auth.json`. Judges, drift, recap and YSK take the catalog's `low` mode
+leased `auth.json`. The catalog is cached in the state dir for its 5-minute
+TTL (`catalog.json`): hooks are fresh processes, and a cold `/agent-modes`
+has been measured at 90 s. Judges, drift, recap and YSK take the catalog's `low` mode
 if leased, else the cheapest leased mode (`PI_AGENDA_EVALUATOR_MODEL` /
 `PI_YOU_SHOULD_KNOW_MODEL` override). No resolvable model is reported — for
 the goal it is a judge error on the goal (three pause it). Advisor:
@@ -68,8 +70,10 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   turn-failure and hand-back guards first. At most one continuation:
   `{"decision":"block","reason":…}`. Budget 110 s: every model call's timeout
   is clamped to what is left (a clamped timeout is a judge error,
-  fail-closed), the gate's timeout is capped, and drift is skipped below 100 s
-  left. `stop_hook_active` is **not** a reason to stand down — a goal loop is
+  fail-closed), the gate's timeout is capped and it is not started below 15 s
+  left (never "timed out" for a gate that could not run), and drift is skipped
+  below 100 s left. The repo gate is not model-backed, so it runs even without
+  `HIVE_PI_AGENT_DIR`. `stop_hook_active` is **not** a reason to stand down — a goal loop is
   a chain of such continuations; the persisted caps (goal iterations,
   no-progress/pending streaks, budget, three judge errors, gate
   `maxInjections`, drift realignments) bound it, and every charge is written
@@ -118,6 +122,12 @@ cancel (`hive-common/child-tree.ts`). `PI_CODING_AGENT_DIR` is only ever
 
 ## Open gaps
 
+- **MCP servers in pi children.** pi's built-in MCP connects every enabled
+  server in `<agent dir>/mcp.json` when a child starts. Inside pi, one-shots
+  and workers read a tmp mirror with no (or HTTP-only) servers; here the only
+  agent dir Hive's node accepts is the lease itself, so children read its
+  `mcp.json` as-is. The lease's `mcp.json` must be empty or HTTP-only, or every
+  judge, scan and worker spawns the stdio servers it names.
 - **Bugfix tool gating.** pi unlocks edits through its evidence protocol
   (`bugfix_evidence` → `bugfix_root_cause`), which a Claude session lacks, so
   pre-tool does not deny edits in bugfix mode and the injected bugfix prompt

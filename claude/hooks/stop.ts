@@ -43,6 +43,8 @@ import { blockStop, type HookInput, type HookOutput } from "./io.ts";
 
 /** The hook's own wall clock. The plugin's timeout is 180 s; this ends well inside 120 s. */
 export const STOP_BUDGET_MS = 110_000;
+/** Below this much time left the repo gate is not started at all. */
+export const GATE_MIN_REMAINING_MS = 15_000;
 /** Below this much time left a drift probe is skipped, so the goal judge (the one that can continue) keeps its time. */
 export const DRIFT_MIN_REMAINING_MS = 100_000;
 /** The driver's transcript excerpt for policies (driver.ts uses the same 16k). */
@@ -99,8 +101,7 @@ export async function stopDecision(input: HookInput, deps: StopDeps): Promise<Ho
 		writeGoal(deps.stateDir, next);
 	};
 
-	const policies: Policy[] = [
-		createGatePolicy(
+	const gate = createGatePolicy(
 			{
 				get: (id) => agenda.gateStamps[id],
 				set: (id, stamp) => {
@@ -109,7 +110,16 @@ export async function stopDecision(input: HookInput, deps: StopDeps): Promise<Ho
 				},
 			},
 			{ timeoutCapMs: left },
-		),
+	);
+	const policies: Policy[] = [
+		{
+			...gate,
+			// A check started with no time left would be SIGKILLed at once and
+			// reported as "the project gate TIMED OUT" — a tool that could not run
+			// read as one that failed, charged an injection. Below the floor it
+			// does not start; the next settle runs it.
+			decide: (context) => (left() < GATE_MIN_REMAINING_MS ? null : gate.decide(context)),
+		},
 	];
 
 	if (goal?.state === "active") {
