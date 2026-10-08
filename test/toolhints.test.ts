@@ -108,6 +108,17 @@ describe("matchHint", () => {
 		expect(hint?.hint).toMatch(/flat name|tes-NNNN/);
 	});
 
+	it("corrects only the model-only discovery error, with async discovery and side-effect caution", () => {
+		const error = "Script failed\nScript error:\nTypeError: tools.tool_search does not exist. Did you mean tools.ls?";
+		const hint = matchHint("codemode", error);
+		expect(hint?.id).toBe("codemode-model-only-search");
+		expect(hint?.hint).toContain('await searchTools("<words>")');
+		expect(hint?.hint).toContain("await describeTool");
+		expect(hint?.hint).toContain("inspect their effects");
+		expect(matchHint("bash", error)).toBeNull();
+		expect(matchHint("codemode", "TypeError: tools.some_other_tool does not exist.")).toBeNull();
+	});
+
 	it("names a schema rejection as a schema rejection, from codemode or a direct MCP tool", () => {
 		expect(matchHint("codemode", REAL_ERRORS.mcpSchema)?.id).toBe("mcp-schema-rejection");
 		expect(matchHint("mcp__hive__wait_for_run", REAL_ERRORS.mcpSchema)?.id).toBe("mcp-schema-rejection");
@@ -220,6 +231,17 @@ describe("the extension", () => {
 			content: [{ type: "text", text: REAL_ERRORS.ghLogin }],
 		})) as ({ content?: { text: string }[] } | undefined)[];
 		expect(patch?.content?.[0].text).toContain("[harness hint · gh-unauthenticated]");
+	});
+
+	it("appends discovery recovery without replacing the script error or changing its verdict", async () => {
+		const pi = load();
+		const original = "Script failed\nScript error:\nTypeError: tools.tool_search does not exist.";
+		const [patch] = (await pi.emit({
+			type: "tool_result", toolName: "codemode", isError: true,
+			content: [{ type: "text", text: original }], details: { calls: [] },
+		})) as (Record<string, unknown> | undefined)[];
+		expect(Object.keys(patch ?? {})).toEqual(["content"]);
+		expect(resultText(patch?.content)).toBe(original + renderHint(HINTS.find((h) => h.id === "codemode-model-only-search")!));
 	});
 
 	it("leaves a SUCCESSFUL call untouched — a hint there is pure context tax", async () => {

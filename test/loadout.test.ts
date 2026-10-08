@@ -72,6 +72,14 @@ describe("the on-demand index", () => {
 		expect(await prompt()).toBe(first);
 	});
 
+	it("distinguishes native discovery from codemode's async globals", () => {
+		const prompt = loadoutPrompt(["session_grep"]);
+		expect(prompt).toContain('await searchTools("<words>")');
+		expect(prompt).toContain('await describeTool("<exact name>")');
+		expect(prompt).toContain("never `tools.tool_search` (it is model-only)");
+		expect(prompt).toContain("they do not need `load_tools` first");
+	});
+
 	it("says nothing when nothing is deferred", () => {
 		expect(loadoutPrompt([])).toBe("");
 	});
@@ -128,7 +136,8 @@ describe("load_tools", () => {
 	it("points at tool_search only when the session has it", () => {
 		const withSearch = { getAllTools: () => [{ name: "tool_search" }] } as never;
 		const without = { getAllTools: () => [{ name: "read" }] } as never;
-		expect(mcpHint(withSearch)).toBe("MCP tools load with tool_search.");
+		expect(mcpHint(withSearch)).toContain("tool_search outside codemode");
+		expect(mcpHint(withSearch)).toContain("await searchTools(query)");
 		expect(mcpHint(without)).toContain("no MCP servers configured");
 	});
 });
