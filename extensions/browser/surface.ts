@@ -28,6 +28,7 @@ const NAVIGATION_TIMEOUT_MS = 20_000;
 const HISTORY_TIMEOUT_MS = 10_000;
 const PASSWORD_CHECK_TIMEOUT_MS = 1_000;
 const SCREENCAST_SWITCH_TIMEOUT_MS = 2_000;
+const SCREENCAST_RETRY_MS = 1_000;
 /** Frames inspected for a focused password field (the main frame first). */
 const MAX_FRAMES_CHECKED = 32;
 const MAX_KEY_TEXT = 2_000;
@@ -471,7 +472,7 @@ export class BrowserSurfaceBridge {
   private readonly agent: SurfaceTarget;
   private readonly log: (line: string) => void;
   private readonly sinks: FrameSink[];
-  private lastFrameFailure = "";
+  private lastFailure = "";
   private operator: SurfaceTarget | null = null;
   /** The page frames show and input reaches. */
   private view: SurfaceView = "agent";
@@ -480,6 +481,7 @@ export class BrowserSurfaceBridge {
   /** The target whose screencast is running; a frame from any other is dropped. */
   private casting: SurfaceTarget | null = null;
   private viewChain: Promise<void> = Promise.resolve();
+  private castRetryAt = 0;
   private commandChain: Promise<void> = Promise.resolve();
   private queuedCommands = 0;
   /** lease.json as of the last control tick (frame status only; commands re-read it). */
@@ -545,6 +547,13 @@ export class BrowserSurfaceBridge {
     }));
   }
 
+  /** Say what the live view had to give up — once per distinct cause, not per frame or tick. */
+  private report(what: string, error: unknown): void {
+    const reason = `${what} — ${error instanceof Error ? error.message : String(error)}`;
+    if (reason !== this.lastFailure) this.log(`browser live view: ${reason}`);
+    this.lastFailure = reason;
+  }
+
   private listen(target: SurfaceTarget): void {
     target.cdp.on("Page.screencastFrame", (frame: ScreencastFrame) => void this.onFrame(target, frame));
   }
@@ -589,9 +598,7 @@ export class BrowserSurfaceBridge {
     try {
       await this.publishFrame(target, frame);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (reason !== this.lastFrameFailure) this.log(`browser live view: dropped a frame — ${reason}`);
-      this.lastFrameFailure = reason;
+      this.report("dropped a frame", error);
     }
   }
 
@@ -636,11 +643,7 @@ export class BrowserSurfaceBridge {
     const wait = Math.max(0, FRAME_INTERVAL_MS - (Date.now() - this.lastFrameAt));
     this.emitTimer = setTimeout(() => {
       this.emitTimer = null;
-      void this.emitPending().catch((error: unknown) => {
-        const reason = error instanceof Error ? error.message : String(error);
-        if (reason !== this.lastFrameFailure) this.log(`browser live view: dropped a frame — ${reason}`);
-        this.lastFrameFailure = reason;
-      });
+      void this.emitPending().catch((error: unknown) => this.report("dropped a frame", error));
     }, wait);
     this.emitTimer.unref();
   }
@@ -705,16 +708,16 @@ export class BrowserSurfaceBridge {
     if (this.stopped) return;
     try {
       this.lease = readLease(this.config);
-      if (!leaseActive(this.lease, Date.now())) void this.switchView("agent");
+      const now = Date.now();
+      if (!leaseActive(this.lease, now)) void this.switchView("agent");
+      this.retryScreencast(now);
       this.republishOnStatusChange();
       this.pollControls();
       this.flushSinks();
       this.scheduleFlush();
     } catch (error) {
       // A timer callback: a throw would take the host down.
-      const reason = error instanceof Error ? error.message : String(error);
-      if (reason !== this.lastFrameFailure) this.log(`browser live view: control tick failed — ${reason}`);
-      this.lastFrameFailure = reason;
+      this.report("control tick failed", error);
     }
   }
 
@@ -933,9 +936,7 @@ export class BrowserSurfaceBridge {
   private switchView(view: SurfaceView): Promise<void> {
     if (this.wantedView === view) return this.viewChain;
     this.wantedView = view;
-    this.viewChain = this.viewChain.then(() => this.applyView()).catch((error: unknown) => {
-      this.log(`browser live view: switching the view failed — ${error instanceof Error ? error.message : String(error)}`);
-    });
+    this.viewChain = this.viewChain.then(() => this.applyView()).catch((error: unknown) => this.report("switching the view failed", error));
     return this.viewChain;
   }
 
@@ -955,13 +956,30 @@ export class BrowserSurfaceBridge {
     if (old) await withTimeout(old.cdp.send("Page.stopScreencast"), SCREENCAST_SWITCH_TIMEOUT_MS, "stopping the screencast").catch(() => {});
     try {
       await withTimeout(want.cdp.send("Page.startScreencast", SCREENCAST_OPTIONS), SCREENCAST_SWITCH_TIMEOUT_MS, "starting the screencast");
+      return;
     } catch (error) {
-      if (want === this.agent) throw error;
-      this.wantedView = "agent";
-      this.view = "agent";
-      this.casting = this.agent;
-      await withTimeout(this.agent.cdp.send("Page.startScreencast", SCREENCAST_OPTIONS), SCREENCAST_SWITCH_TIMEOUT_MS, "starting the screencast");
+      if (want === this.agent) {
+        // Nothing is casting: the control tick retries (`retryScreencast`).
+        this.casting = null;
+        throw error;
+      }
     }
+    this.wantedView = "agent";
+    this.view = "agent";
+    this.casting = this.agent;
+    try {
+      await withTimeout(this.agent.cdp.send("Page.startScreencast", SCREENCAST_OPTIONS), SCREENCAST_SWITCH_TIMEOUT_MS, "starting the screencast");
+    } catch (error) {
+      this.casting = null;
+      throw error;
+    }
+  }
+
+  /** A screencast that failed to start is tried again, at most once a second. */
+  private retryScreencast(now: number): void {
+    if (this.casting || now < this.castRetryAt) return;
+    this.castRetryAt = now + SCREENCAST_RETRY_MS;
+    this.viewChain = this.viewChain.then(() => this.applyView()).catch((error: unknown) => this.report("switching the view failed", error));
   }
 
   async stop(): Promise<void> {
