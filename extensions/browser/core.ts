@@ -23,7 +23,7 @@ import type { Browser, BrowserContext, BrowserType, ConsoleMessage, Page } from 
 import type { RecordedAction } from "../flows/core.ts";
 import type { ScreenshotLedger } from "../pr-attachments/manifest.ts";
 import { buildLaunchPlan } from "./launch.ts";
-import { BrowserSurfaceBridge } from "./surface.ts";
+import { AGENT_PAUSED_MESSAGE, BrowserSurfaceBridge } from "./surface.ts";
 
 export const NAV_TIMEOUT_MS = 20_000;
 export const ACTION_TIMEOUT_MS = 10_000;
@@ -396,6 +396,17 @@ export class SessionBrowser {
 		return { browser, context, page, console: ring, surface, pid };
 	}
 
+	/**
+	 * The browser, for an agent page tool: refused while an operator has taken
+	 * over this page from Hive's live view (an exclusive lease, see surface.ts).
+	 * Reading the console stays allowed; it does not touch the page.
+	 */
+	private async control(): Promise<BrowserState> {
+		const s = await this.ensure();
+		if (s.surface?.agentPaused()) throw new Error(AGENT_PAUSED_MESSAGE);
+		return s;
+	}
+
 	private async describePage(page: Page): Promise<{ body: string; truncated: boolean }> {
 		const outline = await page.locator("body").ariaSnapshot();
 		const capped = truncate(outline, SNAPSHOT_MAX_CHARS);
@@ -404,7 +415,7 @@ export class SessionBrowser {
 	}
 
 	async navigate(params: { url: string }): Promise<BrowserOutput> {
-		const { page } = await this.ensure();
+		const { page } = await this.control();
 		const response = await page.goto(params.url);
 		this.options.onAction?.({ kind: "navigate", url: params.url });
 		const status = response?.status();
@@ -413,13 +424,13 @@ export class SessionBrowser {
 	}
 
 	async snapshot(): Promise<BrowserOutput> {
-		const { page } = await this.ensure();
+		const { page } = await this.control();
 		const described = await this.describePage(page);
 		return { text: described.body, details: { url: page.url(), truncated: described.truncated } };
 	}
 
 	async click(params: { selector: string }): Promise<BrowserOutput> {
-		const { page } = await this.ensure();
+		const { page } = await this.control();
 		await page.click(params.selector);
 		this.options.onAction?.({ kind: "click", selector: params.selector });
 		const described = await this.describePage(page);
@@ -427,7 +438,7 @@ export class SessionBrowser {
 	}
 
 	async type(params: { selector: string; value: string; submit?: boolean }): Promise<BrowserOutput> {
-		const { page } = await this.ensure();
+		const { page } = await this.control();
 		await page.fill(params.selector, params.value);
 		if (params.submit) await page.press(params.selector, "Enter");
 		this.options.onAction?.({ kind: "fill", selector: params.selector, value: params.value, submit: Boolean(params.submit) });
@@ -441,7 +452,7 @@ export class SessionBrowser {
 	 * builds the ledger, keyed by its session.
 	 */
 	async screenshot(params: { full_page?: boolean; label?: string }, ledger: ScreenshotLedger): Promise<BrowserOutput> {
-		const { page } = await this.ensure();
+		const { page } = await this.control();
 		const dir = ledger.shotDir;
 		fs.mkdirSync(dir, { recursive: true });
 		const file = path.join(dir, `shot-${Date.now()}.png`);
@@ -478,7 +489,7 @@ export class SessionBrowser {
 	}
 
 	async evaluate(params: { expression: string }): Promise<BrowserOutput> {
-		const { page } = await this.ensure();
+		const { page } = await this.control();
 		const result: unknown = await page.evaluate(params.expression);
 		let rendered: string;
 		try {
@@ -491,7 +502,7 @@ export class SessionBrowser {
 	}
 
 	async waitFor(params: { selector: string; state?: "visible" | "hidden"; timeout_ms?: number }): Promise<BrowserOutput> {
-		const { page } = await this.ensure();
+		const { page } = await this.control();
 		const state = params.state ?? "visible";
 		const timeout = params.timeout_ms ?? ACTION_TIMEOUT_MS;
 		await page.waitForSelector(params.selector, { state, timeout });
