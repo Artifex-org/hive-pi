@@ -99,7 +99,7 @@ import {
 	type ActivityState,
 } from "./activity.ts";
 import { saveAttachment, textLikeAttachment } from "./attachments.ts";
-import { registerSendAttachmentTool } from "./sendAttachment.ts";
+import { publishLabelledScreenshot, registerSendAttachmentTool, type SendAttachmentDeps } from "./sendAttachment.ts";
 import { registerSessionTitleTool } from "./sessionTitle.ts";
 import registerSessionIdentity from "./sessionIdentity.ts";
 import { IdentitySync, IDENTITY_SYNC_ENTRY } from "./identitySync.ts";
@@ -2299,6 +2299,21 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 	// ----------------------------------------------------------------- handlers
 
+	// send_attachment and the labelled-screenshot auto-post publish through one
+	// path: an assistant event on the client-sequenced transcript queue.
+	const attachmentDeps: SendAttachmentDeps = {
+		getAuth: () => auth,
+		getSessionID: () => sessionID,
+		getGeneration: () => lifecycle.generation,
+		isUploadTargetCurrent: (targetSession, generation) =>
+			cfg.enabled && sessionID === targetSession && lifecycle.generation === generation,
+		onUploaded: (targetSession, caption, ids) => {
+			if (!cfg.enabled || sessionID !== targetSession) return;
+			foldAssistantText(transcript, caption, Date.now(), ids);
+			kick();
+		},
+	};
+
 	let handlersRegistered = false;
 	/**
 	 * The current turn, for the end-of-turn notice: when it began and how many
@@ -2548,6 +2563,13 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				? createdPullURL(toolName, args, event.result, Boolean(event.isError))
 				: null;
 			if (pullURL && auth && sessionID) void postPull(auth, sessionID, pullURL);
+			if (toolName === "browser_screenshot" && !event.isError && cfg.enabled && auth && sessionID) {
+				void publishLabelledScreenshot(attachmentDeps, ctx.sessionManager.getSessionId(), event.result).then((failure) => {
+					if (!failure || !cfg.enabled) return;
+					foldNotice(transcript, failure, Date.now(), "hive");
+					kick();
+				});
+			}
 			foldToolEnd(
 				transcript,
 				callID,
@@ -2725,18 +2747,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	// name, which this extension already reports on every conversation refresh.
 	registerSessionIdentity(pi);
 	registerSessionTitleTool(pi);
-	registerSendAttachmentTool(pi, {
-		getAuth: () => auth,
-		getSessionID: () => sessionID,
-		getGeneration: () => lifecycle.generation,
-		isUploadTargetCurrent: (targetSession, generation) =>
-			cfg.enabled && sessionID === targetSession && lifecycle.generation === generation,
-		onUploaded: (targetSession, caption, ids) => {
-			if (!cfg.enabled || sessionID !== targetSession) return;
-			foldAssistantText(transcript, caption, Date.now(), ids);
-			kick();
-		},
-	});
+	registerSendAttachmentTool(pi, attachmentDeps);
 	registerWorkspaceTools(pi, {
 		enabled: workspaceEnabled,
 		getAuth: () => auth,

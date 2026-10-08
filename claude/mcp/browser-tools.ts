@@ -41,6 +41,7 @@ import {
 } from "../../extensions/browser/core.ts";
 import { createFlowRuntime, FLOW_TOOL_SPECS, type FlowBinding, type FlowToolName } from "../../extensions/flows/core.ts";
 import { resolveSession } from "../../extensions/hive-remote/client.ts";
+import { screenshotCaption, uploadOutputAttachment } from "../../extensions/hive-common/output-attachment.ts";
 import { BrowserSurfacePublisher } from "../../extensions/hive-remote/surfaces.ts";
 import { ScreenshotLedger } from "../../extensions/pr-attachments/manifest.ts";
 import { hiveAuth, stateDir, type AdapterEnv } from "../env.ts";
@@ -322,6 +323,7 @@ export class BrowserTools {
 			else throw error;
 		}
 		if (result === "aborted") return { text: `${name} was cancelled.`, isError: true };
+		if (name === "browser_screenshot") result = await this.postLabelledShot(result);
 		return { text: result.text, ...(result.image ? { images: [result.image] } : {}) };
 	}
 
@@ -362,6 +364,26 @@ export class BrowserTools {
 			case "author_maestro_flow":
 				return this.flows.authorMaestro({ yaml: str("yaml") });
 		}
+	}
+
+	/**
+	 * pi's hive-remote posts a labelled shot to the Hive chat; no hive-remote
+	 * runs here, so this does — after the page operation, so a slow Hive never
+	 * counts against the page bound. The text ends "(attachment <id>)", the
+	 * marker Hive's Claude driver folds into the chat event, so keep it last.
+	 * An unlabelled shot, or a session with no Hive binding, stays local.
+	 */
+	private async postLabelledShot(output: BrowserOutput): Promise<BrowserOutput> {
+		const shot = output.details as { path?: unknown; label?: unknown; url?: unknown };
+		const label = typeof shot.label === "string" ? shot.label.trim() : "";
+		if (typeof shot.path !== "string" || !label) return output;
+		const binding = await this.binding();
+		if (!binding) return output;
+		const ledger = new ScreenshotLedger(this.processEnv, this.ledgerSession);
+		const uploaded = await uploadOutputAttachment(binding.auth, binding.sessionID, shot.path, [ledger.shotDir]);
+		if (!uploaded.ok) return { ...output, text: `${output.text}\nNot posted to the Hive chat: ${uploaded.message}` };
+		const caption = screenshotCaption(label, typeof shot.url === "string" ? shot.url : "");
+		return { ...output, text: `${output.text}\nPosted to the Hive chat: ${caption} (attachment ${uploaded.id})` };
 	}
 
 	/**

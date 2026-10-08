@@ -38,7 +38,9 @@ export const SELECTOR_HINT =
 
 export const SCREENSHOT_LABEL_HINT =
 	"Free-text label recorded with the shot. Convention: `before` for the state before a UI change " +
-	"and `after` for the state after it, so a PR can attach both. Recorded in pr-attachments.json.";
+	"and `after` for the state after it, so a PR can attach both. Recorded in pr-attachments.json, and a " +
+	"labelled shot is posted to the Hive chat (and its Media section) automatically. Omit the label for a " +
+	"shot that is only for you.";
 
 export interface ToolSpec {
 	label: string;
@@ -55,7 +57,8 @@ export const BROWSER_TOOL_SPECS = {
 		label: "Browser: navigate",
 		description:
 			"Open a URL in the session's own headless Chromium and return the page's aria outline. " +
-			"Loopback dev servers work directly; external hosts go through the sandbox's domain allowlist when sandboxed.",
+			"Loopback dev servers work directly; external hosts go through the sandbox's domain allowlist when sandboxed. " +
+			"Load the browser-use skill before a browser task.",
 		promptSnippet: "Open a URL in the session browser",
 		inputSchema: {
 			type: "object",

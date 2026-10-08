@@ -229,6 +229,14 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		expect(file).toContain("pi-browser-run-123");
 		const manifest = JSON.parse(readFileSync(join(launch.root, "attachments", "pr-attachments.json"), "utf8")) as { path: string; label: string; url: string }[];
 		expect(manifest).toEqual([expect.objectContaining({ path: file, label: "after", url: `${base}/` })]);
+		// A labelled shot is posted to the Hive chat; the driver folds the trailing id.
+		const uploads = () => hive.requests.filter((r) => r.method === "POST" && r.path === "/api/v1/agent-sessions/srv-uuid-1/output-attachments");
+		expect(uploads()).toHaveLength(1);
+		expect(shot.text.split("\n").at(-1)).toBe(`Posted to the Hive chat: Screenshot · after · ${base}/ (attachment 0f8fad5b-d9cb-469f-a165-70867728950e)`);
+		// An unlabelled shot is the agent's own and stays local.
+		const own = await c.call("browser_screenshot", {});
+		expect(own.text).not.toContain("Hive chat");
+		expect(uploads()).toHaveLength(1);
 
 		const consoleOut = await c.call("browser_console", { clear: true });
 		expect(consoleOut.text).toContain("[log] hello from the page");

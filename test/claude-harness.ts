@@ -176,6 +176,8 @@ async function bodyOf(req: IncomingMessage): Promise<unknown> {
 	// A surface snapshot is an image; it is recorded by type and size.
 	const type = req.headers["content-type"] ?? "";
 	if (bytes.length > 0 && type.startsWith("image/")) return { contentType: type, bytes: bytes.length };
+	// An output attachment is a multipart upload; likewise recorded by type and size.
+	if (bytes.length > 0 && type.startsWith("multipart/form-data")) return { contentType: "multipart/form-data", bytes: bytes.length };
 	const text = bytes.toString("utf8");
 	return text ? (JSON.parse(text) as unknown) : undefined;
 }
@@ -210,6 +212,7 @@ export async function startFakeHive(): Promise<FakeHive> {
 			if (path.endsWith("/activity")) return json(200, {});
 			if (path.includes("/surfaces/")) return json(200, {});
 			if (path.endsWith("/resources/dev-server")) return json(200, {});
+			if (path.endsWith("/output-attachments")) return json(201, { attachment: { id: "0f8fad5b-d9cb-469f-a165-70867728950e" } });
 			if (path.endsWith("/flow-runs/claim") && hive.flowClaims) return json(200, { items: hive.flowClaims.splice(0) });
 			if (/\/flow-runs\/[^/]+\/complete$/.test(path)) return json(200, {});
 			if (path.endsWith("/you-should-know/findings")) {

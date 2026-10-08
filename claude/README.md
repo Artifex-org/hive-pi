@@ -152,9 +152,14 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
     user:** `npx playwright-core@1.62.1 install chromium-headless-shell` (the
     version in package.json); without it every browser call is an `isError`
     naming that command. `browser_screenshot` returns the PNG as an MCP image
-    block plus `Saved to <path>` (hand the path to `send_attachment`), and
-    records it in the pr-attachments manifest keyed by `HIVE_SESSION_ID`
-    (unset, outside a launch: a per-server id). Page tools — and a claimed
+    block plus `Saved to <path>`, and records it in the pr-attachments
+    manifest keyed by `HIVE_SESSION_ID` (unset, outside a launch: a
+    per-server id). A shot with a `label` is also uploaded to the session's
+    Hive chat (`hive-common/output-attachment.ts`, after the page operation so
+    it never counts against the page bound); the result then ends
+    `Posted to the Hive chat: <caption> (attachment <uuid>)`, the marker Hive's
+    Claude driver folds into the chat event, as it does for the plugin's
+    `send_attachment`. Page tools — and a claimed
     saved-flow run — take turns on the one page (`browser_console` only reads
     its buffer and never waits). A call cancelled while queued never runs; a
     call cancelled while running, or holding the page past its bound (pi's
