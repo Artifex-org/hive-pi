@@ -758,6 +758,18 @@ export function classifyCommand(command: string, posture = "Plan"): PlanToolVerd
 	};
 }
 
+/**
+ * Plan mode's whole gate for one call: the tool, then a shell command's text.
+ * The plan extension's `tool_call` hook and the Claude adapter's PreToolUse
+ * hook both answer from this, so the composition exists once.
+ */
+export function planToolVerdict(name: string, input: unknown): PlanToolVerdict {
+	const verdict = classifyTool(name);
+	if (!verdict.allowed || name !== "bash") return verdict;
+	const command = (input as { command?: unknown } | undefined)?.command;
+	return classifyCommand(typeof command === "string" ? command : "");
+}
+
 // Orchestrate promises more than plan/discuss: the lead must NEVER implement.
 // Keep its shell subset intentionally small. In particular, sed/awk programs
 // can write from inside a quoted script (`sed 'w file'`, awk `> file`), which a

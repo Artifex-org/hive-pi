@@ -25,14 +25,14 @@
  *     discarded repo facts that had already been established.
  */
 
-import { discoverAgents, resolveAgent, type AgentConfig } from "../harness/roles.ts";
+import { discoverAgentsWith, resolveAgent, type AgentConfig, type RolesRuntime } from "../harness/roles-core.ts";
 import { runRoleAgent } from "../agenda/spawn.ts";
 import { WORKER_BUILTIN_MCP_EXTENSIONS, workerExtensionPaths, workerNeedsMcp } from "../subagent/worker.ts";
 import { addTotals, emptyUsage, type Usage } from "../harness/usage.ts";
 import { parseBriefDraft, draftIsEmpty, type BriefDraft } from "./compile.ts";
 import { laneInstruction, laneIsRunnable, laneTools, mergeDrafts, planLanes, type BriefLane, type LaneDraft } from "./lanes.ts";
 import { collectProvenance } from "./provenance.ts";
-import { resolveBriefModel } from "./model.ts";
+import { resolveBriefModel, type BriefModelHost } from "./model.ts";
 import { ticketKeys } from "./detect.ts";
 
 export const BRIEFER_ROLE = "briefer";
@@ -44,6 +44,10 @@ export interface RunBriefOptions {
 	timeoutMs: number;
 	/** Overrides the role's own model pin. */
 	model?: string;
+	/** The pi whose role files are read — `PI_ROLES_RUNTIME` inside pi. */
+	roles: RolesRuntime;
+	/** How the catalog is read and narrowed; absent is this machine's auth, unnarrowed. */
+	modelHost?: BriefModelHost;
 	signal?: AbortSignal;
 	/**
 	 * Called as each lane SETTLES, so a caller can report progress while the
@@ -113,14 +117,14 @@ export async function runBriefer(options: RunBriefOptions): Promise<BriefRunResu
 		timedOut: lanes.length > 0 && lanes.every((l) => l.timedOut),
 	});
 
-	const { agents } = discoverAgents(options.cwd, "user");
+	const { agents } = discoverAgentsWith(options.cwd, "user", options.roles);
 	const role = resolveAgent(agents, BRIEFER_ROLE);
 	if (!role) return empty(`role "${BRIEFER_ROLE}" is not installed`);
 
 	// The fleet's cheap tier, or nothing. Standing down is the correct outcome
 	// when no cheap model resolves — see model.ts for why running the brief on
 	// whatever the session happens to be using is worse than not running it.
-	const pick = await resolveBriefModel(options.model, role.model);
+	const pick = await resolveBriefModel(options.model, role.model, options.modelHost);
 	if (!pick) return empty("no cheap model resolvable (no Hive catalog, no role pin, no PI_BRIEF_MODEL)");
 	const model = pick.spec;
 	const modelSource = pick.source;

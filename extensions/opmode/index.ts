@@ -35,8 +35,8 @@ import {
 import { parseResultHeader, type JobStatus } from "../background/jobs.ts";
 import { canonicalMcpToolName } from "../mcp-common/names.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
-import { classifyCommand, classifyDiscussionTool, classifyOrchestrateCommand, classifyOrchestrateTool } from "../plan/policy.ts";
-import { BUGFIX_WITHHELD_TOOLS, DEFAULT_OP_MODE, isOpMode, OP_MODES, OP_MODE_ENFORCES, type OpMode } from "./modes.ts";
+import { opModeShellVerdict, opModeToolVerdict, PHASE_ORDER } from "./verdict.ts";
+import { DEFAULT_OP_MODE, isOpMode, OP_MODES, OP_MODE_ENFORCES, type OpMode } from "./modes.ts";
 import { buildOpModePrompt } from "./prompt.ts";
 import { exposureFor, restoredLoadout } from "../loadout/policy.ts";
 
@@ -281,7 +281,6 @@ const EXPECTED_CALL: Record<ProtocolState, string | null> = {
 };
 
 /** The order, spelled the way the `phase` argument is spelled. */
-const PHASE_ORDER = `reproduce → hypothesize → instrument → confirm → (bugfix_root_cause, then the edit) → reverify`;
 
 /**
  * The refusal for a `reproduce` call that named a real result but cannot bind.
@@ -523,29 +522,7 @@ export default function (pi: ExtensionAPI) {
 	 * here as well would be a second opinion about one mode.
 	 */
 	function toolVerdict(name: string, input?: unknown): { allowed: true } | { allowed: false; reason: string } {
-		switch (mode) {
-			case "discuss":
-				return classifyDiscussionTool(name, input);
-			case "bugfix":
-				if (rootCause || !BUGFIX_WITHHELD_TOOLS.has(name)) return { allowed: true };
-				// This is the FIRST thing an agent in bugfix mode reads, and it used
-				// to send them straight at `bugfix_root_cause` — which then refuses
-				// until bugfix_evidence has walked every phase. The deny that opens
-				// the investigation cannot prescribe the call that closes it, or the
-				// agent's first two moves are both refusals.
-				return {
-					allowed: false,
-					reason:
-						`Bugfix mode: no fix before a root cause. Reproduce the bug and build something that measures it ` +
-						`— the shell, tests and scripts are all open — recording each step with bugfix_evidence, in order: ` +
-						`${PHASE_ORDER}. Once "confirm" is recorded, bugfix_root_cause accepts the mechanism and unlocks edits.`,
-				};
-			case "orchestrate":
-				return classifyOrchestrateTool(name, input);
-			case "build":
-			case "plan":
-				return { allowed: true };
-		}
+		return opModeToolVerdict(mode, name, input, rootCause !== null);
 	}
 
 	pi.on("tool_call", async (event) => {
@@ -554,12 +531,9 @@ export default function (pi: ExtensionAPI) {
 
 		// Shell gating for the two fail-closed read-only postures. Bugfix
 		// deliberately leaves bash open — see BUGFIX_WITHHELD_TOOLS for why.
-		if ((mode === "discuss" || mode === "orchestrate") && event.toolName === "bash") {
+		if (event.toolName === "bash") {
 			const command = (event.input as { command?: unknown } | undefined)?.command;
-			const raw = typeof command === "string" ? command : "";
-			const shell = mode === "orchestrate"
-				? classifyOrchestrateCommand(raw)
-				: classifyCommand(raw, "Discussion");
+			const shell = opModeShellVerdict(mode, typeof command === "string" ? command : "");
 			if (!shell.allowed) return { block: true, reason: shell.reason };
 		}
 	});

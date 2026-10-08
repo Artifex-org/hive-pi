@@ -44,6 +44,7 @@ import {
 } from "../hive-common/channels.ts";
 import { HIVE_METRIC_CHANNEL, type HiveGateMetricEvent, type HiveMetricEvent } from "../hive-telemetry/types.ts";
 import { runBriefer, type BriefLaneOutcome } from "./run.ts";
+import { PI_ROLES_RUNTIME } from "../harness/roles.ts";
 
 const STATUS_KEY = "brief";
 
@@ -179,6 +180,7 @@ export default function (pi: ExtensionAPI) {
 			const result = await runBriefer({
 				task,
 				cwd,
+				roles: PI_ROLES_RUNTIME,
 				timeoutMs: cfg.timeoutMs,
 				model: cfg.model,
 				// A beat per lane, so the workspace shows the pass advancing
@@ -294,7 +296,7 @@ async function compileInto(
 	}
 	let result;
 	try {
-		result = await runBriefer({ task, cwd, timeoutMs: cfg.timeoutMs, model: cfg.model });
+		result = await runBriefer({ task, cwd, timeoutMs: cfg.timeoutMs, model: cfg.model, roles: PI_ROLES_RUNTIME });
 	} catch (err) {
 		// Same contract as the automatic path, and the same reason: an operator who
 		// typed `/brief` gets a warning and keeps what they wrote.

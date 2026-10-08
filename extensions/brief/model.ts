@@ -20,6 +20,7 @@
  */
 
 import { resolveAuth } from "../hive-common/identity.ts";
+import type { HiveAuth } from "../hive-common/http.ts";
 import { fetchAgentModeCatalog, type AgentMode } from "../advisor/modes.ts";
 
 export interface BriefModelPick {
@@ -37,8 +38,18 @@ export interface BriefModelPick {
  * a ladder ordered highest class first, which is the contract `pickAdvisorModel`
  * already relies on to mean "one step up".
  */
-export function pickBriefModel(modes: AgentMode[], subagentKey: string | undefined): BriefModelPick | null {
-	const usable = modes.filter((m) => m && typeof m.model === "string" && m.model.includes("/"));
+export function pickBriefModel(
+	modes: AgentMode[],
+	subagentKey: string | undefined,
+	isConfigured?: (spec: string) => boolean,
+): BriefModelPick | null {
+	// A host that knows which providers it holds credentials for (the Claude
+	// adapter's leased store) narrows the ladder to them first; a pick it
+	// cannot run is not a pick. Absent, every catalog mode is a candidate, as
+	// before.
+	const usable = modes.filter(
+		(m) => m && typeof m.model === "string" && m.model.includes("/") && (!isConfigured || isConfigured(m.model)),
+	);
 	if (usable.length === 0) return null;
 
 	if (subagentKey) {
@@ -55,14 +66,25 @@ export function pickBriefModel(modes: AgentMode[], subagentKey: string | undefin
  * Never throws: this runs on the path that blocks the first turn, and a
  * resolution failure must degrade to "no brief", never to a failed prompt.
  */
-export async function resolveBriefModel(override: string | undefined, rolePin: string | undefined): Promise<BriefModelPick | null> {
+export interface BriefModelHost {
+	/** The Hive auth for the catalog read. Absent resolves this machine's (`resolveAuth`). */
+	auth?: HiveAuth | null;
+	/** Restricts the catalog to models this host can run. */
+	isConfigured?(spec: string): boolean;
+}
+
+export async function resolveBriefModel(
+	override: string | undefined,
+	rolePin: string | undefined,
+	host: BriefModelHost = {},
+): Promise<BriefModelPick | null> {
 	if (override) return { spec: override, source: "override" };
 
 	try {
-		const auth = resolveAuth();
+		const auth = host.auth === undefined ? resolveAuth() : host.auth;
 		if (auth) {
 			const catalog = await fetchAgentModeCatalog(auth);
-			const pick = catalog ? pickBriefModel(catalog.modes, catalog.subagentKey) : null;
+			const pick = catalog ? pickBriefModel(catalog.modes, catalog.subagentKey, host.isConfigured) : null;
 			if (pick) return pick;
 		}
 	} catch {

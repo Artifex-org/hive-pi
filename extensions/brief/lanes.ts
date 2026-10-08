@@ -26,7 +26,7 @@ import { collectionsFor } from "../profile-common/profile.ts";
  * look complete. Pure functions, tested directly.
  */
 
-import type { AgentConfig } from "../harness/roles.ts";
+import type { AgentConfig } from "../harness/roles-core.ts";
 import { MAX_FACTS, MAX_MOVES, MAX_REFS, MAX_START_HERE, MAX_UNKNOWNS, type BriefDraft, type BriefRef } from "./compile.ts";
 
 export const LANES = ["repo", "knowledge", "ticket"] as const;
