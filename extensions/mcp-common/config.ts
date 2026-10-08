@@ -24,6 +24,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isClaudeHelper } from "../hive-common/child-tree.ts";
 import { processToken } from "../hive-common/process-token.ts";
 
 export interface McpServerDef {
@@ -121,6 +122,11 @@ export function ensureWorkerAgentDir(
 	owner: string = processToken(),
 	kind: MirrorKind = "http",
 ): string | null {
+	// A Claude launch's helpers run on a LEASED store, and Hive's node accepts
+	// a helper child only when its PI_CODING_AGENT_DIR is that store
+	// (HIVE_PI_AGENT_DIR) — a mirror in tmp would read as a different store.
+	// So no mirror there: children read the lease itself, MCP config included.
+	if (isClaudeHelper()) return null;
 	try {
 		if (!fs.existsSync(sourceDir)) return null;
 		const target = workerAgentDirPath(tmp, owner, kind);

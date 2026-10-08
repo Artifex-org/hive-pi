@@ -24,6 +24,7 @@ import * as path from "node:path";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { getPiInvocation } from "../agenda/spawn.ts";
 import { guardWorkerCwd, workerCwdRefusal } from "../guards-common/capability.ts";
+import { killTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
 import { distillFailure } from "../harness/distill.ts";
 import { frame } from "../harness/framing.ts";
 import { emptyJsonRunState, foldJsonLine, type WorkerRetries } from "../harness/json-protocol.ts";
@@ -647,6 +648,7 @@ export async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
+			const tree = treeSpawnOptions();
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: executionCwd,
 				shell: false,
@@ -668,6 +670,8 @@ export async function runSingleAgent(
 				// agent-dir mirror (mcp-common/config.ts): native MCP has no lazy
 				// lifecycle, so this is what keeps a fan-out cheap.
 				env: { ...process.env, PI_AGENDA_WORKER: "1", ...workerMcpEnv(agent.tools), ...(writerLock?.childEnv ?? {}) },
+				// A Claude helper's worker is a process group (hive-common/child-tree.ts).
+				...tree,
 			});
 			let buffer = "";
 			let closed = false;
@@ -735,9 +739,9 @@ export async function runSingleAgent(
 			const terminateAfterGrace = () => {
 				if (terminating) return;
 				terminating = true;
-				proc.kill("SIGTERM");
+				killTree(proc, "SIGTERM", tree.detached);
 				forceKillTimer = setTimeout(() => {
-					if (!closed) proc.kill("SIGKILL");
+					if (!closed) killTree(proc, "SIGKILL", tree.detached);
 				}, 5000);
 				forceKillTimer.unref?.();
 			};

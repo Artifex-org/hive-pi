@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { treeStamp } from "../harness/verify.ts";
+import { killTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
 import { repoRoot } from "../hive-common/git.ts";
 import { atCap, clear, record, remaining } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
@@ -101,12 +102,13 @@ export function runCheck(command: string, cwd: string, timeoutMs: number): Promi
 		// `-c`, not `-lc`: a login shell on Debian resets PATH from /etc/profile,
 		// so the gate would run without the tools the session itself has
 		// (see the background extension's spawn for the measurement).
-		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const tree = treeSpawnOptions();
+		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], ...tree });
 		let out = "";
 		let timedOut = false;
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree(child, "SIGKILL", tree.detached);
 		}, timeoutMs);
 		const collect = (d: Buffer) => {
 			out += d.toString();

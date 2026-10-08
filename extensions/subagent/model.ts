@@ -56,6 +56,14 @@ export interface WorkerModelEnv {
 	 * default — never pays for it (measured 89.9s cold against production).
 	 */
 	catalog: () => Promise<readonly CatalogMode[]>;
+	/**
+	 * Never let pi pick its own default model. Inside pi an unset delegation
+	 * default is fine — the worker runs pi's configured default. A host whose
+	 * store holds only LEASED providers (the Claude adapter) cannot trust that
+	 * default to be one of them, so an unpinned worker takes the cheapest
+	 * configured catalog mode instead, or is refused.
+	 */
+	requireExplicitModel?: boolean;
 }
 
 export interface WorkerModelChoice {
@@ -150,6 +158,15 @@ export async function chooseWorkerModel(
 	}
 
 	const preferred = opts.preferred?.trim() || undefined;
+	if (!preferred && env?.requireExplicitModel) {
+		const [cheapest] = configuredFallbacks(await safeCatalog(env), env.isConfigured, undefined, undefined);
+		if (cheapest) return { spec: cheapest };
+		return {
+			refusal:
+				`role "${opts.roleName}" pins no model, there is no delegation default, and no catalog mode is configured ` +
+				"here, so no worker was started. Pass `model` per call with a provider this session holds.",
+		};
+	}
 	if (!preferred || !env) return { spec: preferred };
 	if (env.isConfigured(preferred) !== false) return { spec: preferred };
 

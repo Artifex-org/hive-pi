@@ -27,6 +27,19 @@ export interface GoalSetParams {
 
 export type GoalSetDecision = { ok: true; goal: GoalItem; text: string } | { ok: false; text: string };
 
+/** How the host names its own moving parts in the tool's replies. */
+export interface GoalWording {
+	/** When the judge runs. */
+	judgedWhen: string;
+	/** How the user stops a goal. */
+	clear: string;
+}
+
+export const PI_GOAL_WORDING: GoalWording = {
+	judgedWhen: "only when Pi becomes idle (agent_settled); it does not evaluate active or interrupted tool chains",
+	clear: "/goal clear",
+};
+
 /**
  * What `goal_set` does with `params` given the `current` goal. Pure: the
  * caller persists `goal`. `mintId` is called only when a NEW goal is created.
@@ -34,7 +47,13 @@ export type GoalSetDecision = { ok: true; goal: GoalItem; text: string } | { ok:
  * Both shaping behaviours are ERRORS rather than warnings (tool errors change
  * model behaviour; description prose does not).
  */
-export function goalSetDecision(current: GoalItem | null, params: GoalSetParams, now: number, mintId: () => string): GoalSetDecision {
+export function goalSetDecision(
+	current: GoalItem | null,
+	params: GoalSetParams,
+	now: number,
+	mintId: () => string,
+	wording: GoalWording = PI_GOAL_WORDING,
+): GoalSetDecision {
 	const condition = params.condition.trim();
 	if (!condition) return { ok: false, text: "goal_set needs a condition." };
 	if (current && !isTerminal(current.state) && !params.replace) {
@@ -44,7 +63,7 @@ export function goalSetDecision(current: GoalItem | null, params: GoalSetParams,
 				`A goal is already active: "${current.condition}". If this is the SAME task and the ` +
 				`condition has simply moved on — a new sha, a renamed check — call goal_set again with ` +
 				`\`replace: true\`: the old condition is recorded and the budget keeps counting. ` +
-				`If it is different work, finish this one or ask the user for \`/goal clear\`.`,
+				`If it is different work, finish this one or ask the user for \`${wording.clear}\`.`,
 		};
 	}
 	if (looksUnverifiable(condition)) {
@@ -77,8 +96,7 @@ export function goalSetDecision(current: GoalItem | null, params: GoalSetParams,
 		ok: true,
 		goal,
 		text:
-			`Goal set: ${condition}\nThe evaluator runs only when Pi becomes idle (agent_settled); ` +
-			"it does not evaluate active or interrupted tool chains. The user can stop it with /goal clear.",
+			`Goal set: ${condition}\nThe evaluator runs ${wording.judgedWhen}. The user can stop it with ${wording.clear}.`,
 	};
 }
 

@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { addUsage, budgetTokens, emptyUsage, type Usage, type WireUsage } from "../harness/usage.ts";
+import { killTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
 import { oneShotMcpEnv } from "../mcp-common/config.ts";
 import { nativeToolGrants, workerMcpEnv } from "../subagent/worker.ts";
 
@@ -145,6 +146,9 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 
 	return new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
+		// A Claude helper spawns each child as a process group, so a kill
+		// reaches the child's own children too (hive-common/child-tree.ts).
+		const tree = treeSpawnOptions();
 		const child = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
@@ -152,6 +156,7 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 			// One-shots load the full extension set, built-in MCP included; the
 			// no-server mirror keeps a --no-tools helper from connecting anything.
 			env: { ...process.env, ...oneShotMcpEnv(), ...options.env },
+			...tree,
 		});
 
 		const texts: string[] = [];
@@ -162,7 +167,7 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree(child, "SIGKILL", tree.detached);
 		}, options.timeoutMs);
 
 		const processLine = (line: string) => {
@@ -285,11 +290,13 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 
 	return new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
+		const tree = treeSpawnOptions();
 		const child = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, ...roleEnv, ...options.env },
+			...tree,
 		});
 
 		const texts: string[] = [];
@@ -314,10 +321,10 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree(child, "SIGKILL", tree.detached);
 		}, options.timeoutMs);
 
-		const onAbort = () => child.kill("SIGTERM");
+		const onAbort = () => killTree(child, "SIGTERM", tree.detached);
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 
 		const processLine = (line: string) => {
