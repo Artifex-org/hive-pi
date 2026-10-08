@@ -10,7 +10,7 @@
 
 import { readFileSync } from "node:fs";
 import { applyPiChildEnv, hiveAuth, modelUnavailableReason, readEnv, stateDir, type AdapterEnv } from "./env.ts";
-import { parseHookInput, readStdin, type HookInput, type HookOutput } from "./hooks/io.ts";
+import { denyToolUse, parseHookInput, readStdin, type HookInput, type HookOutput } from "./hooks/io.ts";
 import { createSpool } from "./spool.ts";
 import { DEFAULT_CONTROL, readControl } from "./state.ts";
 
@@ -138,6 +138,20 @@ export async function main(argv: readonly string[]): Promise<number> {
 	applyPiChildEnv(env);
 	switch (command) {
 		case "hook":
+			if (rest[0] === "pre-tool") {
+				// Enforcement fails CLOSED. Claude reads any exit other than 2 from a
+				// PreToolUse hook as "proceed", so an error here — a half-written
+				// control.json, a failed import — would silently lift a discuss or
+				// plan restriction. It is a deny instead, with the cause.
+				try {
+					await runHook("pre-tool", env);
+				} catch (error) {
+					const cause = error instanceof Error ? error.message : String(error);
+					stderr(`hive-pi: pre-tool could not decide: ${cause}`);
+					print(denyToolUse(`hive-pi could not check this call against the session's operating mode (${cause}), so it is refused rather than allowed unchecked.`));
+				}
+				return 0;
+			}
 			await runHook(rest[0] ?? "", env);
 			return 0;
 		case "brief": {

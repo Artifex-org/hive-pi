@@ -176,7 +176,12 @@ export interface SubagentHost {
 /** Background delegations of this MCP server; all are aborted when it exits. */
 export class BackgroundJobs {
 	private seq = 0;
+	private readonly log: (line: string) => void;
 	private readonly running = new Map<string, { controller: AbortController; done: Promise<void> }>();
+
+	constructor(log: (line: string) => void) {
+		this.log = log;
+	}
 
 	get size(): number {
 		return this.running.size;
@@ -189,7 +194,12 @@ export class BackgroundJobs {
 		// announced it by this id alone.
 		const id = `sub-${this.seq}-${randomUUID().slice(0, 8)}`;
 		const controller = new AbortController();
-		const done = run(controller.signal, id).finally(() => this.running.delete(id));
+		// A job that throws past its own handling is reported, never left as an
+		// unhandled rejection — that would take the whole MCP server, and every
+		// other job with it, down.
+		const done = run(controller.signal, id)
+			.catch((error: unknown) => this.log(`hive-pi mcp: background job ${id} failed: ${error instanceof Error ? error.message : String(error)}`))
+			.finally(() => this.running.delete(id));
 		this.running.set(id, { controller, done });
 		return id;
 	}
@@ -308,7 +318,12 @@ export async function runSubagentTool(args: Record<string, unknown>, host: Subag
 	return { text: outcome.text, ...(outcome.isError ? { isError: true } : {}) };
 }
 
-/** The delegation model env on a leased store: configured = leased; the catalog is read once per call. */
+/**
+ * The delegation model env on a leased store: configured = leased. Build one
+ * PER CALL — the catalog read is memoised for the call (a parallel wave asks
+ * once), never for the server's life, so a catalog that was unreachable at
+ * the first call is read again at the next.
+ */
 export function leasedModelEnv(isConfigured: (spec: string) => boolean, catalog: () => Promise<readonly CatalogMode[]>): WorkerModelEnv {
 	let pending: Promise<readonly CatalogMode[]> | undefined;
 	return {

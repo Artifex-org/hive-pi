@@ -43,7 +43,9 @@ import { blockStop, type HookInput, type HookOutput } from "./io.ts";
 
 /** The hook's own wall clock. The plugin's timeout is 180 s; this ends well inside 120 s. */
 export const STOP_BUDGET_MS = 110_000;
-/** Below this much time left the repo gate is not started at all. */
+/** Time kept back for the goal judge (its 60 s call, and a margin) when it will run after the gate. */
+export const JUDGE_RESERVE_MS = 70_000;
+/** Below this much time for it, the repo gate is not started at all. */
 export const GATE_MIN_REMAINING_MS = 15_000;
 /** Below this much time left a drift probe is skipped, so the goal judge (the one that can continue) keeps its time. */
 export const DRIFT_MIN_REMAINING_MS = 100_000;
@@ -101,28 +103,34 @@ export async function stopDecision(input: HookInput, deps: StopDeps): Promise<Ho
 		writeGoal(deps.stateDir, next);
 	};
 
+	// The goal judge is the policy that can continue the session, so when it
+	// will run, the gate before it must leave it its time.
+	const judgeWillRun = goal?.state === "active" && held === "none" && !deps.modelUnavailable;
+	const gateTime = () => left() - (judgeWillRun ? JUDGE_RESERVE_MS : 0);
 	const gate = createGatePolicy(
-			{
-				get: (id) => agenda.gateStamps[id],
-				set: (id, stamp) => {
-					if (stamp === undefined) delete agenda.gateStamps[id];
-					else agenda.gateStamps[id] = stamp;
-				},
+		{
+			get: (id) => agenda.gateStamps[id],
+			set: (id, stamp) => {
+				if (stamp === undefined) delete agenda.gateStamps[id];
+				else agenda.gateStamps[id] = stamp;
 			},
-			{ timeoutCapMs: left },
+		},
+		// A check the cap cuts short reports skip (gate.ts), never "TIMED OUT".
+		{ timeoutCapMs: gateTime },
 	);
 	const policies: Policy[] = [
 		{
 			...gate,
-			// A check started with no time left would be SIGKILLed at once and
-			// reported as "the project gate TIMED OUT" — a tool that could not run
-			// read as one that failed, charged an injection. Below the floor it
-			// does not start; the next settle runs it.
-			decide: (context) => (left() < GATE_MIN_REMAINING_MS ? null : gate.decide(context)),
+			// Not started at all without real time to run: a check killed at once
+			// tells nothing, and the next settle runs it.
+			decide: (context) => (gateTime() < GATE_MIN_REMAINING_MS ? null : gate.decide(context)),
 		},
 	];
 
-	if (goal?.state === "active") {
+	// Drift and the goal never run on a turn handed back to a person (they
+	// declare no `proceedsDespite`), so nothing about them — not even a failed
+	// evaluator lookup — may be charged on such a settle.
+	if (goal?.state === "active" && held === "none") {
 		const activeGoal: GoalItem = goal;
 		const evaluator = deps.modelUnavailable ? null : await deps.resolveEvaluator();
 		if (deps.modelUnavailable) {

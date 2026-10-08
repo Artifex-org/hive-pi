@@ -6,6 +6,9 @@
  * hook, the async settle hook, the MCP server and its background workers)
  * interleave whole lines, never fragments.
  *
+ * A record that cannot be written is said on stderr, never thrown: the spool
+ * reports work, it must not undo it.
+ *
  * With no `HIVE_AUX_SPOOL` nothing is written, and the process says so once
  * on stderr: a missing spool is a launch misconfiguration the operator should
  * see, not a reason to fail the feature that produced the record.
@@ -56,12 +59,18 @@ export function createSpool(path: string | undefined, stderr: (line: string) => 
 			return;
 		}
 		const line = `${JSON.stringify(record)}\n`;
+		// The spool REPORTS work; it must never undo it. A record that cannot be
+		// written (too large, a full disk, a removed file) is said on stderr and
+		// the verdict, the worker's result or the hook's answer stands.
 		if (Buffer.byteLength(line, "utf8") >= MAX_RECORD_BYTES) {
-			// Only a wake's free text can grow; every other record is bounded by
-			// construction. Refuse rather than write a line the driver would drop.
-			throw new Error(`spool record exceeds ${MAX_RECORD_BYTES} bytes (kind ${String(record.kind)})`);
+			stderr(`hive-pi: spool record not written: it exceeds ${MAX_RECORD_BYTES} bytes (kind ${String(record.kind)})`);
+			return;
 		}
-		appendFileSync(path, line, { encoding: "utf8", mode: 0o600 });
+		try {
+			appendFileSync(path, line, { encoding: "utf8", mode: 0o600 });
+		} catch (error) {
+			stderr(`hive-pi: spool record not written (kind ${String(record.kind)}): ${(error as Error).message}`);
+		}
 	};
 	const at = () => new Date().toISOString();
 	return {

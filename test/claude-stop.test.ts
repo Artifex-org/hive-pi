@@ -139,6 +139,22 @@ describe("hook stop", () => {
 		expect(launch.calls()).toHaveLength(0);
 	});
 
+	it("charges nothing — not even a failed evaluator lookup — on a hand-back or a failed API turn", async () => {
+		setGoal();
+		hive.modes = [{ key: "high", model: "openai-codex/gpt-top" }]; // nothing leased: a lookup would be a judge error
+		transcript = writeTranscript(join(launch.root, "q2.jsonl"), [{ user: "fix it" }, { assistant: "Shall I delete the old table too?" }]);
+		expect((await stop()).stdout).toBe("");
+		expect(goal().ledger.judgeErrors).toBe(0);
+		const apiError = join(launch.root, "err.jsonl");
+		writeFileSync(apiError, [
+			JSON.stringify({ type: "user", uuid: "u", message: { role: "user", content: "go" } }),
+			JSON.stringify({ type: "assistant", uuid: "e", isApiErrorMessage: true, message: { id: "x", role: "assistant", stop_reason: "stop_sequence", content: [{ type: "text", text: "You've hit your session limit" }] } }),
+		].join("\n") + "\n");
+		expect((await stop({ transcript_path: apiError })).stdout).toBe("");
+		expect(goal().ledger.judgeErrors).toBe(0);
+		expect(hive.requests.some((r) => r.path === "/api/v1/agent-modes")).toBe(false);
+	});
+
 	it("grades the final assistant text Claude hands the hook even when the transcript lags", async () => {
 		setGoal();
 		launch.setReplies([{ match: "FINAL-MARKER-7", text: '{"ok": false, "reason": "saw the final turn"}' }]);

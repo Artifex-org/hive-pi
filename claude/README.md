@@ -59,7 +59,9 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   names and judged by pi's policy: `discuss`/`orchestrate` via
   `opModeToolVerdict`/`opModeShellVerdict`, `plan` via `planToolVerdict`; then
   the worktree guard (`decide`) on the edited path. Prints a `deny` or
-  nothing — never `allow`/`ask`. Other Claude tools and MCP tools are not
+  nothing — never `allow`/`ask`; any internal error (bad `control.json`,
+  malformed input) is a `deny` with the cause, since Claude treats a failing
+  PreToolUse hook as "proceed". Other Claude tools and MCP tools are not
   classified. **Bugfix is not gated here** (see Open gaps).
 - **`hook post-tool`** — format-on-edit (`planFor` + `formatFile`) for
   Edit/MultiEdit/Write; prints `additionalContext` with pi's note when the
@@ -70,9 +72,12 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   turn-failure and hand-back guards first. At most one continuation:
   `{"decision":"block","reason":…}`. Budget 110 s: every model call's timeout
   is clamped to what is left (a clamped timeout is a judge error,
-  fail-closed), the gate's timeout is capped and it is not started below 15 s
-  left (never "timed out" for a gate that could not run), and drift is skipped
-  below 100 s left. The repo gate is not model-backed, so it runs even without
+  fail-closed), the gate keeps 70 s back for the goal judge when it will run, is
+  not started with under 15 s for it, and a check cut short by that cap (not
+  by the repo's own `checkTimeoutMs`) is a skip — never "TIMED OUT", never
+  charged; drift is skipped below 100 s left. Drift and the judge (and the
+  evaluator lookup) are not even considered on a hand-back or a failed API
+  turn (`isApiErrorMessage` → `stopReason: error`). The repo gate is not model-backed, so it runs even without
   `HIVE_PI_AGENT_DIR`. `stop_hook_active` is **not** a reason to stand down — a goal loop is
   a chain of such continuations; the persisted caps (goal iterations,
   no-progress/pending streaks, budget, three judge errors, gate

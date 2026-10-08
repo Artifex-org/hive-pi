@@ -44,7 +44,12 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 		// THIS process's node. Executing it directly resolves `node` from PATH,
 		// which a Claude launch does not guarantee and which may be a different
 		// major than the one the harness pinned.
-		if (/\.(c|m)?js$/.test(realEntry(override))) return { command: process.execPath, args: [override, ...args] };
+		// Only when THIS process is a plain node: under a Bun-compiled pi,
+		// `process.execPath` is pi itself, and the script path would arrive as a
+		// stray positional.
+		if (/\.(c|m)?js$/.test(realEntry(override)) && /^node(\.exe)?$/i.test(path.basename(process.execPath))) {
+			return { command: process.execPath, args: [override, ...args] };
+		}
 		return { command: override, args };
 	}
 

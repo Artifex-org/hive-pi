@@ -32,13 +32,13 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 	const dir = stateDir(env);
 	const unavailable = modelUnavailableReason(env);
 	const spool = createSpool(env.spool, log);
-	const jobs = new BackgroundJobs();
+	const jobs = new BackgroundJobs(log);
 	const cwd = process.cwd();
 	const providers = unavailable ? new Set<string>() : leasedProviders(env.piAgentDir as string);
 	const isConfigured = isConfiguredWith(providers);
 	const pinned = () => loadPinnedPi(env.piBin as string, env.piAgentDir as string);
 	const auth = hiveAuth(env);
-	const modelEnv = leasedModelEnv(isConfigured, async () => (auth ? ((await fetchAgentModeCatalog(auth))?.modes ?? []) : []));
+	const catalog = async () => (auth ? ((await fetchAgentModeCatalog(auth))?.modes ?? []) : []);
 
 	const noCredential = (): ToolResult => ({ text: `This tool needs an outside model, and ${unavailable}.`, isError: true });
 	const noState = (): ToolResult => ({ text: "Goal state is unavailable: HIVE_CLAUDE_CONFIG_DIR is unset.", isError: true });
@@ -82,7 +82,7 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 				case "subagent": {
 					if (unavailable) return noCredential();
 					const pi = await pinned();
-					return runSubagentTool(args, { opMode: () => (dir ? readControl(dir) : DEFAULT_CONTROL).opMode, cwd, roles: pi.roles, modelEnv, spool, jobs, canWake: Boolean(env.spool) }, signal);
+					return runSubagentTool(args, { opMode: () => (dir ? readControl(dir) : DEFAULT_CONTROL).opMode, cwd, roles: pi.roles, modelEnv: leasedModelEnv(isConfigured, catalog), spool, jobs, canWake: Boolean(env.spool) }, signal);
 				}
 				default:
 					return { text: `Unknown tool: ${name}`, isError: true };

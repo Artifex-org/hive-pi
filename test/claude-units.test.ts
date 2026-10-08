@@ -4,13 +4,18 @@
  * process-group kill pi children get in a Claude launch.
  */
 
-import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { recapTranscript } from "../extensions/agenda/recap.ts";
+import { createGatePolicy } from "../extensions/agenda/gate.ts";
+import { emptyLedger } from "../extensions/agenda/ledger.ts";
+import { getPiInvocation } from "../extensions/agenda/spawn.ts";
+import { turnFailureOf } from "../extensions/agenda/turn-outcome.ts";
+import { tryLock } from "../claude/state.ts";
 import { classifyHandback } from "../extensions/hive-common/handback.ts";
 import { killTree, treeSpawnOptions } from "../extensions/hive-common/child-tree.ts";
 import { cheapLaneMode } from "../extensions/subagent/model.ts";
@@ -111,6 +116,15 @@ describe("Claude transcript → pi entries", () => {
 		expect(() => readAppendedLines(path, 0)).not.toThrow();
 	});
 
+	it("reads Claude's synthetic API-error turn as a turn that did not run", () => {
+		const entries = toPiEntries([
+			{ type: "user", uuid: "u", message: { role: "user", content: "go" } },
+			{ type: "assistant", uuid: "e", isApiErrorMessage: true, message: { id: "x", role: "assistant", model: "<synthetic>", stop_reason: "stop_sequence", content: [{ type: "text", text: "You've hit your session limit" }] } },
+		]);
+		expect(entries[1].message).toMatchObject({ role: "assistant", stopReason: "error" });
+		expect(turnFailureOf(entries)).toBe("error");
+	});
+
 	it("throws on a malformed line rather than reading it as empty", () => {
 		const path = join(tmp(), "bad.jsonl");
 		writeFileSync(path, "{nope}\n");
@@ -158,5 +172,65 @@ describe("process-group kill for a Claude helper's children", () => {
 		await closed;
 		await new Promise((r) => setTimeout(r, 100));
 		expect(() => process.kill(grandchild, 0)).toThrow();
+	});
+});
+
+describe("the repo gate under a host's wall clock", () => {
+	it("reports a check the CAP cut short as a skip — no injection, no charge, no failure stamp", async () => {
+		const repo = join(tmp(), "repo");
+		mkdirSync(join(repo, ".pi"), { recursive: true });
+		execFileSync("git", ["init", "-q", repo]);
+		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: "sleep 5", checkTimeoutMs: 600000 }));
+		const stamps = new Map<string, string>();
+		const policy = createGatePolicy(
+			{ get: (id) => stamps.get(id), set: (id, stamp) => (stamp === undefined ? stamps.delete(id) : stamps.set(id, stamp)) },
+			{ timeoutCapMs: () => 200 },
+		);
+		const work = policy.decide({ cwd: repo, ledger: emptyLedger, lastAssistantText: undefined, transcript: "" });
+		const outcome = await work?.run();
+		expect(outcome).toEqual({ metric: { outcome: "skip", value: expect.any(Number) } });
+		expect(stamps.size).toBe(0);
+	});
+
+	it("still reports the repo's OWN timeout as a timeout", async () => {
+		const repo = join(tmp(), "repo2");
+		mkdirSync(join(repo, ".pi"), { recursive: true });
+		execFileSync("git", ["init", "-q", repo]);
+		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: "sleep 5", checkTimeoutMs: 200 }));
+		const policy = createGatePolicy(undefined, { timeoutCapMs: () => 60_000 });
+		const outcome = await policy.decide({ cwd: repo, ledger: emptyLedger, lastAssistantText: undefined, transcript: "" })?.run();
+		expect(outcome?.metric.outcome).toBe("timeout");
+		expect(outcome?.inject).toContain("TIMED OUT");
+	});
+});
+
+describe("getPiInvocation with a JavaScript pi override", () => {
+	it("runs a .js entry under this node, and anything else directly", () => {
+		const previous = process.env.PI_HOUSE_PI_BIN;
+		try {
+			process.env.PI_HOUSE_PI_BIN = "/opt/pi/dist/bundle/cli.js";
+			expect(getPiInvocation(["-p"])).toEqual({ command: process.execPath, args: ["/opt/pi/dist/bundle/cli.js", "-p"] });
+			process.env.PI_HOUSE_PI_BIN = "/opt/pi/bin/pi";
+			expect(getPiInvocation(["-p"])).toEqual({ command: "/opt/pi/bin/pi", args: ["-p"] });
+		} finally {
+			if (previous === undefined) delete process.env.PI_HOUSE_PI_BIN;
+			else process.env.PI_HOUSE_PI_BIN = previous;
+		}
+	});
+});
+
+describe("tryLock", () => {
+	it("is exclusive while the holder lives, and takes over a dead holder's lock", () => {
+		const path = join(tmp(), "x.lock");
+		const release = tryLock(path);
+		expect(release).not.toBeNull();
+		expect(tryLock(path)).toBeNull(); // this very process holds it
+		release?.();
+		expect(existsSync(path)).toBe(false);
+		writeFileSync(path, "999999999"); // no such pid
+		const taken = tryLock(path);
+		expect(taken).not.toBeNull();
+		expect(readFileSync(path, "utf8")).toBe(String(process.pid));
+		taken?.();
 	});
 });

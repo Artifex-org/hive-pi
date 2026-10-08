@@ -10,7 +10,7 @@
  * `control.json` is the DRIVER's: the adapter only reads it.
  */
 
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isOpMode, type OpMode } from "../extensions/opmode/modes.ts";
 
@@ -50,25 +50,47 @@ function pidAlive(pid: number): boolean {
  * An exclusive lock file holding the owner's pid. Returns a release function,
  * or null when a LIVE process holds it. A lock left by a dead process is
  * taken over — a crashed hook must not wedge the feature for the session.
+ *
+ * The pid is published atomically: written to a private temp file, then
+ * hard-linked into place (`link` fails with EEXIST if the lock exists), so no
+ * reader ever sees an empty lock. A lock that vanishes between "exists" and
+ * "read" is simply retried; a stale one is removed only if it still names the
+ * dead pid that was judged stale.
  */
 export function tryLock(path: string): (() => void) | null {
 	ensureDir(dirname(path));
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			const fd = openSync(path, "wx", 0o600);
-			writeFileSync(fd, String(process.pid));
-			closeSync(fd);
-			return () => {
-				if (existsSync(path) && readFileSync(path, "utf8").trim() === String(process.pid)) unlinkSync(path);
-			};
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			const holder = Number.parseInt(readFileSync(path, "utf8").trim(), 10);
-			if (Number.isSafeInteger(holder) && holder > 0 && pidAlive(holder)) return null;
-			unlinkSync(path);
+	const mine = String(process.pid);
+	const temp = `${path}.${process.pid}.claim`;
+	writeFileSync(temp, mine, { mode: 0o600 });
+	try {
+		for (let attempt = 0; attempt < 5; attempt++) {
+			try {
+				linkSync(temp, path);
+				return () => {
+					if (existsSync(path) && readFileSync(path, "utf8").trim() === mine) unlinkSync(path);
+				};
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			}
+			let holder: string;
+			try {
+				holder = readFileSync(path, "utf8").trim();
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; // released meanwhile: try again
+				throw error;
+			}
+			const pid = Number.parseInt(holder, 10);
+			if (Number.isSafeInteger(pid) && pid > 0 && pidAlive(pid)) return null;
+			try {
+				if (readFileSync(path, "utf8").trim() === holder) unlinkSync(path);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
 		}
+		return null;
+	} finally {
+		unlinkSync(temp);
 	}
-	return null;
 }
 
 export interface YskControl {

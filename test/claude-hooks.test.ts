@@ -154,13 +154,21 @@ describe("hook pre-tool", () => {
 		expect(out.hookSpecificOutput.permissionDecisionReason).toContain("worktree");
 	});
 
-	it("fails loudly on an unreadable control.json rather than reading it as build", async () => {
+	it("fails CLOSED on an unreadable control.json — a deny, never a silent pass as build", async () => {
 		launch = makeLaunch();
 		launch.writeControl({ opMode: "yolo" });
 		const result = await runCli(["hook", "pre-tool"], launch.env, JSON.stringify({ tool_name: "Edit", tool_input: { file_path: "/tmp/a" } }));
-		expect(result.code).toBe(1);
+		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("unknown opMode");
-		expect(result.stdout).toBe("");
+		const out = JSON.parse(result.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } };
+		expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(out.hookSpecificOutput.permissionDecisionReason).toContain("unknown opMode");
+	});
+
+	it("fails closed on malformed hook input too", async () => {
+		launch = makeLaunch();
+		const result = await runCli(["hook", "pre-tool"], launch.env, "{not json");
+		expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
 	});
 });
 

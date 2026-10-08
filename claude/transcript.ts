@@ -16,7 +16,10 @@
  *     per line, sharing `message.id` — they are merged back into one;
  *   - tool results ride `type: "user"` lines as `tool_result` blocks;
  *   - `isSidechain` lines belong to Claude's own subagents and `isMeta` user
- *     lines are harness-injected context; neither is the conversation.
+ *     lines are harness-injected context; neither is the conversation;
+ *   - a failed API call is a synthetic assistant line flagged
+ *     `isApiErrorMessage` (e.g. "You've hit your session limit"), which
+ *     becomes `stopReason: "error"`.
  */
 
 import { readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
@@ -65,6 +68,8 @@ interface ClaudeLine {
 	uuid?: string;
 	isSidechain?: boolean;
 	isMeta?: boolean;
+	/** Claude's synthetic assistant line for a failed API call (quota, overload, …). */
+	isApiErrorMessage?: boolean;
 	message?: { id?: string; role?: string; content?: unknown; stop_reason?: unknown; model?: unknown };
 }
 
@@ -109,7 +114,13 @@ export function toPiEntries(lines: readonly unknown[]): PiEntry[] {
 					parts.push({ type: "toolCall", id: block.id, name: block.name, arguments: args });
 				}
 			}
-			const stop = typeof message.stop_reason === "string" ? STOP_REASONS[message.stop_reason] ?? message.stop_reason : undefined;
+			// A failed API call is a turn that did not RUN: pi's `error` stop reason,
+			// which turnFailureOf reads, whatever stop_reason the synthetic line carries.
+			const stop = line.isApiErrorMessage
+				? "error"
+				: typeof message.stop_reason === "string"
+					? STOP_REASONS[message.stop_reason] ?? message.stop_reason
+					: undefined;
 			if (openAssistant && message.id !== undefined && openAssistant.messageId === message.id) {
 				const target = openAssistant.entry.message as Extract<PiMessage, { role: "assistant" }>;
 				target.content.push(...parts);

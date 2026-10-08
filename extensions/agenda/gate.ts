@@ -154,7 +154,8 @@ export interface GatePolicyOptions {
 	 * A ceiling on the check's timeout, read when the check starts. A host
 	 * whose settle has a hard wall clock (the Claude adapter's Stop hook)
 	 * passes what is left of it; absent, the repo's own `checkTimeoutMs` (or
-	 * the default) stands, which is pi's behaviour.
+	 * the default) stands, which is pi's behaviour. A check the cap cuts short
+	 * reports `skip` — never "TIMED OUT", which would blame the repo.
 	 */
 	timeoutCapMs?: () => number;
 }
@@ -219,8 +220,17 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 
 				const startedAt = Date.now();
 				const cap = options.timeoutCapMs?.();
-				const result = await runCheck(command, root, cap === undefined ? timeoutMs : Math.max(0, Math.min(timeoutMs, cap)));
+				const effectiveTimeoutMs = cap === undefined ? timeoutMs : Math.max(0, Math.min(timeoutMs, cap));
+				const result = await runCheck(command, root, effectiveTimeoutMs);
 				const elapsed = Date.now() - startedAt;
+
+				// Cut short by the HOST's wall clock, not the repo's own timeout: the
+				// check never reached a verdict, so this is a gate that could not
+				// run — reported as a skip, with no injection, no charge and no
+				// failure stamp (the same tree must be checked again next settle).
+				if (result.timedOut && effectiveTimeoutMs < timeoutMs) {
+					return { metric: { outcome: "skip", value: elapsed } };
+				}
 
 				if (result.ok) {
 					stamps?.set(id, undefined);
