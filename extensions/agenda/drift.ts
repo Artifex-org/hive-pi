@@ -25,7 +25,7 @@ import { nativeClassifier } from "../typesafe-common/native.ts";
 import { type GoalItem } from "./goal-state.ts";
 import { atCap, record } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
-import { runOneShot } from "./spawn.ts";
+import { runOneShot, type OneShotOptions, type OneShotResult } from "./spawn.ts";
 import { parseVerdict } from "./verdict.ts";
 
 export const DRIFT_CHECK_EVERY = 5;
@@ -48,6 +48,18 @@ export interface DriftHooks {
 	 * behaves exactly as it did before Jev existed.
 	 */
 	jev?(): ClassifierClient | null;
+	/** The spawner; absent means `runOneShot` (see GoalHooks.oneShot). */
+	oneShot?(options: OneShotOptions): Promise<OneShotResult>;
+	/** `--thinking` for the probe. Absent inherits the user's default, pi's behaviour. */
+	thinking?(): string | undefined;
+	/**
+	 * Where the cadence counter lives. Absent keeps it in this policy's closure,
+	 * which is right for a pi session (one process for its whole life); a
+	 * harness that runs each settle in a FRESH process (the Claude adapter's
+	 * Stop hook) must persist it, or the probe would never reach its fifth
+	 * settle.
+	 */
+	settles?: { get(): number; set(value: number): void };
 }
 
 /**
@@ -189,7 +201,13 @@ export function realignmentInjection(condition: string, reason: string): string 
 export function createDriftPolicy(hooks: DriftHooks): Policy {
 	// Factory closure, not module scope — pi builds a fresh jiti per extension
 	// entry, and agenda constructs exactly one of these per session process.
-	let settlesSinceProbe = 0;
+	let closureSettles = 0;
+	const settles = hooks.settles ?? {
+		get: () => closureSettles,
+		set: (value: number) => {
+			closureSettles = value;
+		},
+	};
 
 	return {
 		name: "drift",
@@ -197,13 +215,14 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 		decide(context: PolicyContext): PolicyWork | null {
 			const goal = hooks.goal();
 			if (!goal || goal.state !== "active") {
-				settlesSinceProbe = 0;
+				if (settles.get() !== 0) settles.set(0);
 				return null;
 			}
 			if (atCap(context.ledger, driftLedgerId(goal.id), MAX_REALIGNMENTS)) return null;
 
-			settlesSinceProbe++;
-			if (settlesSinceProbe < DRIFT_CHECK_EVERY) return null;
+			const seen = settles.get() + 1;
+			settles.set(seen);
+			if (seen < DRIFT_CHECK_EVERY) return null;
 
 			const transcript = context.transcript;
 			const ledgerId = driftLedgerId(goal.id);
@@ -212,7 +231,7 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 				name: "drift",
 				status: "checking goal alignment…",
 				run: async () => {
-					settlesSinceProbe = 0;
+					settles.set(0);
 					const startedAt = Date.now();
 
 					const jev = hooks.jev?.();
@@ -233,12 +252,14 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 					}
 
 					if (context.signal?.aborted) return { metric: { outcome: "skip", value: Date.now() - startedAt } };
-					const result = await runOneShot({
+					const thinking = hooks.thinking?.();
+					const result = await (hooks.oneShot ?? runOneShot)({
 						prompt: buildDriftPrompt(goal.condition, transcript),
 						model: hooks.evaluatorModel(),
 						cwd: process.cwd(),
 						timeoutMs: JUDGE_TIMEOUT_MS,
 						env: { PI_AGENDA_WORKER: "1" },
+						...(thinking ? { thinking } : {}),
 					});
 					const elapsed = Date.now() - startedAt;
 

@@ -72,7 +72,11 @@ export class YouShouldKnowFindingsTransport {
 	private readonly records = new Map<string, CapturedFinding>();
 	private readonly receiptMap = new Map<string, FindingReceipt>();
 	private readonly failures = new Map<string, string>();
-	constructor(private readonly opts: YskFindingsOptions) { this.sessionId = opts.sessionId; this.generation = opts.generation?.() ?? 0; }
+	// An explicit field, not a constructor parameter property: Node's type
+	// stripping (the Claude adapter runs this file under plain `node`) accepts
+	// only erasable syntax.
+	private readonly opts: YskFindingsOptions;
+	constructor(opts: YskFindingsOptions) { this.opts = opts; this.sessionId = opts.sessionId; this.generation = opts.generation?.() ?? 0; }
 	get state() { return { capability: this.capability, unsupported: this.unsupported, receipts: [...this.receiptMap.values()], failures: [...this.failures.entries()] }; }
 	private live() { return !this.disposed && !this.opts.signal?.aborted && this.opts.allowed() && (this.opts.generation?.() ?? 0) === this.generation; }
 	private report(message: string) { if (this.live()) { this.failures.set("last", message); this.opts.onFailure?.(message); } }

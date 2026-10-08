@@ -37,7 +37,15 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	// being able to name the one workers should use is a real capability, not
 	// only a test hook.
 	const override = process.env.PI_HOUSE_PI_BIN;
-	if (override) return { command: override, args };
+	if (override) {
+		// A JavaScript entry (the pinned harness's `pi` is a symlink to
+		// `dist/bundle/cli.js`, whose shebang is `#!/usr/bin/env node`) runs under
+		// THIS process's node. Executing it directly resolves `node` from PATH,
+		// which a Claude launch does not guarantee and which may be a different
+		// major than the one the harness pinned.
+		if (/\.(c|m)?js$/.test(realEntry(override))) return { command: process.execPath, args: [override, ...args] };
+		return { command: override, args };
+	}
 
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -52,6 +60,17 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	}
 
 	return { command: "pi", args };
+}
+
+/** The file a `pi` path finally names, through any symlinks; the path itself when it cannot be resolved. */
+function realEntry(file: string): string {
+	try {
+		return fs.realpathSync(file);
+	} catch {
+		// A missing binary is reported by the spawn that follows (ENOENT), with
+		// the path the caller configured — not here, as a resolution failure.
+		return file;
+	}
 }
 
 export interface OneShotResult {
@@ -79,6 +98,18 @@ export interface OneShotOptions {
 	 * existed — see goal.ts for what that cost.
 	 */
 	thinking?: string;
+	/**
+	 * Text appended to the child's system prompt. Written to a private temp
+	 * file and passed as `--append-system-prompt <file>`, like `runRoleAgent`'s
+	 * role prompt, so it never rides argv.
+	 */
+	appendSystemPrompt?: string;
+	/**
+	 * Files pi attaches to the prompt (`@<path>` positionals, before the
+	 * message). The route for anything large: Linux caps ONE argv string at
+	 * 128 KiB (MAX_ARG_STRLEN), and a transcript can be several times that.
+	 */
+	promptFiles?: string[];
 }
 
 /**
@@ -99,7 +130,18 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 	const args = ["--mode", "json", "-p", "--no-session", "--no-tools"];
 	if (options.model) args.push("--model", options.model);
 	if (options.thinking) args.push("--thinking", options.thinking);
+	let systemDir: string | null = null;
+	if (options.appendSystemPrompt?.trim()) {
+		systemDir = mkdtempSync(join(tmpdir(), "hive-pi-oneshot-"));
+		const file = join(systemDir, "system.md");
+		writeFileSync(file, options.appendSystemPrompt, { encoding: "utf8", mode: 0o600 });
+		args.push("--append-system-prompt", file);
+	}
+	for (const file of options.promptFiles ?? []) args.push(`@${file}`);
 	args.push(options.prompt);
+	const cleanup = () => {
+		if (systemDir) rmSync(systemDir, { recursive: true, force: true });
+	};
 
 	return new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
@@ -163,12 +205,14 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 
 		child.on("close", (code) => {
 			clearTimeout(timer);
+			cleanup();
 			if (buffer.trim()) processLine(buffer);
 			resolve({ text: texts.join("\n").trim(), tokens: budgetTokens(usage), usage, exitCode: code ?? 1, timedOut, stderr });
 		});
 
 		child.on("error", (err) => {
 			clearTimeout(timer);
+			cleanup();
 			resolve({ text: "", tokens: 0, usage: emptyUsage(), exitCode: 1, timedOut: false, stderr: String(err) });
 		});
 	});

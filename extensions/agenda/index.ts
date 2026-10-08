@@ -103,6 +103,7 @@ import {
 	MIN_TRANSCRIPT_CHARS,
 	sanitizeRecap,
 	type AgentStatusItem,
+	recapTranscript,
 } from "./recap.ts";
 import { classifyHandback } from "../hive-common/handback.ts";
 import { announceOwnWork } from "../hive-common/own-work.ts";
@@ -2303,33 +2304,11 @@ export function contextTreeEnvelope(
 }
 
 /**
- * Recent conversation text for the recap prompt, oldest first, capped from the
- * END. Mirrors the driver's transcript read — recency is what a one-line
- * summary is about.
+ * Recent conversation text for the recap prompt — moved to recap.ts so the
+ * Claude adapter folds a Claude transcript through the same function.
+ * Re-exported for the callers and tests that import it from here.
  */
-export function recapTranscript(branch: readonly unknown[], maxChars = 12_000): string {
-	const lines: string[] = [];
-	for (const raw of branch) {
-		const entry = raw as { message?: { role?: string; content?: unknown } };
-		const role = entry?.message?.role;
-		if (role !== "assistant" && role !== "user" && role !== "toolResult") continue;
-		const content = entry.message?.content;
-		let text = "";
-		if (typeof content === "string") text = content;
-		else if (Array.isArray(content)) {
-			text = content
-				.filter((part): part is { type: string; text: string } => {
-					const p = part as { type?: string; text?: unknown };
-					return p?.type === "text" && typeof p.text === "string";
-				})
-				.map((part) => part.text)
-				.join("\n");
-		}
-		if (text.trim()) lines.push(`[${role}] ${text}`);
-	}
-	const joined = lines.join("\n\n");
-	return joined.length > maxChars ? joined.slice(-maxChars) : joined;
-}
+export { recapTranscript };
 
 /** Re-exported for tests that assert on the ledger without reaching through the driver. */
 export { count };

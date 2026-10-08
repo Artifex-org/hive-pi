@@ -111,3 +111,36 @@ export function validateAgentStatus(data: unknown): AgentStatusItem | null {
 		at: typeof record.at === "number" ? record.at : 0,
 	};
 }
+
+/**
+ * Recent conversation as plain text, oldest first, capped from the END —
+ * recency is what a one-line summary (and a judge's verdict) is about.
+ *
+ * ONE fold for every reader: the recap uses the default 12k, the agenda
+ * driver's policies 16k, and the Claude adapter feeds it a Claude transcript
+ * normalised to pi's entry shape (`claude/transcript.ts`). It reads only
+ * `entry.message.{role,content}`; user, assistant and tool-result text count.
+ */
+export function recapTranscript(branch: readonly unknown[], maxChars = 12_000): string {
+	const lines: string[] = [];
+	for (const raw of branch) {
+		const entry = raw as { message?: { role?: string; content?: unknown } };
+		const role = entry?.message?.role;
+		if (role !== "assistant" && role !== "user" && role !== "toolResult") continue;
+		const content = entry.message?.content;
+		let text = "";
+		if (typeof content === "string") text = content;
+		else if (Array.isArray(content)) {
+			text = content
+				.filter((part): part is { type: string; text: string } => {
+					const p = part as { type?: string; text?: unknown };
+					return p?.type === "text" && typeof p.text === "string";
+				})
+				.map((part) => part.text)
+				.join("\n");
+		}
+		if (text.trim()) lines.push(`[${role}] ${text}`);
+	}
+	const joined = lines.join("\n\n");
+	return joined.length > maxChars ? joined.slice(-maxChars) : joined;
+}
