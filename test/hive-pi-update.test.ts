@@ -175,7 +175,8 @@ describe("hive-pi-update", () => {
 		runUpdater(home, bin);
 		const calls = readFileSync(log, "utf8");
 		expect(calls).toContain(`npm --prefix ${repo} ci --ignore-scripts --no-audit --no-fund`);
-		expect(calls).toContain(`npm --prefix ${repo} run check`);
+		expect(calls).toContain(`npm --prefix ${repo} run typecheck`);
+		expect(calls).not.toContain(`npm --prefix ${repo} run check`);
 		expect(calls).toContain("pi update --extensions");
 		expect(calls).toContain(`stow --restow --no-folding -d ${repo} -t ${home} workstation`);
 		expect(readFileSync(join(home, "state/hive-pi-update/last-run"), "utf8")).toContain("activated");

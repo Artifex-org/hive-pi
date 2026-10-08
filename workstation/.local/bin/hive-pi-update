@@ -90,7 +90,8 @@ clear_stale_index_lock() {
   gitdir="$(git -C "${repo}" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
   lock="${gitdir}/index.lock"
   [[ -f "${lock}" ]] || return 0
-  age=$(( $(date +%s) - $(stat -c %Y "${lock}") ))
+  # GNU stat first, BSD (macOS) second: `-c` is an illegal option there.
+  age=$(( $(date +%s) - $(stat -c %Y "${lock}" 2>/dev/null || stat -f %m "${lock}") ))
   if (( age < STALE_LOCK_AFTER_S )); then
     echo "index.lock is ${age}s old — assuming a live git operation, leaving it" >&2
     return 0
@@ -299,7 +300,15 @@ fi
 # measured 2026-10-06), which wedged the whole run. --no-fund drops the other
 # advisory request.
 npm --prefix "${repo}" ci --ignore-scripts --no-audit --no-fund
-npm --prefix "${repo}" run check
+# Typecheck, NOT `npm run check`: the vitest suite is the repo's gate
+# (.github/workflows/check.yml runs it on every push to main), not this
+# machine's. Re-running it here measured badly on 2026-10-08 on a macOS
+# workstation: 4,744 tests every 15 minutes, 56 of them failing — Linux-only PTY
+# tests and 5 s timeouts under the load the suite itself created — so activation
+# never happened and the harness sat on a revision from the day before while
+# main's own check was green. What this machine can break is its installed
+# dependency tree, and the typecheck is the part of the gate that sees that.
+npm --prefix "${repo}" run typecheck
 
 # The hive-pi source intentionally has no @ref, so this advances only it;
 # the other extension sources in settings.json remain version-pinned.
