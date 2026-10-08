@@ -54,6 +54,14 @@ case where one predates this change and its harness state is *unknown* rather th
 Each trial: a clean `node:22.19.0` container, the pinned pi installed, `pi -p --mode json`
 against the task's `fixture/`, then `grade.sh` — **its exit code is the verdict**.
 
+## Shared-prefix cache measurement
+
+See [the controlled experiment protocol](prefix-cache-measurement.md). Current
+task evals record cache/cost/wall metrics but do not isolate prefix sharing,
+parallel launch or native warming. No live measurements or new caching behavior
+are implied by that protocol or the offline worker replay tests. Paid runs need
+an approved provider/model and budget.
+
 ## What is enforced in code rather than written down
 
 | Rule | Where |
