@@ -47,6 +47,9 @@ export const AGENT_PAUSED_MESSAGE =
   "The operator has taken control of this browser from Hive's live view. Wait for them to release it, or ask in chat.";
 
 export type SurfaceView = "agent" | "operator";
+/** Any character that is not a C0 control or DEL: text that could be a secret. */
+const PRINTABLE = /[^\u0000-\u001f\u007f]/;
+
 export type SurfaceCommandError = "password_field" | "invalid" | "failed" | "no_operator_tab" | "no_lease";
 
 export interface SurfaceLease {
@@ -841,7 +844,10 @@ export class BrowserSurfaceBridge {
         return null;
       }
       case "key":
-        if (command.text) await this.refuseIntoPassword(target);
+        // Control characters (Enter's "\r", Tab, Backspace) submit or edit; they
+        // are not secret text, and refusing them would block submitting a
+        // login form with Enter.
+        if (command.text && PRINTABLE.test(command.text)) await this.refuseIntoPassword(target);
         await target.cdp.send("Input.dispatchKeyEvent", {
           type: command.event_type as KeyEventType,
           key: command.key ?? "",

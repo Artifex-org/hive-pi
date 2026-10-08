@@ -237,7 +237,9 @@ describe.skipIf(!enabled)("browser surface FIFO integration", () => {
 		expect(await run({ kind: "insert_text", text: "secret" })).toMatchObject({ ok: false, error: "password_field" });
 		expect(await run({ kind: "key", event_type: "keyDown", key: "s", code: "KeyS", text: "s" })).toMatchObject({ ok: false, error: "password_field" });
 		expect(await run({ kind: "key", event_type: "char", key: "s", text: "s" })).toMatchObject({ ok: false, error: "password_field" });
-		// A key without text (a modifier, an arrow) is not text entry.
+		// A key without text (a modifier, an arrow) is not text entry, and nor is
+		// a control character: Enter must still submit a login form.
+		expect(await run({ kind: "key", event_type: "keyDown", key: "Enter", code: "Enter", text: "\r" })).toMatchObject({ ok: true });
 		expect(await run({ kind: "key", event_type: "keyDown", key: "Shift", code: "ShiftLeft" })).toMatchObject({ ok: true });
 		expect(await run({ kind: "key", event_type: "keyUp", key: "Shift", code: "ShiftLeft" })).toMatchObject({ ok: true });
 		expect(await page.inputValue("#p")).toBe("");
@@ -292,6 +294,8 @@ describe.skipIf(!enabled)("browser surface FIFO integration", () => {
 			() => browser.type({ selector: "#t", value: "agent" }),
 			() => browser.evaluate({ expression: "1 + 1" }),
 			() => browser.waitFor({ selector: "#t" }),
+			// The flow tools reach the page through page(): a flow is the agent too.
+			() => browser.page(),
 		]) {
 			await expect(call()).rejects.toThrow(AGENT_PAUSED_MESSAGE);
 		}

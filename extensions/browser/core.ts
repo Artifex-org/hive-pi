@@ -321,8 +321,13 @@ export class SessionBrowser {
 		return this.state?.pid ?? null;
 	}
 
+	/**
+	 * The page, for the flow tools (a recorded or saved Playwright flow): as
+	 * much the agent driving the page as a browser tool is, so it is refused
+	 * while an operator has taken over, like the tools are.
+	 */
 	async page(): Promise<Page> {
-		return (await this.ensure()).page;
+		return (await this.control()).page;
 	}
 
 	private async ensure(): Promise<BrowserState> {
