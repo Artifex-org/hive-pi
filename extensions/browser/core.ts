@@ -210,50 +210,68 @@ export interface SessionBrowserOptions {
 	onAction?: (action: RecordedAction) => void;
 	/** Called once per launched browser. */
 	onLaunch?: () => void;
+	/** Where the live view reports a dropped frame (default: console.warn). */
+	log?: (line: string) => void;
 }
 
 /** The binaries Playwright launches as Chromium (the headless shell, or a full build). */
 const CHROMIUM_BINARY = /^(chrome|chrome-headless-shell|headless_shell|chromium)$/;
 
-/**
- * Chromium processes whose parent is this process and that lead their own
- * group (Linux /proc) — the browser Playwright spawned, and not a helper
- * group this process started meanwhile (the adapter's workers lead groups
- * too). Matched on the binary (`/proc/<pid>/exe`): Chromium rewrites its
- * argv, and `executablePath()` names the full build, not the headless shell.
- */
-function ownChromiumLeaders(): Set<number> {
-	const leaders = new Set<number>();
+interface ProcessInfo {
+	pid: number;
+	ppid: number;
+	pgrp: number;
+	chromium: boolean;
+}
+
+/** Every process /proc lists (Linux; empty elsewhere), with whether it runs a Chromium binary. */
+function processes(): ProcessInfo[] {
 	let entries: string[];
 	try {
 		entries = fs.readdirSync("/proc");
 	} catch {
-		return leaders;
+		return [];
 	}
+	const found: ProcessInfo[] = [];
 	for (const entry of entries) {
 		if (!/^\d+$/.test(entry)) continue;
 		try {
 			const stat = fs.readFileSync(`/proc/${entry}/stat`, "utf8");
 			// pid (comm) state ppid pgrp … — comm may hold spaces, so split after ")".
 			const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-			const pid = Number(entry);
-			if (Number(fields[1]) !== process.pid || Number(fields[2]) !== pid) continue;
-			if (CHROMIUM_BINARY.test(path.basename(fs.readlinkSync(`/proc/${entry}/exe`)))) leaders.add(pid);
+			let chromium = false;
+			try {
+				chromium = CHROMIUM_BINARY.test(path.basename(fs.readlinkSync(`/proc/${entry}/exe`)));
+			} catch {
+				// Another user's process, or a zombie: its binary is unreadable.
+			}
+			found.push({ pid: Number(entry), ppid: Number(fields[1]), pgrp: Number(fields[2]), chromium });
 		} catch {
 			// The process exited between readdir and read.
 		}
 	}
-	return leaders;
+	return found;
 }
 
-/** True while any process is still in process group `pgid`. */
-export function processGroupAlive(pgid: number): boolean {
-	try {
-		process.kill(-pgid, 0);
-		return true;
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "EPERM";
-	}
+/**
+ * Chromium processes whose parent is this process and that lead their own
+ * group — the browser Playwright spawned, and not a helper group this
+ * process started meanwhile (the adapter's workers lead groups too). Matched
+ * on the binary (`/proc/<pid>/exe`): Chromium rewrites its argv, and
+ * `executablePath()` names the full build, not the headless shell.
+ */
+function ownChromiumLeaders(): Set<number> {
+	return new Set(processes().filter((p) => p.chromium && p.ppid === process.pid && p.pgrp === p.pid).map((p) => p.pid));
+}
+
+/**
+ * True while process group `pgid` still holds a Chromium process — checked
+ * before killing it. The kernel does not reuse a pid while a group of that id
+ * has members, so a group with Chromium in it is still the browser's; a
+ * group that emptied and whose id now names something else is left alone.
+ */
+function groupHoldsChromium(pgid: number): boolean {
+	return processes().some((p) => p.pgrp === pgid && p.chromium);
 }
 
 /**
@@ -270,7 +288,7 @@ async function closeBrowser(s: Pick<BrowserState, "browser" | "surface" | "pid">
 		}),
 	]);
 	clearTimeout(timer);
-	if (s.pid !== null && processGroupAlive(s.pid)) {
+	if (s.pid !== null && groupHoldsChromium(s.pid)) {
 		try {
 			process.kill(-s.pid, "SIGKILL");
 		} catch {
@@ -371,7 +389,7 @@ export class SessionBrowser {
 			ring.push(`[pageerror] ${err.message}`);
 			if (ring.length > CONSOLE_RING_MAX) ring.shift();
 		});
-		const surface = await BrowserSurfaceBridge.start(page, env);
+		const surface = await BrowserSurfaceBridge.start(page, env, this.options.log);
 		return { browser, context, page, console: ring, surface, pid };
 	}
 

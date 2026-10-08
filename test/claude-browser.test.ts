@@ -13,14 +13,14 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { BROWSER_TOOL_NAMES, BROWSER_TOOLS, checkArgs } from "../claude/mcp/browser-tools.ts";
+import { BROWSER_TOOL_NAMES, BROWSER_TOOLS, BrowserTools, checkArgs } from "../claude/mcp/browser-tools.ts";
 import { browserInstallCommand, describeLaunchError, SessionBrowser } from "../extensions/browser/core.ts";
 import browserExtension from "../extensions/browser/index.ts";
 import { makeLaunch, McpClient, REPO, startFakeHive, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
@@ -34,6 +34,22 @@ const BROWSER_INSTALLED = HEADLESS_REVISION !== undefined && existsSync(join(BRO
 if (!BROWSER_INSTALLED) {
 	console.warn(`claude-browser: real-browser cases skipped — chromium-headless-shell-${HEADLESS_REVISION} is not installed; run \`${browserInstallCommand()}\``);
 }
+
+/**
+ * The environment an in-process browser gets: never this test process's own,
+ * which may be a Hive launch whose live-view dir must not be written to.
+ */
+const CLEAN_ENV: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: homedir(), PLAYWRIGHT_BROWSERS_PATH: BROWSERS_PATH };
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("the browser prerequisite", () => {
+	// CI installs the headless shell (.github/workflows/check.yml); a skip
+	// there would hide every real-browser case.
+	it.runIf(Boolean(process.env.CI))("is installed on CI", () => {
+		expect(BROWSER_INSTALLED, `chromium-headless-shell-${HEADLESS_REVISION} is missing; CI must run \`${browserInstallCommand()}\``).toBe(true);
+	});
+});
 
 describe("browser tool definitions", () => {
 	it("lists pi's browser and flow tools with object JSON schemas whose required keys exist", () => {
@@ -238,7 +254,7 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		const { spawn } = await import("node:child_process");
 		const decoy = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
 		const { chromium } = await import("playwright-core");
-		const browser = new SessionBrowser({ chromium: async () => chromium, env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: BROWSERS_PATH }, handleSignals: false });
+		const browser = new SessionBrowser({ chromium: async () => chromium, env: CLEAN_ENV, handleSignals: false });
 		try {
 			await browser.navigate({ url: `${base}/` });
 			const pid = browser.pid as number;
@@ -250,6 +266,121 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		} finally {
 			decoy.kill("SIGKILL");
 		}
+	}, 60_000);
+
+	it("never runs a call cancelled while queued; a running call cancelled closes the browser, and the next call relaunches", async () => {
+		const c = await connect(launch.env);
+		await c.call("browser_navigate", { url: `${base}/` });
+		const slow = c.send("tools/call", { name: "browser_evaluate", arguments: { expression: "new Promise((r) => setTimeout(() => r('slow done'), 1500))" } });
+		const queued = c.send("tools/call", { name: "browser_type", arguments: { selector: "input", value: "never typed" } });
+		c.notify("notifications/cancelled", { requestId: queued.id });
+		// browser_console reads the buffer: it does not wait behind the page queue.
+		const consoleStarted = Date.now();
+		await c.call("browser_console");
+		expect(Date.now() - consoleStarted).toBeLessThan(1_000);
+		const slowAnswer = (await slow.answer).result?.content as { text: string }[];
+		expect(slowAnswer[0].text).toBe('"slow done"');
+		expect((await c.call("browser_evaluate", { expression: "document.querySelector('input').value" })).text).toBe('""');
+
+		const leader = browserLeader(c.child.pid as number) as number;
+		const stuck = c.send("tools/call", { name: "browser_evaluate", arguments: { expression: "(() => { for (;;) {} })()" } });
+		await sleep(500);
+		c.notify("notifications/cancelled", { requestId: stuck.id });
+		const after = await c.call("browser_navigate", { url: `${base}/` });
+		expect(after.isError).toBe(false);
+		expect(after.text).toContain('heading "Claude Browser Heading"');
+		// A fresh browser: the stuck one's group is gone.
+		expect(groupMembers(leader)).toEqual([]);
+		expect(browserLeader(c.child.pid as number)).not.toBe(leader);
+	}, 60_000);
+
+	it("closes the browser when a call holds the page past its bound, and relaunches on the next call", async () => {
+		const tools = new BrowserTools({}, () => {}, CLEAN_ENV, { pageBoundMs: (name) => (name === "browser_evaluate" ? 1_000 : 30_000) });
+		const signal = new AbortController().signal;
+		try {
+			await tools.call("browser_navigate", { url: `${base}/` }, signal);
+			await expect(tools.call("browser_evaluate", { expression: "(() => { for (;;) {} })()" }, signal)).rejects.toThrow(
+				"browser_evaluate did not finish within 1 s; the session browser was closed and relaunches on the next call.",
+			);
+			const next = await tools.call("browser_snapshot", {}, signal);
+			expect(next.text).toContain("url: about:blank");
+		} finally {
+			await tools.stop();
+		}
+	}, 60_000);
+
+	it("runs a claimed saved flow in its turn on the page, never alongside a tool call", async () => {
+		hive.flowClaims = [];
+		const c = await connect(launch.env);
+		await c.call("browser_navigate", { url: `${base}/` });
+		const slow = c.send("tools/call", {
+			name: "browser_evaluate",
+			arguments: { expression: "new Promise((r) => setTimeout(() => { window.order = (window.order || []).concat('tool'); r(1); }, 3000))" },
+		});
+		// The claim loop polls every 2 s, so this run is claimed while the tool call holds the page.
+		hive.flowClaims.push({
+			run: { id: "run-1", format: "playwright", source: "await page.evaluate(() => { window.order = (window.order || []).concat('flow'); });" },
+			claim_token: "claim-1",
+			connection_url: base,
+		});
+		await slow.answer;
+		const complete = await waitFor(() => hive.requests.find((r) => r.path === "/api/v1/agent-sessions/srv-uuid-1/flow-runs/run-1/complete"), 15_000, "the claimed run to complete");
+		expect(complete.body).toMatchObject({ claim_token: "claim-1", state: "succeeded" });
+		expect(JSON.parse((await c.call("browser_evaluate", { expression: "window.order" })).text)).toEqual(["tool", "flow"]);
+	}, 60_000);
+
+	it("on SIGTERM ends the dev-server report and the surface row, and leaves no Chromium", async () => {
+		const launchId = randomUUID();
+		const dir = join(launch.root, ".hive", "scratch", "launch", "browser");
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		execFileSync("mkfifo", ["-m", "600", join(dir, "frames.fifo"), join(dir, "control.fifo")]);
+		const c = await connect({
+			...launch.env,
+			HIVE_LAUNCH_ID: launchId,
+			HIVE_BROWSER_SURFACE_DIR: dir,
+			HIVE_BROWSER_FRAME_FIFO: join(dir, "frames.fifo"),
+			HIVE_BROWSER_CONTROL_FIFO: join(dir, "control.fifo"),
+			HIVE_BROWSER_SURFACE_MANIFEST: join(dir, "manifest.json"),
+		});
+		expect((await c.call("report_dev_server", { base_url: base })).text).toContain(`Reporting dev-server at ${base}`);
+		await c.call("browser_navigate", { url: `${base}/` });
+		const surface = `/api/v1/agent-sessions/srv-uuid-1/surfaces/${launchId}`;
+		await waitFor(() => hive.requests.find((r) => r.method === "PUT" && r.path === surface), 15_000, "the surface row");
+		const leader = browserLeader(c.child.pid as number) as number;
+
+		c.child.kill("SIGTERM");
+		expect(await c.exited).toBe(0);
+		client = undefined;
+		const devServer = hive.requests.filter((r) => r.path === "/api/v1/agent-sessions/srv-uuid-1/resources/dev-server").map((r) => (r.body as { state: string }).state);
+		expect(devServer.at(-1)).toBe("ended");
+		expect(hive.requests.filter((r) => r.method === "PUT" && r.path === surface).at(-1)?.body).toMatchObject({ state: "ended", ttl_seconds: 0 });
+		expect((JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as { state: string }).state).toBe("ended");
+		await waitFor(() => groupMembers(leader).length === 0, 10_000, "the browser's process group to exit");
+	}, 60_000);
+
+	it("drops a live-view frame it cannot write, says why once, and keeps serving", async () => {
+		const dir = join(launch.root, ".hive", "scratch", "launch", "browser");
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		execFileSync("mkfifo", ["-m", "600", join(dir, "frames.fifo"), join(dir, "control.fifo")]);
+		const c = await connect({
+			...launch.env,
+			HIVE_LAUNCH_ID: randomUUID(),
+			HIVE_BROWSER_SURFACE_DIR: dir,
+			HIVE_BROWSER_FRAME_FIFO: join(dir, "frames.fifo"),
+			HIVE_BROWSER_CONTROL_FIFO: join(dir, "control.fifo"),
+			HIVE_BROWSER_SURFACE_MANIFEST: join(dir, "manifest.json"),
+		});
+		await c.call("browser_navigate", { url: `${base}/` });
+		// The scratch dir is removed under the running browser.
+		rmSync(dir, { recursive: true, force: true });
+		for (const page of ["/next", "/", "/next"]) {
+			await sleep(2_100);
+			await c.call("browser_navigate", { url: `${base}${page}` });
+		}
+		await waitFor(() => c.stderr.includes("browser live view: dropped a frame"), 10_000, "the dropped-frame line");
+		expect((await c.request("ping")).result).toEqual({});
+		expect(c.stderr.split("browser live view: dropped a frame").length - 1).toBe(1);
+		expect(c.stderr).toContain("ENOENT");
 	}, 60_000);
 
 	it("records a Playwright flow from the browser tools and replays it", async () => {
