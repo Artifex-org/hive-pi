@@ -67,7 +67,7 @@ const MAX_ANSWER_CHARS = 64 * 1024;
  * is refused rather than guessed at: picking one of two candidates is exactly
  * the kind of silent wrong answer this module exists to prevent.
  */
-function extractJsonObject(text: string): string | null {
+export function extractJsonObject(text: string): string | null {
 	const trimmed = text.trim();
 	if (!trimmed) return null;
 

@@ -23,6 +23,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { treeStamp } from "../harness/verify.ts";
+import { killTree, trackTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
 import { repoRoot } from "../hive-common/git.ts";
 import { atCap, clear, record, remaining } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
@@ -101,12 +102,14 @@ export function runCheck(command: string, cwd: string, timeoutMs: number): Promi
 		// `-c`, not `-lc`: a login shell on Debian resets PATH from /etc/profile,
 		// so the gate would run without the tools the session itself has
 		// (see the background extension's spawn for the measurement).
-		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const tree = treeSpawnOptions();
+		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], ...tree });
+		trackTree(child, tree.detached);
 		let out = "";
 		let timedOut = false;
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree(child, "SIGKILL", tree.detached);
 		}, timeoutMs);
 		const collect = (d: Buffer) => {
 			out += d.toString();
@@ -147,7 +150,18 @@ export interface GateStampStore {
 	set(id: string, stamp: string | undefined): void;
 }
 
-export function createGatePolicy(stamps?: GateStampStore): Policy {
+export interface GatePolicyOptions {
+	/**
+	 * A ceiling on the check's timeout, read when the check starts. A host
+	 * whose settle has a hard wall clock (the Claude adapter's Stop hook)
+	 * passes what is left of it; absent, the repo's own `checkTimeoutMs` (or
+	 * the default) stands, which is pi's behaviour. A check the cap cuts short
+	 * reports `skip` — never "TIMED OUT", which would blame the repo.
+	 */
+	timeoutCapMs?: () => number;
+}
+
+export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOptions = {}): Policy {
 	return {
 	name: "verification-loop",
 	// A red gate is worth hearing while the agent waits on its own CI watcher;
@@ -206,8 +220,18 @@ export function createGatePolicy(stamps?: GateStampStore): Policy {
 				}
 
 				const startedAt = Date.now();
-				const result = await runCheck(command, root, timeoutMs);
+				const cap = options.timeoutCapMs?.();
+				const effectiveTimeoutMs = cap === undefined ? timeoutMs : Math.max(0, Math.min(timeoutMs, cap));
+				const result = await runCheck(command, root, effectiveTimeoutMs);
 				const elapsed = Date.now() - startedAt;
+
+				// Cut short by the HOST's wall clock, not the repo's own timeout: the
+				// check never reached a verdict, so this is a gate that could not
+				// run — reported as a skip, with no injection, no charge and no
+				// failure stamp (the same tree must be checked again next settle).
+				if (result.timedOut && effectiveTimeoutMs < timeoutMs) {
+					return { metric: { outcome: "skip", value: elapsed } };
+				}
 
 				if (result.ok) {
 					stamps?.set(id, undefined);

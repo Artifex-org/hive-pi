@@ -15,7 +15,8 @@
  * toolchain's own gofmt is the install.
  */
 
-import { dirname, extname, join } from "node:path";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { delimiter, dirname, extname, join } from "node:path";
 
 /** The filesystem questions detection asks — injectable for tests. */
 export interface Probe {
@@ -400,4 +401,36 @@ export function planFor(file: string, probe: Probe): Plan {
 	if (ext === ".py" || ext === ".pyi") return planPython(file, dirs, probe);
 	if (ext === ".go") return planGo(file, dirs, probe);
 	return planJs(file, dirs, root, probe);
+}
+
+/** The real filesystem, for `detect.ts`. */
+export const realProbe: Probe = {
+	read(path) {
+		try {
+			return readFileSync(path, "utf8");
+		} catch {
+			return null;
+		}
+	},
+	exists(path) {
+		return existsSync(path);
+	},
+	which(name) {
+		for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+			if (!dir) continue;
+			const candidate = join(dir, name);
+			try {
+				accessSync(candidate, constants.X_OK);
+				if (statSync(candidate).isFile()) return candidate;
+			} catch {
+				/* not here, or not runnable */
+			}
+		}
+		return null;
+	},
+};
+
+/** `PI_FORMAT_ON_EDIT=0` opts out — in pi and in the Claude adapter alike. */
+export function disabled(env: Record<string, string | undefined>): boolean {
+	return env.PI_FORMAT_ON_EDIT === "0";
 }

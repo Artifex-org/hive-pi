@@ -25,14 +25,14 @@
  *     discarded repo facts that had already been established.
  */
 
-import { discoverAgents, resolveAgent, type AgentConfig } from "../harness/roles.ts";
+import { discoverAgentsWith, resolveAgent, type AgentConfig, type RolesRuntime } from "../harness/roles-core.ts";
 import { runRoleAgent } from "../agenda/spawn.ts";
 import { WORKER_BUILTIN_MCP_EXTENSIONS, workerExtensionPaths, workerNeedsMcp } from "../subagent/worker.ts";
 import { addTotals, emptyUsage, type Usage } from "../harness/usage.ts";
 import { parseBriefDraft, draftIsEmpty, type BriefDraft } from "./compile.ts";
 import { laneInstruction, laneIsRunnable, laneTools, mergeDrafts, planLanes, type BriefLane, type LaneDraft } from "./lanes.ts";
 import { collectProvenance } from "./provenance.ts";
-import { resolveBriefModel } from "./model.ts";
+import { resolveBriefModel, type BriefModelHost } from "./model.ts";
 import { ticketKeys } from "./detect.ts";
 
 export const BRIEFER_ROLE = "briefer";
@@ -44,6 +44,10 @@ export interface RunBriefOptions {
 	timeoutMs: number;
 	/** Overrides the role's own model pin. */
 	model?: string;
+	/** The pi whose role files are read — `PI_ROLES_RUNTIME` inside pi. */
+	roles: RolesRuntime;
+	/** How the catalog is read and narrowed; absent is this machine's auth, unnarrowed. */
+	modelHost?: BriefModelHost;
 	signal?: AbortSignal;
 	/**
 	 * Called as each lane SETTLES, so a caller can report progress while the
@@ -62,6 +66,8 @@ export interface BriefLaneOutcome {
 	timedOut: boolean;
 	elapsedMs: number;
 	usage: Usage | null;
+	/** Model calls the lane's worker made; 0 when it never ran. */
+	turns: number;
 }
 
 export interface BriefRunResult {
@@ -113,14 +119,14 @@ export async function runBriefer(options: RunBriefOptions): Promise<BriefRunResu
 		timedOut: lanes.length > 0 && lanes.every((l) => l.timedOut),
 	});
 
-	const { agents } = discoverAgents(options.cwd, "user");
+	const { agents } = discoverAgentsWith(options.cwd, "user", options.roles);
 	const role = resolveAgent(agents, BRIEFER_ROLE);
 	if (!role) return empty(`role "${BRIEFER_ROLE}" is not installed`);
 
 	// The fleet's cheap tier, or nothing. Standing down is the correct outcome
 	// when no cheap model resolves — see model.ts for why running the brief on
 	// whatever the session happens to be using is worse than not running it.
-	const pick = await resolveBriefModel(options.model, role.model);
+	const pick = await resolveBriefModel(options.model, role.model, options.modelHost);
 	if (!pick) return empty("no cheap model resolvable (no Hive catalog, no role pin, no PI_BRIEF_MODEL)");
 	const model = pick.spec;
 	const modelSource = pick.source;
@@ -179,8 +185,8 @@ interface LaneRun {
 
 async function runLane(lane: BriefLane, role: AgentConfig, model: string, keys: string[], options: RunBriefOptions): Promise<LaneRun> {
 	const startedAtMs = Date.now();
-	const fail = (failure: string, timedOut = false, usage: Usage | null = null): LaneRun => ({
-		outcome: { lane, ok: false, failure, timedOut, elapsedMs: Date.now() - startedAtMs, usage },
+	const fail = (failure: string, timedOut = false, usage: Usage | null = null, turns = 0): LaneRun => ({
+		outcome: { lane, ok: false, failure, timedOut, elapsedMs: Date.now() - startedAtMs, usage, turns },
 		draft: null,
 	});
 
@@ -207,18 +213,18 @@ async function runLane(lane: BriefLane, role: AgentConfig, model: string, keys: 
 		return fail(`briefer lane crashed: ${String(err)}`);
 	}
 
-	if (result.timedOut) return fail(`timed out after ${options.timeoutMs}ms`, true, result.usage);
+	if (result.timedOut) return fail(`timed out after ${options.timeoutMs}ms`, true, result.usage, result.turns);
 	if (result.exitCode !== 0) {
 		const detail = result.stderr.trim().split("\n").at(-1) ?? "";
-		return fail(`exited ${result.exitCode}${detail ? `: ${detail}` : ""}`, false, result.usage);
+		return fail(`exited ${result.exitCode}${detail ? `: ${detail}` : ""}`, false, result.usage, result.turns);
 	}
 
 	const draft = parseBriefDraft(result.text);
-	if (!draft) return fail("returned no parseable json", false, result.usage);
-	if (draftIsEmpty(draft)) return fail("found nothing", false, result.usage);
+	if (!draft) return fail("returned no parseable json", false, result.usage, result.turns);
+	if (draftIsEmpty(draft)) return fail("found nothing", false, result.usage, result.turns);
 
 	return {
-		outcome: { lane, ok: true, failure: "", timedOut: false, elapsedMs: Date.now() - startedAtMs, usage: result.usage },
+		outcome: { lane, ok: true, failure: "", timedOut: false, elapsedMs: Date.now() - startedAtMs, usage: result.usage, turns: result.turns },
 		draft,
 	};
 }

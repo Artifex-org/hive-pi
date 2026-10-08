@@ -35,7 +35,6 @@ import { looksUnverifiable, parseGoalCommand } from "./goal-command.ts";
 import { buildHandoffSeed, captureHandoffOrigin, legacyHandoffPath, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
 import {
 	createGoal,
-	reviseGoal,
 	GOAL_ENTRY_TYPE,
 	type GoalItem,
 	type GoalOutcome,
@@ -46,6 +45,7 @@ import {
 import { branchEntries } from "../session-branch/branch.ts";
 import { createAskPolicy } from "./ask.ts";
 import { createGoalPolicy } from "./goal.ts";
+import { describeGoal, formatElapsed, goalSetDecision } from "./goal-tool.ts";
 import { count } from "./ledger.ts";
 import {
 	DEFAULT_LOOP_PROMPT,
@@ -103,6 +103,7 @@ import {
 	MIN_TRANSCRIPT_CHARS,
 	sanitizeRecap,
 	type AgentStatusItem,
+	recapTranscript,
 } from "./recap.ts";
 import { classifyHandback } from "../hive-common/handback.ts";
 import { announceOwnWork } from "../hive-common/own-work.ts";
@@ -1023,87 +1024,20 @@ export default function (pi: ExtensionAPI) {
 			if (IS_WORKER) {
 				return { content: [{ type: "text", text: "goal_set is inert inside a worker process." }], details: null };
 			}
-			const condition = params.condition.trim();
-			if (!condition) {
-				return { content: [{ type: "text", text: "goal_set needs a condition." }], details: null, isError: true };
-			}
-			if (goal && !isTerminal(goal.state) && !params.replace) {
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`A goal is already active: "${goal.condition}". If this is the SAME task and the ` +
-								`condition has simply moved on — a new sha, a renamed check — call goal_set again with ` +
-								`\`replace: true\`: the old condition is recorded and the budget keeps counting. ` +
-								`If it is different work, finish this one or ask the user for \`/goal clear\`.`,
-						},
-					],
-					details: null,
-					isError: true,
-				};
-			}
-			if (looksUnverifiable(condition)) {
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								"This condition names nothing machine-checkable, so the judge could only grade your own " +
-								"self-report. Restate it with a command, a path, or a count — e.g. " +
-								'"PR created and `gh pr checks` exits 0" or "0 errors from the repo gate".',
-						},
-					],
-					details: null,
-					isError: true,
-				};
-			}
 			const now = Date.now();
-			// A REVISION, not a new goal: same id, same ledger, one more entry in
-			// the trail. Handled here rather than by clearing and re-setting,
-			// because clearing is what resets the budget and that is exactly the
-			// escape hatch this must not open.
-			if (goal && !isTerminal(goal.state) && params.replace) {
-				// Captured BEFORE persist, which reassigns `goal` — without this the
-				// "Was:" line prints the new condition and the message quietly
-				// asserts that nothing changed. (A test caught exactly that.)
-				const previous = goal.condition;
-				const revised = reviseGoal(goal, condition, now);
-				persist(revised);
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`Goal revised: ${condition}\nWas: ${previous}\n` +
-								`Iterations and budget carry over — a revision does not buy fresh ones.`,
-						},
-					],
-					details: { condition, ...lifecycleEnvelope(conductor?.stage ?? "execute", revised) },
-				};
-			}
-			idCounter++;
-			const next = createGoal(`goal-${now.toString(36)}-${idCounter}`, condition, now, {
-				budget: {
-					tokens: params.tokens ?? 300_000,
-					...(params.hours ? { wallClockMs: Math.round(params.hours * 3_600_000) } : {}),
-				},
+			const decision = goalSetDecision(goal, params, now, () => {
+				idCounter++;
+				return `goal-${now.toString(36)}-${idCounter}`;
 			});
-			persist(next);
-			// No sendMessage kick: the model is already mid-turn — it set the goal
-			// itself and continues under it. The evaluator engages on settle.
+			if (!decision.ok) return { content: [{ type: "text", text: decision.text }], details: null, isError: true };
+			persist(decision.goal);
+			// No sendMessage kick on a new goal: the model is already mid-turn — it
+			// set the goal itself and continues under it. The evaluator engages on
+			// settle. The envelope makes the goal legible in the Hive agents
+			// workspace; the terminal renders from the text, unchanged.
 			return {
-				content: [
-					{
-						type: "text",
-						text:
-							`Goal set: ${condition}\nThe evaluator runs only when Pi becomes idle (agent_settled); ` +
-							"it does not evaluate active or interrupted tool chains. The user can stop it with /goal clear.",
-					},
-				],
-				// The envelope makes the goal legible in the Hive agents workspace;
-				// the terminal renders from the text above, unchanged.
-				details: { condition, ...lifecycleEnvelope(conductor?.stage ?? "execute", next) },
+				content: [{ type: "text", text: decision.text }],
+				details: { condition: decision.goal.condition, ...lifecycleEnvelope(conductor?.stage ?? "execute", decision.goal) },
 			};
 		},
 	});
@@ -2197,52 +2131,6 @@ export function describeLoop(loop: LoopItem | null, now: number): string {
 	return lines.join("\n");
 }
 
-function formatElapsed(ms: number): string {
-	const seconds = Math.floor(ms / 1000);
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	if (minutes < 60) return `${minutes}m`;
-	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
-}
-
-/**
- * The `/goal` readout. Pure so its wording is testable.
- *
- * Reports `turnsEvaluated` alongside the state, because an ACTIVE goal that has
- * evaluated zero turns is the "success-shaped nothing" failure — armed,
- * reporting healthy, and doing nothing — and it must not look like a goal that
- * is working.
- */
-export function describeGoal(goal: GoalItem | null, now: number): string {
-	if (!goal) return "No goal set.";
-
-	const lines = [
-		`Goal (${goal.state}): ${goal.condition}`,
-		`  elapsed ${formatElapsed(now - goal.createdAt)} · continuations ${goal.ledger.iterations}/${goal.ledger.maxIterations} · evaluated ${goal.ledger.turnsEvaluated} turn(s) · evaluator spend ${goal.ledger.tokens} tokens`,
-	];
-
-	if (goal.ledger.budget?.tokens !== undefined) {
-		lines.push(`  token budget ${goal.ledger.tokens}/${goal.ledger.budget.tokens}`);
-	}
-	if (goal.ledger.budget?.wallClockMs !== undefined) {
-		lines.push(
-			`  time budget ${formatElapsed(now - goal.createdAt)}/${formatElapsed(goal.ledger.budget.wallClockMs)}`,
-		);
-	}
-	if (goal.lastReason) lines.push(`  latest: ${goal.lastReason}`);
-	if (goal.ledger.judgeErrors > 0) lines.push(`  evaluator errors: ${goal.ledger.judgeErrors} consecutive`);
-	if (goal.lastJudgeError) {
-		lines.push(`  last evaluator error (${new Date(goal.lastJudgeError.at).toISOString()}): ${goal.lastJudgeError.message}`);
-	}
-
-	if (goal.state === "active" && goal.ledger.turnsEvaluated === 0) {
-		lines.push("  ⚠ armed but has evaluated nothing yet");
-	}
-	if (isTerminal(goal.state)) lines.push("  (finished — `/goal <condition>` to set a new one)");
-
-	return lines.join("\n");
-}
-
 /** The `/agenda` readout. Pure, same reasoning as above. */
 export function describe(
 	iterations: Readonly<Record<string, number>>,
@@ -2303,33 +2191,14 @@ export function contextTreeEnvelope(
 }
 
 /**
- * Recent conversation text for the recap prompt, oldest first, capped from the
- * END. Mirrors the driver's transcript read — recency is what a one-line
- * summary is about.
+ * Recent conversation text for the recap prompt — moved to recap.ts so the
+ * Claude adapter folds a Claude transcript through the same function.
+ * Re-exported for the callers and tests that import it from here.
  */
-export function recapTranscript(branch: readonly unknown[], maxChars = 12_000): string {
-	const lines: string[] = [];
-	for (const raw of branch) {
-		const entry = raw as { message?: { role?: string; content?: unknown } };
-		const role = entry?.message?.role;
-		if (role !== "assistant" && role !== "user" && role !== "toolResult") continue;
-		const content = entry.message?.content;
-		let text = "";
-		if (typeof content === "string") text = content;
-		else if (Array.isArray(content)) {
-			text = content
-				.filter((part): part is { type: string; text: string } => {
-					const p = part as { type?: string; text?: unknown };
-					return p?.type === "text" && typeof p.text === "string";
-				})
-				.map((part) => part.text)
-				.join("\n");
-		}
-		if (text.trim()) lines.push(`[${role}] ${text}`);
-	}
-	const joined = lines.join("\n\n");
-	return joined.length > maxChars ? joined.slice(-maxChars) : joined;
-}
+export { recapTranscript };
+
+/** The goal readout lives in goal-tool.ts (shared with the Claude adapter); re-exported for existing importers. */
+export { describeGoal };
 
 /** Re-exported for tests that assert on the ledger without reaching through the driver. */
 export { count };

@@ -27,5 +27,5 @@
   // scripts beside it are unaffected; the one .ts script here
   // (typesafe-route-replay.ts) imports extension code, and a replay whose
   // numbers decide whether a feature ships must not be the one file tsc skips.
-  "include": ["extensions/**/*.ts", "mcp-lazy/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "types/**/*.d.ts"]
+  "include": ["claude/**/*.ts", "extensions/**/*.ts", "mcp-lazy/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "types/**/*.d.ts"]
 }

@@ -14,6 +14,7 @@
  * which injects its own. Two prompts describing one mode would drift.
  */
 
+import { PI_BUGFIX_TOOLS, type BugfixToolNames } from "./bugfix.ts";
 import type { OpMode } from "./modes.ts";
 
 export const OP_MODE_MARKER = "[OPERATING MODE]";
@@ -105,19 +106,19 @@ Communicate material status, decisions, blockers, and completion to the operator
 Never claim implementation credit: name the teammate or Factory run that did it
 and the evidence you independently verified.`;
 
-const BUGFIX = `${OP_MODE_MARKER}
+const bugfixPrompt = (names: BugfixToolNames): string => `${OP_MODE_MARKER}
 # Bugfix mode
 
 **No fix before a root cause.** File edits are denied until you have recorded
-one with \`bugfix_root_cause\`, and that call is itself gated: \`bugfix_evidence\`
+one with \`${names.rootCause}\`, and that call is itself gated: \`${names.evidence}\`
 must have walked the whole protocol first. Everything else stays open — the
 shell, tests, scripts, instrumentation — because the investigation IS the work
 here.
 
-Record each step as you take it with \`bugfix_evidence\`, whose \`phase\` argument
+Record each step as you take it with \`${names.evidence}\`, whose \`phase\` argument
 runs in exactly this order:
 
-\`reproduce\` → \`hypothesize\` → \`instrument\` → \`confirm\` → \`bugfix_root_cause\`
+\`reproduce\` → \`hypothesize\` → \`instrument\` → \`confirm\` → \`${names.rootCause}\`
 (which unlocks the edit) → \`reverify\`
 
 Every call except \`blocked\` binds to a real result with \`tool_call_id\`; if you
@@ -145,7 +146,7 @@ The discipline this enforces, in order:
    mechanism: which state, at which point, produces the observed behaviour. "It
    works when I change this line" is a correlation, not a root cause. Record
    \`phase: "confirm"\` with the hypothesis the instrument established.
-5. **Record it** with \`bugfix_root_cause\`, including the evidence that made you
+5. **Record it** with \`${names.rootCause}\`, including the evidence that made you
    confident. This unlocks edits.
 6. **Fix it, then verify with the same instrument** from step 3, which should now
    go from failing to passing — recorded as \`phase: "reverify"\` with that same
@@ -155,12 +156,16 @@ A pattern-matched fix that makes the symptom disappear without a mechanism is
 the specific outcome this mode is here to prevent. If the evidence points
 somewhere other than where you first looked, follow the evidence.`;
 
-export function buildOpModePrompt(mode: OpMode): string | null {
+/**
+ * `names` are what the bugfix tools are called in the host — pi's own by
+ * default; the Claude adapter serves them over MCP under other names.
+ */
+export function buildOpModePrompt(mode: OpMode, names: BugfixToolNames = PI_BUGFIX_TOOLS): string | null {
 	switch (mode) {
 		case "discuss":
 			return DISCUSS;
 		case "bugfix":
-			return BUGFIX;
+			return bugfixPrompt(names);
 		case "orchestrate":
 			return ORCHESTRATE;
 		// `build` restricts nothing and `plan` is the plan extension's to describe.

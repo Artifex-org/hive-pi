@@ -19,8 +19,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { addUsage, budgetTokens, emptyUsage, type Usage, type WireUsage } from "../harness/usage.ts";
+import { isClaudeHelper, killTree, trackTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
 import { oneShotMcpEnv } from "../mcp-common/config.ts";
-import { nativeToolGrants, workerMcpEnv } from "../subagent/worker.ts";
+import { nativeToolGrants, workerExtensionPaths, workerMcpEnv } from "../subagent/worker.ts";
 
 export function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	// Explicit override, checked first.
@@ -37,7 +38,20 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	// being able to name the one workers should use is a real capability, not
 	// only a test hook.
 	const override = process.env.PI_HOUSE_PI_BIN;
-	if (override) return { command: override, args };
+	if (override) {
+		// A JavaScript entry (the pinned harness's `pi` is a symlink to
+		// `dist/bundle/cli.js`, whose shebang is `#!/usr/bin/env node`) runs under
+		// THIS process's node. Executing it directly resolves `node` from PATH,
+		// which a Claude launch does not guarantee and which may be a different
+		// major than the one the harness pinned.
+		// Only when THIS process is a plain node: under a Bun-compiled pi,
+		// `process.execPath` is pi itself, and the script path would arrive as a
+		// stray positional.
+		if (/\.(c|m)?js$/.test(realEntry(override)) && /^node(\.exe)?$/i.test(path.basename(process.execPath))) {
+			return { command: process.execPath, args: [override, ...args] };
+		}
+		return { command: override, args };
+	}
 
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
@@ -52,6 +66,17 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	}
 
 	return { command: "pi", args };
+}
+
+/** The file a `pi` path finally names, through any symlinks; the path itself when it cannot be resolved. */
+function realEntry(file: string): string {
+	try {
+		return fs.realpathSync(file);
+	} catch {
+		// A missing binary is reported by the spawn that follows (ENOENT), with
+		// the path the caller configured — not here, as a resolution failure.
+		return file;
+	}
 }
 
 export interface OneShotResult {
@@ -79,6 +104,18 @@ export interface OneShotOptions {
 	 * existed — see goal.ts for what that cost.
 	 */
 	thinking?: string;
+	/**
+	 * Text appended to the child's system prompt. Written to a private temp
+	 * file and passed as `--append-system-prompt <file>`, like `runRoleAgent`'s
+	 * role prompt, so it never rides argv.
+	 */
+	appendSystemPrompt?: string;
+	/**
+	 * Files pi attaches to the prompt (`@<path>` positionals, before the
+	 * message). The route for anything large: Linux caps ONE argv string at
+	 * 128 KiB (MAX_ARG_STRLEN), and a transcript can be several times that.
+	 */
+	promptFiles?: string[];
 }
 
 /**
@@ -97,20 +134,49 @@ export interface OneShotOptions {
  */
 export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 	const args = ["--mode", "json", "-p", "--no-session", "--no-tools"];
+	// A Claude helper's one-shot reads the LEASED store as its agent dir (the
+	// only one Hive's node accepts), so the no-server mirror is not available —
+	// and pi's built-in MCP would connect every server the lease names. It runs
+	// with no extension discovery instead: the worker allowlist only (providers
+	// such as meta, no built-in MCP), which for a --no-tools call is everything
+	// it needs.
+	if (isClaudeHelper()) {
+		args.push("--no-extensions");
+		for (const path of workerExtensionPaths()) args.push("-e", path);
+	}
 	if (options.model) args.push("--model", options.model);
 	if (options.thinking) args.push("--thinking", options.thinking);
-	args.push(options.prompt);
+	let systemDir: string | null = null;
+	if (options.appendSystemPrompt?.trim()) {
+		systemDir = mkdtempSync(join(tmpdir(), "hive-pi-oneshot-"));
+		const file = join(systemDir, "system.md");
+		writeFileSync(file, options.appendSystemPrompt, { encoding: "utf8", mode: 0o600 });
+		args.push("--append-system-prompt", file);
+	}
+	for (const file of options.promptFiles ?? []) args.push(`@${file}`);
+	// The prompt goes in on STDIN, never argv: a judge's prompt carries up to
+	// 16k characters of the session, and argv is readable by every process on
+	// the machine (/proc/<pid>/cmdline). pi reads piped stdin as the message
+	// (before any @file text), byte for byte.
+	const cleanup = () => {
+		if (systemDir) rmSync(systemDir, { recursive: true, force: true });
+	};
 
 	return new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
+		// A Claude helper spawns each child as a process group, so a kill
+		// reaches the child's own children too (hive-common/child-tree.ts).
+		const tree = treeSpawnOptions();
 		const child = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["pipe", "pipe", "pipe"],
 			// One-shots load the full extension set, built-in MCP included; the
 			// no-server mirror keeps a --no-tools helper from connecting anything.
 			env: { ...process.env, ...oneShotMcpEnv(), ...options.env },
+			...tree,
 		});
+		trackTree(child, tree.detached);
 
 		const texts: string[] = [];
 		let usage = emptyUsage();
@@ -118,9 +184,16 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 		let buffer = "";
 		let timedOut = false;
 
+		// A child that dies before reading its prompt closes the pipe (EPIPE);
+		// that is the child's failure, reported through its exit, not a crash here.
+		child.stdin.on("error", (error) => {
+			stderr += `[stdin] ${String(error)}\n`;
+		});
+		child.stdin.end(options.prompt);
+
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree(child, "SIGKILL", tree.detached);
 		}, options.timeoutMs);
 
 		const processLine = (line: string) => {
@@ -163,12 +236,14 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 
 		child.on("close", (code) => {
 			clearTimeout(timer);
+			cleanup();
 			if (buffer.trim()) processLine(buffer);
 			resolve({ text: texts.join("\n").trim(), tokens: budgetTokens(usage), usage, exitCode: code ?? 1, timedOut, stderr });
 		});
 
 		child.on("error", (err) => {
 			clearTimeout(timer);
+			cleanup();
 			resolve({ text: "", tokens: 0, usage: emptyUsage(), exitCode: 1, timedOut: false, stderr: String(err) });
 		});
 	});
@@ -209,6 +284,8 @@ export interface RoleAgentOptions {
 export interface RoleAgentResult {
 	text: string;
 	tokens: number;
+	/** Assistant messages the child produced — its model calls. */
+	turns: number;
 	/** Full usage including dollars — see harness/usage.ts. */
 	usage: Usage;
 	exitCode: number;
@@ -239,18 +316,22 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 
 	return new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
+		const tree = treeSpawnOptions();
 		const child = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, ...roleEnv, ...options.env },
+			...tree,
 		});
+		trackTree(child, tree.detached);
 
 		const texts: string[] = [];
 		let usage = emptyUsage();
 		let stderr = "";
 		let buffer = "";
 		let timedOut = false;
+		let turns = 0;
 
 		const finish = (exitCode: number) => {
 			clearTimeout(timer);
@@ -262,15 +343,15 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 					/* temp dir already gone */
 				}
 			}
-			resolve({ text: texts.join("\n").trim(), tokens: budgetTokens(usage), usage, exitCode, timedOut, stderr });
+			resolve({ text: texts.join("\n").trim(), tokens: budgetTokens(usage), turns, usage, exitCode, timedOut, stderr });
 		};
 
 		const timer = setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGKILL");
+			killTree(child, "SIGKILL", tree.detached);
 		}, options.timeoutMs);
 
-		const onAbort = () => child.kill("SIGTERM");
+		const onAbort = () => killTree(child, "SIGTERM", tree.detached);
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 
 		const processLine = (line: string) => {
@@ -289,6 +370,7 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 			if (message.role !== "assistant") return;
 
 			usage = addUsage(usage, message.usage);
+			turns++;
 
 			const content = message.content;
 			if (typeof content === "string") {

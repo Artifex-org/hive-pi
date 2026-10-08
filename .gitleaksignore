@@ -1,0 +1,3 @@
+# Synthetic bearer header in a redaction test fixture (never a credential);
+# the test now builds it at runtime, this pins the one commit that had it literal.
+14c94409ae87e6136433a8b1d57bb8f8eed279cd:test/agenda-recap.test.ts:curl-auth-header:81

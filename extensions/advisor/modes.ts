@@ -162,7 +162,7 @@ export interface ModeCatalogResult {
 /** The catalog is boot-time env config on the server — it changes on deploys,
  *  not per call. Five minutes keeps a long session honest without a request
  *  per consultation. */
-const CATALOG_TTL_MS = 5 * 60_000;
+export const CATALOG_TTL_MS = 5 * 60_000;
 
 let cached: { catalog: ModeCatalogResult; at: number } | null = null;
 

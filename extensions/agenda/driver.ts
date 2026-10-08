@@ -30,7 +30,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-common/channels.ts";
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
+import { walkChain } from "./chain.ts";
 import { emptyLedger, type LedgerState } from "./ledger.ts";
+import { recapTranscript } from "./recap.ts";
 import type { MetricOutcome, Policy } from "./policy.ts";
 import { classifyHandback, type Handback, handbackClass } from "../hive-common/handback.ts";
 import { confirmOwnWork, trackOwnWork } from "../hive-common/own-work.ts";
@@ -76,39 +78,16 @@ export interface DriverHandle {
 	pump(): void;
 }
 
-/** Plain text of a session entry's message, whatever content shape it uses. */
-function messageText(message: { content?: unknown } | undefined): string {
-	const content = message?.content;
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((part): part is { type: string; text: string } => {
-			const p = part as { type?: string; text?: unknown };
-			return p?.type === "text" && typeof p.text === "string";
-		})
-		.map((part) => part.text)
-		.join("\n");
-}
-
 /**
  * Recent conversation as plain text, oldest first, for policies that grade what
  * happened. Capped from the END, because recency is what a judgment is about
  * and an unbounded excerpt would make every evaluation cost more than the turn
- * it is grading.
+ * it is grading. The fold is recap.ts's, shared with the recap and the Claude
+ * adapter; this wrapper only adds the defensive ctx read.
  */
 function recentTranscript(ctx: ExtensionContext, maxChars = 16_000): string {
 	try {
-		const branch = ctx.sessionManager.getBranch();
-		const lines: string[] = [];
-		for (const raw of branch) {
-			const entry = raw as { message?: { role?: string; content?: unknown } };
-			const role = entry?.message?.role;
-			if (role !== "assistant" && role !== "user" && role !== "toolResult") continue;
-			const text = messageText(entry.message);
-			if (text.trim()) lines.push(`[${role}] ${text}`);
-		}
-		const joined = lines.join("\n\n");
-		return joined.length > maxChars ? joined.slice(-maxChars) : joined;
+		return recapTranscript(ctx.sessionManager.getBranch() as readonly unknown[], maxChars);
 	} catch {
 		return "";
 	}
@@ -316,52 +295,52 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			// "At most one injection per settle" is preserved: we stop at the first
 			// injection. Every policy that ran still reports its own metric, so a
 			// green gate followed by a goal evaluation records both.
-			for (const policy of eligible) {
-				const context = { cwd, ledger, lastAssistantText: assistantText, transcript, signals, signal: ctx.signal };
-				const work = policy.decide(context);
-				if (!work) continue;
+			// The walk itself is harness-neutral (chain.ts) — the Claude adapter's
+			// Stop hook runs the same one. What stays here is pi's half: the
+			// generation and abort checks, the idle/claim check, the bus.
+			const injection = await walkChain(
+				eligible,
+				{ cwd, lastAssistantText: assistantText, transcript, signals, signal: ctx.signal },
+				{
+					stillCurrent: () => gen === generation && !ctx.signal?.aborted,
+					// Injecting while the user typed during a slow policy would cut
+					// into their turn.
+					mayInject: () => isIdle() && !settleClaims.claimedBy(),
+					setStatus,
+					// Publish on the in-process bus for hive-telemetry. Emitting with
+					// no subscriber is a no-op, so this needs no import from that
+					// extension and no load ordering against it. METRIC ONLY: a gate
+					// command's output must never ride this channel, or the bus
+					// becomes a path around payload.ts's allowlist.
+					onMetric: (name, outcome, value) => emitMetric(pi, name, outcome, value),
+					ledger: () => ledger,
+					setLedger: (next) => {
+						ledger = next;
+					},
+				},
+			);
+			if (!injection) return;
 
-				if (work.status) setStatus(work.status);
-				const outcome = await work.run();
-				if (gen !== generation || ctx.signal?.aborted) return; // replaced or cancelled mid-await
-				setStatus("");
-
-				// Publish on the in-process bus for hive-telemetry. Emitting with no
-				// subscriber is a no-op, so this needs no import from that extension
-				// and no load ordering against it. METRIC ONLY: a gate command's
-				// output must never ride this channel, or the bus becomes a path
-				// around payload.ts's allowlist.
-				emitMetric(pi, outcome.metric.name ?? work.name, outcome.metric.outcome, outcome.metric.value);
-
-				if (outcome.ledger) ledger = outcome.ledger(ledger);
-				if (!outcome.inject) continue; // nothing to say — let the next policy try
-
-				// Re-checked LIVE: the policy's work is slow (a gate can run for
-				// minutes) and the user may well have typed during it. Injecting
-				// then would cut into their turn.
-				if (!isIdle() || settleClaims.claimedBy()) return;
-
-				if (boundary) {
-					try {
-						pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: work.name } satisfies AgendaInjectionEvent);
-						settleClaims.claim("agenda");
-						return outcome.inject;
-					} catch {
-						return; // session went away mid-check
-					}
-				}
+			if (boundary) {
 				try {
-					pi.sendMessage(
-						{ customType: "agenda", content: outcome.inject, display: true },
-						{ deliverAs: "followUp", triggerTurn: true },
-					);
-					pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: work.name } satisfies AgendaInjectionEvent);
+					pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: injection.policy } satisfies AgendaInjectionEvent);
 					settleClaims.claim("agenda");
+					return injection.text;
 				} catch {
-					/* session went away mid-check — nothing to inject into */
+					return; // session went away mid-check
 				}
-				return; // one injection per settle
 			}
+			try {
+				pi.sendMessage(
+					{ customType: "agenda", content: injection.text, display: true },
+					{ deliverAs: "followUp", triggerTurn: true },
+				);
+				pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: injection.policy } satisfies AgendaInjectionEvent);
+				settleClaims.claim("agenda");
+			} catch {
+				/* session went away mid-check — nothing to inject into */
+			}
+			return; // one injection per settle
 		} catch {
 			/* a policy threw; never take the harness down with it */
 		} finally {

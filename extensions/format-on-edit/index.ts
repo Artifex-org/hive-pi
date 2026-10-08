@@ -23,46 +23,19 @@
  * after every tool call in the session.
  */
 
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { planFor, type Probe } from "./detect.ts";
+import { disabled, planFor, realProbe } from "./detect.ts";
 import { formatFile } from "./run.ts";
 
 /** The built-in tools whose `path` argument is a file they just wrote. */
 const WRITE_TOOLS = new Set(["edit", "write"]);
 
-export function disabled(env: Record<string, string | undefined>): boolean {
-	return env.PI_FORMAT_ON_EDIT === "0";
-}
 
-/** The real filesystem, for `detect.ts`. */
-export const realProbe: Probe = {
-	read(path) {
-		try {
-			return readFileSync(path, "utf8");
-		} catch {
-			return null;
-		}
-	},
-	exists(path) {
-		return existsSync(path);
-	},
-	which(name) {
-		for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-			if (!dir) continue;
-			const candidate = join(dir, name);
-			try {
-				accessSync(candidate, constants.X_OK);
-				if (statSync(candidate).isFile()) return candidate;
-			} catch {
-				/* not here, or not runnable */
-			}
-		}
-		return null;
-	},
-};
+/** The real filesystem probe lives in detect.ts (shared with the Claude adapter); re-exported for existing importers. */
+export { disabled, realProbe };
 
 export default function (pi: ExtensionAPI) {
 	if (disabled(process.env)) return;

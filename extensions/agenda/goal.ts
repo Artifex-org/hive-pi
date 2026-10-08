@@ -24,7 +24,7 @@ import {
 	type GoalOutcome,
 	isTerminal,
 } from "./goal-state.ts";
-import { runOneShot } from "./spawn.ts";
+import { runOneShot, type OneShotOptions, type OneShotResult } from "./spawn.ts";
 import { parseVerdict } from "./verdict.ts";
 
 const JUDGE_TIMEOUT_MS = 60_000;
@@ -70,6 +70,19 @@ export interface GoalHooks {
 	commit(goal: GoalItem, outcome: GoalOutcome): void;
 	/** Model id for the evaluator. */
 	evaluatorModel(): string | undefined;
+	/**
+	 * The spawner. Absent means `runOneShot`; a harness that accounts for each
+	 * model call (the Claude adapter spools usage per call) wraps it rather
+	 * than the module growing a global observer — spawn.ts forbids mutable
+	 * module state.
+	 */
+	oneShot?(options: OneShotOptions): Promise<OneShotResult>;
+	/**
+	 * `--thinking` for the CONFIRMING pass of a fast "met". Absent inherits the
+	 * user's default, which is pi's behaviour; a caller that must never inherit
+	 * (the Claude adapter, whose pi config root is a leased mirror) names one.
+	 */
+	confirmThinking?(): string | undefined;
 }
 
 /**
@@ -216,8 +229,9 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 				status: "judging goal…",
 				run: async () => {
 					const startedAt = Date.now();
+					const spawnJudge = hooks.oneShot ?? runOneShot;
 					const judge = (thinking: string | undefined) =>
-						runOneShot({
+						spawnJudge({
 							prompt: buildJudgePrompt(goal.condition, transcript),
 							model: hooks.evaluatorModel(),
 							cwd: process.cwd(),
@@ -235,7 +249,7 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 					// Only when the fast pass actually ran without reasoning; with
 					// no override there is nothing faster to confirm.
 					if (fast !== undefined && judgedMet(result)) {
-						const confirm = await judge(undefined);
+						const confirm = await judge(hooks.confirmThinking?.());
 						tokens += confirm.tokens;
 						result = confirm;
 					}

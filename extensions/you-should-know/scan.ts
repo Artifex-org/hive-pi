@@ -2,6 +2,9 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { assistantText } from "../btw/thread.ts";
 
 export const EXCERPT_CHARS = 16_000;
+/** Scan limits: at least `intervalMs` between scans, at most `maxScans` per session. */
+export interface ScanConfig { enabled: boolean; intervalMs: number; timeoutMs: number; maxScans: number }
+export const DEFAULT_CONFIG: ScanConfig = { enabled: true, intervalMs: 30_000, timeoutMs: 60_000, maxScans: 20 };
 export const KINDS = ["caveat", "blocker", "action", "decision"] as const;
 export interface Note {
 	id?: string;

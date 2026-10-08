@@ -19,6 +19,8 @@
  * as it does for the plan document.
  */
 
+import { redactEvidence } from "../hive-common/redact.ts";
+
 export const AGENT_STATUS_ENTRY_TYPE = "agent-status";
 
 /** What the settle left the session in, mechanically derived. */
@@ -110,4 +112,66 @@ export function validateAgentStatus(data: unknown): AgentStatusItem | null {
 		recap: typeof record.recap === "string" ? record.recap.slice(0, MAX_RECAP_CHARS) : "",
 		at: typeof record.at === "number" ? record.at : 0,
 	};
+}
+
+/** The most of one tool call's arguments an excerpt shows. */
+export const TOOL_CALL_ARGS_CHARS = 300;
+
+/** One tool call as a compact line: `[toolCall Bash] {"command":"cat answer.txt"}`, args bounded. */
+function toolCallLine(name: string, args: unknown): string {
+	let json: string;
+	try {
+		json = JSON.stringify(args ?? {}) ?? "{}";
+	} catch {
+		json = "(arguments not serializable)";
+	}
+	// Arguments are where a command's inline token or a header's bearer sits;
+	// they are redacted before they can reach any model.
+	const safe = redactEvidence(json);
+	const bounded = safe.length > TOOL_CALL_ARGS_CHARS ? `${safe.slice(0, TOOL_CALL_ARGS_CHARS - 1)}…` : safe;
+	return `[toolCall ${name}] ${bounded}`;
+}
+
+/**
+ * Recent conversation as plain text, oldest first, capped from the END —
+ * recency is what a one-line summary (and a judge's verdict) is about.
+ *
+ * ONE fold for every reader: the recap uses the default 12k, the agenda
+ * driver's policies 16k, and the Claude adapter feeds it a Claude transcript
+ * normalised to pi's entry shape (`claude/transcript.ts`). It reads only
+ * `entry.message`; user and assistant text, each tool CALL and each tool
+ * result count.
+ *
+ * The calls are what make a result gradeable. A judge shown `[toolResult] 42`
+ * without the `cat answer.txt` that printed it cannot tell what was verified,
+ * and refused a met goal for exactly that ("no tool output verifying `cat
+ * answer.txt` prints 42"). So each call is one compact line, named, its
+ * arguments as bounded JSON, and each result is labelled with the tool that
+ * produced it when the entry says so.
+ */
+export function recapTranscript(branch: readonly unknown[], maxChars = 12_000): string {
+	const lines: string[] = [];
+	for (const raw of branch) {
+		const entry = raw as { message?: { role?: string; content?: unknown; toolName?: unknown } };
+		const role = entry?.message?.role;
+		if (role !== "assistant" && role !== "user" && role !== "toolResult") continue;
+		const content = entry.message?.content;
+		const texts: string[] = [];
+		const calls: string[] = [];
+		if (typeof content === "string") texts.push(content);
+		else if (Array.isArray(content)) {
+			for (const part of content) {
+				const p = part as { type?: string; text?: unknown; name?: unknown; arguments?: unknown };
+				if (p?.type === "text" && typeof p.text === "string") texts.push(p.text);
+				else if (role === "assistant" && p?.type === "toolCall" && typeof p.name === "string") calls.push(toolCallLine(p.name, p.arguments));
+			}
+		}
+		const text = texts.join("\n");
+		const toolName = entry.message?.toolName;
+		const label = role === "toolResult" && typeof toolName === "string" && toolName ? `toolResult ${toolName}` : role;
+		if (text.trim()) lines.push(`[${label}] ${text}`);
+		lines.push(...calls);
+	}
+	const joined = lines.join("\n\n");
+	return joined.length > maxChars ? joined.slice(-maxChars) : joined;
 }

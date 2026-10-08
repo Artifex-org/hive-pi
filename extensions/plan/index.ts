@@ -63,7 +63,7 @@ import { readIdentity } from "../hive-remote/sessionIdentity.ts";
 import { introductionOps, planIntroduction } from "./introduction.ts";
 import { isUnattendedHiveLaunch } from "../hive-common/launch.ts";
 import { branchEntries, createBranchWatch } from "../session-branch/branch.ts";
-import { classifyCommand, classifyTool } from "./policy.ts";
+import { classifyTool, planToolVerdict } from "./policy.ts";
 import { buildExecutionPrompt, buildGrillKick, buildPlanPrompt } from "./prompt.ts";
 import { lintPlanComposition, type PlanLintIssue } from "./lint.ts";
 import { planToMarkdown, renderOpResult, renderStepList, summaryLine } from "./render.ts";
@@ -1328,14 +1328,8 @@ export default function (pi: ExtensionAPI) {
 		// stranding the session in a mode it cannot leave.
 		if (grillOwesQuestions && event.toolName === "ask_user_question") grillOwesQuestions = false;
 
-		const verdict = classifyTool(event.toolName);
+		const verdict = planToolVerdict(event.toolName, event.input);
 		if (!verdict.allowed) return { block: true, reason: gateReason(verdict.reason) };
-
-		if (event.toolName === "bash") {
-			const command = (event.input as { command?: unknown } | undefined)?.command;
-			const shell = classifyCommand(typeof command === "string" ? command : "");
-			if (!shell.allowed) return { block: true, reason: gateReason(shell.reason) };
-		}
 	});
 
 	pi.on("before_agent_start", (event) => {

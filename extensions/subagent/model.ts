@@ -56,6 +56,14 @@ export interface WorkerModelEnv {
 	 * default — never pays for it (measured 89.9s cold against production).
 	 */
 	catalog: () => Promise<readonly CatalogMode[]>;
+	/**
+	 * Never let pi pick its own default model. Inside pi an unset delegation
+	 * default is fine — the worker runs pi's configured default. A host whose
+	 * store holds only LEASED providers (the Claude adapter) cannot trust that
+	 * default to be one of them, so an unpinned worker takes the cheapest
+	 * configured catalog mode instead, or is refused.
+	 */
+	requireExplicitModel?: boolean;
 }
 
 export interface WorkerModelChoice {
@@ -107,6 +115,26 @@ function configuredFallbacks(
 }
 
 /**
+ * The cheap lane on a host that cannot run every catalog mode: the mode keyed
+ * `preferKey` (the fleet's `low`) when it is configured here, otherwise the
+ * CHEAPEST configured mode — the same walk the delegation fallback takes.
+ * Undefined when nothing in the catalog is configured; the caller reports it.
+ *
+ * Generic over the mode shape so a caller holding the full catalog entry
+ * (with its `thinking`) gets that entry back.
+ */
+export function cheapLaneMode<M extends CatalogMode>(
+	catalog: readonly M[],
+	isConfigured: ConfiguredCheck,
+	preferKey = "low",
+): M | undefined {
+	const preferred = catalog.find((mode) => mode?.key === preferKey && typeof mode.model === "string");
+	if (preferred && isConfigured(preferred.model) === true) return preferred;
+	const [cheapest] = configuredFallbacks(catalog, isConfigured, undefined, undefined);
+	return cheapest === undefined ? undefined : catalog.find((mode) => mode.model === cheapest);
+}
+
+/**
  * The model a worker spawns with, decided BEFORE the spawn.
  *
  * `preferred` is what the old code would have used (`role.model ??
@@ -117,8 +145,11 @@ export async function chooseWorkerModel(
 	env: WorkerModelEnv | undefined,
 ): Promise<WorkerModelChoice> {
 	const requested = opts.requested?.trim();
+	// Under requireExplicitModel "cannot tell" (a bare id, no provider) is not
+	// good enough: pi would resolve a bare id to whatever provider carries it.
+	const configured = (spec: string) => (env?.requireExplicitModel ? env.isConfigured(spec) === true : env?.isConfigured(spec) !== false);
 	if (requested) {
-		if (env && env.isConfigured(requested) === false) {
+		if (env && !configured(requested)) {
 			return {
 				refusal:
 					`model ${requested} is not configured on this machine (no credential for provider ` +
@@ -130,8 +161,17 @@ export async function chooseWorkerModel(
 	}
 
 	const preferred = opts.preferred?.trim() || undefined;
+	if (!preferred && env?.requireExplicitModel) {
+		const [cheapest] = configuredFallbacks(await safeCatalog(env), env.isConfigured, undefined, undefined);
+		if (cheapest) return { spec: cheapest };
+		return {
+			refusal:
+				`role "${opts.roleName}" pins no model, there is no delegation default, and no catalog mode is configured ` +
+				"here, so no worker was started. Pass `model` per call with a provider this session holds.",
+		};
+	}
 	if (!preferred || !env) return { spec: preferred };
-	if (env.isConfigured(preferred) !== false) return { spec: preferred };
+	if (configured(preferred)) return { spec: preferred };
 
 	// The default cannot run here. Same shape as pickConfiguredAdvisor: prefer
 	// what the catalog ranks, then the session's own model, and say so.
