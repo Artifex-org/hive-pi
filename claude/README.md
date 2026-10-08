@@ -154,8 +154,12 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
     naming that command. `browser_screenshot` returns the PNG as an MCP image
     block plus `Saved to <path>` (hand the path to `send_attachment`), and
     records it in the pr-attachments manifest keyed by `HIVE_SESSION_ID`
-    (unset, outside a launch: a per-server id). Page tools run one at a time;
-    a cancelled call answers at once and the next waits for its operation.
+    (unset, outside a launch: a per-server id). Page tools — and a claimed
+    saved-flow run — take turns on the one page (`browser_console` only reads
+    its buffer and never waits). A call cancelled while queued never runs; a
+    call cancelled while running, or holding the page past its bound (pi's
+    navigation/action timeouts per step, 30 s for `browser_evaluate`, 120 s
+    for a flow source), closes the browser, and the next call relaunches it.
     The flow tools' Hive calls use `HIVE_URL`/`HIVE_TOKEN` and the resolved
     session; the runtime-owner claim loop (every 2 s, launched sessions only)
     runs for the server's lifetime. Not ported: pi's pr-attachments nudge

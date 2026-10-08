@@ -31,6 +31,12 @@ export interface FlowRuntimeHost {
 	page(): Promise<Page>;
 	/** This session's Hive identity, or null when it is not (yet) resolvable. */
 	binding(): Promise<FlowBinding | null>;
+	/**
+	 * Run a claimed saved flow's page work exclusive of the host's other page
+	 * work (the adapter's serialized browser tools). Default: run it directly.
+	 * Tool calls are NOT routed through it — the host already orders those.
+	 */
+	exclusive?: <T>(work: () => Promise<T>) => Promise<T>;
 	env?: NodeJS.ProcessEnv;
 }
 
@@ -323,7 +329,8 @@ export function createFlowRuntime(host: FlowRuntimeHost) {
 					continue;
 				}
 				try {
-					const url = await runSource(run.source, claim.connection_url ?? "");
+					const source = run.source;
+					const url = await (host.exclusive ?? ((work) => work()))(() => runSource(source, claim.connection_url ?? ""));
 					await completeClaim(run.id, claim.claim_token, "succeeded", "Playwright flow completed.", "", { url });
 				} catch (error) {
 					const message = error instanceof Error ? error.message : "flow execution failed";

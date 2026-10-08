@@ -12,8 +12,8 @@
  *  - A leased store (`auth.json` with the given providers), a state dir, a
  *    spool path.
  *  - A fake Hive: `/api/v1/agent-modes`, `/agent-sessions/by-run/{id}`,
- *    `/activity`, `/you-should-know/findings`, `/surfaces/…`, recording every
- *    request.
+ *    `/activity`, `/you-should-know/findings`, `/surfaces/…`,
+ *    `/resources/dev-server`, `/flow-runs/…`, recording every request.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -164,6 +164,8 @@ export interface FakeHive {
 	/** null → by-run answers 404 (session not attached). */
 	sessionId: string | null;
 	recording: { recording: boolean; recording_revision: number };
+	/** null → `/flow-runs/claim` answers 404 (unsupported); else each claim takes every queued item. */
+	flowClaims: unknown[] | null;
 	close(): Promise<void>;
 }
 
@@ -189,6 +191,7 @@ export async function startFakeHive(): Promise<FakeHive> {
 		],
 		sessionId: "srv-uuid-1",
 		recording: { recording: true, recording_revision: 2 },
+		flowClaims: null,
 		close: async () => {},
 	};
 	const server: Server = createServer((req, res) => {
@@ -206,6 +209,9 @@ export async function startFakeHive(): Promise<FakeHive> {
 			}
 			if (path.endsWith("/activity")) return json(200, {});
 			if (path.includes("/surfaces/")) return json(200, {});
+			if (path.endsWith("/resources/dev-server")) return json(200, {});
+			if (path.endsWith("/flow-runs/claim") && hive.flowClaims) return json(200, { items: hive.flowClaims.splice(0) });
+			if (/\/flow-runs\/[^/]+\/complete$/.test(path)) return json(200, {});
 			if (path.endsWith("/you-should-know/findings")) {
 				const findings = req.method === "POST" ? ((body as { findings?: { id: string }[] }).findings ?? []).map((f) => ({ id: f.id, deliveries: [{ destination: "board", state: "delivered" }] })) : [];
 				return json(200, { version: 1, ...hive.recording, findings });
@@ -270,10 +276,15 @@ export class McpClient {
 	}
 
 	request(method: string, params: unknown = {}): Promise<Rpc> {
+		return this.send(method, params).answer;
+	}
+
+	/** A request and its id — to cancel it (`notifications/cancelled`), which leaves it unanswered. */
+	send(method: string, params: unknown = {}): { id: number; answer: Promise<Rpc> } {
 		const id = this.nextId++;
 		const answer = new Promise<Rpc>((done) => this.pending.set(id, done));
 		this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-		return answer;
+		return { id, answer };
 	}
 
 	notify(method: string, params: unknown = {}): void {

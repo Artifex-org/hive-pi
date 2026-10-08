@@ -150,19 +150,30 @@ export class BrowserSurfaceBridge {
   private readonly config: BrowserSurfaceConfig;
   private readonly page: Page;
   private readonly cdp: CDPSession;
+  private readonly log: (line: string) => void;
+  private lastFrameFailure = "";
 
-  private constructor(config: BrowserSurfaceConfig, page: Page, cdp: CDPSession) {
+  private constructor(config: BrowserSurfaceConfig, page: Page, cdp: CDPSession, log: (line: string) => void) {
     this.config = config;
     this.page = page;
     this.cdp = cdp;
+    this.log = log;
     this.sequence = nextSurfaceSequence(config);
   }
 
-  static async start(page: Page, env: NodeJS.ProcessEnv = process.env): Promise<BrowserSurfaceBridge | null> {
+  /**
+   * `log` reports a frame the live view had to drop (its write failed: the
+   * scratch dir removed, a full disk) — once per distinct cause.
+   */
+  static async start(
+    page: Page,
+    env: NodeJS.ProcessEnv = process.env,
+    log: (line: string) => void = (line) => console.warn(line),
+  ): Promise<BrowserSurfaceBridge | null> {
     const config = browserSurfaceConfig(env);
     if (!config) return null;
     const cdp = await page.context().newCDPSession(page);
-    const bridge = new BrowserSurfaceBridge(config, page, cdp);
+    const bridge = new BrowserSurfaceBridge(config, page, cdp, log);
     bridge.writeManifest("ready");
     cdp.on("Page.screencastFrame", (frame: ScreencastFrame) => void bridge.onFrame(frame));
     await cdp.send("Page.startScreencast", {
@@ -239,7 +250,20 @@ export class BrowserSurfaceBridge {
     }
   }
 
+  // Runs detached (`void` from the CDP event): a throw here would be an
+  // unhandled rejection that takes the host process down. The frame is
+  // dropped instead, and the cause said once.
   private async onFrame(frame: ScreencastFrame): Promise<void> {
+    try {
+      await this.publishFrame(frame);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (reason !== this.lastFrameFailure) this.log(`browser live view: dropped a frame — ${reason}`);
+      this.lastFrameFailure = reason;
+    }
+  }
+
+  private async publishFrame(frame: ScreencastFrame): Promise<void> {
     try {
       await this.cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId });
     } catch {
