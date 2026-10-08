@@ -135,6 +135,9 @@ export class BrowserTools {
 		this.ledgerSession = env.sessionRunId ?? `claude-${randomUUID()}`;
 		this.publisher = new BrowserSurfacePublisher(processEnv);
 		this.browser = new SessionBrowser({
+			// Imported on the first launch: the server must load (and answer
+			// every other tool) even where the package is missing.
+			chromium: async () => (await import("playwright-core")).chromium,
 			env: processEnv,
 			handleSignals: false,
 			onAction: (action) => this.flows.record(action),

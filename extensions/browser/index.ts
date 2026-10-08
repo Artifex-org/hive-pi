@@ -29,6 +29,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { chromium } from "playwright-core";
 import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { registerFlowTools } from "../flows/register.ts";
@@ -56,7 +57,7 @@ function text(output: BrowserOutput) {
  */
 export default function (pi: ExtensionAPI) {
 	let flows: { record(action: RecordedAction): void } | null = null;
-	const browser = new SessionBrowser({ onAction: (action) => flows?.record(action) });
+	const browser = new SessionBrowser({ chromium: async () => chromium, onAction: (action) => flows?.record(action) });
 	flows = registerFlowTools(pi, { page: () => browser.page() });
 	const spec = BROWSER_TOOL_SPECS;
 

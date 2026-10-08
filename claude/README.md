@@ -196,7 +196,10 @@ server on SIGTERM/SIGINT, or when its parent dies (ppid polled every 5 s),
 stops reading, aborts and awaits in-flight requests and background jobs, then
 exits — and closes the session's Chromium (Playwright's own signal handlers
 are off; Chromium leads its own process group, which Playwright kills on
-exit and the server SIGKILLs if Chromium outlives its close). **Residual:** SIGKILL cannot be caught — detached groups then outlive
+exit, and on Linux — where its pid is found in /proc — the server SIGKILLs
+that group if Chromium outlives its close). playwright-core is imported on
+the first browser launch, so a checkout without it still serves every other
+tool. **Residual:** SIGKILL cannot be caught — detached groups then outlive
 their parent until they finish. `PI_CODING_AGENT_DIR` is only ever
 `$HIVE_PI_AGENT_DIR`. Transcript reads ignore a half-written last line and
 skip (with one stderr line) a corrupt one.

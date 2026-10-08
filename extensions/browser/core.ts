@@ -10,15 +10,16 @@
  * schemas to these).
  *
  * Erasable TypeScript only, and no runtime import of pi or typebox: the
- * adapter loads this file under Node's type stripping. playwright-core (a
- * dependency of this package) is imported when the first browser launches,
- * so loading the adapter's MCP server never depends on it.
+ * adapter loads this file under Node's type stripping. Chromium is handed in
+ * by the host (`SessionBrowserOptions.chromium`): pi imports playwright-core
+ * statically as it always has, the adapter only when the first browser
+ * launches, so loading its MCP server never depends on the package.
  */
 
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import type { Browser, BrowserContext, ConsoleMessage, Page } from "playwright-core";
+import type { Browser, BrowserContext, BrowserType, ConsoleMessage, Page } from "playwright-core";
 import type { RecordedAction } from "../flows/core.ts";
 import type { ScreenshotLedger } from "../pr-attachments/manifest.ts";
 import { buildLaunchPlan } from "./launch.ts";
@@ -196,6 +197,8 @@ interface BrowserState {
 }
 
 export interface SessionBrowserOptions {
+	/** playwright-core's `chromium`, resolved by the host. */
+	chromium: () => Promise<BrowserType>;
 	env?: NodeJS.ProcessEnv;
 	/**
 	 * Let Playwright install its SIGINT/SIGTERM/SIGHUP handlers (its default).
@@ -255,7 +258,7 @@ export class SessionBrowser {
 	private disposed = false;
 	private readonly options: SessionBrowserOptions;
 
-	constructor(options: SessionBrowserOptions = {}) {
+	constructor(options: SessionBrowserOptions) {
 		this.options = options;
 	}
 
@@ -286,7 +289,7 @@ export class SessionBrowser {
 		const before = ownGroupLeaders();
 		let browser: Browser;
 		try {
-			const { chromium } = await import("playwright-core");
+			const chromium = await this.options.chromium();
 			browser = await chromium.launch({
 				headless: plan.headless,
 				...(plan.chromiumSandbox === false ? { chromiumSandbox: false } : {}),

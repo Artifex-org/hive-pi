@@ -267,8 +267,17 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		await waitFor(() => existsSync(join(dir, "latest-web.json")), 10_000, "latest-web.json");
 		const surface = `/api/v1/agent-sessions/srv-uuid-1/surfaces/${launchId}`;
 		await waitFor(() => hive.requests.find((r) => r.method === "PUT" && r.path.startsWith(`${surface}/snapshot?sequence=`)), 15_000, "the snapshot upload");
-		expect(hive.requests.find((r) => r.method === "PUT" && r.path === surface)?.body).toMatchObject({ kind: "browser", state: "ready", url: `${base}/`, title: "mcp-page" });
+		expect(hive.requests.find((r) => r.method === "PUT" && r.path === surface)?.body).toMatchObject({ kind: "browser", state: "ready" });
 		expect(hive.requests.find((r) => r.path.startsWith(`${surface}/snapshot`))?.body).toMatchObject({ contentType: "image/jpeg" });
+		// The first snapshot can catch the page mid-load; a later page shows up
+		// once the 2 s snapshot interval has passed.
+		await new Promise((r) => setTimeout(r, 2_100));
+		await c.call("browser_navigate", { url: `${base}/next` });
+		await waitFor(
+			() => hive.requests.find((r) => r.method === "PUT" && r.path === surface && (r.body as { url?: string }).url === `${base}/next`),
+			15_000,
+			"the surface row to show the new page",
+		);
 
 		expect(await c.close()).toBe(0);
 		client = undefined;
