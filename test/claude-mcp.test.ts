@@ -297,7 +297,7 @@ describe("robustness", () => {
 		expect(answered).toBe(false);
 		expect(() => process.kill(worker.pid, 0)).toThrow(); // its worker was aborted
 		expect((await c.request("ping")).result).toEqual({}); // and the server is fine
-	});
+	}, 30_000); // waits ~4 s on purpose, after spawning a worker
 
 	it("on SIGTERM aborts and awaits an in-flight foreground delegation before exiting", async () => {
 		launch.setReplies([{ match: "Task: long foreground", text: "never", delayMs: 30_000 }]);
@@ -311,7 +311,7 @@ describe("robustness", () => {
 		await c.exited;
 		expect(Date.now() - signalledAt).toBeLessThan(10_000);
 		expect(() => process.kill(worker.pid, 0)).toThrow();
-	});
+	}, 30_000);
 });
 
 describe("opModeRefusal", () => {
