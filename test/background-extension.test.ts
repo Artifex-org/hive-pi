@@ -129,6 +129,28 @@ describe.runIf(realBashAvailable())("a job that finishes", () => {
 		expect(message.options?.triggerTurn).toBe(true);
 	});
 
+	it("carries created-PR evidence before notification truncation, but not on failure", async () => {
+		for (const exitCode of [0, 3]) {
+			const pi = boot();
+			await pi.emit({ type: "session_start" }, { mode: "tui" });
+			const url = "https://github.com/Artifex-org/hive-pi/pull/138";
+			// A harmless shell fixture, not an outward-facing GitHub operation.
+			await call(pi, "background_bash", {
+				command: `gh() { printf '%s\\n' '${url}'; }; gh pr create; for i in {1..1000}; do printf '%100s\\n' padding; done; exit ${exitCode}`,
+				what: "fixture PR creation",
+			});
+			await until(() => pi.messages.length > 0);
+			const message = pi.messages[0];
+			expect(message.details).toMatchObject({
+				sessionId: "fake-session", executionId: expect.any(String), exitCode,
+				pullURL: exitCode === 0 ? url : null,
+			});
+			expect(message.content).toContain("Output (tail):");
+			expect(String(message.content).split("Output (tail):")[1]).not.toContain(url);
+			await pi.emit({ type: "session_shutdown" });
+		}
+	});
+
 	it("reports a failing command as failed, with its exit code", async () => {
 		const pi = boot();
 		await pi.emit({ type: "session_start" }, { mode: "tui" });
