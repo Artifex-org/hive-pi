@@ -75,6 +75,8 @@ import {
 	type ResolvedAuth,
 } from "../hive-common/identity.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
+import { createdPullURL as createdShellPullURL } from "../hive-common/pull-delivery.ts";
+import { backgroundPull, createPullReporter } from "./pull-delivery.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
@@ -218,15 +220,12 @@ const QUOTA_REFRESH_MS = 5 * 60_000;
  * production wiring is unchanged and only a caller that passes something gets
  * something else.
  */
-const CREATED_PULL_URL = /https:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/[1-9]\d*\/?/;
-
 function createdPullURL(toolName: string, args: unknown, result: unknown, isError: boolean): string | null {
 	if (isError || toolName !== "bash") return null;
 	const command = typeof args === "object" && args !== null && "command" in args
 		? String((args as { command?: unknown }).command ?? "")
 		: "";
-	if (!/\bgh\s+pr\s+create\b/.test(command)) return null;
-	return (JSON.stringify(result) ?? "").match(CREATED_PULL_URL)?.[0] ?? null;
+	return createdShellPullURL(command, JSON.stringify(result) ?? "");
 }
 
 export interface RemoteDeps {
@@ -1047,6 +1046,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	// also run before that setup (for example, an immediate shutdown), so it
 	// reaches them through this optional teardown instead of a temporal dead zone.
 	let clearInteractiveToolState: (() => void) | undefined;
+	let clearPullReports: (() => void) | undefined;
+	let flushPullReports: (() => Promise<void>) | undefined;
 	/**
 	 * The paths of the most recent worktree REPORT — the set a diff request is
 	 * allowed to name (HIV-1421).
@@ -2013,6 +2014,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			if (res.ok) {
 				attachedRunID = attachRunID;
 				sessionID = resolvedSession;
+				void flushPullReports?.();
 				credentialAdvertisementPending = false;
 				if (credentialCapable) credentials.bind(auth, resolvedSession, generation);
 				if (credentialCapable && !credentials.ready()) queueConversationRefresh();
@@ -2243,6 +2245,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		lastWorktree = null;
 		clearInteractiveToolState?.();
 		clearInteractiveToolState = undefined;
+		clearPullReports?.();
 		reportedPaths = new Set();
 		reportedWorktreePath = "";
 	}
@@ -2340,6 +2343,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				if (clientRunID === previousRun) clientRunID = "";
 				attachedRunID = ""; attachingRunID = "";
 				lifecycle.generation++; attaching = false; identitySync.detach(); sessionID = null;
+				clearPullReports?.();
 				deferredSteers.length = 0; compacting = false; polling = false;
 				announceRemoteAnswers(false);
 			}
@@ -2384,6 +2388,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 		pi.on("message_end", (event, ctx) => {
 			remember(ctx);
+			const pull = backgroundPull(event.message, ctx.sessionManager.getSessionId());
+			if (pull && cfg.streamDeltas) void pullReporter.report(pull.url, pull.source);
 			const msg = event.message as AssistantMessage | undefined;
 			if (!msg || msg.role !== "assistant") return;
 			// Reasoning FIRST: it is what the model was doing before it answered,
@@ -2411,6 +2417,20 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		// PR creation from an arbitrary command whose output happens to contain a
 		// pull URL. Retain them only for the lifetime of the tool call.
 		const toolArgs = new Map<string, unknown>();
+		const pullReporter = createPullReporter({
+			binding: () => {
+				if (!cfg.streamDeltas || !auth || !sessionID) return null;
+				const a = auth, id = sessionID;
+				return { key: `${id}:${lifecycle.generation}`, submit: url => postPull(a, id, url) };
+			},
+			notice: content => {
+				foldNotice(transcript, content, Date.now(), "hive");
+				kick();
+				pi.sendMessage({ customType: "hive-delivery-warning", content, display: true }, { triggerTurn: false });
+			},
+		});
+		clearPullReports = () => pullReporter.clear();
+		flushPullReports = () => pullReporter.flush();
 		// An ordinary tool-start is a best-effort progress hint. An interactive
 		// question is different: its start is the only durable copy of the call id
 		// and question arguments, so retry transient transport failures until the
@@ -2562,7 +2582,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 			const pullURL = cfg.streamDeltas && auth && sessionID
 				? createdPullURL(toolName, args, event.result, Boolean(event.isError))
 				: null;
-			if (pullURL && auth && sessionID) void postPull(auth, sessionID, pullURL);
+			if (pullURL) void pullReporter.report(pullURL, `tool:${callID}`);
 			if (toolName === "browser_screenshot" && !event.isError && cfg.enabled && auth && sessionID) {
 				const shotSession = sessionID;
 				const failed = (failure: string | null) => {
