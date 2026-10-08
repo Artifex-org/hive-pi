@@ -41,7 +41,7 @@ import {
 } from "../../extensions/browser/core.ts";
 import { createFlowRuntime, FLOW_TOOL_SPECS, type FlowBinding, type FlowToolName } from "../../extensions/flows/core.ts";
 import { resolveSession } from "../../extensions/hive-remote/client.ts";
-import { screenshotCaption, uploadOutputAttachment } from "../../extensions/hive-common/output-attachment.ts";
+import { ownedDirectory, screenshotCaption, uploadOutputAttachment } from "../../extensions/hive-common/output-attachment.ts";
 import { BrowserSurfacePublisher } from "../../extensions/hive-remote/surfaces.ts";
 import { ScreenshotLedger } from "../../extensions/pr-attachments/manifest.ts";
 import { hiveAuth, stateDir, type AdapterEnv } from "../env.ts";
@@ -379,8 +379,9 @@ export class BrowserTools {
 		if (typeof shot.path !== "string" || !label) return output;
 		const binding = await this.binding();
 		if (!binding) return output;
-		const ledger = new ScreenshotLedger(this.processEnv, this.ledgerSession);
-		const uploaded = await uploadOutputAttachment(binding.auth, binding.sessionID, shot.path, [ledger.shotDir]);
+		const shotDir = await ownedDirectory(new ScreenshotLedger(this.processEnv, this.ledgerSession).shotDir);
+		if (!shotDir) return { ...output, text: `${output.text}\nNot posted to the Hive chat: the screenshot directory is not a private directory owned by this user.` };
+		const uploaded = await uploadOutputAttachment(binding.auth, binding.sessionID, shot.path, [shotDir]);
 		if (!uploaded.ok) return { ...output, text: `${output.text}\nNot posted to the Hive chat: ${uploaded.message}` };
 		const caption = screenshotCaption(label, typeof shot.url === "string" ? shot.url : "");
 		return { ...output, text: `${output.text}\nPosted to the Hive chat: ${caption} (attachment ${uploaded.id})` };

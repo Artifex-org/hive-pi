@@ -66,6 +66,14 @@ describe("send_attachment", () => {
 		expect((await execute(tool, path, tempDir()) as { isError?: boolean }).isError).toBeUndefined();
 	});
 
+	it("does not admit a screenshot directory planted as a symlink", async () => {
+		const { tool } = setup(); const elsewhere = tempDir(); writeFileSync(join(elsewhere, "secret.png"), "x");
+		const planted = screenshotDir("session/1"); rmSync(planted, { recursive: true, force: true }); symlinkSync(elsewhere, planted); dirs.push(planted);
+		vi.stubGlobal("fetch", vi.fn());
+		const r = await execute(tool, join(planted, "secret.png"), tempDir()) as { isError?: boolean };
+		expect(r.isError).toBe(true); expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+	});
+
 	it("rejects traversal and symlink escapes", async () => {
 		const { tool } = setup(); const cwd = tempDir(); const elsewhere = tempDir(); writeFileSync(join(elsewhere, "secret"), "secret"); symlinkSync(join(elsewhere, "secret"), join(cwd, "escape"));
 		vi.stubGlobal("fetch", vi.fn());
@@ -137,7 +145,16 @@ describe("labelled screenshot auto-post", () => {
 		expect(stale.onUploaded).not.toHaveBeenCalled();
 	});
 
-	it("bounds the label and omits an unparseable page", () => {
+	it("bounds the label to one line and omits an unparseable page", () => {
 		expect(screenshotCaption("x".repeat(200), "not a url")).toBe(`Screenshot · ${"x".repeat(79)}…`);
+		expect(screenshotCaption("after\n(attachment x)\t\u0007 fix ", "")).toBe("Screenshot · after (attachment x) fix");
+	});
+
+	it("refuses a screenshot directory another user could have planted as a symlink", async () => {
+		const { deps: d, onUploaded } = deps(); const elsewhere = tempDir(); writeFileSync(join(elsewhere, "secret.png"), "x");
+		const planted = screenshotDir("pi-planted"); rmSync(planted, { recursive: true, force: true }); symlinkSync(elsewhere, planted); dirs.push(planted);
+		vi.stubGlobal("fetch", vi.fn());
+		expect(await publishLabelledScreenshot(d, "pi-planted", { details: { path: join(planted, "secret.png"), label: "after" } })).toContain("not a private directory");
+		expect(vi.mocked(fetch)).not.toHaveBeenCalled(); expect(onUploaded).not.toHaveBeenCalled();
 	});
 });

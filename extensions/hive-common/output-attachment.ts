@@ -7,7 +7,7 @@
  * node only.
  */
 import { constants } from "node:fs";
-import { open, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { type HiveAuth, withTimeout } from "./http.ts";
 
@@ -16,9 +16,15 @@ const MAX_CAPTION_LABEL = 80;
 
 export type UploadOutcome = { ok: true; id: string; name: string } | { ok: false; message: string };
 
-/** `Screenshot · before · http://127.0.0.1:5173/orders` — query and fragment dropped, as the surface publisher does. */
+/**
+ * `Screenshot · before · http://127.0.0.1:5173/orders` — query and fragment
+ * dropped, as the surface publisher does. The label is model text: whitespace
+ * and control characters collapse to single spaces, so a caption stays one
+ * line (the Claude driver reads it off the result's last line).
+ */
 export function screenshotCaption(label: string, url: string): string {
-	const shortLabel = label.length > MAX_CAPTION_LABEL ? `${label.slice(0, MAX_CAPTION_LABEL - 1)}…` : label;
+	const flat = label.replace(/[\s\u0000-\u001f\u007f]+/g, " ").trim();
+	const shortLabel = flat.length > MAX_CAPTION_LABEL ? `${flat.slice(0, MAX_CAPTION_LABEL - 1)}…` : flat;
 	let page = "";
 	try {
 		const parsed = new URL(url);
@@ -27,6 +33,23 @@ export function screenshotCaption(label: string, url: string): string {
 		page = "";
 	}
 	return page ? `Screenshot · ${shortLabel} · ${page}` : `Screenshot · ${shortLabel}`;
+}
+
+/**
+ * `dir` when it is a real directory owned by this user, else null. Admits the
+ * session's screenshot directory as an upload root: its path is predictable in
+ * a shared tmpdir, so another local user could pre-create it as a symlink to a
+ * directory of their choosing and widen what an upload may read.
+ */
+export async function ownedDirectory(dir: string): Promise<string | null> {
+	try {
+		const info = await lstat(dir);
+		if (info.isSymbolicLink() || !info.isDirectory()) return null;
+		if (typeof process.getuid === "function" && info.uid !== process.getuid()) return null;
+		return dir;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -40,7 +63,7 @@ export async function uploadOutputAttachment(auth: HiveAuth, sessionID: string, 
 	let handle;
 	try {
 		path = await realpath(requested);
-		const realRoots = await Promise.all(roots.map((root) => realpath(root).catch(() => resolve(root))));
+		const realRoots = (await Promise.all(roots.map((root) => realpath(root).catch(() => null)))).filter((root) => root !== null);
 		if (!realRoots.some((root) => beneath(path, root))) return { ok: false, message: "File must be beneath this session's working directory or its browser screenshot directory." };
 		// O_NONBLOCK prevents opening a FIFO from hanging; descriptor stat is authoritative.
 		handle = await open(requested, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);

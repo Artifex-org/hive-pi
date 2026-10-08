@@ -2564,11 +2564,14 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				: null;
 			if (pullURL && auth && sessionID) void postPull(auth, sessionID, pullURL);
 			if (toolName === "browser_screenshot" && !event.isError && cfg.enabled && auth && sessionID) {
-				void publishLabelledScreenshot(attachmentDeps, ctx.sessionManager.getSessionId(), event.result).then((failure) => {
-					if (!failure || !cfg.enabled) return;
+				const shotSession = sessionID;
+				const failed = (failure: string | null) => {
+					if (!failure || !cfg.enabled || sessionID !== shotSession) return;
 					foldNotice(transcript, failure, Date.now(), "hive");
 					kick();
-				});
+				};
+				void publishLabelledScreenshot(attachmentDeps, ctx.sessionManager.getSessionId(), event.result)
+					.then(failed, (error: unknown) => failed(`Could not post the screenshot to the chat: ${error instanceof Error ? error.message : String(error)}`));
 			}
 			foldToolEnd(
 				transcript,
