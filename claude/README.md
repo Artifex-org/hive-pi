@@ -62,11 +62,17 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   nothing — never `allow`/`ask`; any internal error (bad `control.json`,
   malformed input) is a `deny` with the cause, since Claude treats a failing
   PreToolUse hook as "proceed". Other Claude tools and MCP tools are not
-  classified. **Bugfix is not gated here** (see Open gaps).
-- **`hook post-tool`** — format-on-edit (`planFor` + `formatFile`) for
+  classified. **Bugfix**: Edit/Write/MultiEdit/NotebookEdit are denied with
+  opmode's refusal until the episode records a root cause; Bash stays open,
+  as in pi (the investigation is the work).
+- **`hook post-tool`** — while a bugfix investigation is live, tags the
+  result `[bugfix evidence id: <tool_use_id>]` (pi's evidence tag; Claude runs
+  PostToolUse only for successful calls, so the plugin should match all tools);
+  format-on-edit (`planFor` + `formatFile`) for
   Edit/MultiEdit/Write; prints `additionalContext` with pi's note when the
   file changed or the formatter failed; "not installed" said once per config.
-- **`hook prompt`** — discuss/bugfix: the op mode's prompt as `additionalContext`.
+- **`hook prompt`** — discuss/bugfix: the op mode's prompt as `additionalContext`
+  (bugfix names the tools `mcp__hive-pi__bugfix_evidence` / `mcp__hive-pi__bugfix_root_cause`).
 - **`hook stop`** (sync) — `walkChain` over repo gate (`.pi/harness.json`) →
   drift (every 5th settle with an active goal) → goal judge; the driver's
   turn-failure and hand-back guards first. At most one continuation:
@@ -109,6 +115,13 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   - `goal_set {condition, replace?, budget?{tokens,hours}}`, `goal_status`,
     `goal_clear` — agenda's rules (`goalSetDecision`, `describeGoal`).
   - `quality_gate` — `gate/tool.ts` (agent-check / vendored gate / `hive check`).
+  - `bugfix_evidence {phase, tool_call_id?, reproduction_key?, hypothesis?}`,
+    `bugfix_root_cause {summary, evidence}` — opmode's protocol
+    (`opmode/bugfix.ts`): reproduce → hypothesize → instrument → confirm →
+    root cause (unlocks edits) → reverify. Results are observed from the
+    transcript by `tool_use_id`, failed calls included. State is one episode in
+    `bugfix.json`, discarded by any reader that finds control.json out of
+    bugfix mode; outside bugfix both tools say there is nothing to record into.
 
 ## Spool records
 
@@ -133,11 +146,9 @@ cancel (`hive-common/child-tree.ts`). `PI_CODING_AGENT_DIR` is only ever
   agent dir Hive's node accepts is the lease itself, so children read its
   `mcp.json` as-is. The lease's `mcp.json` must be empty or HTTP-only, or every
   judge, scan and worker spawns the stdio servers it names.
-- **Bugfix tool gating.** pi unlocks edits through its evidence protocol
-  (`bugfix_evidence` → `bugfix_root_cause`), which a Claude session lacks, so
-  pre-tool does not deny edits in bugfix mode and the injected bugfix prompt
-  names those (absent) tools. Workers are covered (see `subagent`).
-- The recap POST carries no `completion_summary_seq` (the driver owns the
-  transcript sequence). Its `idle` phase can land after a Stop-hook
+- The recap POST carries no `completion_summary_seq`: hive-remote sends its
+  OWN transcript-stream sequence number, and for a Claude session that
+  numbering belongs to the driver's transcript upload — the adapter cannot
+  derive it honestly. Its `idle` phase can land after a Stop-hook
   continuation has started; the next heartbeat corrects it.
 - Worktree-guard advisory notes (allow-with-note) are not surfaced.

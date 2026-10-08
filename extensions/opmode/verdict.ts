@@ -18,16 +18,23 @@ import {
 	classifyOrchestrateTool,
 	type PlanToolVerdict,
 } from "../plan/policy.ts";
+import { phaseOrder, PI_BUGFIX_TOOLS, type BugfixToolNames } from "./bugfix.ts";
 import { BUGFIX_WITHHELD_TOOLS, type OpMode } from "./modes.ts";
 
-/** The evidence protocol's phases, in the one order they run. */
-export const PHASE_ORDER = `reproduce → hypothesize → instrument → confirm → (bugfix_root_cause, then the edit) → reverify`;
+/** The evidence protocol's phases, in the one order they run, with pi's tool names. */
+export const PHASE_ORDER = phaseOrder();
 
 /**
  * Whether `mode` permits calling `name` with `input`. `rootCauseRecorded` is
  * the bugfix gate's key: edits open once a root cause exists.
  */
-export function opModeToolVerdict(mode: OpMode, name: string, input: unknown, rootCauseRecorded: boolean): PlanToolVerdict {
+export function opModeToolVerdict(
+	mode: OpMode,
+	name: string,
+	input: unknown,
+	rootCauseRecorded: boolean,
+	names: BugfixToolNames = PI_BUGFIX_TOOLS,
+): PlanToolVerdict {
 	switch (mode) {
 		case "discuss":
 			return classifyDiscussionTool(name, input);
@@ -42,8 +49,8 @@ export function opModeToolVerdict(mode: OpMode, name: string, input: unknown, ro
 				allowed: false,
 				reason:
 					`Bugfix mode: no fix before a root cause. Reproduce the bug and build something that measures it ` +
-					`— the shell, tests and scripts are all open — recording each step with bugfix_evidence, in order: ` +
-					`${PHASE_ORDER}. Once "confirm" is recorded, bugfix_root_cause accepts the mechanism and unlocks edits.`,
+					`— the shell, tests and scripts are all open — recording each step with ${names.evidence}, in order: ` +
+					`${phaseOrder(names)}. Once "confirm" is recorded, ${names.rootCause} accepts the mechanism and unlocks edits.`,
 			};
 		case "orchestrate":
 			return classifyOrchestrateTool(name, input);

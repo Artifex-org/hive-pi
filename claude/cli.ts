@@ -45,7 +45,14 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 	switch (name) {
 		case "pre-tool": {
 			const { preToolDecision } = await import("./hooks/pre-tool.ts");
-			print(preToolDecision(input, dir ? readControl(dir) : DEFAULT_CONTROL));
+			const control = dir ? readControl(dir) : DEFAULT_CONTROL;
+			let rootCause = false;
+			if (dir) {
+				// Also discards a stale episode once the session has left bugfix.
+				const { currentEpisode } = await import("./bugfix.ts");
+				rootCause = currentEpisode(dir, control)?.rootCause != null;
+			}
+			print(preToolDecision(input, control, rootCause));
 			return;
 		}
 		case "prompt": {
@@ -55,7 +62,13 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 		}
 		case "post-tool": {
 			const { postToolDecision } = await import("./hooks/post-tool.ts");
-			print(await postToolDecision(input, dir));
+			let bugfixLive = false;
+			if (dir) {
+				const { currentEpisode } = await import("./bugfix.ts");
+				const phase = currentEpisode(dir, readControl(dir))?.machine.phase;
+				bugfixLive = phase !== undefined && phase !== "done" && phase !== "blocked";
+			}
+			print(await postToolDecision(input, dir, bugfixLive));
 			return;
 		}
 		case "stop": {

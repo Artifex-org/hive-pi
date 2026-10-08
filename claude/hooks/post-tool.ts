@@ -15,12 +15,31 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { disabled, planFor, realProbe } from "../../extensions/format-on-edit/detect.ts";
 import { formatFile } from "../../extensions/format-on-edit/run.ts";
+import { CLAUDE_BUGFIX_TOOLS } from "../bugfix.ts";
 import { readJson, writeJsonAtomic } from "../state.ts";
 import { additionalContext, type HookInput, type HookOutput } from "./io.ts";
 
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write"]);
 
-export async function postToolDecision(input: HookInput, stateDir: string | null): Promise<HookOutput> {
+/**
+ * While a bugfix investigation is live (`bugfixLive`), every result is tagged
+ * with the id `bugfix_evidence` binds — pi's `evidenceTag`: the model cannot
+ * see tool-call ids otherwise, and every phase began with a deliberately
+ * refused call just to list them. Claude only runs PostToolUse for SUCCESSFUL
+ * calls; a failed run's id is listed by the evidence tool's refusal instead.
+ */
+export async function postToolDecision(input: HookInput, stateDir: string | null, bugfixLive = false): Promise<HookOutput> {
+	const notes: string[] = [];
+	const name = input.tool_name ?? "";
+	if (bugfixLive && input.tool_use_id && name !== CLAUDE_BUGFIX_TOOLS.evidence && name !== CLAUDE_BUGFIX_TOOLS.rootCause) {
+		notes.push(`[bugfix evidence id: ${input.tool_use_id}]`);
+	}
+	const formatted = await formatNote(input, stateDir);
+	if (formatted) notes.push(formatted);
+	return notes.length > 0 ? additionalContext("PostToolUse", notes.join("\n")) : null;
+}
+
+async function formatNote(input: HookInput, stateDir: string | null): Promise<string | null> {
 	if (disabled(process.env)) return null;
 	if (!EDIT_TOOLS.has(input.tool_name ?? "")) return null;
 	const raw = input.tool_input?.file_path;
@@ -37,14 +56,14 @@ export async function postToolDecision(input: HookInput, stateDir: string | null
 	const plan = planFor(file, realProbe);
 	if (plan.kind === "none") return null;
 	if (plan.kind === "missing") {
-		if (!stateDir) return additionalContext("PostToolUse", `[format-on-edit] Not formatted: ${plan.reason}.`);
+		if (!stateDir) return `[format-on-edit] Not formatted: ${plan.reason}.`;
 		const path = join(stateDir, "format-told.json");
 		const told = readJson(path);
 		const keys = Array.isArray(told) ? told.filter((k): k is string => typeof k === "string") : [];
 		if (keys.includes(plan.key)) return null;
 		writeJsonAtomic(path, [...keys, plan.key]);
-		return additionalContext("PostToolUse", `[format-on-edit] Not formatted: ${plan.reason}.`);
+		return `[format-on-edit] Not formatted: ${plan.reason}.`;
 	}
 	const { note } = await formatFile(file, plan);
-	return note ? additionalContext("PostToolUse", note) : null;
+	return note;
 }

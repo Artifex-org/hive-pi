@@ -115,9 +115,10 @@ describe("hook pre-tool", () => {
 		expect(preToolDecision({ tool_name: "Bash", tool_input: { command: "git status" } }, control("plan"))).toBeNull();
 	});
 
-	it("does not gate build, bugfix, or Claude tools pi has no name for", () => {
+	it("does not gate build, bugfix once a root cause is recorded, or Claude tools pi has no name for", () => {
 		expect(preToolDecision({ tool_name: "Edit", tool_input: { file_path: "/tmp/a" } }, control("build"))).toBeNull();
-		expect(preToolDecision({ tool_name: "Edit", tool_input: { file_path: "/tmp/a" } }, control("bugfix"))).toBeNull();
+		expect(preToolDecision({ tool_name: "Edit", tool_input: { file_path: "/tmp/a" } }, control("bugfix"), true)).toBeNull();
+		expect(preToolDecision({ tool_name: "Bash", tool_input: { command: "rm -rf build" } }, control("bugfix"))).toBeNull();
 		expect(preToolDecision({ tool_name: "WebFetch", tool_input: { url: "https://x" } }, control("discuss"))).toBeNull();
 		expect(preToolDecision({ tool_name: "mcp__hive__get_run", tool_input: {} }, control("discuss"))).toBeNull();
 	});

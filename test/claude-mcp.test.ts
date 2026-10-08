@@ -106,7 +106,7 @@ describe("mcp protocol", () => {
 		expect((await c.request("ping")).result).toEqual({});
 		const list = await c.request("tools/list");
 		const tools = list.result?.tools as { name: string; description: string; inputSchema: { type: string } }[];
-		expect(tools.map((t) => t.name).sort()).toEqual(["advisor", "goal_clear", "goal_set", "goal_status", "quality_gate", "subagent"]);
+		expect(tools.map((t) => t.name).sort()).toEqual(["advisor", "bugfix_evidence", "bugfix_root_cause", "goal_clear", "goal_set", "goal_status", "quality_gate", "subagent"]);
 		for (const tool of tools) expect(tool.inputSchema.type).toBe("object");
 		expect(tools.find((t) => t.name === "subagent")?.description).toContain("research (aka explorer)");
 		const unknown = await c.request("tools/call", { name: "nope", arguments: {} });

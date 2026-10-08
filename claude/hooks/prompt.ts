@@ -8,11 +8,13 @@
  */
 
 import { buildOpModePrompt } from "../../extensions/opmode/prompt.ts";
+import { CLAUDE_BUGFIX_TOOLS } from "../bugfix.ts";
 import type { Control } from "../state.ts";
 import { additionalContext, type HookOutput } from "./io.ts";
 
 export function promptDecision(control: Control): HookOutput {
 	if (control.opMode !== "discuss" && control.opMode !== "bugfix") return null;
-	const text = buildOpModePrompt(control.opMode);
+	// Claude calls the bugfix tools by their MCP names.
+	const text = buildOpModePrompt(control.opMode, CLAUDE_BUGFIX_TOOLS);
 	return text ? additionalContext("UserPromptSubmit", text) : null;
 }

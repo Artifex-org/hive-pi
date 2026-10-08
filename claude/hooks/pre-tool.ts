@@ -15,10 +15,9 @@
  * vocabulary is not pi's, and an allowlist written for pi's names would deny
  * Claude's harmless ones wholesale.
  *
- * Bugfix mode is NOT gated here: its edit lock opens through pi's evidence
- * protocol (`bugfix_evidence` → `bugfix_root_cause`), which a Claude session
- * does not have, so gating would lock edits for good. It is prompt-only (see
- * prompt.ts) — reported as an open gap in README.md.
+ * Bugfix mode withholds the editors until the episode records a root cause
+ * through the MCP tools `bugfix_evidence` → `bugfix_root_cause` (claude/bugfix.ts),
+ * with opmode's refusal; Bash stays open, as in pi.
  *
  * The decision is only ever DENY or nothing: printing "allow" would skip
  * Claude's own permission prompt, which is not this hook's call.
@@ -28,6 +27,7 @@ import { isAbsolute, resolve } from "node:path";
 import { decide, realProbe } from "../../extensions/guards-common/worktree-guard.ts";
 import { opModeShellVerdict, opModeToolVerdict } from "../../extensions/opmode/verdict.ts";
 import { planToolVerdict } from "../../extensions/plan/policy.ts";
+import { CLAUDE_BUGFIX_TOOLS } from "../bugfix.ts";
 import type { Control } from "../state.ts";
 import { denyToolUse, type HookInput, type HookOutput } from "./io.ts";
 
@@ -46,7 +46,12 @@ function editTarget(toolName: string, input: Record<string, unknown>): string | 
 	return typeof raw === "string" && raw ? raw : undefined;
 }
 
-export function preToolDecision(input: HookInput, control: Control): HookOutput {
+/**
+ * `rootCauseRecorded` is the bugfix gate's key (claude/bugfix.ts): until the
+ * episode records a root cause, bugfix mode denies the file-mutating tools
+ * with opmode's own refusal, naming the tools by their Claude names.
+ */
+export function preToolDecision(input: HookInput, control: Control, rootCauseRecorded = false): HookOutput {
 	const claudeName = input.tool_name ?? "";
 	const piName = CLAUDE_TO_PI_TOOL[claudeName];
 	if (!piName) return null;
@@ -55,6 +60,12 @@ export function preToolDecision(input: HookInput, control: Control): HookOutput 
 	const mode = control.opMode;
 	if (mode === "plan") {
 		const verdict = planToolVerdict(piName, toolInput);
+		if (!verdict.allowed) return denyToolUse(verdict.reason);
+	} else if (mode === "bugfix") {
+		// Bash stays open, exactly as pi leaves it: the investigation IS the
+		// work — repros, instruments, the failing test (opmode/modes.ts,
+		// BUGFIX_WITHHELD_TOOLS). Only the file editors wait for a root cause.
+		const verdict = opModeToolVerdict(mode, piName, toolInput, rootCauseRecorded, CLAUDE_BUGFIX_TOOLS);
 		if (!verdict.allowed) return denyToolUse(verdict.reason);
 	} else if (mode === "discuss" || mode === "orchestrate") {
 		const verdict = opModeToolVerdict(mode, piName, toolInput, false);

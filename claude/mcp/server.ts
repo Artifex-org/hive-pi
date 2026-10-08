@@ -1,6 +1,6 @@
 /**
  * The adapter's MCP server (`cli.ts mcp`): subagent, advisor, goal_set,
- * goal_status, goal_clear, quality_gate.
+ * goal_status, goal_clear, quality_gate, bugfix_evidence, bugfix_root_cause.
  *
  * Lifetime: the server lives as long as Claude keeps its stdin open. When the
  * input ends (or the process is told to terminate), every background
@@ -20,13 +20,14 @@ import { loadPinnedPi } from "../pi-runtime.ts";
 import { createSpool } from "../spool.ts";
 import { DEFAULT_CONTROL, readControl } from "../state.ts";
 import { ADVISOR_TOOL, runAdvisor } from "./advisor-tool.ts";
+import { BUGFIX_TOOLS, bugfixEvidence, bugfixRootCause } from "./bugfix-tools.ts";
 import { QUALITY_GATE_TOOL, runGateTool } from "./gate-tool.ts";
 import { GOAL_TOOLS, goalClear, goalSet, goalStatus } from "./goal-tools.ts";
 import { serve, type ToolDefinition, type ToolResult, type ToolServer } from "./protocol.ts";
 import { BackgroundJobs, leasedModelEnv, runSubagentTool, subagentToolDefinition } from "./subagent-tool.ts";
 
 const SERVER_VERSION = "0.1.0";
-const TOOL_NAMES = new Set(["subagent", "advisor", "goal_set", "goal_status", "goal_clear", "quality_gate"]);
+const TOOL_NAMES = new Set(["subagent", "advisor", "goal_set", "goal_status", "goal_clear", "quality_gate", "bugfix_evidence", "bugfix_root_cause"]);
 
 export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream, output: NodeJS.WritableStream, log: (line: string) => void): Promise<void> {
 	const dir = stateDir(env);
@@ -41,7 +42,7 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 	const catalog = async () => (auth ? ((await fetchAgentModeCatalog(auth))?.modes ?? []) : []);
 
 	const noCredential = (): ToolResult => ({ text: `This tool needs an outside model, and ${unavailable}.`, isError: true });
-	const noState = (): ToolResult => ({ text: "Goal state is unavailable: HIVE_CLAUDE_CONFIG_DIR is unset.", isError: true });
+	const noState = (): ToolResult => ({ text: "Session state is unavailable: HIVE_CLAUDE_CONFIG_DIR is unset.", isError: true });
 
 	const server: ToolServer = {
 		name: "hive-pi",
@@ -61,7 +62,7 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					log(`hive-pi mcp: cannot list subagent roles: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
-			return [subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL];
+			return [subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL, ...BUGFIX_TOOLS];
 		},
 		async call(name, args, signal) {
 			const now = Date.now();
@@ -72,6 +73,10 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					return dir ? goalStatus(dir, now) : noState();
 				case "goal_clear":
 					return dir ? goalClear(dir, now) : noState();
+				case "bugfix_evidence":
+					return dir ? bugfixEvidence(dir, readControl(dir), env.transcript, args) : noState();
+				case "bugfix_root_cause":
+					return dir ? bugfixRootCause(dir, readControl(dir), args) : noState();
 				case "quality_gate":
 					return runGateTool(args, cwd, signal);
 				case "advisor": {
