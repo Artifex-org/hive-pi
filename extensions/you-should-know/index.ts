@@ -10,7 +10,7 @@ import { loadConfig } from "../typesafe-common/config.ts";
 import { readApiKey } from "../typesafe-common/key.ts";
 import { createJevShadow } from "./jev.ts";
 import { createJevPrefilter, type PrefilterOutcome } from "./prefilter.ts";
-import { assistantEvidence, failedToolEvidence, redactEvidence, stableFindingID, type SourceEvidence } from "./evidence.ts";
+import { assistantEvidence, failedToolEvidence, groundNotes, redactEvidence, stableFindingID, type CaptureSource, type SourceEvidence } from "./evidence.ts";
 import { excerpt, fingerprint, outputText, parseNotes, SCAN_SYSTEM, type Note } from "./scan.ts";
 
 const KEY = "you-should-know";
@@ -88,7 +88,6 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	let jevDetail = jevConfig.enabled ? (jevKey ? "waiting" : "no usable key") : "configuration disabled";
 	let model = process.env.PI_YOU_SHOULD_KNOW_MODEL || "catalog:low";
 	let state = fresh(cfg.enabled);
-	type CaptureSource = { evidence: SourceEvidence; recording: boolean; revision: number; serverSessionId?: string };
 	let sources: CaptureSource[] = [];
 	let ledger: CapturedFinding[] = [];
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -223,15 +222,8 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 			if (["error", "aborted", "length"].includes(response.stopReason)) throw new Error("scanner could not finish its response");
 			const extracted = parseNotes(assistantText(response), source);
 			baseline = { checked: true, notes: extracted.length, tokens: response.usage.totalTokens };
-			const notes = extracted.filter(n => !state.seen.includes(fingerprint(n.quote)));
-			const findings: CapturedFinding[] = [];
-			for (const note of notes) {
-				const origin = captured.find(x => x.evidence.text.includes(note.quote));
-				if (!origin) continue;
-				note.id = stableFindingID(state.sessionId, origin.evidence.id, note.quote);
-				const finding = { id: note.id, kind: note.kind, classification: note.classification ?? "context", text: note.text, quote: note.quote, source_id: origin.evidence.id, source_type: origin.evidence.type, provenance: origin.evidence.type === "tool" ? "observed" as const : "assistant_reported" as const, context: origin.evidence.context, expected: note.expected, impact: note.impact };
-				if (validFinding(finding)) findings.push({ finding, recording: origin.recording && scanRecording && state.recording === true && scanRevision === origin.revision && recordingRevision === scanRevision, revision: origin.revision, serverSessionId: origin.serverSessionId ?? "" });
-			}
+			const { notes, findings } = groundNotes(extracted, state.seen, captured, state.sessionId,
+				origin => origin.recording && scanRecording && state.recording === true && scanRevision === origin.revision && recordingRevision === scanRevision);
 			state.notes = [...state.notes, ...notes].slice(-10);
 			state.seen = [...state.seen, ...notes.map(n => fingerprint(n.quote))].slice(-100);
 			if (findings.length && ledger.length < 200) {

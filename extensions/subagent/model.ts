@@ -107,6 +107,26 @@ function configuredFallbacks(
 }
 
 /**
+ * The cheap lane on a host that cannot run every catalog mode: the mode keyed
+ * `preferKey` (the fleet's `low`) when it is configured here, otherwise the
+ * CHEAPEST configured mode — the same walk the delegation fallback takes.
+ * Undefined when nothing in the catalog is configured; the caller reports it.
+ *
+ * Generic over the mode shape so a caller holding the full catalog entry
+ * (with its `thinking`) gets that entry back.
+ */
+export function cheapLaneMode<M extends CatalogMode>(
+	catalog: readonly M[],
+	isConfigured: ConfiguredCheck,
+	preferKey = "low",
+): M | undefined {
+	const preferred = catalog.find((mode) => mode?.key === preferKey && typeof mode.model === "string");
+	if (preferred && isConfigured(preferred.model) === true) return preferred;
+	const [cheapest] = configuredFallbacks(catalog, isConfigured, undefined, undefined);
+	return cheapest === undefined ? undefined : catalog.find((mode) => mode.model === cheapest);
+}
+
+/**
  * The model a worker spawns with, decided BEFORE the spawn.
  *
  * `preferred` is what the old code would have used (`role.model ??
