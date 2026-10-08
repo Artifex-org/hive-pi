@@ -27,18 +27,15 @@ import { realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { withFileMutationQueue, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { planFor, realProbe } from "./detect.ts";
+import { disabled, planFor, realProbe } from "./detect.ts";
 import { formatFile } from "./run.ts";
 
 /** The built-in tools whose `path` argument is a file they just wrote. */
 const WRITE_TOOLS = new Set(["edit", "write"]);
 
-export function disabled(env: Record<string, string | undefined>): boolean {
-	return env.PI_FORMAT_ON_EDIT === "0";
-}
 
 /** The real filesystem probe lives in detect.ts (shared with the Claude adapter); re-exported for existing importers. */
-export { realProbe };
+export { disabled, realProbe };
 
 export default function (pi: ExtensionAPI) {
 	if (disabled(process.env)) return;

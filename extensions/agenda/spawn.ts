@@ -253,6 +253,8 @@ export interface RoleAgentOptions {
 export interface RoleAgentResult {
 	text: string;
 	tokens: number;
+	/** Assistant messages the child produced — its model calls. */
+	turns: number;
 	/** Full usage including dollars — see harness/usage.ts. */
 	usage: Usage;
 	exitCode: number;
@@ -295,6 +297,7 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 		let stderr = "";
 		let buffer = "";
 		let timedOut = false;
+		let turns = 0;
 
 		const finish = (exitCode: number) => {
 			clearTimeout(timer);
@@ -306,7 +309,7 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 					/* temp dir already gone */
 				}
 			}
-			resolve({ text: texts.join("\n").trim(), tokens: budgetTokens(usage), usage, exitCode, timedOut, stderr });
+			resolve({ text: texts.join("\n").trim(), tokens: budgetTokens(usage), turns, usage, exitCode, timedOut, stderr });
 		};
 
 		const timer = setTimeout(() => {
@@ -333,6 +336,7 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 			if (message.role !== "assistant") return;
 
 			usage = addUsage(usage, message.usage);
+			turns++;
 
 			const content = message.content;
 			if (typeof content === "string") {

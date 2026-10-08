@@ -147,7 +147,17 @@ export interface GateStampStore {
 	set(id: string, stamp: string | undefined): void;
 }
 
-export function createGatePolicy(stamps?: GateStampStore): Policy {
+export interface GatePolicyOptions {
+	/**
+	 * A ceiling on the check's timeout, read when the check starts. A host
+	 * whose settle has a hard wall clock (the Claude adapter's Stop hook)
+	 * passes what is left of it; absent, the repo's own `checkTimeoutMs` (or
+	 * the default) stands, which is pi's behaviour.
+	 */
+	timeoutCapMs?: () => number;
+}
+
+export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOptions = {}): Policy {
 	return {
 	name: "verification-loop",
 	// A red gate is worth hearing while the agent waits on its own CI watcher;
@@ -206,7 +216,8 @@ export function createGatePolicy(stamps?: GateStampStore): Policy {
 				}
 
 				const startedAt = Date.now();
-				const result = await runCheck(command, root, timeoutMs);
+				const cap = options.timeoutCapMs?.();
+				const result = await runCheck(command, root, cap === undefined ? timeoutMs : Math.max(0, Math.min(timeoutMs, cap)));
 				const elapsed = Date.now() - startedAt;
 
 				if (result.ok) {

@@ -11,13 +11,13 @@ import { readApiKey } from "../typesafe-common/key.ts";
 import { createJevShadow } from "./jev.ts";
 import { createJevPrefilter, type PrefilterOutcome } from "./prefilter.ts";
 import { assistantEvidence, failedToolEvidence, groundNotes, redactEvidence, stableFindingID, type CaptureSource, type SourceEvidence } from "./evidence.ts";
-import { excerpt, fingerprint, outputText, parseNotes, SCAN_SYSTEM, type Note } from "./scan.ts";
+import { DEFAULT_CONFIG, excerpt, fingerprint, outputText, parseNotes, SCAN_SYSTEM, type Note, type ScanConfig } from "./scan.ts";
 
 const KEY = "you-should-know";
 const LEDGER = "you-should-know.findings";
 const RECEIPTS = "you-should-know.receipts";
-export interface ScanConfig { enabled: boolean; intervalMs: number; timeoutMs: number; maxScans: number }
-export const DEFAULT_CONFIG: ScanConfig = { enabled: true, intervalMs: 30_000, timeoutMs: 60_000, maxScans: 20 };
+// The scan limits live in scan.ts, shared with the Claude adapter's settle hook.
+export { DEFAULT_CONFIG, type ScanConfig };
 interface State {
 	sessionId: string; enabled: boolean; scans: number; notes: Note[]; seen: string[]; tokens: number; cost: number;
 	recording?: boolean; desiredRecording?: boolean;

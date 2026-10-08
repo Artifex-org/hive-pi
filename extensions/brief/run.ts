@@ -66,6 +66,8 @@ export interface BriefLaneOutcome {
 	timedOut: boolean;
 	elapsedMs: number;
 	usage: Usage | null;
+	/** Model calls the lane's worker made; 0 when it never ran. */
+	turns: number;
 }
 
 export interface BriefRunResult {
@@ -183,8 +185,8 @@ interface LaneRun {
 
 async function runLane(lane: BriefLane, role: AgentConfig, model: string, keys: string[], options: RunBriefOptions): Promise<LaneRun> {
 	const startedAtMs = Date.now();
-	const fail = (failure: string, timedOut = false, usage: Usage | null = null): LaneRun => ({
-		outcome: { lane, ok: false, failure, timedOut, elapsedMs: Date.now() - startedAtMs, usage },
+	const fail = (failure: string, timedOut = false, usage: Usage | null = null, turns = 0): LaneRun => ({
+		outcome: { lane, ok: false, failure, timedOut, elapsedMs: Date.now() - startedAtMs, usage, turns },
 		draft: null,
 	});
 
@@ -211,18 +213,18 @@ async function runLane(lane: BriefLane, role: AgentConfig, model: string, keys: 
 		return fail(`briefer lane crashed: ${String(err)}`);
 	}
 
-	if (result.timedOut) return fail(`timed out after ${options.timeoutMs}ms`, true, result.usage);
+	if (result.timedOut) return fail(`timed out after ${options.timeoutMs}ms`, true, result.usage, result.turns);
 	if (result.exitCode !== 0) {
 		const detail = result.stderr.trim().split("\n").at(-1) ?? "";
-		return fail(`exited ${result.exitCode}${detail ? `: ${detail}` : ""}`, false, result.usage);
+		return fail(`exited ${result.exitCode}${detail ? `: ${detail}` : ""}`, false, result.usage, result.turns);
 	}
 
 	const draft = parseBriefDraft(result.text);
-	if (!draft) return fail("returned no parseable json", false, result.usage);
-	if (draftIsEmpty(draft)) return fail("found nothing", false, result.usage);
+	if (!draft) return fail("returned no parseable json", false, result.usage, result.turns);
+	if (draftIsEmpty(draft)) return fail("found nothing", false, result.usage, result.turns);
 
 	return {
-		outcome: { lane, ok: true, failure: "", timedOut: false, elapsedMs: Date.now() - startedAtMs, usage: result.usage },
+		outcome: { lane, ok: true, failure: "", timedOut: false, elapsedMs: Date.now() - startedAtMs, usage: result.usage, turns: result.turns },
 		draft,
 	};
 }

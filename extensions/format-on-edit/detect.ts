@@ -429,3 +429,8 @@ export const realProbe: Probe = {
 		return null;
 	},
 };
+
+/** `PI_FORMAT_ON_EDIT=0` opts out — in pi and in the Claude adapter alike. */
+export function disabled(env: Record<string, string | undefined>): boolean {
+	return env.PI_FORMAT_ON_EDIT === "0";
+}
