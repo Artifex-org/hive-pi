@@ -28,18 +28,15 @@
  * package.json.
  */
 
-import fs from "node:fs";
-import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Browser, BrowserContext, ConsoleMessage, Page } from "playwright-core";
 import { chromium } from "playwright-core";
 import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
-import { buildLaunchPlan } from "./launch.ts";
-import { BrowserSurfaceBridge } from "./surface.ts";
 import { registerFlowTools } from "../flows/register.ts";
 import { ScreenshotLedger } from "../pr-attachments/manifest.ts";
 import { CAPTURABLE_CHANNEL } from "../pr-attachments/logic.ts";
+import type { RecordedAction } from "../flows/core.ts";
+import { BROWSER_TOOL_SPECS, SCREENSHOT_LABEL_HINT, SELECTOR_HINT, SessionBrowser, type BrowserOutput } from "./core.ts";
 
 // Every tool here shares one capability shape: the first call spawns the
 // session's headless Chromium (a subprocess), and nothing writes outside the
@@ -49,168 +46,90 @@ const BROWSER_CAPABILITY = {
 	writesExemptBecause: "writes only its own per-process screenshot/profile dir under /tmp",
 };
 
-const NAV_TIMEOUT_MS = 20_000;
-const ACTION_TIMEOUT_MS = 10_000;
-const SNAPSHOT_MAX_CHARS = 30_000;
-const CONSOLE_RING_MAX = 200;
-
-const SELECTOR_HINT =
-	'Playwright selector: css, `text=Save`, `role=button[name="Save"]`, `xpath=...`. ' +
-	"Take browser_snapshot first and derive role/name selectors from the outline.";
-
-interface BrowserState {
-	browser: Browser;
-	context: BrowserContext;
-	page: Page;
-	console: string[];
-	surface: BrowserSurfaceBridge | null;
+function text(output: BrowserOutput) {
+	return { content: [{ type: "text" as const, text: output.text }], details: output.details };
 }
 
-function text(body: string, details: unknown) {
-	return { content: [{ type: "text" as const, text: body }], details };
-}
-
-function truncate(s: string, max: number): { text: string; truncated: boolean } {
-	if (s.length <= max) return { text: s, truncated: false };
-	return { text: `${s.slice(0, max)}\n… [truncated at ${max} chars — narrow the request]`, truncated: true };
-}
-
+/**
+ * pi's registration of the session browser. What each tool does is
+ * `core.ts` (shared with the Claude adapter's MCP server); this file adds the
+ * typebox schemas, the capability guard and the pr-attachments event.
+ */
 export default function (pi: ExtensionAPI) {
-	let state: BrowserState | null = null;
-
-	async function ensurePage(): Promise<BrowserState> {
-		if (state && state.browser.isConnected()) return state;
-		if (state) await state.surface?.stop();
-		const plan = buildLaunchPlan(process.env);
-		const browser = await chromium.launch({
-			headless: plan.headless,
-			...(plan.chromiumSandbox === false ? { chromiumSandbox: false } : {}),
-			...(plan.args ? { args: plan.args } : {}),
-			...(plan.proxy ? { proxy: plan.proxy } : {}),
-		});
-		const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-		context.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
-		context.setDefaultTimeout(ACTION_TIMEOUT_MS);
-		const page = await context.newPage();
-		const ring: string[] = [];
-		page.on("console", (msg: ConsoleMessage) => {
-			ring.push(`[${msg.type()}] ${msg.text()}`);
-			if (ring.length > CONSOLE_RING_MAX) ring.shift();
-		});
-		page.on("pageerror", (err: Error) => {
-			ring.push(`[pageerror] ${err.message}`);
-			if (ring.length > CONSOLE_RING_MAX) ring.shift();
-		});
-		const surface = await BrowserSurfaceBridge.start(page);
-		state = { browser, context, page, console: ring, surface };
-		return state;
-	}
-
-	const flows = registerFlowTools(pi, { page: async () => (await ensurePage()).page });
-
-	async function describePage(page: Page): Promise<{ body: string; truncated: boolean }> {
-		const outline = await page.locator("body").ariaSnapshot();
-		const capped = truncate(outline, SNAPSHOT_MAX_CHARS);
-		const body = [`url: ${page.url()}`, `title: ${await page.title()}`, "", capped.text].join("\n");
-		return { body, truncated: capped.truncated };
-	}
+	let flows: { record(action: RecordedAction): void } | null = null;
+	const browser = new SessionBrowser({ chromium: async () => chromium, onAction: (action) => flows?.record(action) });
+	flows = registerFlowTools(pi, { page: () => browser.page() });
+	const spec = BROWSER_TOOL_SPECS;
 
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_navigate",
-		label: "Browser: navigate",
-		description:
-			"Open a URL in the session's own headless Chromium and return the page's aria outline. " +
-			"Loopback dev servers work directly; external hosts go through the sandbox's domain allowlist when sandboxed.",
-		promptSnippet: "Open a URL in the session browser",
+		label: spec.browser_navigate.label,
+		description: spec.browser_navigate.description,
+		promptSnippet: spec.browser_navigate.promptSnippet,
 		parameters: Type.Object({
-			url: Type.String({ description: "URL to open (http(s); loopback dev servers included)." }),
+			url: Type.String({ description: spec.browser_navigate.inputSchema.properties.url.description }),
 		}),
 		async execute(_id, params) {
-			const { page } = await ensurePage();
-			const response = await page.goto(params.url);
-			flows.record({ kind: "navigate", url: params.url });
+			const output = await browser.navigate(params);
 			// A page is open, so a `before` screenshot is now possible — let
 			// pr-attachments upgrade its BEFORE reminder to a just-in-time block.
 			pi.events.emit(CAPTURABLE_CHANNEL, { source: "browser_navigate", url: params.url });
-			const status = response?.status();
-			const described = await describePage(page);
-			return text(described.body, {
-				url: page.url(),
-				...(status !== undefined ? { status } : {}),
-				truncated: described.truncated,
-			});
+			return text(output);
 		},
 	});
 
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_snapshot",
-		label: "Browser: snapshot",
-		description: "Aria outline (roles, names, values) of the current page — the ground truth for picking selectors.",
-		promptSnippet: "Snapshot the current browser page",
+		label: spec.browser_snapshot.label,
+		description: spec.browser_snapshot.description,
+		promptSnippet: spec.browser_snapshot.promptSnippet,
 		parameters: Type.Object({}),
 		async execute() {
-			const { page } = await ensurePage();
-			const described = await describePage(page);
-			return text(described.body, { url: page.url(), truncated: described.truncated });
+			return text(await browser.snapshot());
 		},
 	});
 
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_click",
-		label: "Browser: click",
-		description: `Click an element and return the resulting page outline. ${SELECTOR_HINT}`,
-		promptSnippet: "Click an element in the browser",
+		label: spec.browser_click.label,
+		description: spec.browser_click.description,
+		promptSnippet: spec.browser_click.promptSnippet,
 		parameters: Type.Object({
 			selector: Type.String({ description: SELECTOR_HINT }),
 		}),
 		async execute(_id, params) {
-			const { page } = await ensurePage();
-			await page.click(params.selector);
-			flows.record({ kind: "click", selector: params.selector });
-			const described = await describePage(page);
-			return text(described.body, { url: page.url(), selector: params.selector });
+			return text(await browser.click(params));
 		},
 	});
 
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_type",
-		label: "Browser: type",
-		description: `Fill an input (replaces its value), optionally pressing Enter. ${SELECTOR_HINT}`,
-		promptSnippet: "Type into a browser input",
+		label: spec.browser_type.label,
+		description: spec.browser_type.description,
+		promptSnippet: spec.browser_type.promptSnippet,
 		parameters: Type.Object({
 			selector: Type.String({ description: SELECTOR_HINT }),
-			value: Type.String({ description: "Text to fill." }),
-			submit: Type.Optional(Type.Boolean({ description: "Press Enter afterwards (default false)." })),
+			value: Type.String({ description: spec.browser_type.inputSchema.properties.value.description }),
+			submit: Type.Optional(Type.Boolean({ description: spec.browser_type.inputSchema.properties.submit.description })),
 		}),
 		async execute(_id, params) {
-			const { page } = await ensurePage();
-			await page.fill(params.selector, params.value);
-			if (params.submit) await page.press(params.selector, "Enter");
-			flows.record({ kind: "fill", selector: params.selector, value: params.value, submit: Boolean(params.submit) });
-			const described = await describePage(page);
-			return text(described.body, { url: page.url(), selector: params.selector, submitted: Boolean(params.submit) });
+			return text(await browser.type(params));
 		},
 	});
 
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_screenshot",
-		label: "Browser: screenshot",
-		description: "Screenshot the current page — returned inline and saved to a file for later reference.",
-		promptSnippet: "Screenshot the browser page",
+		label: spec.browser_screenshot.label,
+		description: spec.browser_screenshot.description,
+		promptSnippet: spec.browser_screenshot.promptSnippet,
 		parameters: Type.Object({
-			full_page: Type.Optional(Type.Boolean({ description: "Capture the full scroll height (default viewport only)." })),
-			label: Type.Optional(
-				Type.String({
-					description:
-						"Free-text label recorded with the shot. Convention: `before` for the state before a UI change " +
-						"and `after` for the state after it, so a PR can attach both. Recorded in pr-attachments.json.",
-				}),
-			),
+			full_page: Type.Optional(Type.Boolean({ description: spec.browser_screenshot.inputSchema.properties.full_page.description })),
+			label: Type.Optional(Type.String({ description: SCREENSHOT_LABEL_HINT })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			// Backed by the on-disk pr-attachments.json manifest, so the record
@@ -220,33 +139,13 @@ export default function (pi: ExtensionAPI) {
 			// per-process directory was one directory for all of them. See
 			// ../pr-attachments/manifest.ts. Read from ctx before the first await.
 			const ledger = new ScreenshotLedger(process.env, ctx.sessionManager.getSessionId());
-			const { page } = await ensurePage();
-			const dir = ledger.shotDir;
-			fs.mkdirSync(dir, { recursive: true });
-			const file = path.join(dir, `shot-${Date.now()}.png`);
-			const buf = await page.screenshot({ fullPage: Boolean(params.full_page), path: file });
-			const url = page.url();
-			const label = params.label ?? "";
-			// Best-effort: a manifest write that fails must never fail the screenshot.
-			let recorded;
-			try {
-				recorded = ledger.record({ path: file, label, url });
-			} catch {
-				recorded = undefined;
-			}
-			const labelNote = label ? ` [${label}]` : "";
+			const output = await browser.screenshot(params, ledger);
 			return {
 				content: [
-					{ type: "image" as const, data: buf.toString("base64"), mimeType: "image/png" },
-					{ type: "text" as const, text: `Saved to ${file}${labelNote} (${url})` },
+					...(output.image ? [{ type: "image" as const, data: output.image.data, mimeType: output.image.mimeType }] : []),
+					{ type: "text" as const, text: output.text },
 				],
-				details: {
-					path: file,
-					url,
-					full_page: Boolean(params.full_page),
-					...(label ? { label } : {}),
-					...(recorded ? { taken_at: recorded.taken_at } : {}),
-				},
+				details: output.details,
 			};
 		},
 	});
@@ -254,77 +153,56 @@ export default function (pi: ExtensionAPI) {
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_console",
-		label: "Browser: console",
-		description: "Recent console messages and page errors from the session browser (ring buffer, newest last).",
-		promptSnippet: "Read browser console messages",
+		label: spec.browser_console.label,
+		description: spec.browser_console.description,
+		promptSnippet: spec.browser_console.promptSnippet,
 		parameters: Type.Object({
-			clear: Type.Optional(Type.Boolean({ description: "Clear the buffer after reading (default false)." })),
+			clear: Type.Optional(Type.Boolean({ description: spec.browser_console.inputSchema.properties.clear.description })),
 		}),
 		async execute(_id, params) {
-			const s = await ensurePage();
-			const body = s.console.length ? s.console.join("\n") : "(no console output captured)";
-			const count = s.console.length;
-			if (params.clear) s.console.length = 0;
-			return text(body, { count, cleared: Boolean(params.clear) });
+			return text(await browser.console(params));
 		},
 	});
 
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_evaluate",
-		label: "Browser: evaluate",
-		description: "Evaluate a JavaScript expression in the page and return its JSON-serialized result.",
-		promptSnippet: "Evaluate JS in the browser page",
+		label: spec.browser_evaluate.label,
+		description: spec.browser_evaluate.description,
+		promptSnippet: spec.browser_evaluate.promptSnippet,
 		parameters: Type.Object({
-			expression: Type.String({ description: "Expression or IIFE body, e.g. `document.querySelectorAll('.row').length`." }),
+			expression: Type.String({ description: spec.browser_evaluate.inputSchema.properties.expression.description }),
 		}),
 		async execute(_id, params) {
-			const { page } = await ensurePage();
-			const result: unknown = await page.evaluate(params.expression);
-			let rendered: string;
-			try {
-				rendered = JSON.stringify(result, null, 2) ?? "undefined";
-			} catch {
-				rendered = String(result);
-			}
-			const capped = truncate(rendered, SNAPSHOT_MAX_CHARS);
-			return text(capped.text, { truncated: capped.truncated });
+			return text(await browser.evaluate(params));
 		},
 	});
 
 	registerGuardedTool(pi, {
 		capability: BROWSER_CAPABILITY,
 		name: "browser_wait_for",
-		label: "Browser: wait for",
-		description: `Wait until an element is visible (or hidden). ${SELECTOR_HINT}`,
-		promptSnippet: "Wait for a browser element",
+		label: spec.browser_wait_for.label,
+		description: spec.browser_wait_for.description,
+		promptSnippet: spec.browser_wait_for.promptSnippet,
 		parameters: Type.Object({
 			selector: Type.String({ description: SELECTOR_HINT }),
 			state: Type.Optional(
 				Type.Union([Type.Literal("visible"), Type.Literal("hidden")], {
-					description: "Target state, default visible.",
+					description: spec.browser_wait_for.inputSchema.properties.state.description,
 				}),
 			),
-			timeout_ms: Type.Optional(Type.Integer({ minimum: 100, maximum: 60_000, description: "Default 10000." })),
+			timeout_ms: Type.Optional(
+				Type.Integer({ minimum: 100, maximum: 60_000, description: spec.browser_wait_for.inputSchema.properties.timeout_ms.description }),
+			),
 		}),
 		async execute(_id, params) {
-			const { page } = await ensurePage();
-			const state = params.state ?? "visible";
-			const timeout = params.timeout_ms ?? ACTION_TIMEOUT_MS;
-			await page.waitForSelector(params.selector, { state, timeout });
-			flows.record({ kind: "wait", selector: params.selector, state, timeoutMS: timeout });
-			const described = await describePage(page);
-			return text(described.body, { url: page.url(), selector: params.selector, state: params.state ?? "visible" });
+			return text(await browser.waitFor(params));
 		},
 	});
 
 	pi.on("session_shutdown", () => {
 		// Best-effort: an orphaned headless Chromium outlives the session and
 		// holds memory until the host cleans /tmp.
-		const s = state;
-		state = null;
-		if (s) {
-			void (s.surface?.stop() ?? Promise.resolve()).finally(() => s.browser.close().catch(() => {}));
-		}
+		void browser.close();
 	});
 }

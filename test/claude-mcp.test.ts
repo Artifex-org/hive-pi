@@ -5,65 +5,14 @@
  * and a fake Hive catalog.
  */
 
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { opModeRefusal } from "../claude/mcp/subagent-tool.ts";
 import { negotiateVersion } from "../claude/mcp/protocol.ts";
-import { CLI, makeLaunch, REPO, startFakeHive, writeTranscript, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
-
-interface Rpc {
-	id?: number;
-	result?: Record<string, unknown>;
-	error?: { code: number; message: string };
-}
-
-class McpClient {
-	readonly child: ChildProcessWithoutNullStreams;
-	private readonly pending = new Map<number, (message: Rpc) => void>();
-	private nextId = 1;
-	stderr = "";
-	readonly exited: Promise<number | null>;
-
-	constructor(env: Record<string, string>, cwd = REPO) {
-		this.child = spawn(process.execPath, [CLI, "mcp"], { cwd, env });
-		this.child.stderr.on("data", (d: Buffer) => {
-			this.stderr += d.toString();
-		});
-		createInterface({ input: this.child.stdout }).on("line", (line) => {
-			const message = JSON.parse(line) as Rpc;
-			if (message.id !== undefined) this.pending.get(message.id)?.(message);
-		});
-		this.exited = new Promise((done) => this.child.on("close", (code) => done(code)));
-	}
-
-	request(method: string, params: unknown = {}): Promise<Rpc> {
-		const id = this.nextId++;
-		const answer = new Promise<Rpc>((done) => this.pending.set(id, done));
-		this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
-		return answer;
-	}
-
-	notify(method: string, params: unknown = {}): void {
-		this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
-	}
-
-	async call(name: string, args: Record<string, unknown> = {}): Promise<{ text: string; isError: boolean }> {
-		const message = await this.request("tools/call", { name, arguments: args });
-		if (message.error) throw new Error(message.error.message);
-		const content = message.result?.content as { type: string; text: string }[];
-		return { text: content[0].text, isError: message.result?.isError === true };
-	}
-
-	close(): Promise<number | null> {
-		this.child.stdin.end();
-		return this.exited;
-	}
-}
+import { makeLaunch, McpClient, REPO, startFakeHive, writeTranscript, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
 
 let launch: LaunchEnv;
 let hive: FakeHive;
@@ -106,7 +55,29 @@ describe("mcp protocol", () => {
 		expect((await c.request("ping")).result).toEqual({});
 		const list = await c.request("tools/list");
 		const tools = list.result?.tools as { name: string; description: string; inputSchema: { type: string } }[];
-		expect(tools.map((t) => t.name).sort()).toEqual(["advisor", "bugfix_evidence", "bugfix_root_cause", "goal_clear", "goal_set", "goal_status", "quality_gate", "subagent"]);
+		expect(tools.map((t) => t.name).sort()).toEqual([
+			"advisor",
+			"author_maestro_flow",
+			"browser_click",
+			"browser_console",
+			"browser_evaluate",
+			"browser_navigate",
+			"browser_screenshot",
+			"browser_snapshot",
+			"browser_type",
+			"browser_wait_for",
+			"bugfix_evidence",
+			"bugfix_root_cause",
+			"goal_clear",
+			"goal_set",
+			"goal_status",
+			"quality_gate",
+			"record_playwright_flow",
+			"report_dev_server",
+			"run_playwright_flow_source",
+			"run_saved_agent_flow",
+			"subagent",
+		]);
 		for (const tool of tools) expect(tool.inputSchema.type).toBe("object");
 		expect(tools.find((t) => t.name === "subagent")?.description).toContain("research (aka explorer)");
 		const unknown = await c.request("tools/call", { name: "nope", arguments: {} });

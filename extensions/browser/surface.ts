@@ -145,12 +145,16 @@ export class BrowserSurfaceBridge {
   private readonly publisherID = randomUUID();
   private readonly publisherStartedAt = Date.now();
   private stopped = false;
+  // Plain fields, not parameter properties: the Claude adapter loads this file
+  // under Node's type stripping, which accepts erasable syntax only.
+  private readonly config: BrowserSurfaceConfig;
+  private readonly page: Page;
+  private readonly cdp: CDPSession;
 
-  private constructor(
-    private readonly config: BrowserSurfaceConfig,
-    private readonly page: Page,
-    private readonly cdp: CDPSession,
-  ) {
+  private constructor(config: BrowserSurfaceConfig, page: Page, cdp: CDPSession) {
+    this.config = config;
+    this.page = page;
+    this.cdp = cdp;
     this.sequence = nextSurfaceSequence(config);
   }
 

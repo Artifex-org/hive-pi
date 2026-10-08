@@ -33,9 +33,12 @@ function loadTools(): { tools: Map<string, RegisteredTool>; shutdown: () => void
 		on(event: string, handler: () => void) {
 			if (event === "session_shutdown") onShutdown = handler;
 		},
+		// The flow tools' SessionPublisher subscribes to the session channel, and
+		// browser_navigate emits the pr-attachments event.
+		events: { on: () => () => {}, emit: () => {} },
 	};
-	// The extension only uses registerTool + on(session_shutdown); the fake
-	// covers exactly that surface.
+	// The extension uses registerTool, on(session_shutdown) and the event bus;
+	// the fake covers exactly that surface.
 	(browserExtension as unknown as (pi: typeof fakePi) => void)(fakePi);
 	return { tools, shutdown: () => onShutdown?.() };
 }

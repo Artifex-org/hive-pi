@@ -4,14 +4,15 @@ Gives a Hive-launched **Claude Code** session the hive-pi features that run on
 *other* model families or that pi injects: the opening brief, subagents on the
 catalog ladder, You Should Know, the goal judge and drift probe, the status
 recap, a cross-family advisor, op-mode enforcement, the worktree guard,
-format-on-edit and `quality_gate`.
+format-on-edit, `quality_gate`, and pi's session browser with its flow tools.
 
 The Claude loop stays Anthropic. Every outside-model call is a `pi` child
 (`pi --mode json -p --no-session …`) on the launch's **leased** pi store. The
 adapter reuses hive-pi's own cores — nothing here is a second implementation;
 where a core was entangled with pi's runtime it was lifted into a shared
 module (`agenda/chain.ts`, `agenda/goal-tool.ts`, `subagent/delegate.ts`,
-`gate/tool.ts`, `opmode/verdict.ts`, `harness/roles-core.ts`, …) that the pi
+`gate/tool.ts`, `opmode/verdict.ts`, `harness/roles-core.ts`,
+`browser/core.ts`, `flows/core.ts`, …) that the pi
 extension and this adapter both import.
 
 Run by the plugin as `$HIVE_NODE $HIVE_PI_BASE/claude/cli.ts <command>` —
@@ -31,6 +32,8 @@ the **pinned** pi install that `HIVE_PI_BIN` points into (`pi-runtime.ts`).
 | `HIVE_CLAUDE_CONFIG_DIR` | state lives in `$HIVE_CLAUDE_CONFIG_DIR/hive-pi/` (0700): `goal.json`, `agenda.json`, `ysk.json`, `recap.json`, `session.json`, locks |
 | `HIVE_AUX_SPOOL` | append-only JSONL for the driver; unset ⇒ no records (said once on stderr) |
 | `HIVE_CLAUDE_TRANSCRIPT` | the Claude JSONL, for MCP tools (hooks get `transcript_path`) |
+| `HIVE_LAUNCH_ID`, `HIVE_BROWSER_SURFACE_DIR`, `HIVE_BROWSER_{FRAME,CONTROL}_FIFO`, `HIVE_BROWSER_SURFACE_MANIFEST` | the browser's live view (below); `HIVE_LAUNCH_ID` also turns on the flow claim loop and the sandbox launch flags |
+| `HIVE_PR_ATTACHMENTS_DIR` | where the screenshot manifest goes (else next to the shots) |
 
 `control.json` in the state dir is the **driver's** (read-only here):
 `{"opMode":"build|plan|discuss|bugfix","ysk":{"enabled":bool,"recording":bool?,"recordingRevision":int?}}`.
@@ -137,6 +140,43 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
     `bugfix.json`, discarded by any reader that finds control.json out of
     bugfix mode (the driver also deletes it whenever it writes a non-bugfix
     opMode, and owns that reset); outside bugfix both tools say there is nothing to record into.
+  - `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`,
+    `browser_screenshot`, `browser_console`, `browser_evaluate`,
+    `browser_wait_for`, and the flow tools `report_dev_server`,
+    `run_saved_agent_flow`, `record_playwright_flow`,
+    `run_playwright_flow_source`, `author_maestro_flow` — pi's tools, same
+    names, wording and JSON schemas (`extensions/browser/core.ts`,
+    `extensions/flows/core.ts`; a test pins them to pi's typebox). Model-free,
+    so offered without a lease. One headless Chromium per server (= session),
+    launched on the first browser call. **Prerequisite, once per host and
+    user:** `npx playwright-core@1.62.1 install chromium-headless-shell` (the
+    version in package.json); without it every browser call is an `isError`
+    naming that command. `browser_screenshot` returns the PNG as an MCP image
+    block plus `Saved to <path>` (hand the path to `send_attachment`), and
+    records it in the pr-attachments manifest keyed by `HIVE_SESSION_ID`
+    (unset, outside a launch: a per-server id). Page tools run one at a time;
+    a cancelled call answers at once and the next waits for its operation.
+    The flow tools' Hive calls use `HIVE_URL`/`HIVE_TOKEN` and the resolved
+    session; the runtime-owner claim loop (every 2 s, launched sessions only)
+    runs for the server's lifetime. Not ported: pi's pr-attachments nudge
+    (an in-process pi event).
+
+## Browser live view
+
+The same contract pi's browser follows, so nothing on the node changes:
+
+- **Desktop app** — `BrowserSurfaceBridge` writes the launch's surface dir
+  (`HIVE_BROWSER_SURFACE_DIR`, under `~/.hive/scratch/`, 0700, with the two
+  FIFOs the node creates): `manifest.json` (`ready` → `ended`), JPEG frames on
+  `frames.fifo`, input from `control.fifo` (lease-checked), and
+  `latest-web.{jpg,json}` every 2 s. The desktop reads the dir directly.
+- **Hive web UI** — in a pi session hive-remote relays `latest-web.*` to
+  `PUT /agent-sessions/{id}/surfaces/{HIVE_LAUNCH_ID}` (+ `/snapshot`). A
+  Claude session has no hive-remote and the driver does not relay surfaces,
+  so this server runs hive-remote's `BrowserSurfacePublisher` itself (2 s
+  tick from the first launch, `ended` at shutdown). The driver must therefore
+  NOT publish a browser surface for the same launch id — two publishers on
+  one row fence each other out. Requires a uuid `HIVE_LAUNCH_ID`.
 
 ## Spool records
 
@@ -156,7 +196,12 @@ group on timeout or cancel (`hive-common/child-tree.ts`); a hook or `brief`
 told to stop (SIGTERM/SIGINT/SIGHUP) kills every group it started. The MCP
 server on SIGTERM/SIGINT, or when its parent dies (ppid polled every 5 s),
 stops reading, aborts and awaits in-flight requests and background jobs, then
-exits. **Residual:** SIGKILL cannot be caught — detached groups then outlive
+exits — and closes the session's Chromium (Playwright's own signal handlers
+are off; Chromium leads its own process group, which Playwright kills on
+exit, and on Linux — where its pid is found in /proc — the server SIGKILLs
+that group if Chromium outlives its close). playwright-core is imported on
+the first browser launch, so a checkout without it still serves every other
+tool. **Residual:** SIGKILL cannot be caught — detached groups then outlive
 their parent until they finish. `PI_CODING_AGENT_DIR` is only ever
 `$HIVE_PI_AGENT_DIR`. Transcript reads ignore a half-written last line and
 skip (with one stderr line) a corrupt one.

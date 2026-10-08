@@ -27,7 +27,7 @@ const USAGE = `usage: node claude/cli.ts <command>
   hook settle       Stop (async): you-should-know scan and the status recap
   brief --cwd <dir> --prompt-file <file>
                     compile a retrieval-backed brief for an opening prompt
-  mcp               stdio MCP server: subagent, advisor, goal_set/status/clear, quality_gate
+  mcp               stdio MCP server: subagent, advisor, goal_set/status/clear, quality_gate, browser_*, flows
 
 Every command reads Claude Code's hook JSON (or MCP JSON-RPC) on stdin. See claude/README.md.`;
 

@@ -12,14 +12,16 @@
  *  - A leased store (`auth.json` with the given providers), a state dir, a
  *    spool path.
  *  - A fake Hive: `/api/v1/agent-modes`, `/agent-sessions/by-run/{id}`,
- *    `/activity`, `/you-should-know/findings`, recording every request.
+ *    `/activity`, `/you-should-know/findings`, `/surfaces/…`, recording every
+ *    request.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -168,7 +170,11 @@ export interface FakeHive {
 async function bodyOf(req: IncomingMessage): Promise<unknown> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of req) chunks.push(chunk as Buffer);
-	const text = Buffer.concat(chunks).toString("utf8");
+	const bytes = Buffer.concat(chunks);
+	// A surface snapshot is an image; it is recorded by type and size.
+	const type = req.headers["content-type"] ?? "";
+	if (bytes.length > 0 && type.startsWith("image/")) return { contentType: type, bytes: bytes.length };
+	const text = bytes.toString("utf8");
 	return text ? (JSON.parse(text) as unknown) : undefined;
 }
 
@@ -199,6 +205,7 @@ export async function startFakeHive(): Promise<FakeHive> {
 				return hive.sessionId ? json(200, { id: hive.sessionId }) : json(404, { error: "not found" });
 			}
 			if (path.endsWith("/activity")) return json(200, {});
+			if (path.includes("/surfaces/")) return json(200, {});
 			if (path.endsWith("/you-should-know/findings")) {
 				const findings = req.method === "POST" ? ((body as { findings?: { id: string }[] }).findings ?? []).map((f) => ({ id: f.id, deliveries: [{ destination: "board", state: "delivered" }] })) : [];
 				return json(200, { version: 1, ...hive.recording, findings });
@@ -227,4 +234,62 @@ export function writeTranscript(path: string, turns: ({ user: string } | { assis
 	);
 	writeFileSync(path, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
 	return path;
+}
+
+export interface McpContent {
+	type: string;
+	text?: string;
+	data?: string;
+	mimeType?: string;
+}
+
+export interface Rpc {
+	id?: number;
+	result?: Record<string, unknown>;
+	error?: { code: number; message: string };
+}
+
+/** The adapter's `mcp` command, driven over its real stdio transport. */
+export class McpClient {
+	readonly child: ChildProcessWithoutNullStreams;
+	private readonly pending = new Map<number, (message: Rpc) => void>();
+	private nextId = 1;
+	stderr = "";
+	readonly exited: Promise<number | null>;
+
+	constructor(env: Record<string, string>, cwd = REPO) {
+		this.child = spawn(process.execPath, [CLI, "mcp"], { cwd, env });
+		this.child.stderr.on("data", (d: Buffer) => {
+			this.stderr += d.toString();
+		});
+		createInterface({ input: this.child.stdout }).on("line", (line) => {
+			const message = JSON.parse(line) as Rpc;
+			if (message.id !== undefined) this.pending.get(message.id)?.(message);
+		});
+		this.exited = new Promise((done) => this.child.on("close", (code) => done(code)));
+	}
+
+	request(method: string, params: unknown = {}): Promise<Rpc> {
+		const id = this.nextId++;
+		const answer = new Promise<Rpc>((done) => this.pending.set(id, done));
+		this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+		return answer;
+	}
+
+	notify(method: string, params: unknown = {}): void {
+		this.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+	}
+
+	/** A tool call: its text block, every content block, and whether it is an error. */
+	async call(name: string, args: Record<string, unknown> = {}): Promise<{ text: string; isError: boolean; content: McpContent[] }> {
+		const message = await this.request("tools/call", { name, arguments: args });
+		if (message.error) throw new Error(message.error.message);
+		const content = message.result?.content as McpContent[];
+		return { text: content.find((block) => block.type === "text")?.text ?? "", isError: message.result?.isError === true, content };
+	}
+
+	close(): Promise<number | null> {
+		this.child.stdin.end();
+		return this.exited;
+	}
 }
