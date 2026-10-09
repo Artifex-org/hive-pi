@@ -29,6 +29,7 @@ describe("delivery milestones", () => {
 		["git commit -m change", "fatal: failed"],
 		["gh pr create", "permission denied"],
 		["gh pr view", "https://github.com/owner/repo/pull/123"],
+		["gh pr create || gh pr view --json url --jq .url", "https://github.com/owner/repo/pull/123"],
 		["echo 'git commit'", "[work abc1234] change"],
 		["echo 'gh pr create'", "https://github.com/owner/repo/pull/123"],
 	])("does not mistake failed or read-only %s for a milestone", (command, output) => {

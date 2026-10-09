@@ -116,7 +116,7 @@ it("offers milestone advice before the native final report without starving sett
 		pi.registerTool({ name: "fixture_code", label: "nested fixture", description: "Call bash through the native nested-tool API", parameters: Type.Object({}),
 			execute: async (_id, _args, _signal, _update, ctx) => (await ctx.executeTool("bash", { command: "git commit -m change" })).result });
 		const advice = createConductorAdvicePolicy({ current: () => item, commit: next => { item = next; },
-			goal: () => null, enabled: () => true, requestPlanMode: () => {} });
+			goal: () => ({ state: "active" } as import("../extensions/agenda/goal-state.ts").GoalItem), enabled: () => true, requestPlanMode: () => {} });
 		installDriver(pi, { turnPolicies: [advice], policies: [advice, { name: "gate", decide: () => {
 			checks++; return null;
 		} }] });

@@ -265,6 +265,16 @@ describe("conductor policy", () => {
 		hooks.commit(withStage(item()!, "execute", 10));
 		expect(policy.decide(contextWith(ledger, milestone))).toBeNull();
 	});
+	it("does not create an unfinishable lifecycle when milestone advice has no goal or todos", async () => {
+		const { hooks, item } = makeHooks();
+		const advice = createConductorAdvicePolicy(hooks);
+		const outcome = await advice.decide(contextWith(emptyLedger, signalsWith({ deliveryStarted: true })))!.run();
+		expect(outcome.inject).toContain("advisor");
+		expect(item()).toBeNull();
+		const next = createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), signalsWith({})));
+		await next!.run();
+		expect(item()?.stage).toBe("frame");
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});

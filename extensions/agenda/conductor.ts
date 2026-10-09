@@ -338,17 +338,20 @@ export function createConductorAdvicePolicy(hooks: ConductorHooks): Policy {
 		if (!hooks.enabled() || !signals?.deliveryStarted || !signals.userTurns ||
 			atCap(context.ledger, ADVISE_LEDGER_ID, 1)) return null;
 		if (!hooks.current() && assessComplexity(signals.lastUserPrompt, signals.tasks.total) !== "complex") return null;
-		return adviceTransition(hooks);
+		return adviceTransition(hooks, signals);
 	} };
 }
 
-function adviceTransition(hooks: ConductorHooks): PolicyWork {
+function adviceTransition(hooks: ConductorHooks, signals: SessionSignals): PolicyWork {
 	return {
 		name: "conductor",
 		status: "conductor: entering verify stage",
 		run: async () => {
 			const now = Date.now();
-			hooks.commit(withStage(itemFor(hooks, now), "verify", now));
+			// Advice must not strand a session with no completion contract. Give
+			// it the reminder without creating an unfinishable verify lifecycle.
+			if (hooks.goal() || signals.tasks.total > 0) hooks.commit(withStage(itemFor(hooks, now), "verify", now));
+			else if (hooks.current()) hooks.commit(withStage(itemFor(hooks, now), "idle", now));
 			return {
 				metric: { outcome: "pass" as const, value: 0 },
 				inject: ADVISE_INJECTION,

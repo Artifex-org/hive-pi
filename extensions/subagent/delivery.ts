@@ -40,9 +40,10 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		while (prefix?.[verb] === "-C") verb += 2;
 		const forcedStaging = prefix?.[0] === "git" && prefix[verb] === "add" && prefix.slice(verb + 1).some(token =>
 			token === "--force" || /^-[^-]*f/.test(token) || /^(?:--chmod|--patch|--interactive)/.test(token) || ["-p", "-i"].includes(token));
+		const gitWritesOutput = prefix?.[0] === "git" && prefix.some(token => token === "--output" || token.startsWith("--output="));
 		const dynamicGit = prefix?.[0] === "git" && !literalWords(cleaned);
 		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
-		if (!prefix || configuredEnv || forcedStaging || dynamicGit || redirected || !(prefix[0] === "git" && ["add", "commit", "status", "diff", "log", "push"].includes(prefix[verb]) ||
+		if (!prefix || configuredEnv || forcedStaging || gitWritesOutput || dynamicGit || redirected || !(prefix[0] === "git" && ["add", "commit", "status", "diff", "log", "push"].includes(prefix[verb]) ||
 			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) precedingMutation = true;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);

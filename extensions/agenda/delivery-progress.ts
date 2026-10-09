@@ -10,7 +10,8 @@ export const ADVICE_GIVEN_ENTRY = "agenda-advice-given";
 
 export function deliveryMilestone(command: string, output: string): boolean {
 	if (command.length > 8192) return false;
-	for (const segment of splitCommands(command, true)) {
+	const segments = splitCommands(command, true);
+	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment, true);
 		if (!words) continue;
 		while (/^[A-Za-z_]\w*=/.test(words[0] ?? "")) words.shift();
@@ -23,7 +24,9 @@ export function deliveryMilestone(command: string, output: string): boolean {
 		}
 		if ((words[0] === "gh" && words[1] === "pr" && words[2] === "create") ||
 			(words[0] === "hive" && words[1] === "ship")) {
-			if (/https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/.test(output)) return true;
+			// Do not attribute a fallback/read command\'s URL to a failed create.
+			// Only the final creator has attributable stdout in a shell chain.
+			if (index === segments.length - 1 && /https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/.test(output)) return true;
 		}
 	}
 	return false;
