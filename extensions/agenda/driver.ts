@@ -31,7 +31,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-common/channels.ts";
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { walkChain } from "./chain.ts";
-import { emptyLedger, type LedgerState } from "./ledger.ts";
+import { emptyLedger, record, count, type LedgerState } from "./ledger.ts";
+import { ADVISE_INJECTION, ADVISE_LEDGER_ID } from "./conductor.ts";
+import { ADVICE_GIVEN_ENTRY, registerDeliveryProgress } from "./delivery-progress.ts";
 import { recapTranscript } from "./recap.ts";
 import type { MetricOutcome, Policy } from "./policy.ts";
 import { classifyHandback, type Handback, handbackClass } from "../hive-common/handback.ts";
@@ -57,6 +59,8 @@ import { type TurnFailure, turnFailureOf } from "./turn-outcome.ts";
 
 export interface DriverOptions {
 	policies: Policy[];
+	/** Cheap milestone policies only; gates/judges stay at settle. */
+	turnPolicies?: Policy[];
 	/** True inside a spawned worker, where automatic re-entry is never wanted. */
 	isWorker?: boolean;
 }
@@ -161,6 +165,7 @@ function lastAssistantText(ctx: ExtensionContext): string | undefined {
 
 export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverHandle {
 	let ledger: LedgerState = emptyLedger;
+	let advicePending = false;
 	let inSettle = false;
 	let generation = 0;
 	let blockedOnUser = false;
@@ -169,6 +174,29 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	let heldCtx: ExtensionContext | null = null;
 	const settleClaims = trackSettleClaims(pi);
 	const ownWork = trackOwnWork(pi);
+	const rehydrateDeliveryProgress = registerDeliveryProgress(pi);
+	const adviceMessage = (entries: readonly unknown[]) => entries.some(entry => {
+		const message = entry as { type?: string; customType?: string; content?: unknown };
+		return message.type === "custom_message" && message.customType === "agenda" && message.content === ADVISE_INJECTION;
+	});
+	const adviceStamp = (entries: readonly unknown[]) => entries.some(entry => (entry as { customType?: string }).customType === ADVICE_GIVEN_ENTRY);
+	// Notification contexts reflect committed session entries. Actionable
+	// boundary contexts can contain preview drafts, which are not delivery proof.
+	const reconcileAdvice = (ctx: ExtensionContext) => {
+		if (!advicePending) return;
+		const entries = ctx.sessionManager.getEntries();
+		if (adviceMessage(entries) || adviceStamp(entries)) {
+			if (!count(ledger, ADVISE_LEDGER_ID)) ledger = record(ledger, ADVISE_LEDGER_ID);
+			if (!adviceStamp(entries)) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
+		} else {
+			const iterations = { ...ledger.iterations }; delete iterations[ADVISE_LEDGER_ID];
+			ledger = { ...ledger, iterations }; // a later boundary handler discarded the draft
+		}
+		advicePending = false;
+	};
+	pi.on("turn_start", (_event, ctx) => reconcileAdvice(ctx));
+	pi.on("agent_start", (_event, ctx) => reconcileAdvice(ctx));
+	pi.on("agent_end", (_event, ctx) => reconcileAdvice(ctx));
 
 	// Registered UNCONDITIONALLY. The extension factory runs once at startup, so
 	// a registration gated on state can never be un-gated by a later command —
@@ -182,10 +210,15 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		// The gate's budget is per-session by design and pinned as such by
 		// test/verification-loop.test.ts. Durable, non-resetting budgets arrive
 		// with /goal, which needs persistence this policy deliberately does not.
-		ledger = emptyLedger;
+		const entries = ctx.sessionManager.getEntries();
+		rehydrateDeliveryProgress(entries);
+		advicePending = false;
+		const given = adviceMessage(entries) || adviceStamp(entries);
+		ledger = given ? record(emptyLedger, ADVISE_LEDGER_ID) : emptyLedger;
+		if (given && !adviceStamp(entries)) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
 	});
 
-	async function runChain(ctx: ExtensionContext, boundary = false): Promise<string | undefined> {
+	async function runChain(ctx: ExtensionContext, boundary: "settle" | "turn" | null = null, policies = options.policies): Promise<string | undefined> {
 		if (options.isWorker) return;
 		if (inSettle) return; // our own injected turn settling — never recurse
 
@@ -274,12 +307,18 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		// and a user-armed loop still run while the agent waits on its own job).
 		blockedOnUser = handback.kind === "human";
 		const held = handbackClass(handback);
-		const eligible = options.policies.filter(
+		const eligible = policies.filter(
 			(policy) => held === "none" || (held !== "gate" && policy.proceedsDespite?.includes(held) === true),
 		);
 		if (eligible.length === 0) return;
 
 		const gen = generation;
+		const adviceBefore = count(ledger, ADVISE_LEDGER_ID);
+		let injectionAccepted = false;
+		const acceptInjection = () => {
+			injectionAccepted = true;
+
+		};
 
 		inSettle = true;
 		try {
@@ -315,6 +354,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					onMetric: (name, outcome, value) => emitMetric(pi, name, outcome, value),
 					ledger: () => ledger,
 					setLedger: (next) => {
+						if (count(next, ADVISE_LEDGER_ID) > count(ledger, ADVISE_LEDGER_ID)) advicePending = true;
 						ledger = next;
 					},
 				},
@@ -324,7 +364,10 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			if (boundary) {
 				try {
 					pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: injection.policy } satisfies AgendaInjectionEvent);
-					settleClaims.claim("agenda");
+					// turn_end continues INSIDE the current run (turn_start, not
+					// agent_start). Its advice must not hold a later settle hostage.
+					if (boundary === "settle") settleClaims.claim("agenda");
+					acceptInjection();
 					return injection.text;
 				} catch {
 					return; // session went away mid-check
@@ -335,6 +378,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					{ customType: "agenda", content: injection.text, display: true },
 					{ deliverAs: "followUp", triggerTurn: true },
 				);
+				acceptInjection();
 				pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: injection.policy } satisfies AgendaInjectionEvent);
 				settleClaims.claim("agenda");
 			} catch {
@@ -344,9 +388,29 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		} catch {
 			/* a policy threw; never take the harness down with it */
 		} finally {
+			// A live user-message check can discard advice after policy work.
+			// Keep other retry charges, but do not spend an undelivered reminder.
+			if (gen === generation && !injectionAccepted && count(ledger, ADVISE_LEDGER_ID) > adviceBefore) {
+				const iterations = { ...ledger.iterations };
+				if (adviceBefore) iterations[ADVISE_LEDGER_ID] = adviceBefore;
+				else delete iterations[ADVISE_LEDGER_ID];
+				ledger = { ...ledger, iterations };
+				advicePending = false;
+			}
 			inSettle = false;
 		}
 	}
+
+	// A commit's tool result is persisted before turn_end. Inject here so the
+	// next model request sees advice, not after its final delivery report.
+	pi.on("turn_end", async (event, ctx) => {
+		if (!options.turnPolicies?.length || event.continue || event.outcome !== "completed") return;
+		const injection = await runChain(ctx, "turn", options.turnPolicies);
+		return injection ? {
+			entries: [...event.entries, { type: "custom_message", customType: "agenda", content: injection, display: true }],
+			continue: true,
+		} : undefined;
+	});
 
 	pi.on("agent_before_settle", async (event, ctx) => {
 		heldCtx = ctx;
@@ -355,7 +419,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			return;
 		}
 		if (event.continue) return; // another boundary handler already requested a turn
-		const injection = await runChain(ctx, true);
+		const injection = await runChain(ctx, "settle");
 		return injection ? {
 			entries: [...event.entries, { type: "custom_message", customType: "agenda", content: injection, display: true }],
 			continue: true,
@@ -363,6 +427,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		heldCtx = ctx; // final observation only; no policy work or continuation
+		reconcileAdvice(ctx);
 	});
 
 	return {
@@ -375,7 +440,8 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			void runChain(ctx).catch(() => {});
 		},
 		reset: () => {
-			ledger = emptyLedger;
+			// Stop/re-enable resets retry budgets, not the session-wide reminder.
+			ledger = ledger.iterations[ADVISE_LEDGER_ID] ? record(emptyLedger, ADVISE_LEDGER_ID) : emptyLedger;
 			blockedOnUser = false;
 		},
 		blockedOnUser: () => blockedOnUser,

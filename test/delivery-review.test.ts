@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deliveryCommand, deliveryTargets, needsDeliveryReview, registerDeliveryReview, reviewFingerprint } from "../extensions/subagent/delivery.ts";
@@ -21,6 +21,149 @@ function repo() {
 const substantive = Array.from({ length: 12 }, (_, i) => `export const n${i} = ${i};`).join("\n") + "\n";
 
 describe("delivery review", () => {
+	it.each([
+		"hive ship --no-pr && gh pr create",
+		"hive ship --no-pr && gh pr create --title 'review stamped'",
+		"HIVE_PRESIGN_REQUIRED=1 git push",
+		"git commit -m 'code && docs' && hive ship && git push",
+		"cd .; FORCE_COLOR='1 2' HIVE_PRESIGN_REQUIRED=1 git push",
+	])("requires a matching review for %s", async command => {
+		const { cwd, git } = repo();
+		writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		vi.stubEnv("PI_DELIVERY_REVIEW", "1");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		const deliver = () => pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } });
+		const refused = (await deliver())[0] as { block: boolean; reason: string };
+		expect(refused.block).toBe(true);
+		expect(refused.reason).toContain("no matching completed foreground review");
+		expect(refused.reason).not.toContain("diff unavailable");
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await deliver())[0]).toBeUndefined();
+		writeFileSync(join(cwd, "code.ts"), substantive + "export const later = 1;\n"); git("add", ".");
+		expect((await deliver())[0]).toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
+	it("checks the last delivery first without hiding earlier unsupported pushes", () => {
+		expect(deliveryTargets("git -C /first push && cd /last && gh pr create", "/repo")).toEqual(["/last", "/first"]);
+		expect(deliveryTargets("git push other HEAD && gh pr create", "/repo")).toEqual(["/repo", null]);
+	});
+	it("does not authorize alternate configuration or ignored files staged by force", async () => {
+		const { cwd, git } = repo();
+		writeFileSync(join(cwd, ".gitignore"), "generated.ts\n"); git("add", "."); git("commit", "-m", "ignore");
+		writeFileSync(join(cwd, "generated.ts"), substantive);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		expect(needsDeliveryReview(captureDeliveryDiff(cwd)!)).toBe(false);
+		for (const command of ["git add -f generated.ts && git commit -m code && git push",
+			"git add --force generated.ts; hive ship", `git -C "${cwd}" add -f generated.ts && git push`,
+			"HOME=/other git push", "XDG_CONFIG_HOME=/other git push",
+			"git status > code.ts; git add code.ts; git commit -m code; git push",
+			"git status && git push",
+			"git diff HEAD~1 HEAD --output=code.ts -- README.md && git add code.ts && git commit -m generated && git push origin HEAD",
+			"git log --output code.ts; git add code.ts; hive ship",
+			'SETTING="$(echo changed >> code.ts)" git push',
+			'SETTING=$(echo changed >> code.ts) git push',
+			'git status "$(echo changed >> code.ts)" && git push',
+			'gh pr create --body "$(git reset --hard unreviewed)"; git push origin HEAD']) {
+			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0])
+				.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		}
+	});
+	it.each(["pre-commit", "post-rewrite"])("requires post-commit review when %s can generate unreviewed code", async hookName => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		if (hookName === "post-rewrite") git("commit", "-m", "seed code");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		const hook = join(cwd, ".git", "hooks", hookName);
+		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' > generated.ts\ngit add generated.ts\n" +
+			(hookName === "post-rewrite" ? "git -c core.hooksPath=/dev/null commit -m generated\n" : "")); chmodSync(hook, 0o755);
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: hookName === "post-rewrite" ? "git commit --amend --no-edit && git push origin HEAD" : "git commit -m code && hive ship && git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("executable hooks") });
+		if (hookName === "post-rewrite") git("commit", "--amend", "--no-edit");
+		else git("commit", "-m", "hook generated");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const generated");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
+	it("allows a reviewed push-only chain with unused executable commit hooks", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		const hook = join(cwd, ".git", "hooks", "pre-commit");
+		writeFileSync(hook, "#!/bin/sh\nexit 1\n"); chmodSync(hook, 0o755);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: `cd ${cwd} && git push origin HEAD`, cwd } }))[0]).toBeUndefined();
+	});
+	it("requires separation when pre-push hooks generate bytes for a later commit/push", async () => {
+		const source = repo(), destination = repo(); destination.git("checkout", "main");
+		source.git("remote", "add", "origin", destination.cwd);
+		writeFileSync(join(source.cwd, "code.ts"), substantive); source.git("add", "."); source.git("commit", "-m", "code");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd: source.cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(source.cwd)!) }] } });
+		const hook = join(source.cwd, ".git", "hooks", "pre-push");
+		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' >> code.ts\n"); chmodSync(hook, 0o755);
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD && git add code.ts && git commit -m generated && git push origin HEAD", cwd: source.cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("executable hooks") });
+		source.git("push", "origin", "HEAD");
+		expect(captureDeliveryDiff(source.cwd)!.text).toContain("export const generated");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd: source.cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
+	it("rejects a reviewed chain whose external-diff helper can change code", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive);
+		const helper = join(cwd, ".git", "external-diff");
+		writeFileSync(helper, "#!/bin/sh\nprintf 'export const helper = 1;\\n' >> code.ts\n"); chmodSync(helper, 0o755);
+		git("config", "diff.external", helper);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git diff --ext-diff && git add code.ts && git commit -m code && git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		git("diff", "--ext-diff");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const helper");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
+	it("requires staging separately when clean filters can generate different staged code", async () => {
+		const { cwd, git } = repo();
+		writeFileSync(join(cwd, ".gitattributes"), "code.ts filter=transform\n"); git("add", "."); git("commit", "-m", "attributes");
+		git("update-ref", "refs/remotes/origin/main", "HEAD");
+		const helper = join(cwd, ".git", "clean-filter");
+		writeFileSync(helper, "#!/bin/sh\ncat >/dev/null\nif [ -e .git/index.lock ]; then printf 'export const staged = 2;\\n'; else printf 'export const preview = 1;\\n'; fi\n"); chmodSync(helper, 0o755);
+		git("config", "filter.transform.clean", helper);
+		writeFileSync(join(cwd, "README.md"), "docs only\n");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const preview");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0]).toBeUndefined();
+		for (const command of ["git add --renormalize . && git commit -m change && git push origin HEAD", "git commit -am change && git push origin HEAD", "git commit -m change code.ts && git push origin HEAD", "git commit && git push origin HEAD"]) {
+			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0])
+				.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		}
+		git("add", "--renormalize", ".");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const staged");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
+	it("distinguishes unsupported shapes from an unavailable diff", async () => {
+		const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);
+		for (const command of ["git checkout work && git push", "git push other HEAD"]) {
+			const result = (await pi.emit({ type: "tool_call", toolName: "bash", input: { command } }))[0] as { reason: string };
+			expect(result.reason).toContain("Unsupported command shape:");
+			expect(result.reason).toContain("standalone");
+			expect(result.reason).not.toContain("diff unavailable");
+		}
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push" } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("Complete delivery diff unavailable") });
+	});
 	it("recognizes real delivery, not echo, status, dry runs, or PR reads", () => {
 		for (const c of ["git push -u origin HEAD", "git -C /repo push", "git push && gh pr create", "gh pr create --title 'change'", "git status\ngit push",  'gh pr create --body "$(cat body.md)"']) expect(deliveryCommand(c), c).toBe(true);
 		for (const c of ["echo 'git push'", "git push --dry-run", "git status", "gh pr view", "cat README.md", 'echo "git status\ngit push"']) expect(deliveryCommand(c), c).toBe(false);

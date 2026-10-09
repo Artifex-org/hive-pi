@@ -141,7 +141,7 @@ export function suggestsHandoff(
 export const ADVISE_LEDGER_ID = "conductor:advise";
 
 export const ADVISE_INJECTION = [
-	"Conductor: the work looks complete. Before delivery checks, review any advisory composition lint returned by plan_ready;",
+	"Conductor: the first commit or PR opening marks execute→verify. Before continuing delivery, review any advisory composition lint returned by plan_ready;",
 	"this is the one execute→verify reminder, charged to the existing conductor:advise ledger.",
 	"If an `advisor` tool is available, call it once for a final review of this work — then address anything real it raises.",
 ].join(" ");
@@ -321,26 +321,53 @@ function decidePlan(hooks: ConductorHooks, signals: SessionSignals): PolicyWork 
 	return null;
 }
 
-function decideExecute(hooks: ConductorHooks, context: PolicyContext, signals: SessionSignals): PolicyWork | null {
+function completionGoal(hooks: ConductorHooks): GoalItem | null {
 	const goal = hooks.goal();
+	const binding = hooks.current()?.verificationGoalId;
+	if (binding === null || binding !== undefined && (goal?.id ?? "") !== binding) return null;
+	return goal && ["active", "paused", "achieved"].includes(goal.state) ? goal : null;
+}
+
+function decideExecute(hooks: ConductorHooks, context: PolicyContext, signals: SessionSignals): PolicyWork | null {
+	const goal = completionGoal(hooks);
 	const goalDone = goal?.state === "achieved";
 	// With no goal, completion is "every todo closed". With a goal, the judge's
 	// verdict is the completion signal and todo state is advisory.
 	const done = goal ? goalDone : allTasksDone(signals);
 	if (!done) return null;
-	// The execute→verify seam is the last settle where advice can still change
-	// the outcome cheaply — after verify the work is being judged, not shaped.
-	// One nudge, ever (HIV-1247); a rehydrated session at cap advances silently
-	// exactly as before.
-	if (atCap(context.ledger, ADVISE_LEDGER_ID, 1)) {
-		return silentAdvance(hooks, "verify");
-	}
+	// A silent stage change alone never schedules a new boundary. Perform the
+	// verification work now, without reviving the late advisor injection.
+	const verification = decideVerify(hooks, context);
+	if (!verification) return null;
+	return { ...verification, run: async () => {
+		hooks.commit(withStage(itemFor(hooks, Date.now()), "verify", Date.now()));
+		return verification.run();
+	} };
+}
+
+/** Early policy: run at the post-tool boundary and before the goal judge. */
+export function createConductorAdvicePolicy(hooks: ConductorHooks): Policy {
+	return { name: "conductor-advice", decide(context) {
+		const signals = context.signals;
+		if (!hooks.enabled() || !signals?.deliveryStarted || !signals.userTurns ||
+			atCap(context.ledger, ADVISE_LEDGER_ID, 1)) return null;
+		return adviceTransition(hooks, signals);
+	} };
+}
+
+function adviceTransition(hooks: ConductorHooks, signals: SessionSignals): PolicyWork {
 	return {
 		name: "conductor",
 		status: "conductor: entering verify stage",
 		run: async () => {
 			const now = Date.now();
-			hooks.commit(withStage(itemFor(hooks, now), "verify", now));
+			// Advice must not strand a session with no completion contract. Give
+			// it the reminder without creating an unfinishable verify lifecycle.
+			const goal = hooks.goal();
+			if (goal?.state === "active" || signals.tasks.total > 0) hooks.commit({
+				...withStage(itemFor(hooks, now), "verify", now), verificationGoalId: goal?.state === "active" ? goal.id ?? "" : null,
+			});
+			else if (hooks.current()) hooks.commit(withStage(itemFor(hooks, now), "idle", now));
 			return {
 				metric: { outcome: "pass" as const, value: 0 },
 				inject: ADVISE_INJECTION,
@@ -366,6 +393,11 @@ function decideExecute(hooks: ConductorHooks, context: PolicyContext, signals: S
  * harness checking at all, and get neither tier.
  */
 function decideVerify(hooks: ConductorHooks, context: PolicyContext): PolicyWork | null {
+	// Advice can move us here while CI/tasks remain open. Do not consolidate
+	// until the original completion contract is met.
+	const goal = completionGoal(hooks);
+	if (!context.signals?.tasks.total && (!goal || !["active", "paused", "achieved"].includes(goal.state))) return silentAdvance(hooks, "idle");
+	if (goal ? goal.state !== "achieved" : !context.signals || !allTasksDone(context.signals)) return null;
 	const loaded = loadHarnessConfig(context.cwd);
 	const prCheck = loaded?.config.prCheck?.trim();
 	if (!loaded) {

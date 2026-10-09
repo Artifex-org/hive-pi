@@ -3,16 +3,32 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { splitCommands } from "../guards-common/shell-split.ts";
 import { literalWords } from "../toolhints/contextual.ts";
 import { captureDeliveryDiff, reviewFingerprint, stampableReview, type ReviewDiff } from "./reviewdiff.ts";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { accessSync, constants } from "node:fs";
 
 export const DELIVERY_REVIEW_GUIDANCE = "Before pushing or opening a PR, run subagent with agent: code-reviewer on the diff and fix its findings. The harness supplies the diff/file list, not the author's design rationale. Docs-only or tiny diffs skip automatically; PI_DELIVERY_REVIEW=0 explicitly overrides the checkpoint.";
+
+function commitPreservesStagedBytes(args: string[]): boolean {
+	let nonInteractive = false;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (["-m", "--message", "-F", "--file"].includes(arg)) { if (args[++i] === undefined) return false; nonInteractive = true; continue; }
+		if (/^(?:-m.+|-F.+|--(?:message|file)=)/.test(arg)) { nonInteractive = true; continue; }
+		if (arg === "--no-edit") nonInteractive = true;
+		if (["--amend", "--no-edit", "--allow-empty", "--allow-empty-message", "--no-verify", "--quiet", "--verbose", "--signoff", "--reset-author", "--no-gpg-sign", "-q", "-s", "-S", "-v"].includes(arg)) continue;
+		if (/^--gpg-sign(?:=|$)/.test(arg)) continue;
+		return false; // paths, -a/-i/-o, patches and unknown staging/editor modes
+	}
+	return nonInteractive;
+}
 
 export function deliveryTargets(command: string, cwd: string): (string | null)[] {
 	const targets: (string | null)[] = [];
 	let dir: string | null = cwd;
-	if (command.length > 8192) return splitCommands(command, true).some((segment) => /^\s*(?:\w+=\S+\s+)*(?:git|gh)\s/.test(segment) && /\b(?:push|pr\s+create)\b/.test(segment)) ? [null] : [];
+	if (command.length > 8192) return splitCommands(command, true).some((segment) => /^\s*(?:\w+=\S+\s+)*(?:git|gh|hive)\s/.test(segment) && /\b(?:push|pr\s+create|ship)\b/.test(segment)) ? [null] : [];
 	let pipeline = false;
-	let precedingCommand = false;
+	let precedingMutation = false;
 	for (const segment of splitCommands(command, true, () => { pipeline = true; })) {
 		const words = literalWords(segment);
 		if (/^\s*cd\s/.test(segment)) {
@@ -20,13 +36,40 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 			continue;
 		}
 		if (!segment.trim()) continue;
-		const preceded = precedingCommand;
-		precedingCommand = true;
-		// Only inspect the command prefix: a gh body can legitimately contain
-		// substitutions, without changing which command/repo is being delivered.
-		const cleaned = segment.replace(/^\s*(?:\w+=\S+\s+)*/, "");
+		// Strip assignment WORDS, including quoted values with spaces. Ordinary
+		// process settings do not change the reviewed repo; Git/gh selectors do.
+		const cleaned = segment.replace(/^\s*(?:[A-Za-z_]\w*=(?:[^\s'"\\]+|'[^']*'|"[^"\\]*")*\s+)*/, "");
+		// An unquoted substitution with spaces cannot be stripped as literal
+		// assignment words. Recognize the delivery tail, but do not guess it.
+		if (/^\s*[A-Za-z_]\w*=/.test(segment) && !/^(?:git|gh|hive)\s/.test(cleaned) &&
+			/\b(?:git\s+push|gh\s+pr\s+create|hive\s+ship)\b/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""))) {
+			targets.push(null); precedingMutation = true; continue;
+		}
 		const assignments = segment.slice(0, segment.length - cleaned.length);
-		const configuredEnv = /\b(?!(?:PI_DELIVERY_REVIEW|FORCE_COLOR)=)\w+=/.test(assignments);
+		const configuredEnv = !literalWords(assignments) || /\b(?:GIT_\w+|GH_REPO|GH_HOST|HOME|XDG_CONFIG_HOME|PATH)=/.test(assignments);
+		const preceded = precedingMutation;
+		// Committing already captured staged bytes is supported. Staging can
+		// transform content through filters, so it must finish before review. Commands
+		// that can switch HEAD, reconfigure the target, or generate new bytes
+		// must be run separately, then reviewed against their resulting diff.
+		const prefix = literalWords(cleaned, true);
+		let verb = 1;
+		while (prefix?.[verb] === "-C") verb += 2;
+		const gitWritesOutput = prefix?.[0] === "git" && prefix.some(token => token === "--output" || token.startsWith("--output="));
+		const implicitStaging = prefix?.[0] === "git" && prefix[verb] === "commit" && !commitPreservesStagedBytes(prefix.slice(verb + 1));
+		const dynamicGit = prefix?.[0] === "git" && !literalWords(cleaned);
+		// Preserve the common read-only body-file substitution, not arbitrary
+		// shell code that can reset HEAD before PR creation or a later push.
+		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) &&
+			!literalWords(cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body"));
+		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
+		if (!prefix || configuredEnv || gitWritesOutput || implicitStaging || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "push"].includes(prefix[verb]) ||
+			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) precedingMutation = true;
+		if (/^hive\s+ship\b/.test(cleaned)) {
+			const tokens = literalWords(cleaned);
+			targets.push(preceded || configuredEnv || redirected || !tokens || tokens.slice(2).some((token) => token !== "--no-pr") ? null : dir);
+			continue;
+		}
 		if (/^gh\s/.test(cleaned)) {
 			const tokens = literalWords(cleaned, true);
 			if (!tokens) { if (/\bpr\s+create\b/.test(cleaned)) targets.push(null); continue; }
@@ -41,7 +84,7 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 				if (["--repo", "--head", "--base", "-R", "-H", "-B"].includes(option)) targetOverride = true;
 				if (!tokens[i].includes("=") && ["--repo", "--head", "--base", "-R", "-H", "-B", "--title", "--body", "--body-file", "-t", "-b", "-F", "--assignee", "--reviewer", "--label", "--milestone", "--project", "--template"].includes(option)) i++;
 			}
-			targets.push(preceded || configuredEnv || targetOverride ? null : dir);
+			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? null : dir);
 			continue;
 		}
 		if (!/^git\s/.test(cleaned)) continue;
@@ -61,10 +104,44 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		if ((positional[0] !== undefined && positional[0] !== "origin") ||
 			args.some((t) => ["--all", "--mirror", "--tags", "--follow-tags", "--repo"].includes(t) || t.startsWith("--repo=")) ||
 			positional.slice(1).some((t) => !/^HEAD(?::.+)?$/.test(t))) target = null;
-		targets.push(preceded || configuredEnv ? null : target);
+		targets.push(preceded || configuredEnv || redirected ? null : target);
 	}
-	return pipeline ? targets.map(() => null) : targets;
+	// Evaluate the LAST delivery verb first, but never let it conceal an
+	// earlier push to another repo or an unsupported target in the same chain.
+	return pipeline ? targets.map(() => null) : targets.reverse();
 }
+/** Supported chains contain literal commits and HEAD delivery.
+ * They are not arbitrary shell programs: executable mutation hooks, helpers,
+ * dynamic arguments and unknown predecessors must run separately, then be reviewed. */
+function chainHookProblem(command: string, cwd: string): boolean {
+	const segments = splitCommands(command, true);
+	if (segments.length < 2) return false;
+	let dir = cwd;
+	for (const segment of segments) {
+		const words = literalWords(segment);
+		if (!words) continue; // unsupported dynamic shapes are rejected by deliveryTargets
+		while (/^[A-Za-z_]\w*=/.test(words[0] ?? "")) words.shift();
+		if (words[0] === "cd" && words.length === 2) { dir = resolve(dir, words[1]); continue; }
+		if (words[0] !== "git" && !(words[0] === "hive" && words[1] === "ship")) continue;
+		let i = 1, target = dir;
+		while (words[i] === "-C" && words[i + 1]) { target = resolve(target, words[i + 1]); i += 2; }
+		if (words[0] === "git" && !["commit", "push"].includes(words[i])) continue;
+		const hookNames = words[0] === "git" && words[i] === "commit"
+			? ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite"]
+			: ["pre-push"];
+		try {
+			const hooks = execFileSync("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], {
+				cwd: target, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+			for (const name of hookNames) {
+				try { accessSync(join(hooks, name), constants.X_OK); return true; }
+				catch (error) { if (!["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) return true; }
+			}
+		} catch { return true; } // cannot establish that the compound commit preserves reviewed bytes
+	}
+	return false;
+}
+
 export function deliveryCommand(command: string): boolean {
 	return deliveryTargets(command, "/").length > 0;
 }
@@ -103,10 +180,15 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		// An explicit per-call override is visible in the transcript. It is not
 		// a claim of review or a check passing, just an acknowledged skip.
 		if (/^\s*PI_DELIVERY_REVIEW=0\s/.test(command)) return;
+		if (chainHookProblem(command, cwd)) return { block: true, reason: 'Unsupported command shape: a compound delivery has executable hooks (or its hook configuration cannot be read), so later bytes cannot be reviewed by this preflight. Run each command separately, then run a foreground code-reviewer on the resulting diff before standalone delivery.' };
 		for (const target of deliveryTargets(command, cwd)) {
-			const diff = target ? capture(target, "") : null;
+			if (!target) return { block: true, reason: 'Unsupported command shape: delivery target/environment, pipeline, implicit staging, or preceding mutation cannot be evaluated. Run setup/mutation commands separately, then review and run a standalone `git push origin HEAD`, `hive ship --no-pr`, or `gh pr create` in the reviewed repo (without target overrides).' };
+			const diff = capture(target, "");
 			if (diff && (!needsDeliveryReview(diff) || (stampableReview(diff) && reviewed.has(reviewFingerprint(diff))))) continue;
-			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${diff ? "Stage new files before review. " : "Complete delivery diff unavailable (unsupported target/configuration, no remote merge-base, or scan budget exceeded). "}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target ?? cwd)}}), then retry. Untracked, binary, or larger-than-budget changes require staging/review or an explicit override; they are never stamped as reviewed.` };
+			const reason = !diff ? "Complete delivery diff unavailable (no remote merge-base, repository/configuration scan failed, or scan budget exceeded). "
+				: stampableReview(diff) ? "Delivery diff has no matching completed foreground review. "
+				: "Delivery diff is not stampable: stage new files before review; binary or larger-than-budget changes require an explicit override. ";
+			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${reason}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` };
 		}
 	});
 	pi.on("tool_result", (event) => {

@@ -457,12 +457,12 @@ export function createFakePi(): FakePi {
 			let entries: Draft[] = [];
 			let shouldContinue = false;
 			for (const handler of handlers.get(event.type) ?? []) {
-				const currentEvent = event.type === "agent_before_settle"
+				const currentEvent = (event.type === "agent_before_settle" || event.type === "turn_end")
 					? { ...event, entries, continue: shouldContinue, outcome: event.outcome ?? "completed" }
 					: event;
 				const result = await handler(currentEvent, ctx);
 				results.push(result);
-				if (event.type === "agent_before_settle" && result && typeof result === "object") {
+				if ((event.type === "agent_before_settle" || event.type === "turn_end") && result && typeof result === "object") {
 					const override = result as { entries?: Draft[]; continue?: boolean };
 					if (override.entries !== undefined) entries = override.entries;
 					if (override.continue !== undefined) shouldContinue = override.continue;
@@ -471,15 +471,16 @@ export function createFakePi(): FakePi {
 			// Actionable boundaries return proposed entries. Pi commits those only
 			// after the complete handler chain, then flushes custom messages and
 			// starts exactly one continuation when requested.
-			if (event.type === "agent_before_settle") {
+			if (event.type === "agent_before_settle" || event.type === "turn_end") {
 				for (const entry of entries) {
 					if (entry.type === "custom_message") {
 						messages.push({ customType: entry.customType!, content: entry.content as string, display: entry.display });
 					}
 				}
 				if (shouldContinue) {
-					for (const handler of handlers.get("agent_start") ?? []) {
-						await handler({ type: "agent_start" }, ctx);
+					const startEvent = event.type === "turn_end" ? "turn_start" : "agent_start";
+					for (const handler of handlers.get(startEvent) ?? []) {
+						await handler({ type: startEvent }, ctx);
 					}
 				}
 			}

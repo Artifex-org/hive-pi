@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { ensureBash } from "./bash-shim.ts";
+
+beforeAll(ensureBash);
 import {
 	assessComplexity,
 	createConductor,
@@ -11,6 +18,7 @@ import {
 import {
 	ADVISE_LEDGER_ID,
 	createConductorPolicy,
+	createConductorAdvicePolicy,
 	describeConductor,
 	deriveGoalCondition,
 	FRAME_INJECTION,
@@ -227,28 +235,133 @@ describe("conductor policy", () => {
 		expect(policy.decide(contextWith(emptyLedger, open))).toBeNull();
 	});
 
-	it("execute → verify when every todo is closed, with a one-shot advisor nudge", async () => {
+	it("runs verification at the same completion boundary without late advice", async () => {
 		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0));
 		const policy = createConductorPolicy(hooks);
 		const done = signalsWith({ tasks: { total: 3, pending: 0, inProgress: 0, completed: 3 } });
 		const work = policy.decide(contextWith(emptyLedger, done));
 		const outcome = await work!.run();
-		expect(item()?.stage).toBe("verify");
-		expect(outcome.inject).toContain("advisor");
-		expect(outcome.ledger).toBeDefined();
+		expect(item()?.stage).toBe("consolidate"); // no harness configured: explicitly skipped
+		expect(outcome.metric.outcome).toBe("skip");
+		expect(outcome.inject).toBeUndefined();
+		expect(outcome.ledger).toBeUndefined();
 	});
 
-	it("execute → verify advances silently once the advisor nudge is spent", async () => {
+	it("runs verification silently once the advisor nudge is spent", async () => {
 		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0));
 		const policy = createConductorPolicy(hooks);
 		const done = signalsWith({ tasks: { total: 3, pending: 0, inProgress: 0, completed: 3 } });
 		const spent = record(emptyLedger, ADVISE_LEDGER_ID);
 		const work = policy.decide(contextWith(spent, done));
 		const outcome = await work!.run();
-		expect(item()?.stage).toBe("verify");
+		expect(item()?.stage).toBe("consolidate");
 		expect(outcome.inject).toBeUndefined();
 	});
 
+	it("nudges at the first milestone with an active goal and open todos, once per session", async () => {
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), { state: "active" } as GoalItem);
+		const policy = createConductorAdvicePolicy(hooks);
+		const open = signalsWith({ tasks: { total: 3, pending: 2, inProgress: 1, completed: 0 } });
+		expect(policy.decide(contextWith(emptyLedger, open))).toBeNull();
+		const milestone = { ...open, deliveryStarted: true };
+		const outcome = await policy.decide(contextWith(emptyLedger, milestone))!.run();
+		expect(outcome.inject).toContain("first commit or PR opening");
+		expect(item()?.stage).toBe("verify");
+		const ledger = outcome.ledger!(emptyLedger);
+		expect(policy.decide(contextWith(ledger, milestone))).toBeNull();
+		expect(createConductorPolicy(hooks).decide(contextWith(ledger, milestone))).toBeNull();
+		hooks.commit(withStage(item()!, "execute", 10));
+		expect(policy.decide(contextWith(ledger, milestone))).toBeNull();
+	});
+	it("does not create an unfinishable lifecycle when milestone advice has no goal or todos", async () => {
+		const { hooks, item } = makeHooks();
+		const advice = createConductorAdvicePolicy(hooks);
+		const outcome = await advice.decide(contextWith(emptyLedger, signalsWith({ deliveryStarted: true })))!.run();
+		expect(outcome.inject).toContain("advisor");
+		expect(item()).toBeNull();
+		const next = createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), signalsWith({})));
+		await next!.run();
+		expect(item()?.stage).toBe("frame");
+	});
+	it("offers advice for the session\'s first commit even on a simple task, not on a later complex read", async () => {
+		const { hooks } = makeHooks();
+		const policy = createConductorAdvicePolicy(hooks);
+		const simple = signalsWith({ lastUserPrompt: "Fix a typo", deliveryStarted: true });
+		const outcome = await policy.decide(contextWith(emptyLedger, simple))!.run();
+		expect(outcome.inject).toContain("advisor");
+		expect(policy.decide(contextWith(outcome.ledger!(emptyLedger), signalsWith({ deliveryStarted: true })))).toBeNull();
+	});
+	it.each(["capped", "budget_exhausted", "paused", "cleared", "blocked_user", "achieved"] as const)("does not create a verify lifecycle from an old %s goal without todos", async state => {
+		const { hooks, item } = makeHooks(null, { state } as GoalItem);
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ deliveryStarted: true })))!.run();
+		expect(outcome.inject).toContain("advisor");
+		expect(item()).toBeNull();
+		await createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), signalsWith({})))!.run();
+		expect(item()?.stage).toBe("frame");
+	});
+	it("releases an early verify lifecycle if its goal terminates without todos", async () => {
+		const goal = { state: "active" } as GoalItem;
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), goal);
+		await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ deliveryStarted: true })))!.run();
+		goal.state = "capped";
+		const outcome = await createConductorPolicy(hooks).decide(contextWith(record(emptyLedger, ADVISE_LEDGER_ID), signalsWith({})))!.run();
+		expect(outcome.inject).toBeUndefined();
+		expect(item()?.stage).toBe("idle");
+		expect(goal.state).toBe("capped");
+	});
+	it.each(["capped", "budget_exhausted", "cleared", "blocked_user"] as const)("uses the current todos instead of a terminal %s goal", async state => {
+		const { hooks, item } = makeHooks(null, { state } as GoalItem);
+		const open = signalsWith({ deliveryStarted: true, tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, open))!.run();
+		expect(item()?.stage).toBe("verify");
+		const ledger = outcome.ledger!(emptyLedger), policy = createConductorPolicy(hooks);
+		expect(policy.decide(contextWith(ledger, open))).toBeNull();
+		const done = { ...open, tasks: { total: 1, pending: 0, inProgress: 0, completed: 1 } };
+		const verified = await policy.decide(contextWith(ledger, done))!.run();
+		expect(verified.metric.outcome).toBe("skip");
+		expect(item()?.stage).toBe("consolidate");
+	});
+	it("binds milestone verification to current todos rather than an old achieved goal", async () => {
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "done", 0), { id: "old", state: "achieved" } as GoalItem);
+		const open = signalsWith({ deliveryStarted: true, tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, open))!.run();
+		expect(item()?.verificationGoalId).toBeNull();
+		const persisted = validateConductor(item()); expect(persisted?.verificationGoalId).toBeNull();
+		expect(createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), open))).toBeNull();
+	});
+	it("retains its active goal binding when the original judge later achieves it", async () => {
+		const goal = { id: "current", state: "active" } as GoalItem;
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), goal);
+		const open = signalsWith({ deliveryStarted: true, tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, open))!.run();
+		expect(validateConductor(item())?.verificationGoalId).toBe("current");
+		goal.state = "achieved";
+		await createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), open))!.run();
+		expect(item()?.stage).toBe("consolidate");
+	});
+	it("retains no-todo verification through goal pause and resume", async () => {
+		const goal = { id: "current", state: "active" } as GoalItem;
+		const { hooks, item } = makeHooks(null, goal);
+		const signals = signalsWith({ lastUserPrompt: "Fix a typo", deliveryStarted: true });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, signals))!.run();
+		const ledger = outcome.ledger!(emptyLedger), policy = createConductorPolicy(hooks);
+		goal.state = "paused";
+		expect(policy.decide(contextWith(ledger, signals))).toBeNull();
+		expect(item()?.stage).toBe("verify");
+		goal.state = "active"; expect(policy.decide(contextWith(ledger, signals))).toBeNull();
+		goal.state = "achieved"; await policy.decide(contextWith(ledger, signals))!.run();
+		expect(item()?.stage).toBe("consolidate");
+	});
+	it("clears milestone goal bindings when beginning another lifecycle", async () => {
+		const old = { ...withStage(createConductor("c", 0), "verify", 0), verificationGoalId: "old" };
+		expect(withStage(old, "idle", 1).verificationGoalId).toBeUndefined();
+		const next = withStage(withStage(old, "plan", 2), "execute", 3);
+		expect(next.verificationGoalId).toBeUndefined();
+		const { hooks, item } = makeHooks(next, { id: "new", state: "achieved" } as GoalItem);
+		const signals = signalsWith({ tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		await createConductorPolicy(hooks).decide(contextWith(emptyLedger, signals))!.run();
+		expect(item()?.stage).toBe("consolidate");
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});
@@ -260,14 +373,15 @@ describe("conductor policy", () => {
 		// Todos deliberately open: the judge's verdict outranks todo state.
 		const open = signalsWith({ tasks: { total: 3, pending: 3, inProgress: 0, completed: 0 } });
 		const work = policy.decide(contextWith(emptyLedger, open));
-		await work!.run();
-		expect(item()?.stage).toBe("verify");
+		const outcome = await work!.run();
+		expect(outcome.metric.outcome).toBe("skip");
+		expect(item()?.stage).toBe("consolidate");
 	});
 
 	it("verify with no prCheck hands over to consolidate with a skip metric", async () => {
 		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "verify", 0));
 		const policy = createConductorPolicy(hooks);
-		const work = policy.decide(contextWith(emptyLedger, signalsWith({})));
+		const work = policy.decide(contextWith(emptyLedger, signalsWith({ tasks: { total: 1, pending: 0, inProgress: 0, completed: 1 } })));
 		const outcome = await work!.run();
 		expect(outcome.metric.outcome).toBe("skip");
 		expect(outcome.inject).toBeUndefined();
@@ -368,6 +482,39 @@ describe("renderConductorLines", () => {
 		const lines = renderConductorLines(withStage(createConductor("c", 0), "execute", 0), activeGoal, true)!;
 		expect(lines.some((line) => line.includes("goal: PR created"))).toBe(true);
 		expect(lines.some((line) => line.includes("1/8 continuations"))).toBe(true);
+	});
+});
+
+describe("conductor configured delivery checks", () => {
+	it.each(["todo completion without a milestone", "bound goal paused then resumed"])("runs the real prCheck at %s", async scenario => {
+		const cwd = mkdtempSync(join(tmpdir(), "conductor-check-"));
+		try {
+			const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+			git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+			mkdirSync(join(cwd, ".pi"));
+			writeFileSync(join(cwd, ".pi", "harness.json"), JSON.stringify({ check: "exit 0", prCheck: "printf verified > check-ran", prCheckTimeoutMs: 5000 }));
+			git("add", "."); git("commit", "-qm", "fixture");
+			const goal = scenario === "bound goal paused then resumed" ? { id: "current", state: "active" } as GoalItem : null;
+			const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), goal);
+			const signals = signalsWith({ tasks: goal ? emptySignals.tasks : { total: 1, pending: 0, inProgress: 0, completed: 1 } });
+			const policy = createConductorPolicy(hooks);
+			let ledger = emptyLedger;
+			if (goal) {
+				const advice = await createConductorAdvicePolicy(hooks).decide(contextWith(ledger, { ...signals, deliveryStarted: true }, cwd))!.run();
+				ledger = advice.ledger!(ledger);
+				goal.state = "paused";
+				expect(policy.decide(contextWith(ledger, signals, cwd))).toBeNull();
+				expect(item()?.stage).toBe("verify");
+				expect(existsSync(join(cwd, "check-ran"))).toBe(false);
+				goal.state = "active";
+				expect(policy.decide(contextWith(ledger, signals, cwd))).toBeNull();
+				goal.state = "achieved";
+			}
+			const outcome = await policy.decide(contextWith(ledger, signals, cwd))!.run();
+			expect(readFileSync(join(cwd, "check-ran"), "utf8")).toBe("verified");
+			expect(outcome.metric.outcome).toBe("pass");
+			expect(item()?.stage).toBe("consolidate");
+		} finally { rmSync(cwd, { recursive: true, force: true }); }
 	});
 });
 

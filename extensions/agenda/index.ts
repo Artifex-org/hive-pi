@@ -74,6 +74,7 @@ import {
 } from "./conductor-state.ts";
 import {
 	createConductorPolicy,
+	createConductorAdvicePolicy,
 	deriveGoalCondition,
 	describeConductor,
 	lifecycleEnvelope,
@@ -300,7 +301,7 @@ export default function (pi: ExtensionAPI) {
 	/** Red-vs-red comparison note for the conductor's verify stage (HIV-1232). */
 	let verifyNote: string | null = null;
 
-	const conductorPolicy = createConductorPolicy({
+	const conductorHooks = {
 		current: () => conductor,
 		commit: persistConductor,
 		goal: () => goal,
@@ -324,7 +325,9 @@ export default function (pi: ExtensionAPI) {
 		recordVerifyNote: (note: string) => {
 			verifyNote = note;
 		},
-	});
+	};
+	const conductorPolicy = createConductorPolicy(conductorHooks);
+	const conductorAdvicePolicy = createConductorAdvicePolicy(conductorHooks);
 
 	/**
 	 * Gate-retry stamps (HIV-1229): after a red gate, the gate is skipped until
@@ -395,11 +398,12 @@ export default function (pi: ExtensionAPI) {
 	// the exact failure the hand-back guard (hive-common/handback.ts) exists to prevent — then the drift
 	// probe, then the passive advisor — both must also sit BEFORE the goal policy,
 	// whose per-settle continue injection would starve everything behind it —
-	// then the goal verdict (the conductor's execute→verify transition keys off
-	// it), then the conductor, then the timer loop. Pinned by
+	// then milestone advice (before goal achievement), then the goal verdict
+	// (delivery verification still waits for it), the conductor, and the timer. Pinned by
 	// test/agenda-conductor.test.ts.
 	const driver = installDriver(pi, {
-		policies: [gatePolicy, askPolicy, driftPolicy, advisorWatchPolicy, goalPolicy, conductorPolicy, loopPolicy],
+		policies: [gatePolicy, askPolicy, driftPolicy, advisorWatchPolicy, conductorAdvicePolicy, goalPolicy, conductorPolicy, loopPolicy],
+		turnPolicies: [conductorAdvicePolicy],
 		isWorker: IS_WORKER,
 	});
 
