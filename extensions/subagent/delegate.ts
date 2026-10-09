@@ -516,7 +516,7 @@ export async function runSingleAgent(
 	// `No API key found for xai.` — the shape that cost eight delegations in a
 	// day while readiness reported another provider ready (model.ts).
 	const choice = await chooseWorkerModel(
-		{ requested: requestedModel, preferred: agent.model ?? getSubagentDefaultModel(), roleName: agent.name },
+		{ requested: requestedModel, preferred: agent.model ?? getSubagentDefaultModel(), roleName: agent.name, tier: agent.model ? undefined : agent.tier },
 		env,
 	);
 	if (choice.refusal) {

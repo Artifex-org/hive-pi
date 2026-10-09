@@ -220,3 +220,32 @@ describe("what the caller is shown", () => {
 		expect(delegationOutcome({ exitCode: 2, stderr: "", output: "" })).toEqual({ status: "failed", exitCode: 2 });
 	});
 });
+
+describe("chooseWorkerModel — a role's catalog tier", () => {
+	it("runs the catalog's mode for that class when it is configured", async () => {
+		const e = env(["openai-codex/gpt-5.6-terra", "xai/grok-4"]);
+		const choice = await chooseWorkerModel({ preferred: "xai/grok-4", roleName: "code-reviewer", tier: "high" }, e);
+		expect(choice).toEqual({ spec: "openai-codex/gpt-5.6-terra" });
+	});
+
+	it("falls back to the delegation lane, and says so, when the class cannot run here", async () => {
+		const e = env(["xai/grok-4"]);
+		const choice = await chooseWorkerModel({ preferred: "xai/grok-4", roleName: "code-reviewer", tier: "high" }, e);
+		expect(choice.spec).toBe("xai/grok-4");
+		expect(choice.note).toMatch(/asks for the "high" class.*gpt-5\.6-terra.*not configured.*ran on xai\/grok-4/);
+	});
+
+	it("names a class the catalog does not have", async () => {
+		const e = env(["xai/grok-4"]);
+		const choice = await chooseWorkerModel({ preferred: "xai/grok-4", roleName: "code-reviewer", tier: "ultra" }, e);
+		expect(choice.spec).toBe("xai/grok-4");
+		expect(choice.note).toMatch(/no "ultra" mode/);
+	});
+
+	it("never overrides the caller's explicit model", async () => {
+		const e = env(["openai-codex/gpt-5.6-terra", "xai/grok-4"]);
+		const choice = await chooseWorkerModel({ requested: "xai/grok-4", roleName: "code-reviewer", tier: "high" }, e);
+		expect(choice).toEqual({ spec: "xai/grok-4" });
+		expect(e.fetches).toBe(0);
+	});
+});

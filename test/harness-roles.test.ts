@@ -100,6 +100,21 @@ describe("discoverAgents — package-local roles", () => {
 		expect(agents.filter((a) => a.source === "package")).toEqual([]);
 	});
 
+	it("ships a read-only code-reviewer on the high class that hunts the failure categories", () => {
+		// HIV-3802 eval: the review that ran was a generic checklist on the cheap
+		// delegation lane and returned "no findings" in 29 s, where Claude's diff
+		// pass found three real bugs in a similar change.
+		const reviewer = discoverAgents(repoRoot, "user").agents.find((a) => a.name === "code-reviewer");
+		expect(reviewer?.source).toBe("package");
+		expect(reviewer?.tier).toBe("high");
+		expect(reviewer?.model).toBeUndefined();
+		expect(reviewer?.tools).toEqual(["read", "grep", "find", "ls"]);
+		for (const category of ["Correctness", "Failure paths", "Concurrency", "Silent fallbacks", "Tests that cannot fail"]) {
+			expect(reviewer?.systemPrompt, category).toContain(category);
+		}
+		expect(reviewer?.systemPrompt).toMatch(/Verify every finding/);
+	});
+
 	it("lets a user role of the same name shadow the shipped one", () => {
 		// The escape hatch: tune a shipped role by dropping a same-named file in
 		// ~/.pi/agent/agents, never by editing a pinned package. Observed for real
