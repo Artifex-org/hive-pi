@@ -27,7 +27,7 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 			while (words[i] === "-C" || words[i] === "-c") i += 2;
 			// Success evidence, not merely an attempted commit (a later command
 			// may fail or recover with ||). Git's commit summary carries its SHA.
-			if (words[i] === "commit" && /^\[[^\]\n]+ [0-9a-f]{7,40}\]/m.test(output)) return true;
+			if (words[i] === "commit" && allSuccessChain && /^\[[^\]\n]+ [0-9a-f]{7,40}\]/m.test(output)) return true;
 		}
 		if ((words[0] === "gh" && words[1] === "pr" && words[2] === "create") ||
 			(words[0] === "hive" && words[1] === "ship")) {

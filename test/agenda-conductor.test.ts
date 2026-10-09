@@ -332,6 +332,19 @@ describe("conductor policy", () => {
 		await createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), open))!.run();
 		expect(item()?.stage).toBe("consolidate");
 	});
+	it("retains no-todo verification through goal pause and resume", async () => {
+		const goal = { id: "current", state: "active" } as GoalItem;
+		const { hooks, item } = makeHooks(null, goal);
+		const signals = signalsWith({ lastUserPrompt: "Fix a typo", deliveryStarted: true });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, signals))!.run();
+		const ledger = outcome.ledger!(emptyLedger), policy = createConductorPolicy(hooks);
+		goal.state = "paused";
+		expect(policy.decide(contextWith(ledger, signals))).toBeNull();
+		expect(item()?.stage).toBe("verify");
+		goal.state = "active"; expect(policy.decide(contextWith(ledger, signals))).toBeNull();
+		goal.state = "achieved"; await policy.decide(contextWith(ledger, signals))!.run();
+		expect(item()?.stage).toBe("consolidate");
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});

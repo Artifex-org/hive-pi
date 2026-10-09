@@ -73,6 +73,7 @@ describe("delivery milestones", () => {
 	it.each([
 		["git commit -m change", "nothing to commit, working tree clean"],
 		["git commit -m change", "fatal: failed"],
+		["git commit -m change || git log -1 --format=\'[%D %h] %s\'", "[HEAD abc1234] old commit"],
 		["gh pr create", "permission denied"],
 		["gh pr view", "https://github.com/owner/repo/pull/123"],
 		["gh pr create || gh pr view --json url --jq .url", "https://github.com/owner/repo/pull/123"],

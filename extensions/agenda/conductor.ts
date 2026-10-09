@@ -396,7 +396,7 @@ function decideVerify(hooks: ConductorHooks, context: PolicyContext): PolicyWork
 	// Advice can move us here while CI/tasks remain open. Do not consolidate
 	// until the original completion contract is met.
 	const goal = completionGoal(hooks);
-	if (!context.signals?.tasks.total && (!goal || !["active", "achieved"].includes(goal.state))) return silentAdvance(hooks, "idle");
+	if (!context.signals?.tasks.total && (!goal || !["active", "paused", "achieved"].includes(goal.state))) return silentAdvance(hooks, "idle");
 	if (goal ? goal.state !== "achieved" : !context.signals || !allTasksDone(context.signals)) return null;
 	const loaded = loadHarnessConfig(context.cwd);
 	const prCheck = loaded?.config.prCheck?.trim();
