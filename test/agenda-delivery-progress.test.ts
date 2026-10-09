@@ -13,6 +13,12 @@ describe("delivery milestones", () => {
 			content: [{ type: "text", text: "a pull request already exists:\nhttps://github.com/owner/repo/pull/123" }], isError: true });
 		expect(pi.entries).toHaveLength(0);
 	});
+	it("ignores successful pipelines masking failed creation, but keeps an attributable partial success", () => {
+		const url = "https://github.com/owner/repo/pull/123";
+		expect(deliveryMilestone("gh pr create 2>&1 | cat", "already exists:\n" + url, true)).toBe(false);
+		expect(deliveryMilestone("gh pr create && false", url, false)).toBe(true);
+		expect(deliveryMilestone("gh pr create && false", "already exists:\n" + url, false)).toBe(false);
+	});
 	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change"])("observes %s only when HEAD actually changes", async command => {
 		const pi = createFakePi(); let head = "old";
 		registerDeliveryProgress(pi.api, () => head);

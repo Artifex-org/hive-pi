@@ -119,6 +119,27 @@ describe("delivery review", () => {
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
 	});
+	it("requires staging separately when clean filters can generate different staged code", async () => {
+		const { cwd, git } = repo();
+		writeFileSync(join(cwd, ".gitattributes"), "code.ts filter=transform\n"); git("add", "."); git("commit", "-m", "attributes");
+		git("update-ref", "refs/remotes/origin/main", "HEAD");
+		const helper = join(cwd, ".git", "clean-filter");
+		writeFileSync(helper, "#!/bin/sh\ncat >/dev/null\nif [ -e .git/index.lock ]; then printf 'export const staged = 2;\\n'; else printf 'export const preview = 1;\\n'; fi\n"); chmodSync(helper, 0o755);
+		git("config", "filter.transform.clean", helper);
+		writeFileSync(join(cwd, "README.md"), "docs only\n");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const preview");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0]).toBeUndefined();
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git add --renormalize . && git commit -m change && git push origin HEAD", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		git("add", "--renormalize", ".");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const staged");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
 	it("distinguishes unsupported shapes from an unavailable diff", async () => {
 		const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);
 		for (const command of ["git checkout work && git push", "git push other HEAD"]) {

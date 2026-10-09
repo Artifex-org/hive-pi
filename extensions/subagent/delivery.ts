@@ -34,14 +34,13 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		const assignments = segment.slice(0, segment.length - cleaned.length);
 		const configuredEnv = !literalWords(assignments) || /\b(?:GIT_\w+|GH_REPO|GH_HOST|HOME|XDG_CONFIG_HOME|PATH)=/.test(assignments);
 		const preceded = precedingMutation;
-		// Staging/committing the already captured bytes is supported. Commands
+		// Committing already captured staged bytes is supported. Staging can
+		// transform content through filters, so it must finish before review. Commands
 		// that can switch HEAD, reconfigure the target, or generate new bytes
 		// must be run separately, then reviewed against their resulting diff.
 		const prefix = literalWords(cleaned, true);
 		let verb = 1;
 		while (prefix?.[verb] === "-C") verb += 2;
-		const forcedStaging = prefix?.[0] === "git" && prefix[verb] === "add" && prefix.slice(verb + 1).some(token =>
-			token === "--force" || /^-[^-]*f/.test(token) || /^(?:--chmod|--patch|--interactive)/.test(token) || ["-p", "-i"].includes(token));
 		const gitWritesOutput = prefix?.[0] === "git" && prefix.some(token => token === "--output" || token.startsWith("--output="));
 		const dynamicGit = prefix?.[0] === "git" && !literalWords(cleaned);
 		// Preserve the common read-only body-file substitution, not arbitrary
@@ -49,7 +48,7 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) &&
 			!literalWords(cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body"));
 		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
-		if (!prefix || configuredEnv || forcedStaging || gitWritesOutput || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["add", "commit", "status", "push"].includes(prefix[verb]) ||
+		if (!prefix || configuredEnv || gitWritesOutput || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "status", "push"].includes(prefix[verb]) ||
 			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) precedingMutation = true;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);
@@ -96,7 +95,7 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 	// earlier push to another repo or an unsupported target in the same chain.
 	return pipeline ? targets.map(() => null) : targets.reverse();
 }
-/** Supported chains contain literal status/staging/commits and HEAD delivery.
+/** Supported chains contain literal status/commits and HEAD delivery.
  * They are not arbitrary shell programs: executable mutation hooks, helpers,
  * dynamic arguments and unknown predecessors must run separately, then be reviewed. */
 function chainHookProblem(command: string, cwd: string): boolean {

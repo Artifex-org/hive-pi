@@ -10,7 +10,9 @@ export const ADVICE_GIVEN_ENTRY = "agenda-advice-given";
 
 export function deliveryMilestone(command: string, output: string, succeeded = true): boolean {
 	if (command.length > 8192) return false;
-	const segments = splitCommands(command, true);
+	let pipeline = false;
+	const segments = splitCommands(command, true, () => { pipeline = true; });
+	if (pipeline) return false; // the shell exit code may belong to cat, not the creator
 	// In an all-success && chain, successful tool completion also establishes
 	// the earlier creator succeeded. Do not infer that across ; or || recovery.
 	const allSuccessChain = !/[;\n]|\|\|/.test(command.replace(/'[^']*'|"[^"\\]*"/g, ""));
@@ -29,7 +31,12 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 			(words[0] === "hive" && words[1] === "ship")) {
 			// Do not attribute a fallback/read command\'s URL to a failed create.
 			// A successful && suffix is also attributable to its earlier creator.
-			if (succeeded && (index === segments.length - 1 || allSuccessChain) && /https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/.test(output)) return true;
+			const url = /^https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?\s*$/m.test(output);
+			// gh prints the created URL on its own line. A later && suffix may
+			// fail, but duplicate/error output must not masquerade as creation.
+			const partialSuccess = allSuccessChain && index < segments.length - 1 &&
+				!/(?:already exists|permission denied|fatal:|error:|HTTP [45]\d\d|GraphQL)/i.test(output);
+			if (url && (succeeded && (index === segments.length - 1 || allSuccessChain) || partialSuccess)) return true;
 		}
 	}
 	return false;
@@ -38,8 +45,9 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 /** Literal commit checkout, for quiet commits whose stdout has no summary. */
 function commitCheckout(command: string, cwd: string): string | null {
 	if (command.length > 8192) return null;
-	let dir = cwd;
-	const segments = splitCommands(command, true);
+	let dir = cwd, pipeline = false;
+	const segments = splitCommands(command, true, () => { pipeline = true; });
+	if (pipeline) return null;
 	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment);
 		if (!words) return null;
