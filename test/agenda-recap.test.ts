@@ -6,19 +6,26 @@
  * that drives the workspace triage.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+const runRecap = vi.hoisted(() => vi.fn());
+vi.mock("../extensions/agenda/spawn.ts", async (importOriginal) => ({
+	...await importOriginal<typeof import("../extensions/agenda/spawn.ts")>(), runOneShot: runRecap,
+}));
 import agenda from "../extensions/agenda/index.ts";
 import { contextTreeEnvelope, recapTranscript } from "../extensions/agenda/index.ts";
 import { buildJudgePrompt } from "../extensions/agenda/goal.ts";
 import { TOOL_CALL_ARGS_CHARS } from "../extensions/agenda/recap.ts";
 import {
 	buildRecapPrompt,
+	activeWorkRecap,
 	latestAgentStatus,
 	mechanicalTaskState,
 	sanitizeRecap,
 } from "../extensions/agenda/recap.ts";
 import { AGENT_STATUS_CHANNEL } from "../extensions/hive-common/channels.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
+import { createGoal } from "../extensions/agenda/goal-state.ts";
+import { announceOwnWork } from "../extensions/hive-common/own-work.ts";
 
 describe("mechanicalTaskState", () => {
 	it("a question outranks everything — done-ness does not answer it", () => {
@@ -123,6 +130,37 @@ describe("the settle observer", () => {
 		return fake.entries.filter((entry) => entry.customType === "agent-status");
 	}
 
+	it("replaces a stale in-flight recap with the latest settled transcript", async () => {
+		vi.useFakeTimers(); runRecap.mockReset();
+		try {
+			let resolveFirst!: (value: unknown) => void;
+			runRecap.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; })).mockResolvedValue({ exitCode: 0, timedOut: false, text: "Latest work recap" });
+			const fake = createFakePi(); agenda(fake.api);
+			const initial = [{ message: { role: "assistant", content: "Earlier work ".repeat(100) } }];
+			await settle(fake, initial); await vi.advanceTimersByTimeAsync(0);
+			await settle(fake, [...initial, { message: { role: "assistant", content: "Newer turn evidence" } }]);
+			resolveFirst({ exitCode: 0, timedOut: false, text: "Stale earlier recap" });
+			await vi.advanceTimersByTimeAsync(1);
+			expect(runRecap).toHaveBeenCalledTimes(2);
+			expect(runRecap.mock.calls[1][0].prompt).toContain("Newer turn evidence");
+			expect((statusEntries(fake).at(-1)?.data as { recap: string }).recap).toBe("Latest work recap");
+			expect(statusEntries(fake).some((e) => (e.data as { recap: string }).recap === "Stale earlier recap")).toBe(false);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); runRecap.mockReset(); }
+	});
+	it("does not retain an old session's in-flight recap latch", async () => {
+		vi.useFakeTimers(); runRecap.mockReset();
+		try {
+			let resolveOld!: (value: unknown) => void;
+			runRecap.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; })).mockResolvedValue({ exitCode: 0, timedOut: false, text: "New session recap" });
+			const fake = createFakePi(); agenda(fake.api);
+			await settle(fake, [{ message: { role: "assistant", content: "Old transcript ".repeat(100) } }]); await vi.advanceTimersByTimeAsync(0);
+			await fake.emit({ type: "session_start", reason: "new" });
+			await settle(fake, [{ message: { role: "assistant", content: "New transcript ".repeat(100) } }]); await vi.advanceTimersByTimeAsync(0);
+			expect(runRecap).toHaveBeenCalledTimes(2);
+			resolveOld({ exitCode: 0, timedOut: false, text: "Old session recap" }); await vi.advanceTimersByTimeAsync(1);
+			expect((statusEntries(fake).at(-1)?.data as { recap: string }).recap).toBe("New session recap");
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); runRecap.mockReset(); }
+	});
 	it("appends a status entry and rings the doorbell on settle", async () => {
 		const fake = createFakePi();
 		agenda(fake.api);
@@ -156,6 +194,36 @@ describe("the settle observer", () => {
 		await settle(fake, [{ message: { role: "assistant", content: "two" } }]);
 		const revisions = statusEntries(fake).map((entry) => (entry.data as { revision: number }).revision);
 		expect(revisions).toEqual([1, 2]);
+	});
+});
+
+describe("live-work recap precedence (HIV-3802)", () => {
+	it("stays null with no active work; bounded goal/job lines never become greetings", () => {
+		expect(activeWorkRecap(null, [])).toBeNull();
+		expect(activeWorkRecap("Deliver a green PR", ["watching CI #42"])).toContain("Running: watching CI #42");
+		expect(activeWorkRecap("x".repeat(500), ["y".repeat(500)])!.length).toBeLessThanOrEqual(200);
+	});
+	it("uses restored active goal and running jobs even under the model recap gate", async () => {
+		const pi = createFakePi(); agenda(pi.api);
+		const goal = createGoal("test-goal", "PR created and checks green", 1);
+		await pi.emit({ type: "session_start" }, { branch: [{ customType: "agenda", data: goal }] });
+		announceOwnWork(pi.api, "background", 1, ["watching CI #42"]);
+		await pi.emit({ type: "agent_settled" }, { branch: [{ message: { role: "assistant", content: "I'm ready to help. What would you like me to work on?" } }] });
+		const item = pi.entries.find((e) => e.customType === "agent-status")!.data as { recap: string };
+		expect(item.recap).toContain("PR created and checks green"); expect(item.recap).toContain("watching CI #42");
+		expect(item.recap).not.toContain("ready to help");
+	});
+	it("jobs alone drive the recap and a finished job disappears", async () => {
+		const pi = createFakePi(); agenda(pi.api); announceOwnWork(pi.api, "background", 1, ["building"]);
+		await pi.emit({ type: "agent_settled" });
+		expect((pi.entries.at(-1)!.data as { recap: string }).recap).toBe("Running: building");
+		announceOwnWork(pi.api, "background", 0, []); await pi.emit({ type: "agent_settled" });
+		expect((pi.entries.at(-1)!.data as { recap: string }).recap).toBe("No active goal or background work");
+	});
+	it("does not invent completion for a still-running process-owned job on session change", async () => {
+		const pi = createFakePi(); agenda(pi.api); announceOwnWork(pi.api, "background", 1, ["old job"]);
+		await pi.emit({ type: "session_start", reason: "new" }); await pi.emit({ type: "agent_settled" });
+		expect((pi.entries.at(-1)!.data as { recap: string }).recap).toContain("old job");
 	});
 });
 

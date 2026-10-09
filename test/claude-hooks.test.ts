@@ -196,7 +196,7 @@ describe("hook pre-tool", () => {
 });
 
 describe("hook prompt", () => {
-	it("adds the op mode's prompt in discuss and bugfix, nothing otherwise", async () => {
+	it("adds mode restrictions when applicable and helper discovery in every mode", async () => {
 		launch = makeLaunch();
 		launch.writeControl({ opMode: "discuss" });
 		const discuss = JSON.parse((await runCli(["hook", "prompt"], launch.env, JSON.stringify({ prompt: "why?" }))).stdout);
@@ -206,12 +206,18 @@ describe("hook prompt", () => {
 		const bugfix = JSON.parse((await runCli(["hook", "prompt"], launch.env, "{}")).stdout);
 		expect(bugfix.hookSpecificOutput.additionalContext).toContain("# Bugfix mode");
 		launch.writeControl({ opMode: "plan" });
-		expect((await runCli(["hook", "prompt"], launch.env, "{}")).stdout).toBe("");
+		const plan = JSON.parse((await runCli(["hook", "prompt"], launch.env, "{}")).stdout);
+		expect(plan.hookSpecificOutput.additionalContext).toContain("mcp__hive-pi__goal_set");
+		expect(plan.hookSpecificOutput.additionalContext).not.toContain("# Bugfix mode");
 	});
 
-	it("speaks nothing with no control.json (defaults: build)", async () => {
+	it("names deferred helpers even without control.json or a retrieval brief", async () => {
 		launch = makeLaunch();
-		expect((await runCli(["hook", "prompt"], launch.env, "{}")).stdout).toBe("");
+		const out = JSON.parse((await runCli(["hook", "prompt"], launch.env, "{}")).stdout);
+		const text = out.hookSpecificOutput.additionalContext;
+		for (const name of ["quality_gate", "hive_watch_run", "subagent", "goal_set"]) expect(text).toContain(`mcp__hive-pi__${name}`);
+		expect(text).toContain("before pushing"); expect(text).toContain("instead of sleep-polling CI");
+		expect(text).not.toContain("# Discussion mode");
 	});
 });
 

@@ -169,7 +169,8 @@ export default function background(pi: ExtensionAPI) {
 	const paintFooter = (): void => {
 		// Every job state change passes through here, so the shared running count
 		// (hive-common/own-work.ts) is announced from the same place.
-		announceOwnWork(pi, "background", allJobs().filter((job) => job.status === "running").length);
+		const running = allJobs().filter((job) => job.status === "running");
+		announceOwnWork(pi, "background", running.length, running.map((job) => job.what));
 		const segment = footerSegment(allJobs());
 		withCtx((ctx) => ctx.ui.setStatus("background", segment ?? undefined));
 	};

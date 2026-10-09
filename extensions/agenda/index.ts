@@ -99,6 +99,7 @@ import { buildGrillKick } from "../plan/prompt.ts";
 import {
 	AGENT_STATUS_ENTRY_TYPE,
 	buildRecapPrompt,
+	activeWorkRecap,
 	mechanicalTaskState,
 	MIN_TRANSCRIPT_CHARS,
 	sanitizeRecap,
@@ -106,7 +107,7 @@ import {
 	recapTranscript,
 } from "./recap.ts";
 import { classifyHandback } from "../hive-common/handback.ts";
-import { announceOwnWork } from "../hive-common/own-work.ts";
+import { announceOwnWork, trackOwnWork } from "../hive-common/own-work.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import { runOneShot } from "./spawn.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
@@ -413,6 +414,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (event, ctx) => {
 		if (IS_WORKER) return;
 		sessionGeneration++;
+		hadLiveRecap = false;
+		recapInFlight = false;
+		pendingRecap = null;
+		lastRecapTail = "";
 		autoShutdownScheduled = false;
 		heldCtx = ctx;
 		// Ephemeral per-session state — unlike goals, deliberately NOT persisted:
@@ -470,9 +475,17 @@ export default function (pi: ExtensionAPI) {
 	 * is invisible to the LLM; the bus carries a revision and nothing else, and
 	 * hive-remote reads the prose from the entries under its own consent.
 	 */
+	const recapWork = trackOwnWork(pi);
+	const liveRecap = (asksQuestion: boolean) => activeWorkRecap(
+		goal?.state === "active" ? goal.condition : null,
+		recapWork.descriptions?.() ?? [],
+		asksQuestion,
+	);
+	let hadLiveRecap = false;
 	let statusRevision = 0;
 	let lastRecapTail = "";
 	let recapInFlight = false;
+	let pendingRecap: (() => void) | null = null;
 	let sessionGeneration = 0;
 	const autoShutdownEnabled = process.env.PI_AGENDA_AUTO_SHUTDOWN === "1";
 	const unattendedHiveLaunch = isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID);
@@ -497,7 +510,7 @@ export default function (pi: ExtensionAPI) {
 		if (changed) paintConductor();
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	const observeSettled = (_event: unknown, ctx: ExtensionContext) => {
 		if (IS_WORKER) return;
 		let transcript = "";
 		let asksQuestion = false;
@@ -518,16 +531,23 @@ export default function (pi: ExtensionAPI) {
 			conductorDone: conductor?.stage === "done",
 		});
 
-		const wantRecap =
-			!recapInFlight && transcript.length >= MIN_TRANSCRIPT_CHARS && transcript !== lastRecapTail;
+		const activeRecap = liveRecap(asksQuestion);
+		const changedTranscript = transcript.length >= MIN_TRANSCRIPT_CHARS && transcript !== lastRecapTail;
+		pendingRecap = !activeRecap && recapInFlight && changedTranscript ? () => observeSettled(null, ctx) : null;
+		const wantRecap = !activeRecap && !recapInFlight && changedTranscript;
 
 		const persistStatus = (recap: string) => {
 			statusRevision++;
+			const live = liveRecap(asksQuestion);
+			// Empty prose is preserved downstream. Explicitly replace a finished
+			// live-work line rather than leaving a stale job in Hive.
+			const next = live ?? (hadLiveRecap && !recap ? "No active goal or background work" : recap);
+			hadLiveRecap = live !== null;
 			const item: AgentStatusItem = {
 				kind: "agent-status",
 				revision: statusRevision,
 				taskState,
-				recap,
+				recap: next,
 				at: Date.now(),
 			};
 			try {
@@ -546,12 +566,14 @@ export default function (pi: ExtensionAPI) {
 			// The state is still news (needs_input drives the workspace triage);
 			// an empty recap never blanks a previous one — the server and the
 			// entry reader both preserve on empty.
-			persistStatus("");
+			persistStatus(activeRecap ?? "");
 			scheduleAutoShutdown(ctx, asksQuestion);
 			return;
 		}
 
 		recapInFlight = true;
+		const recapRevision = statusRevision;
+		const recapGeneration = sessionGeneration;
 		lastRecapTail = transcript;
 		// Detached, like every network call in hive-remote: pi awaits handlers
 		// serially, and a model call in a settle handler would BE the agent loop.
@@ -565,17 +587,22 @@ export default function (pi: ExtensionAPI) {
 			})
 				.then((result) => {
 					const recap = result.exitCode === 0 && !result.timedOut ? sanitizeRecap(result.text) : "";
-					persistStatus(recap);
+					if (recapRevision === statusRevision && recapGeneration === sessionGeneration) persistStatus(recap);
 				})
-				.catch(() => persistStatus(""))
+				.catch(() => { if (recapRevision === statusRevision && recapGeneration === sessionGeneration) persistStatus(""); })
 				.finally(() => {
+					if (recapGeneration !== sessionGeneration) return;
 					recapInFlight = false;
+					const pending = pendingRecap;
+					pendingRecap = null;
+					if (pending) { pending(); return; }
 					// The recap is part of the completion barrier: only after its
 					// status entry has been attempted may the session close.
 					scheduleAutoShutdown(ctx, asksQuestion);
 				});
 		}, 0);
-	});
+	};
+	pi.on("agent_settled", observeSettled);
 
 	/**
 	 * Close only a finished, unattended session. The final conductor transition

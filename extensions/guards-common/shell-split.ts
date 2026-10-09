@@ -27,8 +27,9 @@
  * `&&`, `||`, `;`, and `|` separate segments; quotes and `$( … )` are respected
  * so a separator inside a body value does not split. Good enough to decide
  * which segment is the `gh` invocation — the guard does the same kind of scan.
+ * Callers checking execution boundaries can opt into top-level newlines too.
  */
-export function splitCommands(command: string): string[] {
+export function splitCommands(command: string, splitNewlines = false, onPipeline?: () => void): string[] {
 	const segments: string[] = [];
 	let current = "";
 	let quote: '"' | "'" | null = null;
@@ -63,7 +64,8 @@ export function splitCommands(command: string): string[] {
 				i++;
 				continue;
 			}
-			if (ch === ";" || ch === "|" || ch === "&") {
+			if (ch === ";" || ch === "|" || ch === "&" || (splitNewlines && ch === "\n")) {
+				if (ch === "|" || ch === "&") onPipeline?.();
 				segments.push(current);
 				current = "";
 				continue;

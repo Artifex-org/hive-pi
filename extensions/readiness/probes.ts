@@ -102,10 +102,10 @@ export type UnixListenResult = { ok: true } | { ok: false; code: string; message
 export type Probe = (deps: ProbeDeps) => Promise<Omit<ProbeResult, "at">>;
 
 /** Wrap a probe so it always answers, and always within the deadline. */
-export async function runProbe(id: string, label: string, probe: Probe, deps: ProbeDeps): Promise<ProbeResult> {
+export async function runProbe(id: string, label: string, probe: Probe, deps: ProbeDeps, deadlineMs = PROBE_TIMEOUT_MS + 1_000): Promise<ProbeResult> {
 	const at = deps.now();
 	try {
-		const outcome = await withDeadline(probe(deps), PROBE_TIMEOUT_MS + 1_000);
+		const outcome = await withDeadline(probe(deps), deadlineMs);
 		return { ...outcome, id: outcome.id ?? id, label: outcome.label ?? label, at };
 	} catch {
 		return { id, label, status: "unknown", detail: "probe failed or timed out", at };
