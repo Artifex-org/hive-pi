@@ -533,7 +533,11 @@ export default function (pi: ExtensionAPI) {
 
 		const activeRecap = liveRecap(asksQuestion);
 		const changedTranscript = transcript.length >= MIN_TRANSCRIPT_CHARS && transcript !== lastRecapTail;
-		pendingRecap = !activeRecap && recapInFlight && changedTranscript ? () => observeSettled(null, ctx) : null;
+		// Even an identical settle invalidates the old status revision. Queue
+		// the latest context whenever that happens; reset the attempted tail so
+		// a discarded result cannot permanently suppress the same transcript.
+		pendingRecap = !activeRecap && recapInFlight && transcript.length >= MIN_TRANSCRIPT_CHARS
+			? () => { lastRecapTail = ""; observeSettled(null, ctx); } : null;
 		const wantRecap = !activeRecap && !recapInFlight && changedTranscript;
 
 		const persistStatus = (recap: string) => {

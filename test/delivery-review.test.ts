@@ -116,6 +116,16 @@ describe("delivery review", () => {
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
 		for (const command of [`cd '${clean.cwd}' | cat\ngit push`, "git push other HEAD"]) expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd: original.cwd } }))[0]).toMatchObject({ block: true });
 	});
+	it("does not treat origin's fetch URL as evidence for an alternate push URL", async () => {
+		const destination = repo(), source = repo();
+		source.git("remote", "add", "origin", destination.cwd);
+		source.git("fetch", "origin", "main"); source.git("reset", "--hard", "origin/main");
+		expect(needsDeliveryReview(captureDeliveryDiff(source.cwd)!)).toBe(false);
+		const other = repo(); source.git("config", "remote.origin.pushurl", other.cwd);
+		expect(captureDeliveryDiff(source.cwd)).toBeNull();
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD", cwd: source.cwd } }))[0]).toMatchObject({ block: true });
+	});
 	it("refuses default pushes configured to send non-HEAD branches", () => {
 		const { cwd, git } = repo();
 		git("config", "push.default", "matching"); expect(captureDeliveryDiff(cwd)).toBeNull();
