@@ -99,8 +99,11 @@ const grepCallers: CallerGrep = (symbol, repo, timeoutMs) => {
 	}
 };
 
-export function discoverCallers(repo: string, patch: string, changedPaths: readonly string[], grep: CallerGrep = grepCallers, readSource = (file: string): string | null => {
+export function discoverCallers(repo: string, patch: string, changedPaths: readonly string[], grep: CallerGrep = grepCallers, readSource = (file: string, revision?: "HEAD" | ":"): string | null => {
 	try {
+		if (revision) return execFileSync("git", ["--no-optional-locks", "show", revision === ":" ? `:${file}` : `HEAD:${file}`], {
+			cwd: repo, encoding: "utf8", timeout: 300, maxBuffer: CALLER_SOURCE_BYTES, stdio: ["ignore", "pipe", "ignore"],
+		});
 		const absolute = resolve(repo, file);
 		if (!absolute.startsWith(`${resolve(repo)}/`) || statSync(absolute).size > CALLER_SOURCE_BYTES) return null;
 		return readFileSync(absolute, "utf8");

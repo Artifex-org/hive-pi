@@ -46,7 +46,7 @@ describe("caller-aware review scope", () => {
 		const repo = mkdtempSync(join(tmpdir(), "layered-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
 		git("init", "-b", "main"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
-		const body = "impl Client {\n    pub fn fetch(&self) -> Result<T> {\n" + "        // body\n".repeat(30);
+		const body = "// initial header\n".repeat(10) + "impl Client {\n    pub fn fetch(&self) -> Result<T> {\n" + "        // body\n".repeat(30);
 		writeFileSync(join(repo, "api.rs"), body + "        Ok(value)\n    }\n}\n");
 		writeFileSync(join(repo, "caller.rs"), "client.fetch();\n");
 		git("add", "."); git("commit", "-m", "base"); git("update-ref", "refs/remotes/origin/main", "HEAD"); git("checkout", "-b", "work");
