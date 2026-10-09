@@ -219,7 +219,7 @@ export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = del
 		const separator = entry.indexOf("\n");
 		const key = separator < 0 ? entry : entry.slice(0, separator);
 		const value = separator < 0 ? "" : entry.slice(separator + 1);
-		if (/^remote\..*\.(?:push|mirror)$/.test(key) || ["push.followtags", "push.recursesubmodules"].includes(key)) return null;
+		if (/^remote\..*\.(?:push|mirror|pushurl)$/.test(key) || ["push.followtags", "push.recursesubmodules"].includes(key)) return null;
 		if ((key === "remote.pushdefault" || /^branch\..*\.(?:pushremote|remote)$/.test(key)) && value !== "origin") return null;
 		if (key === "push.default") pushDefault = value;
 	}

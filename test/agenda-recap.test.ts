@@ -130,7 +130,7 @@ describe("the settle observer", () => {
 		return fake.entries.filter((entry) => entry.customType === "agent-status");
 	}
 
-	it("replaces a stale in-flight recap with the latest settled transcript", async () => {
+	it.each([true, false])("replaces an invalidated in-flight recap (changed transcript: %s)", async (changed) => {
 		vi.useFakeTimers(); runRecap.mockReset();
 		try {
 			let resolveFirst!: (value: unknown) => void;
@@ -138,11 +138,11 @@ describe("the settle observer", () => {
 			const fake = createFakePi(); agenda(fake.api);
 			const initial = [{ message: { role: "assistant", content: "Earlier work ".repeat(100) } }];
 			await settle(fake, initial); await vi.advanceTimersByTimeAsync(0);
-			await settle(fake, [...initial, { message: { role: "assistant", content: "Newer turn evidence" } }]);
+			await settle(fake, changed ? [...initial, { message: { role: "assistant", content: "Newer turn evidence" } }] : initial);
 			resolveFirst({ exitCode: 0, timedOut: false, text: "Stale earlier recap" });
 			await vi.advanceTimersByTimeAsync(1);
 			expect(runRecap).toHaveBeenCalledTimes(2);
-			expect(runRecap.mock.calls[1][0].prompt).toContain("Newer turn evidence");
+			expect(runRecap.mock.calls[1][0].prompt).toContain(changed ? "Newer turn evidence" : "Earlier work");
 			expect((statusEntries(fake).at(-1)?.data as { recap: string }).recap).toBe("Latest work recap");
 			expect(statusEntries(fake).some((e) => (e.data as { recap: string }).recap === "Stale earlier recap")).toBe(false);
 		} finally { vi.clearAllTimers(); vi.useRealTimers(); runRecap.mockReset(); }
