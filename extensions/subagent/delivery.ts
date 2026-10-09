@@ -10,15 +10,17 @@ import { accessSync, constants } from "node:fs";
 export const DELIVERY_REVIEW_GUIDANCE = "Before pushing or opening a PR, run subagent with agent: code-reviewer on the diff and fix its findings. The harness supplies the diff/file list, not the author's design rationale. Docs-only or tiny diffs skip automatically; PI_DELIVERY_REVIEW=0 explicitly overrides the checkpoint.";
 
 function commitPreservesStagedBytes(args: string[]): boolean {
+	let nonInteractive = false;
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
-		if (["-m", "--message", "-F", "--file"].includes(arg)) { if (!args[++i]) return false; continue; }
-		if (/^(?:-m.+|-F.+|--(?:message|file)=)/.test(arg)) continue;
+		if (["-m", "--message", "-F", "--file"].includes(arg)) { if (args[++i] === undefined) return false; nonInteractive = true; continue; }
+		if (/^(?:-m.+|-F.+|--(?:message|file)=)/.test(arg)) { nonInteractive = true; continue; }
+		if (arg === "--no-edit") nonInteractive = true;
 		if (["--amend", "--no-edit", "--allow-empty", "--allow-empty-message", "--no-verify", "--quiet", "--verbose", "--signoff", "--reset-author", "--no-gpg-sign", "-q", "-s", "-S", "-v"].includes(arg)) continue;
 		if (/^--gpg-sign(?:=|$)/.test(arg)) continue;
 		return false; // paths, -a/-i/-o, patches and unknown staging/editor modes
 	}
-	return true;
+	return nonInteractive;
 }
 
 export function deliveryTargets(command: string, cwd: string): (string | null)[] {
