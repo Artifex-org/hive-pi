@@ -86,6 +86,23 @@ describe("delivery review", () => {
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
 	});
+	it("requires separation when pre-push hooks generate bytes for a later commit/push", async () => {
+		const source = repo(), destination = repo(); destination.git("checkout", "main");
+		source.git("remote", "add", "origin", destination.cwd);
+		writeFileSync(join(source.cwd, "code.ts"), substantive); source.git("add", "."); source.git("commit", "-m", "code");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd: source.cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(source.cwd)!) }] } });
+		const hook = join(source.cwd, ".git", "hooks", "pre-push");
+		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' >> code.ts\n"); chmodSync(hook, 0o755);
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD && git add code.ts && git commit -m generated && git push origin HEAD", cwd: source.cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("executable hooks") });
+		source.git("push", "origin", "HEAD");
+		expect(captureDeliveryDiff(source.cwd)!.text).toContain("export const generated");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd: source.cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
 	it("rejects a reviewed chain whose external-diff helper can change code", async () => {
 		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive);
 		const helper = join(cwd, ".git", "external-diff");

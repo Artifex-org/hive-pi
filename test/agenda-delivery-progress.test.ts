@@ -17,8 +17,9 @@ describe("delivery milestones", () => {
 		const pi = createFakePi(); let head = "old";
 		registerDeliveryProgress(pi.api, () => head);
 		const call = () => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "q", input: { command } });
-		const result = () => pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "q", input: { command }, content: [], isError: false });
+		const result = (isError = false) => pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "q", input: { command }, content: [], isError });
 		await call(); await result(); expect(pi.entries).toHaveLength(0);
+		await call(); head = "failed hook changed HEAD"; await result(true); expect(pi.entries).toHaveLength(0);
 		const fallback = "git commit -q -m change || git checkout other";
 		await pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "f", input: { command: fallback } });
 		head = "other";
@@ -31,6 +32,7 @@ describe("delivery milestones", () => {
 		["git commit -m change", "[work abc1234] change"],
 		["HIVE_PRESIGN_REQUIRED=1 git -C /repo commit -m change && false", "[work (root-commit) abc1234] change"],
 		["gh pr create", "https://github.com/owner/repo/pull/123"],
+		["gh pr create && echo done", "https://github.com/owner/repo/pull/123\ndone"],
 		["hive ship", "https://github.com/owner/repo/pull/123"],
 	])("recognizes successful evidence for %s", (command, output) => {
 		expect(deliveryMilestone(command, output)).toBe(true);

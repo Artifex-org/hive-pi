@@ -11,6 +11,9 @@ export const ADVICE_GIVEN_ENTRY = "agenda-advice-given";
 export function deliveryMilestone(command: string, output: string, succeeded = true): boolean {
 	if (command.length > 8192) return false;
 	const segments = splitCommands(command, true);
+	// In an all-success && chain, successful tool completion also establishes
+	// the earlier creator succeeded. Do not infer that across ; or || recovery.
+	const allSuccessChain = !/[;\n]|\|\|/.test(command.replace(/'[^']*'|"[^"\\]*"/g, ""));
 	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment, true);
 		if (!words) continue;
@@ -25,8 +28,8 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 		if ((words[0] === "gh" && words[1] === "pr" && words[2] === "create") ||
 			(words[0] === "hive" && words[1] === "ship")) {
 			// Do not attribute a fallback/read command\'s URL to a failed create.
-			// Only the final creator has attributable stdout in a shell chain.
-			if (succeeded && index === segments.length - 1 && /https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/.test(output)) return true;
+			// A successful && suffix is also attributable to its earlier creator.
+			if (succeeded && (index === segments.length - 1 || allSuccessChain) && /https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/.test(output)) return true;
 		}
 	}
 	return false;
@@ -83,7 +86,7 @@ export function registerDeliveryProgress(pi: ExtensionAPI, head = readHead): (en
 		// A commit/PR may have succeeded before a later command failed. The
 		// concrete summary/URL, rather than the whole chain's exit, decides.
 		const after = before ? head(before.cwd) : null;
-		if (!deliveryMilestone(command, output, !event.isError) && !(after && after !== before?.head)) return;
+		if (!deliveryMilestone(command, output, !event.isError) && !(!event.isError && after && after !== before?.head)) return;
 		seen = true;
 		pi.appendEntry(DELIVERY_PROGRESS_ENTRY, { reached: true });
 	});

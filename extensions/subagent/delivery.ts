@@ -96,23 +96,27 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 	// earlier push to another repo or an unsupported target in the same chain.
 	return pipeline ? targets.map(() => null) : targets.reverse();
 }
-/** A hook can create/stage bytes after this preflight captured the review. */
-function chainedCommitHookProblem(command: string, cwd: string): boolean {
+/** Supported chains contain literal status/staging/commits and HEAD delivery.
+ * They are not arbitrary shell programs: executable mutation hooks, helpers,
+ * dynamic arguments and unknown predecessors must run separately, then be reviewed. */
+function chainHookProblem(command: string, cwd: string): boolean {
+	const segments = splitCommands(command, true);
+	if (segments.length < 2) return false;
 	let dir = cwd;
-	for (const segment of splitCommands(command, true)) {
+	for (const segment of segments) {
 		const words = literalWords(segment);
 		if (!words) continue; // unsupported dynamic shapes are rejected by deliveryTargets
 		while (/^[A-Za-z_]\w*=/.test(words[0] ?? "")) words.shift();
 		if (words[0] === "cd" && words.length === 2) { dir = resolve(dir, words[1]); continue; }
-		if (words[0] !== "git") continue;
+		if (words[0] !== "git" && !(words[0] === "hive" && words[1] === "ship")) continue;
 		let i = 1, target = dir;
 		while (words[i] === "-C" && words[i + 1]) { target = resolve(target, words[i + 1]); i += 2; }
-		if (words[i] !== "commit") continue;
+		if (words[0] === "git" && !["commit", "push"].includes(words[i])) continue;
 		try {
 			const hooks = execFileSync("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], {
 				cwd: target, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"],
 			}).trim();
-			for (const name of ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite"]) {
+			for (const name of ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"]) {
 				try { accessSync(join(hooks, name), constants.X_OK); return true; }
 				catch (error) { if (!["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) return true; }
 			}
@@ -159,7 +163,7 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		// An explicit per-call override is visible in the transcript. It is not
 		// a claim of review or a check passing, just an acknowledged skip.
 		if (/^\s*PI_DELIVERY_REVIEW=0\s/.test(command)) return;
-		if (chainedCommitHookProblem(command, cwd)) return { block: true, reason: 'Unsupported command shape: a chained commit has executable hooks (or its hook configuration cannot be read), so post-commit bytes cannot be reviewed by this preflight. Run the commit separately, then run a foreground code-reviewer on the resulting diff before standalone delivery.' };
+		if (chainHookProblem(command, cwd)) return { block: true, reason: 'Unsupported command shape: a compound delivery has executable hooks (or its hook configuration cannot be read), so later bytes cannot be reviewed by this preflight. Run each command separately, then run a foreground code-reviewer on the resulting diff before standalone delivery.' };
 		for (const target of deliveryTargets(command, cwd)) {
 			if (!target) return { block: true, reason: 'Unsupported command shape: delivery target/environment, pipeline, or preceding mutation cannot be evaluated. Run setup/mutation commands separately, then review and run a standalone `git push origin HEAD`, `hive ship --no-pr`, or `gh pr create` in the reviewed repo (without target overrides).' };
 			const diff = capture(target, "");
