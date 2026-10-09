@@ -44,8 +44,12 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 			token === "--force" || /^-[^-]*f/.test(token) || /^(?:--chmod|--patch|--interactive)/.test(token) || ["-p", "-i"].includes(token));
 		const gitWritesOutput = prefix?.[0] === "git" && prefix.some(token => token === "--output" || token.startsWith("--output="));
 		const dynamicGit = prefix?.[0] === "git" && !literalWords(cleaned);
+		// Preserve the common read-only body-file substitution, not arbitrary
+		// shell code that can reset HEAD before PR creation or a later push.
+		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) &&
+			!literalWords(cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body"));
 		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
-		if (!prefix || configuredEnv || forcedStaging || gitWritesOutput || dynamicGit || redirected || !(prefix[0] === "git" && ["add", "commit", "status", "diff", "log", "push"].includes(prefix[verb]) ||
+		if (!prefix || configuredEnv || forcedStaging || gitWritesOutput || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["add", "commit", "status", "diff", "log", "push"].includes(prefix[verb]) ||
 			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) precedingMutation = true;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);
@@ -66,7 +70,7 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 				if (["--repo", "--head", "--base", "-R", "-H", "-B"].includes(option)) targetOverride = true;
 				if (!tokens[i].includes("=") && ["--repo", "--head", "--base", "-R", "-H", "-B", "--title", "--body", "--body-file", "-t", "-b", "-F", "--assignee", "--reviewer", "--label", "--milestone", "--project", "--template"].includes(option)) i++;
 			}
-			targets.push(preceded || configuredEnv || redirected || targetOverride ? null : dir);
+			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? null : dir);
 			continue;
 		}
 		if (!/^git\s/.test(cleaned)) continue;
@@ -108,7 +112,7 @@ function chainedCommitHookProblem(command: string, cwd: string): boolean {
 			const hooks = execFileSync("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], {
 				cwd: target, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"],
 			}).trim();
-			for (const name of ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit"]) {
+			for (const name of ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite"]) {
 				try { accessSync(join(hooks, name), constants.X_OK); return true; }
 				catch (error) { if (!["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) return true; }
 			}

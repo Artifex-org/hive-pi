@@ -62,22 +62,26 @@ describe("delivery review", () => {
 			"git log --output code.ts; git add code.ts; hive ship",
 			'SETTING="$(echo changed >> code.ts)" git push',
 			'SETTING=$(echo changed >> code.ts) git push',
-			'git status "$(echo changed >> code.ts)" && git push']) {
+			'git status "$(echo changed >> code.ts)" && git push',
+			'gh pr create --body "$(git reset --hard unreviewed)"; git push origin HEAD']) {
 			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0])
 				.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
 		}
 	});
-	it("requires post-commit review when hooks can generate unreviewed code", async () => {
+	it.each(["pre-commit", "post-rewrite"])("requires post-commit review when %s can generate unreviewed code", async hookName => {
 		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		if (hookName === "post-rewrite") git("commit", "-m", "seed code");
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
 			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
-		const hook = join(cwd, ".git", "hooks", "pre-commit");
-		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' > generated.ts\ngit add generated.ts\n"); chmodSync(hook, 0o755);
-		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git commit -m code && hive ship && git push", cwd } }))[0])
+		const hook = join(cwd, ".git", "hooks", hookName);
+		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' > generated.ts\ngit add generated.ts\n" +
+			(hookName === "post-rewrite" ? "git -c core.hooksPath=/dev/null commit -m generated\n" : "")); chmodSync(hook, 0o755);
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: hookName === "post-rewrite" ? "git commit --amend --no-edit && git push origin HEAD" : "git commit -m code && hive ship && git push", cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("executable hooks") });
-		git("commit", "-m", "hook generated");
+		if (hookName === "post-rewrite") git("commit", "--amend", "--no-edit");
+		else git("commit", "-m", "hook generated");
 		expect(captureDeliveryDiff(cwd)!.text).toContain("export const generated");
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });

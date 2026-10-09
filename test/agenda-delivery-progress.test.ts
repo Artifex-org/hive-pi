@@ -7,11 +7,11 @@ import type { GoalItem } from "../extensions/agenda/goal-state.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 describe("delivery milestones", () => {
-	it("observes a quiet commit only when HEAD actually changes", async () => {
+	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change"])("observes %s only when HEAD actually changes", async command => {
 		const pi = createFakePi(); let head = "old";
 		registerDeliveryProgress(pi.api, () => head);
-		const call = () => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "q", input: { command: "git commit -q -m change" } });
-		const result = () => pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "q", input: { command: "git commit -q -m change" }, content: [], isError: false });
+		const call = () => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "q", input: { command } });
+		const result = () => pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "q", input: { command }, content: [], isError: false });
 		await call(); await result(); expect(pi.entries).toHaveLength(0);
 		const fallback = "git commit -q -m change || git checkout other";
 		await pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "f", input: { command: fallback } });

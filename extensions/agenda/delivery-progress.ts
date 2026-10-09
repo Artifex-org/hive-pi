@@ -51,6 +51,7 @@ function commitCheckout(command: string, cwd: string): string | null {
 		// HEAD-only evidence is attributable only to a final standalone commit,
 		// optionally after cd; checkout/reset fallbacks must never count.
 		if (words[i] === "commit") return index === segments.length - 1 ? target : null;
+		if (["add", "status"].includes(words[i])) continue;
 		return null;
 	}
 	return null;
