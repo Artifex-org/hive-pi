@@ -214,13 +214,14 @@ export default function (pi: ExtensionAPI) {
 		capability: PROBE_CAPABILITY,
 		description: [
 			"What this environment can already do: MCP servers, credentials, the disposable Postgres,",
-			"the headless browser, and the checkout. Each row names the tool that uses the capability and,",
+			"the headless browser, unix sockets, and the checkout. Each row names the tool that uses the capability and,",
 			"when it is not ready, what to do about it. Call it instead of discovering a missing capability",
 			"by failing — and again after fixing one, to confirm.",
 		].join(" "),
 		promptSnippet: "Check which environment capabilities are ready before relying on one",
 		promptGuidelines: [
 			"Call readiness before a task that depends on a database, a browser, an MCP server or a delegation — it is one call against several failed ones.",
+			"Call it before running a test suite that listens on unix sockets: in a sandbox the `unix sockets` row says those tests cannot run here and which fleet check runs them.",
 			"A `warming` MCP row means the tools are cached but nothing has connected: the first call works, it just pays the connect.",
 			"A product MCP (`borealis` / `aurorasvc`) only appears in that project's checkout. A cached tool count from the other product is not this session being ready.",
 			"`unknown` means the probe could not tell, NOT that the capability is missing.",

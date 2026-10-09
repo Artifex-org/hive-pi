@@ -15,7 +15,7 @@ made. Errors work; warnings and READMEs do not.
 
 ## The table
 
-Five signatures today, each in `hints.ts` with the session or measurement that
+The signatures live in `hints.ts`, each with the session or measurement that
 produced it. The rules the table will not bend:
 
 1. **Append, never replace.** The original error is the evidence.

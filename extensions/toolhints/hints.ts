@@ -223,6 +223,28 @@ export const HINTS: readonly ToolHint[] = [
 			"22 papercuts 2026-08-17/19 across Aurora and Borealis worktrees, five blocking. Six of them post-date the first version of this hint, and name the two things it got wrong: 2026-08-18T22:58 found six live `quality-gate --changed` shells holding the lock (invisible to a `git |pre-commit` pgrep), 2026-08-18T17:00 and 08-17T20:31 concluded 'no holder' against a lock that was really held, and 2026-08-19T00:37 reports \"the worktree's `.git` indirection made the first lock check ineffective\"",
 	},
 	{
+		// srt's seccomp filter refuses socket(AF_UNIX) for every process in a
+		// sandboxed launch. Two spellings, both anchored on a socket PATH so a TCP
+		// bind refusal (`listen EPERM: … 0.0.0.0:80`) never matches: Node's
+		// `listen EPERM: operation not permitted /tmp/x.sock` (and `connect EPERM
+		// /x.sock`), and Go's `listen unix /tmp/x.sock: socket: operation not
+		// permitted` (also `dial unix`).
+		id: "unix-socket-refused",
+		tools: ["bash", "background_bash"],
+		match:
+			/\b(?:listen|connect) EPERM(?:: operation not permitted)? \/[^\s'"]+|\b(?:listen|dial) unix(?:gram|packet)? \S+: (?:socket|bind|connect): operation not permitted/,
+		hint:
+			"That is the SANDBOX, not your code: srt's seccomp filter refuses socket(AF_UNIX), so every unix-socket " +
+			"listen or connect fails here with EPERM — and a test harness that does not surface the listen error just " +
+			"times out instead. Do not debug it further locally and do not weaken the test: run those tests on the " +
+			"fleet — `quality_gate` (it lists this repo's steps) or `hive check --step <step>` — and report them as not " +
+			"run locally. TCP on 127.0.0.1 is unaffected. `readiness` reports this up front as `unix sockets`.",
+		evidence:
+			"HIV-3802 A/B eval 2026-10-08: the pi arm's vitest unix-socket transport suite timed out 7×5s and the agent " +
+			"isolated `listen EPERM: operation not permitted /tmp/hc-simple.sock` by hand; the Claude arm's `go test` failed " +
+			"`listen unix /tmp/claude/…/capability.sock: socket: operation not permitted`",
+	},
+	{
 		id: "bash-foreground-timeout",
 		tools: ["bash"],
 		match: /timed out after \d+ seconds/i,

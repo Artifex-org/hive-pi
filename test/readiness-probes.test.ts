@@ -6,6 +6,9 @@
  * report and none of them are reproducible against the real world on demand.
  */
 
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
 
@@ -22,6 +25,8 @@ import {
 	postgresProbe,
 	repoProbe,
 	runProbe,
+	listenUnixSocket,
+	unixSocketProbe,
 	type ProbeDeps,
 	type ExecResult,
 	type HttpResult,
@@ -777,5 +782,36 @@ describe("mcp probes — servers an extension registered", () => {
 		const hive = await rows[1].probe(d);
 		expect(hive.detail).toBe("1 tools · codemode"); // the file's entry, not the registration
 		setHouseProfileForTest(null);
+	});
+});
+
+describe("unix sockets (HIV-3802 eval)", () => {
+	it("is absent with the fleet pointer when the sandbox refuses the listen", async () => {
+		const out = await unixSocketProbe(deps({ listenUnix: async () => ({ ok: false, code: "EPERM", message: "listen EPERM" }) }));
+		expect(out.status).toBe("absent");
+		expect(out.hint).toMatch(/quality_gate/);
+		expect(out.hint).toMatch(/hive check --step/);
+	});
+
+	it("is ready when the listen succeeds", async () => {
+		expect((await unixSocketProbe(deps({ listenUnix: async () => ({ ok: true }) }))).status).toBe("ready");
+	});
+
+	it("says unknown, never absent, for a failure that is not a policy refusal", async () => {
+		const out = await unixSocketProbe(deps({ listenUnix: async () => ({ ok: false, code: "temp dir EROFS", message: "x" }) }));
+		expect(out.status).toBe("unknown");
+		expect((await unixSocketProbe(deps())).status).toBe("unknown");
+	});
+
+	it("really listens, and leaves nothing behind", async () => {
+		const base = mkdtempSync(join(tmpdir(), "readiness-unix-"));
+		try {
+			const outcome = await listenUnixSocket(base);
+			// Either answer is honest — this test may itself run in a sandbox.
+			if (!outcome.ok) expect(outcome.code).toMatch(/^(EPERM|EACCES)$/);
+			expect(readdirSync(base)).toEqual([]);
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
 	});
 });
