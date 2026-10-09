@@ -81,9 +81,9 @@ describe("caller-aware review scope", () => {
 	});
 	it("retains a same-name forwarding call on its declaration line", () => {
 		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -1 +1 @@\n-export function fetch() {}\n+export function fetch() { throw new Error(); }\n";
-		const rows = "wrapper.ts:1:export function fetch() { return api.fetch(); }\nonly-declaration.ts:1:export function fetch() { return 1; }";
+		const rows = "wrapper.ts:1:export function fetch() { return api.fetch(); }\nonly-declaration.ts:1:export function fetch() { return 1; }\narrow.ts:1:export const fetch = () => api.fetch();\nanonymous.ts:1:export const fetch = function () { return api.fetch(); };";
 		expect(discoverCallers("/repo", changed, ["api.ts"], () => ({ text: rows }), () => "").sites)
-			.toEqual([{ symbol: "fetch", path: "wrapper.ts", line: 1 }]);
+			.toEqual(["wrapper.ts", "arrow.ts", "anonymous.ts"].map((path) => ({ symbol: "fetch", path, line: 1 })));
 	});
 	it("discovers ordinary multiline class methods and generator body changes", () => {
 		for (const [symbol, source, line] of [["fetch", "export class Client {\n  fetch(\n    options: string,\n  ) {\n" + "    // body\n".repeat(12) + "    throw new Error();\n  }\n}\n", 17],

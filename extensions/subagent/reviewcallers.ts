@@ -147,7 +147,8 @@ export function discoverCallers(repo: string, patch: string, changedPaths: reado
 			if (functionName(match[3]) === symbol) {
 				const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 				const occurrences = match[3].match(new RegExp(`(^|[^\\w$])${escaped}\\s*(<[^;()]{1,128}>|\\[[^;()]{1,128}\\]|::<[^;()]{1,128}>)?\\s*\\(`, "g")) ?? [];
-				if (occurrences.length <= 1) continue; // declaration only, not a forwarding call
+				const variableBound = /^\s*(?:export\s+)?(?:const|let|var)\b/.test(match[3]);
+				if (occurrences.length <= (variableBound ? 0 : 1)) continue; // declaration only, not a forwarding call
 			}
 			const key = `${symbol}:${match[1]}:${match[2]}`;
 			if (seen.has(key)) continue;
