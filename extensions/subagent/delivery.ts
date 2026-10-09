@@ -126,11 +126,14 @@ function chainHookProblem(command: string, cwd: string): boolean {
 		let i = 1, target = dir;
 		while (words[i] === "-C" && words[i + 1]) { target = resolve(target, words[i + 1]); i += 2; }
 		if (words[0] === "git" && !["commit", "push"].includes(words[i])) continue;
+		const hookNames = words[0] === "git" && words[i] === "commit"
+			? ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite"]
+			: ["pre-push"];
 		try {
 			const hooks = execFileSync("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], {
 				cwd: target, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"],
 			}).trim();
-			for (const name of ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite", "pre-push"]) {
+			for (const name of hookNames) {
 				try { accessSync(join(hooks, name), constants.X_OK); return true; }
 				catch (error) { if (!["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) return true; }
 			}

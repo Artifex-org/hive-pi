@@ -228,25 +228,26 @@ describe("conductor policy", () => {
 		expect(policy.decide(contextWith(emptyLedger, open))).toBeNull();
 	});
 
-	it("execute → verify when every todo is closed, without late advice", async () => {
+	it("runs verification at the same completion boundary without late advice", async () => {
 		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0));
 		const policy = createConductorPolicy(hooks);
 		const done = signalsWith({ tasks: { total: 3, pending: 0, inProgress: 0, completed: 3 } });
 		const work = policy.decide(contextWith(emptyLedger, done));
 		const outcome = await work!.run();
-		expect(item()?.stage).toBe("verify");
+		expect(item()?.stage).toBe("consolidate"); // no harness configured: explicitly skipped
+		expect(outcome.metric.outcome).toBe("skip");
 		expect(outcome.inject).toBeUndefined();
 		expect(outcome.ledger).toBeUndefined();
 	});
 
-	it("execute → verify advances silently once the advisor nudge is spent", async () => {
+	it("runs verification silently once the advisor nudge is spent", async () => {
 		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0));
 		const policy = createConductorPolicy(hooks);
 		const done = signalsWith({ tasks: { total: 3, pending: 0, inProgress: 0, completed: 3 } });
 		const spent = record(emptyLedger, ADVISE_LEDGER_ID);
 		const work = policy.decide(contextWith(spent, done));
 		const outcome = await work!.run();
-		expect(item()?.stage).toBe("verify");
+		expect(item()?.stage).toBe("consolidate");
 		expect(outcome.inject).toBeUndefined();
 	});
 
@@ -301,6 +302,18 @@ describe("conductor policy", () => {
 		expect(item()?.stage).toBe("idle");
 		expect(goal.state).toBe("capped");
 	});
+	it.each(["capped", "budget_exhausted", "cleared", "blocked_user"] as const)("uses the current todos instead of a terminal %s goal", async state => {
+		const { hooks, item } = makeHooks(null, { state } as GoalItem);
+		const open = signalsWith({ deliveryStarted: true, tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, open))!.run();
+		expect(item()?.stage).toBe("verify");
+		const ledger = outcome.ledger!(emptyLedger), policy = createConductorPolicy(hooks);
+		expect(policy.decide(contextWith(ledger, open))).toBeNull();
+		const done = { ...open, tasks: { total: 1, pending: 0, inProgress: 0, completed: 1 } };
+		const verified = await policy.decide(contextWith(ledger, done))!.run();
+		expect(verified.metric.outcome).toBe("skip");
+		expect(item()?.stage).toBe("consolidate");
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});
@@ -312,8 +325,9 @@ describe("conductor policy", () => {
 		// Todos deliberately open: the judge's verdict outranks todo state.
 		const open = signalsWith({ tasks: { total: 3, pending: 3, inProgress: 0, completed: 0 } });
 		const work = policy.decide(contextWith(emptyLedger, open));
-		await work!.run();
-		expect(item()?.stage).toBe("verify");
+		const outcome = await work!.run();
+		expect(outcome.metric.outcome).toBe("skip");
+		expect(item()?.stage).toBe("consolidate");
 	});
 
 	it("verify with no prCheck hands over to consolidate with a skip metric", async () => {

@@ -321,14 +321,26 @@ function decidePlan(hooks: ConductorHooks, signals: SessionSignals): PolicyWork 
 	return null;
 }
 
-function decideExecute(hooks: ConductorHooks, context: PolicyContext, signals: SessionSignals): PolicyWork | null {
+function completionGoal(hooks: ConductorHooks): GoalItem | null {
 	const goal = hooks.goal();
+	return goal && ["active", "paused", "achieved"].includes(goal.state) ? goal : null;
+}
+
+function decideExecute(hooks: ConductorHooks, context: PolicyContext, signals: SessionSignals): PolicyWork | null {
+	const goal = completionGoal(hooks);
 	const goalDone = goal?.state === "achieved";
 	// With no goal, completion is "every todo closed". With a goal, the judge's
 	// verdict is the completion signal and todo state is advisory.
 	const done = goal ? goalDone : allTasksDone(signals);
 	if (!done) return null;
-	return silentAdvance(hooks, "verify");
+	// A silent stage change alone never schedules a new boundary. Perform the
+	// verification work now, without reviving the late advisor injection.
+	const verification = decideVerify(hooks, context);
+	if (!verification) return null;
+	return { ...verification, run: async () => {
+		hooks.commit(withStage(itemFor(hooks, Date.now()), "verify", Date.now()));
+		return verification.run();
+	} };
 }
 
 /** Early policy: run at the post-tool boundary and before the goal judge. */
@@ -378,7 +390,7 @@ function adviceTransition(hooks: ConductorHooks, signals: SessionSignals): Polic
 function decideVerify(hooks: ConductorHooks, context: PolicyContext): PolicyWork | null {
 	// Advice can move us here while CI/tasks remain open. Do not consolidate
 	// until the original completion contract is met.
-	const goal = hooks.goal();
+	const goal = completionGoal(hooks);
 	if (!context.signals?.tasks.total && (!goal || !["active", "achieved"].includes(goal.state))) return silentAdvance(hooks, "idle");
 	if (goal ? goal.state !== "achieved" : !context.signals || !allTasksDone(context.signals)) return null;
 	const loaded = loadHarnessConfig(context.cwd);

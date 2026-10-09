@@ -86,6 +86,16 @@ describe("delivery review", () => {
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
 	});
+	it("allows a reviewed push-only chain with unused executable commit hooks", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		const hook = join(cwd, ".git", "hooks", "pre-commit");
+		writeFileSync(hook, "#!/bin/sh\nexit 1\n"); chmodSync(hook, 0o755);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: `cd ${cwd} && git push origin HEAD`, cwd } }))[0]).toBeUndefined();
+	});
 	it("requires separation when pre-push hooks generate bytes for a later commit/push", async () => {
 		const source = repo(), destination = repo(); destination.git("checkout", "main");
 		source.git("remote", "add", "origin", destination.cwd);
