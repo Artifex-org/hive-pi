@@ -12,12 +12,12 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 	if (command.length > 8192) return false;
 	let pipeline = false;
 	const parsed = command.replace(/\d*[<>]&\s*(?:\d+|-)/g, "");
-	const segments = splitCommands(parsed, true, () => { pipeline = true; });
+	const segments = splitCommands(parsed, true, () => { pipeline = true; }).filter(segment => segment.trim());
 	if (pipeline) return false; // the shell exit code may belong to cat, not the creator
 	// In an all-success && chain, successful tool completion also establishes
 	// the earlier creator succeeded. Do not infer that across ; or || recovery.
 	const syntax = command.trim().replace(/'[^']*'|"[^"\\]*"/g, "");
-	const allSuccessChain = !/[;\n]|\|\|/.test(syntax);
+	const allSuccessChain = !/[;\n]|\|\|/.test(syntax.replace(/&&\s*\n\s*/g, "&& "));
 	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment, true);
 		if (!words) continue;
@@ -59,7 +59,7 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 function commitCheckout(command: string, cwd: string): string | null {
 	if (command.length > 8192) return null;
 	let dir = cwd, pipeline = false;
-	const segments = splitCommands(command.replace(/\d*[<>]&\s*(?:\d+|-)/g, ""), true, () => { pipeline = true; });
+	const segments = splitCommands(command.replace(/\d*[<>]&\s*(?:\d+|-)/g, ""), true, () => { pipeline = true; }).filter(segment => segment.trim());
 	if (pipeline) return null;
 	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment);
@@ -80,7 +80,7 @@ function commitCheckout(command: string, cwd: string): string | null {
 		// Quiet commit/push/reporting chains are safe when all && steps succeed.
 		if (words[i] === "commit") {
 			if (words.slice(i + 1).some(arg => ["--dry-run", "--short", "--long", "--porcelain"].includes(arg))) return null;
-			const safeSuffix = !/[;\n]|\|\|/.test(command.trim().replace(/'[^']*'|"[^"\\]*"/g, "")) && segments.slice(index + 1).every(tail => {
+			const safeSuffix = !/[;\n]|\|\|/.test(command.trim().replace(/'[^']*'|"[^"\\]*"/g, "").replace(/&&\s*\n\s*/g, "&& ")) && segments.slice(index + 1).every(tail => {
 				const args = literalWords(tail);
 				while (args && /^[A-Za-z_]\w*=/.test(args[0] ?? "")) args.shift();
 				return args && (["echo", "printf"].includes(args[0]) || args[0] === "git" && args[1] === "push" || args[0] === "hive" && args[1] === "ship" || args[0] === "gh" && args[1] === "pr" && args[2] === "create");

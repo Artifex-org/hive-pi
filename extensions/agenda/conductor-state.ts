@@ -59,7 +59,9 @@ export function createConductor(id: string, now: number): ConductorItem {
 }
 
 export function withStage(item: ConductorItem, stage: ConductorStage, now: number): ConductorItem {
-	return { ...item, stage, updatedAt: now };
+	const next = { ...item, stage, updatedAt: now };
+	if (["idle", "frame", "plan", "execute"].includes(stage)) delete next.verificationGoalId;
+	return next;
 }
 
 export function withComplexity(item: ConductorItem, complexity: Complexity, now: number): ConductorItem {

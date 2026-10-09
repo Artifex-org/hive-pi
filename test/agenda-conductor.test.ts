@@ -345,6 +345,16 @@ describe("conductor policy", () => {
 		goal.state = "achieved"; await policy.decide(contextWith(ledger, signals))!.run();
 		expect(item()?.stage).toBe("consolidate");
 	});
+	it("clears milestone goal bindings when beginning another lifecycle", async () => {
+		const old = { ...withStage(createConductor("c", 0), "verify", 0), verificationGoalId: "old" };
+		expect(withStage(old, "idle", 1).verificationGoalId).toBeUndefined();
+		const next = withStage(withStage(old, "plan", 2), "execute", 3);
+		expect(next.verificationGoalId).toBeUndefined();
+		const { hooks, item } = makeHooks(next, { id: "new", state: "achieved" } as GoalItem);
+		const signals = signalsWith({ tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		await createConductorPolicy(hooks).decide(contextWith(emptyLedger, signals))!.run();
+		expect(item()?.stage).toBe("consolidate");
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});

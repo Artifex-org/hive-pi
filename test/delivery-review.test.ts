@@ -26,7 +26,7 @@ describe("delivery review", () => {
 		"hive ship --no-pr && gh pr create --title 'review stamped'",
 		"HIVE_PRESIGN_REQUIRED=1 git push",
 		"git commit -m 'code && docs' && hive ship && git push",
-		"git status; FORCE_COLOR='1 2' HIVE_PRESIGN_REQUIRED=1 git push",
+		"cd .; FORCE_COLOR='1 2' HIVE_PRESIGN_REQUIRED=1 git push",
 	])("requires a matching review for %s", async command => {
 		const { cwd, git } = repo();
 		writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
@@ -58,6 +58,7 @@ describe("delivery review", () => {
 			"git add --force generated.ts; hive ship", `git -C "${cwd}" add -f generated.ts && git push`,
 			"HOME=/other git push", "XDG_CONFIG_HOME=/other git push",
 			"git status > code.ts; git add code.ts; git commit -m code; git push",
+			"git status && git push",
 			"git diff HEAD~1 HEAD --output=code.ts -- README.md && git add code.ts && git commit -m generated && git push origin HEAD",
 			"git log --output code.ts; git add code.ts; hive ship",
 			'SETTING="$(echo changed >> code.ts)" git push',

@@ -63,7 +63,7 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) &&
 			!literalWords(cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body"));
 		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
-		if (!prefix || configuredEnv || gitWritesOutput || implicitStaging || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "status", "push"].includes(prefix[verb]) ||
+		if (!prefix || configuredEnv || gitWritesOutput || implicitStaging || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "push"].includes(prefix[verb]) ||
 			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) precedingMutation = true;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);
@@ -110,7 +110,7 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 	// earlier push to another repo or an unsupported target in the same chain.
 	return pipeline ? targets.map(() => null) : targets.reverse();
 }
-/** Supported chains contain literal status/commits and HEAD delivery.
+/** Supported chains contain literal commits and HEAD delivery.
  * They are not arbitrary shell programs: executable mutation hooks, helpers,
  * dynamic arguments and unknown predecessors must run separately, then be reviewed. */
 function chainHookProblem(command: string, cwd: string): boolean {
