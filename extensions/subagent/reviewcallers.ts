@@ -32,7 +32,8 @@ export function changedFunctionNames(patch: string, readSource: (path: string) =
 	const notes: string[] = [];
 	let path = "";
 	let spanLookups = 0;
-	for (const line of patch.split("\n")) {
+	const patchLines = patch.split("\n");
+	for (const [index, line] of patchLines.entries()) {
 		if (line.startsWith("+++ b/")) path = line.slice(6);
 		else if (line === "+++ /dev/null") path = "";
 		else if (line.startsWith("@@")) {
@@ -47,7 +48,8 @@ export function changedFunctionNames(patch: string, readSource: (path: string) =
 				ranges.set(path, list);
 			}
 		} else if (/^[+-](?![+-])/.test(line)) {
-			const name = functionName(line.slice(1));
+			const name = functionName(line.slice(1)) ?? (/^[+-]\s*export\s+(?:const|let)\b/.test(line)
+				? functionName(patchLines.slice(index, index + 8).filter((row) => row[0] === line[0] || row[0] === " ").map((row) => row.slice(1)).join("\n")) : undefined);
 			if (name) names.add(name);
 		}
 	}
@@ -57,11 +59,12 @@ export function changedFunctionNames(patch: string, readSource: (path: string) =
 		const source = readSource(file);
 		if (source === null) { notes.push(`Could not scan ${file} (missing or over ${CALLER_SOURCE_BYTES} bytes).`); continue; }
 		if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
+		const sourceLines = source.split("\n");
 		const outline = listSymbols(source, file, CALLER_DECLARATION_CAP + 1);
 		if (outline.length > CALLER_DECLARATION_CAP) notes.push(`Source outline for ${file} capped at ${CALLER_DECLARATION_CAP} declarations.`);
 		for (const declaration of outline.slice(0, CALLER_DECLARATION_CAP)) {
 			if (Date.now() >= deadline || spanLookups >= CALLER_SPAN_LOOKUP_CAP) { notes.push("Source discovery stopped at its time/span-lookup budget."); break; }
-			const name = functionName(declaration.signature);
+			const name = functionName(sourceLines.slice(declaration.line - 1, declaration.line + 7).join("\n"));
 			if (!name) continue;
 			spanLookups++;
 			const spans = findSymbol(source, file, name, CALLER_DECLARATION_CAP + 1);

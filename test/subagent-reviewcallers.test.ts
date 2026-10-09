@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as lensSymbols from "../extensions/lens/symbols.ts";
-import { captureDeliveryDiff, citedOutsideDiff, reviewScopeFiles, reviewTaskWithDiff, withReviewCallers } from "../extensions/subagent/reviewdiff.ts";
+import { captureDeliveryDiff, citedOutsideDiff, reviewScopeFiles, reviewTaskWithDiff, outsideDiffWarning, withReviewCallers } from "../extensions/subagent/reviewdiff.ts";
 import { CALLER_DECLARATION_CAP, CALLER_SPAN_LOOKUP_CAP, CALLER_FILE_CAP, CALLER_GREP_BYTES, CALLER_SITE_CAP, CALLER_SYMBOL_CAP, changedFunctionNames, discoverCallers } from "../extensions/subagent/reviewcallers.ts";
 
 const dirs: string[] = [];
@@ -33,6 +33,14 @@ describe("caller-aware review scope", () => {
 		const task = reviewTaskWithDiff("review", review, true);
 		expect(task).toContain("Callers of changed symbols"); expect(task).toContain("Check EACH listed caller's handling");
 		for (const file of ["panel.go", "coverage.go", "migration.go"]) expect(task).toContain(`${file}:2 — PullFiles(`);
+		const rows = Array.from({ length: 81 }, (_, n) => `caller${n}.go:2: PullFiles()`).join("\n");
+		const capped = { ...review, callers: discoverCallers(repo, patch, ["api.go"], () => ({ text: rows }), () => source) };
+		expect(capped.callers.sites).toHaveLength(80);
+		expect(reviewTaskWithDiff("review", capped, true)).toContain("Independently verified affected callers are also in scope");
+		const outside = citedOutsideDiff("caller80.go:2 — PullFiles() contract broken\nunrelated.go:2 — irrelevant", reviewScopeFiles(capped));
+		expect(outside).toEqual(["caller80.go", "unrelated.go"]);
+		expect(outsideDiffWarning(outside, reviewScopeFiles(capped).length)).toContain("independently verified affected callers are valid findings");
+		expect(outsideDiffWarning(outside, reviewScopeFiles(capped).length)).toContain("unrelated paths are not");
 	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
@@ -52,6 +60,14 @@ describe("caller-aware review scope", () => {
 		const grep = vi.fn(() => ({ text: "client.rs:4: client.fetch()" }));
 		expect(discoverCallers("/repo", changed, ["api.rs"], grep, () => rust).sites).toEqual([{ symbol: "fetch", path: "client.rs", line: 4 }]);
 		expect(grep).toHaveBeenCalledWith("fetch", "/repo", expect.any(Number));
+	});
+	it("discovers multiline exported arrows from body-only edits and removed declarations", () => {
+		const arrow = "export const fetchData = (\n  id: string,\n) => {\n" + "  // unchanged\n".repeat(12) + "  return updated;\n};\n";
+		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -16 +16 @@\n-  return old;\n+  return updated;\n";
+		const grep = vi.fn(() => ({ text: "caller.ts:4: fetchData(id)" }));
+		expect(discoverCallers("/repo", changed, ["api.ts"], grep, () => arrow).sites).toEqual([{ symbol: "fetchData", path: "caller.ts", line: 4 }]);
+		const removed = "--- a/api.ts\n+++ b/api.ts\n@@ -1,5 +0,0 @@\n-export const fetchData = (\n-  id: string,\n-) => {\n-  return old;\n-};\n";
+		expect(changedFunctionNames(removed, () => "").names).toEqual(["fetchData"]);
 	});
 	it("recognises Go methods, TS exports and Python functions but not call expressions", () => {
 		const p = ["--- a/x.ts", "+++ b/x.ts", "@@ -1 +1 @@", "-export function Fetch() {}", "+export async function Fetch() { return 1; }", "+obj.Unrelated()", "+func (c *Client) PullFiles() error {", "+def fetch_data():", "+func private() {}", "+export const CONSTANT = 1;", "+export const arrow = (x) => x;"].join("\n");
