@@ -5,12 +5,12 @@
  * and a fake Hive catalog.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { opModeRefusal } from "../claude/mcp/subagent-tool.ts";
+import { abortedText, CANCELLED_BY_CALLER, opModeRefusal } from "../claude/mcp/subagent-tool.ts";
 import { negotiateVersion } from "../claude/mcp/protocol.ts";
 import { makeLaunch, McpClient, REPO, startFakeHive, writeTranscript, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
 
@@ -58,6 +58,7 @@ describe("mcp protocol", () => {
 		expect(tools.map((t) => t.name).sort()).toEqual([
 			"advisor",
 			"author_maestro_flow",
+			"background_cancel",
 			"browser_click",
 			"browser_console",
 			"browser_evaluate",
@@ -71,6 +72,7 @@ describe("mcp protocol", () => {
 			"goal_clear",
 			"goal_set",
 			"goal_status",
+			"hive_watch_run",
 			"quality_gate",
 			"record_playwright_flow",
 			"report_dev_server",
@@ -222,6 +224,121 @@ describe("quality_gate", () => {
 	});
 });
 
+describe("hive_watch_run", () => {
+	const RUN = "1d363f69-ed6d-40c3-80b1-55bf40cc8640";
+	/** Real processes on a shared workstation: wakes are polled for up to 15 s. */
+	const PROCESS_TEST_TIMEOUT_MS = 30_000;
+
+	/** A fake `hive` on PATH: `hive watch <uuid>` records its pid, prints, sleeps, exits with the given code. */
+	function fakeHiveCli(sleepSeconds: number, exitCode: number): { env: Record<string, string>; pids: () => number[] } {
+		const bin = join(launch.root, "bin");
+		mkdirSync(bin, { recursive: true });
+		const log = join(launch.root, "hive-watch.log");
+		writeFileSync(
+			join(bin, "hive"),
+			`#!/bin/bash\necho "$$" >> ${JSON.stringify(log)}\necho "watching $2"\nsleep ${sleepSeconds}\necho "run $2 finished"\nexit ${exitCode}\n`,
+		);
+		chmodSync(join(bin, "hive"), 0o755);
+		const pids = () => {
+			try {
+				return readFileSync(log, "utf8").split("\n").filter(Boolean).map(Number);
+			} catch {
+				return [];
+			}
+		};
+		return { env: { ...launch.env, PATH: `${bin}:${launch.env.PATH}` }, pids };
+	}
+
+	async function wakes(count: number, timeoutMs = 15_000): Promise<Record<string, unknown>[]> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline && launch.spoolRecords().filter((r) => r.kind === "wake").length < count) await new Promise((r) => setTimeout(r, 50));
+		return launch.spoolRecords().filter((r) => r.kind === "wake");
+	}
+
+	function alive(pid: number): boolean {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	it("returns at once, announces the job, and wakes the driver exactly once with the run's verdict", async () => {
+		const cli = fakeHiveCli(0.5, 0);
+		const c = await connect(cli.env);
+		const started = await c.call("hive_watch_run", { run: RUN, what: "waiting for the PR gate" });
+		expect(started.isError).toBe(false);
+		const id = /^hive-pi-job: ([A-Za-z0-9_-]{1,64})$/m.exec(started.text)?.[1];
+		expect(id).toMatch(/^watch-/);
+		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(0);
+		const [wake] = await wakes(1);
+		expect(wake).toMatchObject({ v: 1, kind: "wake", job: id });
+		expect(String(wake?.text)).toContain("the run PASSED");
+		expect(String(wake?.text)).toContain(`run ${RUN} finished`);
+		// Exactly one, also after the exit-settle grace has passed.
+		await new Promise((r) => setTimeout(r, 2_500));
+		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(1);
+	}, PROCESS_TEST_TIMEOUT_MS);
+
+	it("reports a red run as FAILED and points at explain_failure", async () => {
+		const cli = fakeHiveCli(0.1, 1);
+		const c = await connect(cli.env);
+		await c.call("hive_watch_run", { run: RUN, what: "waiting for the PR gate" });
+		const [wake] = await wakes(1);
+		expect(String(wake?.text)).toContain("the run FAILED");
+		expect(String(wake?.text)).toContain("explain_failure");
+	}, PROCESS_TEST_TIMEOUT_MS);
+
+	it("cancels a watch: the hive watch process group is killed and the one wake says so", async () => {
+		const cli = fakeHiveCli(60, 0);
+		const c = await connect(cli.env);
+		const started = await c.call("hive_watch_run", { run: RUN, what: "waiting for the PR gate" });
+		const id = /^hive-pi-job: (\S+)$/m.exec(started.text)?.[1] as string;
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline && cli.pids().length === 0) await new Promise((r) => setTimeout(r, 50));
+		const [pid] = cli.pids();
+		expect(alive(pid)).toBe(true);
+		const cancelled = await c.call("background_cancel", { id });
+		expect(cancelled.isError).toBe(false);
+		const [wake] = await wakes(1);
+		expect(wake).toMatchObject({ job: id });
+		expect(String(wake?.text)).toContain("cancelled at your request");
+		expect(alive(pid)).toBe(false);
+		expect((await c.call("background_cancel", { id })).isError).toBe(true);
+		await new Promise((r) => setTimeout(r, 500));
+		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(1);
+	}, PROCESS_TEST_TIMEOUT_MS);
+
+	it("stops a watch when the server shuts down, and tells the model to watch again", async () => {
+		const cli = fakeHiveCli(60, 0);
+		const c = await connect(cli.env);
+		const started = await c.call("hive_watch_run", { run: RUN, what: "waiting for the PR gate" });
+		const id = /^hive-pi-job: (\S+)$/m.exec(started.text)?.[1];
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline && cli.pids().length === 0) await new Promise((r) => setTimeout(r, 50));
+		expect(await c.close()).toBe(0);
+		expect(alive(cli.pids()[0])).toBe(false);
+		const all = launch.spoolRecords().filter((r) => r.kind === "wake");
+		expect(all).toHaveLength(1);
+		expect(all[0]).toMatchObject({ job: id });
+		expect(String(all[0]?.text)).toContain("was cancelled because the helper server restarted");
+	}, PROCESS_TEST_TIMEOUT_MS);
+
+	it("refuses without a spool to wake through, and refuses a malformed run reference", async () => {
+		const cli = fakeHiveCli(0.1, 0);
+		const { HIVE_AUX_SPOOL: _unused, ...noSpool } = cli.env;
+		const c = await connect(noSpool);
+		const refused = await c.call("hive_watch_run", { run: RUN, what: "x" });
+		expect(refused.isError).toBe(true);
+		expect(refused.text).toContain("HIVE_AUX_SPOOL");
+		await c.close();
+		const c2 = await connect(cli.env);
+		expect((await c2.call("hive_watch_run", { run: "not a run", what: "x" })).isError).toBe(true);
+		expect(cli.pids()).toHaveLength(0);
+	}, PROCESS_TEST_TIMEOUT_MS);
+});
+
 describe("shutdown", () => {
 	it("aborts and reaps background workers when its input closes, and tells the model the job is gone", async () => {
 		launch.setReplies([{ match: "Task: long survey", text: "never", delayMs: 30_000 }]);
@@ -297,5 +414,16 @@ describe("opModeRefusal", () => {
 	it("in bugfix, admits only writers that enforce the bugfix posture themselves", () => {
 		expect(opModeRefusal("bugfix", [role("bugfix", ["read", "edit"], "bugfix")])).toBeNull();
 		expect(opModeRefusal("bugfix", [role("test-fixer", ["read", "edit"])])).toContain("no fix before a root cause");
+	});
+});
+
+describe("abortedText", () => {
+	it("tells a cancelled delegation from one the server restart took", () => {
+		const cancelled = new AbortController();
+		cancelled.abort(CANCELLED_BY_CALLER);
+		expect(abortedText(cancelled.signal, "sub-1-ab", "research", "survey")).toContain("cancelled at your request");
+		const shutdown = new AbortController();
+		shutdown.abort();
+		expect(abortedText(shutdown.signal, "sub-1-ab", "research", "survey")).toContain("helper server restarted; delegate it again");
 	});
 });
