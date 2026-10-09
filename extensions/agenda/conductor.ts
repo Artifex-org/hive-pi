@@ -349,7 +349,7 @@ function adviceTransition(hooks: ConductorHooks, signals: SessionSignals): Polic
 			const now = Date.now();
 			// Advice must not strand a session with no completion contract. Give
 			// it the reminder without creating an unfinishable verify lifecycle.
-			if (hooks.goal() || signals.tasks.total > 0) hooks.commit(withStage(itemFor(hooks, now), "verify", now));
+			if (hooks.goal()?.state === "active" || signals.tasks.total > 0) hooks.commit(withStage(itemFor(hooks, now), "verify", now));
 			else if (hooks.current()) hooks.commit(withStage(itemFor(hooks, now), "idle", now));
 			return {
 				metric: { outcome: "pass" as const, value: 0 },
@@ -379,6 +379,7 @@ function decideVerify(hooks: ConductorHooks, context: PolicyContext): PolicyWork
 	// Advice can move us here while CI/tasks remain open. Do not consolidate
 	// until the original completion contract is met.
 	const goal = hooks.goal();
+	if (!context.signals?.tasks.total && (!goal || !["active", "achieved"].includes(goal.state))) return silentAdvance(hooks, "idle");
 	if (goal ? goal.state !== "achieved" : !context.signals || !allTasksDone(context.signals)) return null;
 	const loaded = loadHarnessConfig(context.cwd);
 	const prCheck = loaded?.config.prCheck?.trim();

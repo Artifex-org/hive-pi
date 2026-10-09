@@ -38,7 +38,7 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 			const createdUrl = /^https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?\s*$/m.exec(output);
 			const partialSuccess = createdUrl && allSuccessChain && index < segments.length - 1 &&
 				!/(?:already exists|permission denied|fatal:|error:|HTTP [45]\d\d|GraphQL)/i.test(output.slice(0, createdUrl.index));
-			if (url && (succeeded && (index === segments.length - 1 || allSuccessChain) || partialSuccess)) return true;
+			if (url && (succeeded && allSuccessChain || partialSuccess)) return true;
 		}
 	}
 	return false;

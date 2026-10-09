@@ -32,7 +32,7 @@ import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-com
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { walkChain } from "./chain.ts";
 import { emptyLedger, record, count, type LedgerState } from "./ledger.ts";
-import { ADVISE_LEDGER_ID } from "./conductor.ts";
+import { ADVISE_INJECTION, ADVISE_LEDGER_ID } from "./conductor.ts";
 import { ADVICE_GIVEN_ENTRY, registerDeliveryProgress } from "./delivery-progress.ts";
 import { recapTranscript } from "./recap.ts";
 import type { MetricOutcome, Policy } from "./policy.ts";
@@ -165,6 +165,7 @@ function lastAssistantText(ctx: ExtensionContext): string | undefined {
 
 export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverHandle {
 	let ledger: LedgerState = emptyLedger;
+	let advicePending = false;
 	let inSettle = false;
 	let generation = 0;
 	let blockedOnUser = false;
@@ -174,6 +175,25 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	const settleClaims = trackSettleClaims(pi);
 	const ownWork = trackOwnWork(pi);
 	const rehydrateDeliveryProgress = registerDeliveryProgress(pi);
+	const adviceMessage = (entries: readonly unknown[]) => entries.some(entry => {
+		const message = entry as { type?: string; customType?: string; content?: unknown };
+		return message.type === "custom_message" && message.customType === "agenda" && message.content === ADVISE_INJECTION;
+	});
+	const adviceStamp = (entries: readonly unknown[]) => entries.some(entry => (entry as { customType?: string }).customType === ADVICE_GIVEN_ENTRY);
+	const reconcileAdvice = (ctx: ExtensionContext) => {
+		if (!advicePending) return;
+		const entries = ctx.sessionManager.getEntries();
+		if (adviceMessage(entries) || adviceStamp(entries)) {
+			if (!count(ledger, ADVISE_LEDGER_ID)) ledger = record(ledger, ADVISE_LEDGER_ID);
+			if (!adviceStamp(entries)) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
+		} else {
+			const iterations = { ...ledger.iterations }; delete iterations[ADVISE_LEDGER_ID];
+			ledger = { ...ledger, iterations }; // a later boundary handler discarded the draft
+		}
+		advicePending = false;
+	};
+	pi.on("turn_start", (_event, ctx) => reconcileAdvice(ctx));
+	pi.on("agent_start", (_event, ctx) => reconcileAdvice(ctx));
 
 	// Registered UNCONDITIONALLY. The extension factory runs once at startup, so
 	// a registration gated on state can never be un-gated by a later command —
@@ -189,9 +209,10 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		// with /goal, which needs persistence this policy deliberately does not.
 		const entries = ctx.sessionManager.getEntries();
 		rehydrateDeliveryProgress(entries);
-		ledger = entries.some(entry =>
-			(entry as { customType?: string }).customType === ADVICE_GIVEN_ENTRY)
-			? record(emptyLedger, ADVISE_LEDGER_ID) : emptyLedger;
+		advicePending = false;
+		const given = adviceMessage(entries) || adviceStamp(entries);
+		ledger = given ? record(emptyLedger, ADVISE_LEDGER_ID) : emptyLedger;
+		if (given && !adviceStamp(entries)) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
 	});
 
 	async function runChain(ctx: ExtensionContext, boundary: "settle" | "turn" | null = null, policies = options.policies): Promise<string | undefined> {
@@ -209,6 +230,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		let setStatus: (text: string) => void;
 		let isIdle: () => boolean;
 		try {
+			reconcileAdvice(ctx);
 			mode = ctx.mode;
 			cwd = ctx.cwd;
 			assistantText = lastAssistantText(ctx);
@@ -293,7 +315,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		let injectionAccepted = false;
 		const acceptInjection = () => {
 			injectionAccepted = true;
-			if (count(ledger, ADVISE_LEDGER_ID) > adviceBefore) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
+
 		};
 
 		inSettle = true;
@@ -329,7 +351,10 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					// becomes a path around payload.ts's allowlist.
 					onMetric: (name, outcome, value) => emitMetric(pi, name, outcome, value),
 					ledger: () => ledger,
-					setLedger: (next) => { ledger = next; },
+					setLedger: (next) => {
+						if (count(next, ADVISE_LEDGER_ID) > count(ledger, ADVISE_LEDGER_ID)) advicePending = true;
+						ledger = next;
+					},
 				},
 			);
 			if (!injection) return;
@@ -368,6 +393,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 				if (adviceBefore) iterations[ADVISE_LEDGER_ID] = adviceBefore;
 				else delete iterations[ADVISE_LEDGER_ID];
 				ledger = { ...ledger, iterations };
+				advicePending = false;
 			}
 			inSettle = false;
 		}

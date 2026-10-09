@@ -72,6 +72,7 @@ describe("delivery milestones", () => {
 		["gh pr create", "permission denied"],
 		["gh pr view", "https://github.com/owner/repo/pull/123"],
 		["gh pr create || gh pr view --json url --jq .url", "https://github.com/owner/repo/pull/123"],
+		["gh pr view --json url --jq .url || gh pr create", "https://github.com/owner/repo/pull/123"],
 		["echo 'git commit'", "[work abc1234] change"],
 		["echo 'gh pr create'", "https://github.com/owner/repo/pull/123"],
 	])("does not mistake failed or read-only %s for a milestone", (command, output) => {
@@ -80,20 +81,25 @@ describe("delivery milestones", () => {
 });
 
 describe("advisor timing", () => {
-	it("does not spend or persist advice dropped when a user message arrives during policy work", async () => {
+	it.each(["metric callback", "later boundary handler"])("does not spend or persist advice discarded by %s", async mode => {
 		const pi = createFakePi(); let item = withStage(createConductor("c", 0), "execute", 0);
 		const advice = createConductorAdvicePolicy({ current: () => item, commit: next => { item = next; }, goal: () => null, enabled: () => true, requestPlanMode: () => {} });
 		const driver = installDriver(pi.api, { policies: [advice], turnPolicies: [advice] });
 		const branch = [{ message: { role: "user", content: "Implement HIV-3838 with tests and deliver one PR" } }];
-		const ctx: FakeCtxOptions = { branch, idle: false, pendingMessages: false };
+		const ctx: FakeCtxOptions = { branch, idle: false, pendingMessages: false,
+			get entries() { return [...branch, ...pi.entries, ...pi.messages.map(message => ({ type: "custom_message", customType: message.customType, content: message.content }))]; },
+		};
 		await pi.emit({ type: "session_start" }, ctx);
 		await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "c", input: { command: "git commit -m change" },
 			content: [{ type: "text", text: "[work abc1234] change" }], isError: false });
 		ctx.branch = [...branch, ...pi.entries];
 		let metrics = 0;
-		const unsubscribe = pi.api.events.on("hive.metric", () => { metrics++; ctx.pendingMessages = true; });
-		await pi.emit({ type: "turn_end" }, ctx); unsubscribe();
+		const unsubscribe = pi.api.events.on("hive.metric", () => { metrics++; if (mode === "metric callback") ctx.pendingMessages = true; });
+		let discard = mode === "later boundary handler";
+		pi.api.on("turn_end", () => discard ? { entries: [], continue: false } : undefined);
+		await pi.emit({ type: "turn_end" }, ctx); unsubscribe(); discard = false;
 		expect(metrics).toBe(1);
+		await pi.emit({ type: "turn_start" }, ctx);
 		expect(pi.messages).toHaveLength(0);
 		expect(driver.ledger().iterations[ADVISE_LEDGER_ID]).toBeUndefined();
 		expect(pi.entries.filter(entry => entry.customType === ADVICE_GIVEN_ENTRY)).toHaveLength(0);
@@ -120,7 +126,9 @@ describe("advisor timing", () => {
 			turnPolicies: [advice],
 		});
 		const branch = [{ message: { role: "user", content: "Implement HIV-3838 with tests and deliver one PR" } }];
-		const ctx = () => ({ branch: [...branch, ...pi.entries], idle: false });
+		const ctx = () => ({ branch: [...branch, ...pi.entries], idle: false,
+			get entries() { return [...branch, ...pi.entries, ...pi.messages.map(message => ({ type: "custom_message", customType: message.customType, content: message.content }))]; },
+		});
 		await pi.emit({ type: "session_start" }, ctx());
 		await pi.emit({ type: "turn_end" }, ctx());
 		expect(pi.messages).toHaveLength(0);

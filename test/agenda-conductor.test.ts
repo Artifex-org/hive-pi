@@ -283,6 +283,24 @@ describe("conductor policy", () => {
 		expect(outcome.inject).toContain("advisor");
 		expect(policy.decide(contextWith(outcome.ledger!(emptyLedger), signalsWith({ deliveryStarted: true })))).toBeNull();
 	});
+	it.each(["capped", "budget_exhausted", "paused", "cleared", "blocked_user", "achieved"] as const)("does not create a verify lifecycle from an old %s goal without todos", async state => {
+		const { hooks, item } = makeHooks(null, { state } as GoalItem);
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ deliveryStarted: true })))!.run();
+		expect(outcome.inject).toContain("advisor");
+		expect(item()).toBeNull();
+		await createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), signalsWith({})))!.run();
+		expect(item()?.stage).toBe("frame");
+	});
+	it("releases an early verify lifecycle if its goal terminates without todos", async () => {
+		const goal = { state: "active" } as GoalItem;
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), goal);
+		await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ deliveryStarted: true })))!.run();
+		goal.state = "capped";
+		const outcome = await createConductorPolicy(hooks).decide(contextWith(record(emptyLedger, ADVISE_LEDGER_ID), signalsWith({})))!.run();
+		expect(outcome.inject).toBeUndefined();
+		expect(item()?.stage).toBe("idle");
+		expect(goal.state).toBe("capped");
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});
