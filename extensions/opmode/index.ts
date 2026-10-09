@@ -432,17 +432,21 @@ export default function (pi: ExtensionAPI) {
 		evidence = INITIAL_EVIDENCE;
 		results.clear();
 		toolsBeforeMode = null;
-		announce();
-		paint();
-	});
-
-	// `--mode` is honoured once, on the first session build — here rather than in
-	// the factory so pi.getAllTools() sees the full registry, including tools
-	// other extensions register after this one.
-	pi.on("session_start", () => {
+		// Flags are extension-scoped: only plan can read --plan. Send the launch
+		// request with its session identity so plan applies it AFTER its reset,
+		// even when opmode runs first. With no explicit mode, sync its own flag.
 		const requested = pi.getFlag("op-mode");
-		if (!isOpMode(requested) || requested === mode) return;
-		switchTo(requested);
+		pi.events.emit(PLAN_CONTROL_CHANNEL, {
+			action: isOpMode(requested) ? requested === "plan" ? "enter" : "exit" : "sync",
+			startupSessionId: ctx.sessionManager.getSessionId(),
+		} satisfies PlanControlEvent);
+		// Never announce transient build before applying an explicit launch mode.
+		// The startup request above owns plan entry/exit, not switchTo's doorbell.
+		if (isOpMode(requested) && requested !== mode) switchTo(requested, true);
+		else {
+			announce();
+			paint();
+		}
 	});
 
 	/* ---------------------------------------------------------------------- */

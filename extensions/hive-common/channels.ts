@@ -65,7 +65,7 @@ export interface HivePlanEvent {
 
 /**
  * Asks the `plan` extension to enter read-only plan mode — the conductor's
- * doorbell. An enum action and nothing else; the plan extension decides
+ * doorbell. An enum action (and session identity at startup); plan decides
  * whether the request is honoured (it is a no-op when the mode is already
  * active), so the sender never learns or controls plan state directly.
  */
@@ -87,7 +87,11 @@ export interface PlanControlEvent {
 	 * rule as `approve`: the plan extension validates that there is a pending
 	 * gate to decline, and ignores the doorbell when there is not.
 	 */
-	action: "enter" | "exit" | "approve" | "grill";
+	action: "enter" | "exit" | "approve" | "grill" | "sync";
+	/** Startup-only enter/exit/sync is applied after this session's plan reset.
+	 * sync resolves plan's own --plan flag; other extensions cannot read it.
+	 */
+	startupSessionId?: string;
 }
 
 /**

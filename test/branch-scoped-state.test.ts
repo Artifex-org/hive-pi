@@ -104,6 +104,7 @@ function liveSession() {
 	let leafId = ACTIVE.leafId;
 	const ctx = {
 		sessionManager: {
+			getSessionId: () => "branch-scoped-session",
 			getEntries: () => all,
 			getBranch: () => path,
 			getLeafId: () => leafId,
