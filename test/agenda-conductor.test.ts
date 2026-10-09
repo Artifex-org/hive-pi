@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { ensureBash } from "./bash-shim.ts";
+
+beforeAll(ensureBash);
 import {
 	assessComplexity,
 	createConductor,
@@ -475,6 +482,39 @@ describe("renderConductorLines", () => {
 		const lines = renderConductorLines(withStage(createConductor("c", 0), "execute", 0), activeGoal, true)!;
 		expect(lines.some((line) => line.includes("goal: PR created"))).toBe(true);
 		expect(lines.some((line) => line.includes("1/8 continuations"))).toBe(true);
+	});
+});
+
+describe("conductor configured delivery checks", () => {
+	it.each(["todo completion without a milestone", "bound goal paused then resumed"])("runs the real prCheck at %s", async scenario => {
+		const cwd = mkdtempSync(join(tmpdir(), "conductor-check-"));
+		try {
+			const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+			git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+			mkdirSync(join(cwd, ".pi"));
+			writeFileSync(join(cwd, ".pi", "harness.json"), JSON.stringify({ check: "exit 0", prCheck: "printf verified > check-ran", prCheckTimeoutMs: 5000 }));
+			git("add", "."); git("commit", "-qm", "fixture");
+			const goal = scenario === "bound goal paused then resumed" ? { id: "current", state: "active" } as GoalItem : null;
+			const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), goal);
+			const signals = signalsWith({ tasks: goal ? emptySignals.tasks : { total: 1, pending: 0, inProgress: 0, completed: 1 } });
+			const policy = createConductorPolicy(hooks);
+			let ledger = emptyLedger;
+			if (goal) {
+				const advice = await createConductorAdvicePolicy(hooks).decide(contextWith(ledger, { ...signals, deliveryStarted: true }, cwd))!.run();
+				ledger = advice.ledger!(ledger);
+				goal.state = "paused";
+				expect(policy.decide(contextWith(ledger, signals, cwd))).toBeNull();
+				expect(item()?.stage).toBe("verify");
+				expect(existsSync(join(cwd, "check-ran"))).toBe(false);
+				goal.state = "active";
+				expect(policy.decide(contextWith(ledger, signals, cwd))).toBeNull();
+				goal.state = "achieved";
+			}
+			const outcome = await policy.decide(contextWith(ledger, signals, cwd))!.run();
+			expect(readFileSync(join(cwd, "check-ran"), "utf8")).toBe("verified");
+			expect(outcome.metric.outcome).toBe("pass");
+			expect(item()?.stage).toBe("consolidate");
+		} finally { rmSync(cwd, { recursive: true, force: true }); }
 	});
 });
 
