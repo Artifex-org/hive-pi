@@ -180,6 +180,8 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		return message.type === "custom_message" && message.customType === "agenda" && message.content === ADVISE_INJECTION;
 	});
 	const adviceStamp = (entries: readonly unknown[]) => entries.some(entry => (entry as { customType?: string }).customType === ADVICE_GIVEN_ENTRY);
+	// Notification contexts reflect committed session entries. Actionable
+	// boundary contexts can contain preview drafts, which are not delivery proof.
 	const reconcileAdvice = (ctx: ExtensionContext) => {
 		if (!advicePending) return;
 		const entries = ctx.sessionManager.getEntries();
@@ -194,6 +196,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	};
 	pi.on("turn_start", (_event, ctx) => reconcileAdvice(ctx));
 	pi.on("agent_start", (_event, ctx) => reconcileAdvice(ctx));
+	pi.on("agent_end", (_event, ctx) => reconcileAdvice(ctx));
 
 	// Registered UNCONDITIONALLY. The extension factory runs once at startup, so
 	// a registration gated on state can never be un-gated by a later command —
@@ -230,7 +233,6 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		let setStatus: (text: string) => void;
 		let isIdle: () => boolean;
 		try {
-			reconcileAdvice(ctx);
 			mode = ctx.mode;
 			cwd = ctx.cwd;
 			assistantText = lastAssistantText(ctx);
@@ -425,6 +427,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		heldCtx = ctx; // final observation only; no policy work or continuation
+		reconcileAdvice(ctx);
 	});
 
 	return {
