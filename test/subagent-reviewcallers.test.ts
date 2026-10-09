@@ -56,6 +56,17 @@ describe("caller-aware review scope", () => {
 		const review = withReviewCallers(captureDeliveryDiff(repo)!);
 		expect(review.callers?.sites).toEqual([{ symbol: "fetch", path: "caller.rs", line: 1 }]);
 	});
+	it("discovers a body-only public method change in an exported TypeScript class", () => {
+		const repo = mkdtempSync(join(tmpdir(), "ts-method-callers-")); dirs.push(repo);
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
+		git("init", "-b", "main"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
+		const body = "export class Client {\n  public async fetch(): Promise<string> {\n" + "    // body\n".repeat(12);
+		writeFileSync(join(repo, "api.ts"), body + "    return fallback;\n  }\n}\n");
+		writeFileSync(join(repo, "caller.ts"), "client.fetch();\n");
+		git("add", "."); git("commit", "-m", "base"); git("update-ref", "refs/remotes/origin/main", "HEAD"); git("checkout", "-b", "work");
+		writeFileSync(join(repo, "api.ts"), body + "    throw new Error();\n  }\n}\n"); git("add", "."); git("commit", "-m", "method contract");
+		expect(withReviewCallers(captureDeliveryDiff(repo)!).callers?.sites).toEqual([{ symbol: "fetch", path: "caller.ts", line: 1 }]);
+	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });

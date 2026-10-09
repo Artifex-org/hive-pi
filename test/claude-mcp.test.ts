@@ -5,7 +5,7 @@
  * and a fake Hive catalog.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -230,12 +230,20 @@ describe("quality_gate", () => {
 		const deadline = Date.now() + 10_000;
 		while (!hive.requests.some((r) => r.path === `/api/v1/runs/${run}`) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
 		expect(hive.requests.some((r) => r.path === `/api/v1/runs/${run}`)).toBe(true);
+		const runB = "2d363f69-ed6d-40c3-80b1-55bf40cc8640";
+		writeFileSync(join(bin, "hive"), `#!/bin/sh\nif [ "$1" = check ]; then echo 'https://hive.example/runs/${runB}'; else echo watch > '${marker}'; fi\n`);
+		const second = c.send("tools/call", { name: "quality_gate", arguments: { only: "test" } });
+		const secondDeadline = Date.now() + 10_000;
+		while (!hive.requests.some((r) => r.path === `/api/v1/runs/${runB}`) && Date.now() < secondDeadline) await new Promise((r) => setTimeout(r, 25));
+		expect(hive.requests.some((r) => r.path === `/api/v1/runs/${runB}`)).toBe(true);
 		c.notify("notifications/cancelled", { requestId: request.id });
+		c.notify("notifications/cancelled", { requestId: second.id });
 		await new Promise((r) => setTimeout(r, 700));
 		expect(answered).toBe(false); expect(existsSync(marker)).toBe(false);
-		const retained = JSON.parse(readFileSync(join(launch.stateDir, "quality-gate-report.json"), "utf8"));
-		expect(retained.cwd).toBe(repo); expect(retained.report).toContain(run);
-		expect(retained.report).toContain("NOT cancelled");
+		const reportDir = join(launch.stateDir, "quality-gate-reports");
+		const retained = readdirSync(reportDir).map((file) => JSON.parse(readFileSync(join(reportDir, file), "utf8")));
+		expect(retained).toHaveLength(2);
+		for (const ref of [run, runB]) expect(retained.some((r) => r.cwd === repo && r.report.includes(ref) && r.report.includes("NOT cancelled"))).toBe(true);
 		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(0);
 		expect(hive.requests.some((r) => r.path.endsWith("/cancel"))).toBe(false);
 		expect((await c.request("ping")).result).toEqual({});

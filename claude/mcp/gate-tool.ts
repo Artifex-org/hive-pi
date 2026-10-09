@@ -5,6 +5,7 @@
  * There is no live progress section in Claude, so the deck is not painted.
  */
 
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { writeJsonAtomic } from "../state.ts";
 import { spawn } from "node:child_process";
@@ -20,7 +21,7 @@ export const QUALITY_GATE_TOOL: ToolDefinition = {
 		"(deps bootstrap, quick gate, type-check, the tests CI would select; `tests:false` for the fast steps only). Otherwise " +
 		"mode `quick` runs the vendored gate, lint only. In a repo that gates through Hive it runs `hive check` on the fleet " +
 		"against your uncommitted working tree. Reports failed checks, findings, and any check that did not run. " +
-		"The latest report (including any surviving fleet run reference) is retained at $HIVE_CLAUDE_CONFIG_DIR/hive-pi/quality-gate-report.json even if the MCP request is cancelled; read it to resume watching, not re-dispatch.",
+		"Reports (including surviving fleet run references) are retained under $HIVE_CLAUDE_CONFIG_DIR/hive-pi/quality-gate-reports/ even if the MCP request is cancelled; read it to resume watching, not re-dispatch.",
 	inputSchema: {
 		type: "object",
 		properties: {
@@ -140,6 +141,6 @@ export async function runGateTool(args: Record<string, unknown>, cwd: string, si
 	const first = result.content[0];
 	const report = first && first.type === "text" ? first.text : "quality_gate produced no report.";
 	// MCP drops cancelled responses; retain their run reference before returning.
-	if (stateDir) writeJsonAtomic(join(stateDir, "quality-gate-report.json"), { cwd, report });
+	if (stateDir) writeJsonAtomic(join(stateDir, "quality-gate-reports", `${Date.now()}-${randomUUID()}.json`), { cwd, report });
 	return { text: report };
 }
