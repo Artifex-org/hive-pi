@@ -77,6 +77,8 @@ export interface GateProgress {
 	 * happening on this code. Only the hive-check path sets it.
 	 */
 	run_state?: string;
+	/** Every unfinished Hive task is waiting for scheduler admission. */
+	awaiting_admission?: boolean;
 	/**
 	 * Seconds this run has been waiting for a fleet slot, from its creation.
 	 *

@@ -5,6 +5,9 @@
  * There is no live progress section in Claude, so the deck is not painted.
  */
 
+import { randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
+import { writeJsonAtomic } from "../state.ts";
 import { spawn } from "node:child_process";
 import { killTree, trackTree, treeSpawnOptions } from "../../extensions/hive-common/child-tree.ts";
 import { runQualityGate, type GateHost, type QualityGateParams } from "../../extensions/gate/tool.ts";
@@ -17,7 +20,8 @@ export const QUALITY_GATE_TOOL: ToolDefinition = {
 		"edits and BEFORE claiming work is done. When the repo declares `scripts/agent-check`, the default is mode `verify` " +
 		"(deps bootstrap, quick gate, type-check, the tests CI would select; `tests:false` for the fast steps only). Otherwise " +
 		"mode `quick` runs the vendored gate, lint only. In a repo that gates through Hive it runs `hive check` on the fleet " +
-		"against your uncommitted working tree. Reports failed checks, findings, and any check that did not run.",
+		"against your uncommitted working tree. Reports failed checks, findings, and any check that did not run. " +
+		"Reports (including surviving fleet run references) are retained under $HIVE_CLAUDE_CONFIG_DIR/hive-pi/quality-gate-reports/ even if the MCP request is cancelled; read it to resume watching, not re-dispatch.",
 	inputSchema: {
 		type: "object",
 		properties: {
@@ -126,8 +130,20 @@ export function parseGateParams(args: Record<string, unknown>): QualityGateParam
 	return params;
 }
 
-export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal): Promise<ToolResult> {
-	const result = await runQualityGate(nodeGateHost, parseGateParams(args), cwd, signal);
+export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal, stateDir?: string): Promise<ToolResult> {
+	// The driver's announcement allowlist accepts hive_watch_run, not
+	// quality_gate. Do not create a job whose verdict wake would be dropped.
+	const host: GateHost = { ...nodeGateHost, watchRun: async () => ({
+		text: "Claude's driver requires a separate hive_watch_run call to announce the job. Call that tool with the run reference above for one background verdict wake.",
+		isError: true,
+	}) };
+	const result = await runQualityGate(host, parseGateParams(args), cwd, signal);
 	const first = result.content[0];
-	return { text: first && first.type === "text" ? first.text : "quality_gate produced no report." };
+	const report = first && first.type === "text" ? first.text : "quality_gate produced no report.";
+	// MCP drops cancelled responses; retain their run reference before returning.
+	if (stateDir) {
+		try { writeJsonAtomic(join(stateDir, "quality-gate-reports", `${Date.now()}-${randomUUID()}.json`), { cwd: typeof args.cwd === "string" && args.cwd.trim() ? resolve(cwd, args.cwd.trim()) : cwd, report }); }
+		catch (error) { return { text: `${report}\n\nCould not retain the gate report in session state: ${String(error)}. Save the run reference above before proceeding.`, isError: true }; }
+	}
+	return { text: report };
 }

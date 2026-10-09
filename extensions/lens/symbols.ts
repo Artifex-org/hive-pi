@@ -130,13 +130,16 @@ export function findSymbol(source: string, file: string, name: string): SymbolSp
 export function listSymbols(
 	source: string,
 	file: string,
+	maxSymbols = Infinity,
+	onCandidateCap?: () => void,
+	callerOnlyDeclarations = false,
 ): { line: number; signature: string; depth: number }[] {
 	const lang = langOf(file);
 	const lines = source.split("\n");
 	const decl =
 		lang === "python"
 			? /^(?:async[ \t]+)?(?:def|class)[ \t]+\w/
-			: /^(?:export[ \t]+)?(?:default[ \t]+)?(?:async[ \t]+)?(?:func|function\*?|class|interface|type|enum|const|let|var)[ \t]+/;
+			: /^(?:export[ \t]+)?(?:default[ \t]+)?(?:async[ \t]+)?(?:func|function\*?|class|interface|type|enum|const|let|var)[ \t]+|^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+/;
 	/**
 	 * Members, one level in.
 	 *
@@ -155,8 +158,10 @@ export function listSymbols(
 			? /^[ \t]+(?:async[ \t]+)?(?:def|class)[ \t]+\w/
 			: new RegExp(
 					"^[ \\t]+(?:" +
+						// Rust impl method
+						"(?:pub(?:\\([^)]*\\))?[ \t]+)?(?:async[ \t]+)?fn[ \t]+\\w" +
 						// modifier-led member
-						"(?:public|private|protected|static|readonly|async|get|set)[ \\t]+\\w" +
+						"|(?:public|private|protected|static|readonly|async|get|set)[ \\t]+\\w" +
 						// opens a body
 						"|\\w[\\w$]*[ \\t]*[(<].*\\{[ \\t]*$" +
 						// TS signature with a return annotation
@@ -166,18 +171,25 @@ export function listSymbols(
 						")",
 				);
 	const out: { line: number; signature: string; depth: number }[] = [];
+	let candidates = 0;
 	for (let i = 0; i < lines.length; i++) {
-		const top = decl.test(lines[i]);
+		const top = decl.test(lines[i]) && (callerOnlyDeclarations || !/^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+/.test(lines[i]));
 		// One level only. Listing every member of every nested scope turns an
 		// outline back into the file, which is the thing it exists to avoid.
-		const nested = !top && member.test(lines[i]);
+		const wrappedMethod = lang !== "python" && /^[ \t]+(?!(?:if|for|while|switch|catch)\b)[\w$]+\s*\(\s*$/.test(lines[i]) &&
+			/^\s*\)\s*(?::[^;{}]*)?\s*\{/m.test(lines.slice(i + 1, i + 8).join("\n"));
+		const nested = !top && (member.test(lines[i]) || (callerOnlyDeclarations && wrappedMethod)) &&
+			(callerOnlyDeclarations || !/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+/.test(lines[i]));
 		if (!top && !nested) continue;
+		// Rejected comment/string candidates also incur a prefix scan.
+		if (++candidates > maxSymbols) { onCandidateCap?.(); break; }
 		if (inCommentOrString(lines, i)) continue;
 		out.push({
 			line: i + 1,
 			signature: lines[i].trim().replace(/[ \t]*\{[ \t]*$/, ""),
 			depth: top ? 0 : 1,
 		});
+		if (out.length >= maxSymbols) break;
 	}
 	return out;
 }

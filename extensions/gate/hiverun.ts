@@ -18,32 +18,10 @@ import { fold, type HiveRun, type HiveSubstep, type HiveTask, hiveCheckArgs, isQ
 /** A poll pair per two seconds. The substep ingest itself runs at ~1 Hz, so
  *  faster would mostly re-read the same rows at twice the server cost. */
 export const POLL_INTERVAL_MS = 2_000;
-/** Ceiling on the whole follow. A hive `test` step legitimately runs 20+ min;
- *  this is long because progress is VISIBLE the entire time — the short ceiling
- *  exists for the paths where a silent hold cannot be told from a hang. */
-const FOLLOW_TIMEOUT_MS = 45 * 60_000;
-/**
- * Ceiling while the run is still QUEUED, where that premise does not hold.
- *
- * The long ceiling above is justified by progress being visible throughout. A
- * queued run shows none: no step has started, nothing is on a node, and the
- * only thing that moves is the wait itself. Measured 2026-08-17 — an agent 27
- * minutes into a queue wait, its pane frozen and its card reading
- * `waiting on Running quality_gate`, indistinguishable from a hang.
- *
- * Ten minutes, from hive's own queue-wait stats over the trailing 7 days:
- * p50 is 6–120s across every cluster, and p90 reaches 1810s on a busy day. So
- * this clears the overwhelming majority of real waits, and the tail it does cut
- * is the tail worth cutting.
- *
- * ABORTING THE FOLLOW DOES NOT ABORT THE RUN — that is what makes a short
- * ceiling safe here. The run keeps going on the fleet; the caller gets its turn
- * back plus the run reference, and can watch it or check again. Blocking is the
- * expensive half, not waiting.
- */
-const QUEUED_TIMEOUT_MS = 10 * 60_000;
-/** The same number, for the message that has to name it. */
-export const QUEUED_FOLLOW_MINUTES = QUEUED_TIMEOUT_MS / 60_000;
+/** Keep fast checks synchronous; slower work belongs to the background watcher. */
+export const FOLLOW_TIMEOUT_MS = 2 * 60_000;
+/** A shorter wait when every unfinished task is waiting for admission. */
+export const QUEUED_TIMEOUT_MS = 60_000;
 /** Ceiling on packing + uploading the working tree. Aurora's snapshot is ~220 MB. */
 const DISPATCH_TIMEOUT_MS = 10 * 60_000;
 const LOG_TAIL_LINES = 40;
@@ -249,16 +227,11 @@ export async function follow(
 			if (isTerminalRun(run.state)) return { progress, tasks, timedOut, stillQueued };
 		}
 		if (signal?.aborted) return { progress, tasks, timedOut, stillQueued };
-		// Two ceilings, because they answer different questions. The long one
-		// bounds a run that is WORKING; this one bounds a run that has not
-		// begun, where nothing is visible to reassure the caller it is alive.
+		// Both ceilings only end the foreground follow, never the fleet work.
 		const queuedTooLong = isQueued(progress) && Date.now() - startedAtMs >= QUEUED_TIMEOUT_MS;
 		if (queuedTooLong || Date.now() >= deadline) {
 			timedOut = true;
-			// WHICH ceiling fired decides whether the run is cancelled — see the
-			// caller. A run that never started is not holding fleet capacity, and
-			// cancelling it guarantees the work is never done.
-			stillQueued = queuedTooLong;
+			stillQueued = isQueued(progress);
 			return { progress, tasks, timedOut, stillQueued };
 		}
 		await sleep(POLL_INTERVAL_MS, signal);
@@ -279,15 +252,14 @@ export async function follow(
  */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		signal?.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				resolve();
-			},
-			{ once: true },
-		);
+		const finish = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", finish);
+			resolve();
+		};
+		const timer = setTimeout(finish, ms);
+		if (signal?.aborted) finish();
+		else signal?.addEventListener("abort", finish, { once: true });
 	});
 }
 
@@ -314,18 +286,6 @@ export function tailLines(text: string, max: number): string {
 	const lines = text.trimEnd().split("\n");
 	if (lines.length <= max) return lines.join("\n");
 	return [`[… ${lines.length - max} earlier line(s) omitted …]`, ...lines.slice(-max)].join("\n");
-}
-
-/**
- * cancelRun stops a run the caller abandoned.
- *
- * Best effort, and deliberately fire-and-forget: an aborted tool call must not
- * wait on a cancel, but leaving the run to finish would spend fleet capacity on
- * a verdict nobody will ever read. A token without `trigger` scope simply gets a
- * 403 here, which is not worth reporting — the run then just runs to completion.
- */
-export function cancelRun(auth: HiveAuth, id: string): void {
-	void request(auth, "POST", `/runs/${id}/cancel`, {}, 3_000);
 }
 
 /** A plain-text GET (logs are `text/plain`, so the JSON helper cannot serve). */
