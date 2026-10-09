@@ -44,6 +44,12 @@ describe("a queued run", () => {
 		expect(isQueued(queuedProgress(60))).toBe(true);
 	});
 
+	it("preserves explicit queued status before tasks materialise", () => {
+		const p = fold({ run: { state: "queued" }, tasks: [], substeps: [], steps: ["lint"], ref: REF, nowMs: createdMs });
+		expect(isQueued(p)).toBe(true);
+		expect(renderReport(p)).toContain("QUEUED");
+		expect(renderReport(p)).not.toContain("STILL RUNNING");
+	});
 	it("carries how long it has been waiting", () => {
 		expect(queuedProgress(42).queued_secs).toBe(42);
 		expect(queuedProgress(27 * 60).queued_secs).toBe(1620);

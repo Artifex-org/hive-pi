@@ -469,7 +469,7 @@ export function fold(input: FoldInput): GateProgress {
 		run_number: ref.number ?? run.number,
 		run_id: ref.id,
 		run_state: run.state,
-		awaiting_admission: tasksAwaitingAdmission(tasks),
+		awaiting_admission: tasks.length > 0 ? tasksAwaitingAdmission(tasks) : run.state === "queued",
 		// How long this has been waiting for a slot, measured from the run's own
 		// creation rather than from when the follow attached: `hive check` packs
 		// and uploads a snapshot first, so the two differ by however long that

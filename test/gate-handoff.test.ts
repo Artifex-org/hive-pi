@@ -115,6 +115,14 @@ describe("quality_gate foreground handoff", () => {
 		expect(s.executeTool).toHaveBeenCalledTimes(1);
 		await verdict(s.pi);
 	});
+	it("hands off an explicitly queued run with no materialised tasks at 60 seconds", async () => {
+		state = "queued"; tasks = [];
+		const s = await start();
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(s.executeTool).toHaveBeenCalledTimes(1);
+		expect((await s.result).content[0].text).toContain("all unfinished tasks are waiting for admission");
+		await verdict(s.pi);
+	});
 	it("keeps a quick lint verdict synchronous, with no watch or wake", async () => {
 		tasks = [{ key: "lint", state: "running" }];
 		const s = await start(); state = "succeeded"; tasks = [{ key: "lint", state: "succeeded" }];
