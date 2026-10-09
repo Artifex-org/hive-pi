@@ -29,6 +29,7 @@ function functionName(line: string): string | undefined {
 export function changedFunctionNames(patch: string, readSource: (path: string, revision?: "HEAD" | ":") => string | null, deadline = Date.now() + CALLER_SEARCH_MS): { names: string[]; notes: string[] } {
 	const ranges = new Map<string, { start: number; end: number }[]>();
 	const names = new Set<string>();
+	const conservativeNames = new Set<string>();
 	const notes: string[] = ["Source discovery uses conservative declaration windows, not parsed bodies; verify symbol and caller relevance."];
 	let path = "";
 	let revision: "HEAD" | ":" | undefined;
@@ -86,13 +87,12 @@ export function changedFunctionNames(patch: string, readSource: (path: string, r
 			const nearest = candidates.filter((c) => hunk.start < c.endLine && hunk.end >= c.line).sort((a, b) => b.line - a.line)[0];
 			if (nearest) names.add(nearest.name);
 		}
-		for (const candidate of candidates.sort((a, b) => b.line - a.line)) {
-			names.add(candidate.name);
-			if (names.size > CALLER_SYMBOL_CAP) break;
-		}
+		for (const candidate of candidates.sort((a, b) => b.line - a.line)) conservativeNames.add(candidate.name);
+	}
+	for (const name of conservativeNames) {
+		names.add(name);
 		if (names.size > CALLER_SYMBOL_CAP) break;
 	}
-
 	if (names.size > CALLER_SYMBOL_CAP) notes.push(`Changed-symbol scan capped at ${CALLER_SYMBOL_CAP} functions.`);
 	return { names: [...names].slice(0, CALLER_SYMBOL_CAP), notes };
 }

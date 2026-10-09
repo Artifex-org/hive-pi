@@ -129,8 +129,10 @@ describe("caller-aware review scope", () => {
 		const rust = "impl Client {\n" + Array.from({ length: 18 }, (_, n) => `    pub fn fetch${n}(&self) {\n${"        // unchanged\n".repeat(12)}        ${n === 17 ? "changed();" : "unchanged();"}\n    }\n`).join("") + "}\n";
 		const line = rust.split("\n").findIndex((row) => row.includes("changed();") && !row.includes("unchanged();")) + 1;
 		const changed = `--- a/api.rs\n+++ b/api.rs\n@@ -${line} +${line} @@ impl Client {\n-        unchanged();\n+        changed();\n`;
-		const result = discoverCallers("/repo", changed, ["api.rs"], (symbol) => ({ text: symbol === "fetch17" ? "caller.rs:4: client.fetch17()" : "" }), () => rust);
-		expect(result.sites).toEqual([{ symbol: "fetch17", path: "caller.rs", line: 4 }]);
+		const second = "impl Other {\n    pub fn second(&self) {\n" + "        // body\n".repeat(12) + "        changed();\n    }\n}\n";
+		const twoFiles = changed + "\n--- a/other.rs\n+++ b/other.rs\n@@ -15 +15 @@ impl Other {\n-        old();\n+        changed();\n";
+		const result = discoverCallers("/repo", twoFiles, ["api.rs", "other.rs"], (symbol) => ({ text: ["fetch17", "second"].includes(symbol) ? `caller.rs:4: client.${symbol}()` : "" }), (file) => file === "api.rs" ? rust : second);
+		expect(result.sites).toEqual([{ symbol: "fetch17", path: "caller.rs", line: 4 }, { symbol: "second", path: "caller.rs", line: 4 }]);
 		expect(result.notes.join(" ")).toContain(`capped at ${CALLER_SYMBOL_CAP} functions`);
 	});
 	it("discovers body-only Rust changes after a multiline where clause", () => {
