@@ -253,7 +253,7 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 			if (ch === ";" && !seenOpen && depth === 0) return i;
 		}
 		// Unbraced single-line declaration (Go has no semicolons).
-		if (!seenOpen && !inBlockComment && !/[=(,{[]\s*$/.test(line) && i >= start) {
+		if (!seenOpen && !inBlockComment && !(rust && /\bfn\s/.test(lines[start])) && !/[=(,{[]\s*$/.test(line) && i >= start) {
 			if (!/^\s*(?:\/\/|#)/.test(line)) return i;
 		}
 	}

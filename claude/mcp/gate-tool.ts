@@ -5,6 +5,8 @@
  * There is no live progress section in Claude, so the deck is not painted.
  */
 
+import { join } from "node:path";
+import { writeJsonAtomic } from "../state.ts";
 import { spawn } from "node:child_process";
 import { killTree, trackTree, treeSpawnOptions } from "../../extensions/hive-common/child-tree.ts";
 import { runQualityGate, type GateHost, type QualityGateParams } from "../../extensions/gate/tool.ts";
@@ -17,7 +19,8 @@ export const QUALITY_GATE_TOOL: ToolDefinition = {
 		"edits and BEFORE claiming work is done. When the repo declares `scripts/agent-check`, the default is mode `verify` " +
 		"(deps bootstrap, quick gate, type-check, the tests CI would select; `tests:false` for the fast steps only). Otherwise " +
 		"mode `quick` runs the vendored gate, lint only. In a repo that gates through Hive it runs `hive check` on the fleet " +
-		"against your uncommitted working tree. Reports failed checks, findings, and any check that did not run.",
+		"against your uncommitted working tree. Reports failed checks, findings, and any check that did not run. " +
+		"The latest report (including any surviving fleet run reference) is retained at $HIVE_CLAUDE_CONFIG_DIR/hive-pi/quality-gate-report.json even if the MCP request is cancelled; read it to resume watching, not re-dispatch.",
 	inputSchema: {
 		type: "object",
 		properties: {
@@ -126,7 +129,7 @@ export function parseGateParams(args: Record<string, unknown>): QualityGateParam
 	return params;
 }
 
-export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal): Promise<ToolResult> {
+export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal, stateDir?: string): Promise<ToolResult> {
 	// The driver's announcement allowlist accepts hive_watch_run, not
 	// quality_gate. Do not create a job whose verdict wake would be dropped.
 	const host: GateHost = { ...nodeGateHost, watchRun: async () => ({
@@ -135,5 +138,8 @@ export async function runGateTool(args: Record<string, unknown>, cwd: string, si
 	}) };
 	const result = await runQualityGate(host, parseGateParams(args), cwd, signal);
 	const first = result.content[0];
-	return { text: first && first.type === "text" ? first.text : "quality_gate produced no report." };
+	const report = first && first.type === "text" ? first.text : "quality_gate produced no report.";
+	// MCP drops cancelled responses; retain their run reference before returning.
+	if (stateDir) writeJsonAtomic(join(stateDir, "quality-gate-report.json"), { cwd, report });
+	return { text: report };
 }

@@ -61,6 +61,12 @@ describe("caller-aware review scope", () => {
 		expect(discoverCallers("/repo", changed, ["api.rs"], grep, () => rust).sites).toEqual([{ symbol: "fetch", path: "client.rs", line: 4 }]);
 		expect(grep).toHaveBeenCalledWith("fetch", "/repo", expect.any(Number));
 	});
+	it("discovers body-only Rust changes after a multiline where clause", () => {
+		const rust = "impl Client {\n    pub fn fetch<T>(&self, value: T) -> Result<T, Error>\n    where\n        T: Clone,\n    {\n" + "        // body\n".repeat(12) + "        Err(error)\n    }\n}\n";
+		const changed = "--- a/api.rs\n+++ b/api.rs\n@@ -18 +18 @@ impl Client {\n-        Ok(value)\n+        Err(error)\n";
+		expect(discoverCallers("/repo", changed, ["api.rs"], () => ({ text: "caller.rs:4: client.fetch(value)" }), () => rust).sites)
+			.toEqual([{ symbol: "fetch", path: "caller.rs", line: 4 }]);
+	});
 	it("discovers multiline exported arrows from body-only edits and removed declarations", () => {
 		const arrow = "export const fetchData = (\n  id: string,\n) => {\n" + "  // unchanged\n".repeat(12) + "  return updated;\n};\n";
 		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -16 +16 @@\n-  return old;\n+  return updated;\n";

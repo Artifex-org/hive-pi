@@ -233,6 +233,9 @@ describe("quality_gate", () => {
 		c.notify("notifications/cancelled", { requestId: request.id });
 		await new Promise((r) => setTimeout(r, 700));
 		expect(answered).toBe(false); expect(existsSync(marker)).toBe(false);
+		const retained = JSON.parse(readFileSync(join(launch.stateDir, "quality-gate-report.json"), "utf8"));
+		expect(retained.cwd).toBe(repo); expect(retained.report).toContain(run);
+		expect(retained.report).toContain("NOT cancelled");
 		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(0);
 		expect(hive.requests.some((r) => r.path.endsWith("/cancel"))).toBe(false);
 		expect((await c.request("ping")).result).toEqual({});
