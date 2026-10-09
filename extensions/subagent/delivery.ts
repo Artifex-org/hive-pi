@@ -9,6 +9,18 @@ import { accessSync, constants } from "node:fs";
 
 export const DELIVERY_REVIEW_GUIDANCE = "Before pushing or opening a PR, run subagent with agent: code-reviewer on the diff and fix its findings. The harness supplies the diff/file list, not the author's design rationale. Docs-only or tiny diffs skip automatically; PI_DELIVERY_REVIEW=0 explicitly overrides the checkpoint.";
 
+function commitPreservesStagedBytes(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (["-m", "--message", "-F", "--file"].includes(arg)) { if (!args[++i]) return false; continue; }
+		if (/^(?:-m.+|-F.+|--(?:message|file)=)/.test(arg)) continue;
+		if (["--amend", "--no-edit", "--allow-empty", "--allow-empty-message", "--no-verify", "--quiet", "--verbose", "--signoff", "--reset-author", "--no-gpg-sign", "-q", "-s", "-S", "-v"].includes(arg)) continue;
+		if (/^--gpg-sign(?:=|$)/.test(arg)) continue;
+		return false; // paths, -a/-i/-o, patches and unknown staging/editor modes
+	}
+	return true;
+}
+
 export function deliveryTargets(command: string, cwd: string): (string | null)[] {
 	const targets: (string | null)[] = [];
 	let dir: string | null = cwd;
@@ -42,13 +54,14 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		let verb = 1;
 		while (prefix?.[verb] === "-C") verb += 2;
 		const gitWritesOutput = prefix?.[0] === "git" && prefix.some(token => token === "--output" || token.startsWith("--output="));
+		const implicitStaging = prefix?.[0] === "git" && prefix[verb] === "commit" && !commitPreservesStagedBytes(prefix.slice(verb + 1));
 		const dynamicGit = prefix?.[0] === "git" && !literalWords(cleaned);
 		// Preserve the common read-only body-file substitution, not arbitrary
 		// shell code that can reset HEAD before PR creation or a later push.
 		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) &&
 			!literalWords(cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body"));
 		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
-		if (!prefix || configuredEnv || gitWritesOutput || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "status", "push"].includes(prefix[verb]) ||
+		if (!prefix || configuredEnv || gitWritesOutput || implicitStaging || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "status", "push"].includes(prefix[verb]) ||
 			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) precedingMutation = true;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);
@@ -164,7 +177,7 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		if (/^\s*PI_DELIVERY_REVIEW=0\s/.test(command)) return;
 		if (chainHookProblem(command, cwd)) return { block: true, reason: 'Unsupported command shape: a compound delivery has executable hooks (or its hook configuration cannot be read), so later bytes cannot be reviewed by this preflight. Run each command separately, then run a foreground code-reviewer on the resulting diff before standalone delivery.' };
 		for (const target of deliveryTargets(command, cwd)) {
-			if (!target) return { block: true, reason: 'Unsupported command shape: delivery target/environment, pipeline, or preceding mutation cannot be evaluated. Run setup/mutation commands separately, then review and run a standalone `git push origin HEAD`, `hive ship --no-pr`, or `gh pr create` in the reviewed repo (without target overrides).' };
+			if (!target) return { block: true, reason: 'Unsupported command shape: delivery target/environment, pipeline, implicit staging, or preceding mutation cannot be evaluated. Run setup/mutation commands separately, then review and run a standalone `git push origin HEAD`, `hive ship --no-pr`, or `gh pr create` in the reviewed repo (without target overrides).' };
 			const diff = capture(target, "");
 			if (diff && (!needsDeliveryReview(diff) || (stampableReview(diff) && reviewed.has(reviewFingerprint(diff))))) continue;
 			const reason = !diff ? "Complete delivery diff unavailable (no remote merge-base, repository/configuration scan failed, or scan budget exceeded). "

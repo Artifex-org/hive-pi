@@ -60,9 +60,17 @@ function commitCheckout(command: string, cwd: string): string | null {
 		if (words[0] !== "git") continue;
 		let i = 1, target = dir;
 		while (words[i] === "-C" && words[i + 1]) { target = resolve(target, words[i + 1]); i += 2; }
-		// HEAD-only evidence is attributable only to a final standalone commit,
-		// optionally after cd; checkout/reset fallbacks must never count.
-		if (words[i] === "commit") return index === segments.length - 1 ? target : null;
+		// HEAD-only evidence requires a real commit and no HEAD-changing suffix.
+		// Quiet commit/push/reporting chains are safe when all && steps succeed.
+		if (words[i] === "commit") {
+			if (words.slice(i + 1).some(arg => ["--dry-run", "--short", "--long", "--porcelain"].includes(arg))) return null;
+			const safeSuffix = !/[;\n]|\|\|/.test(command.replace(/'[^']*'|"[^"\\]*"/g, "")) && segments.slice(index + 1).every(tail => {
+				const args = literalWords(tail);
+				while (args && /^[A-Za-z_]\w*=/.test(args[0] ?? "")) args.shift();
+				return args && (["echo", "printf"].includes(args[0]) || args[0] === "git" && args[1] === "push" || args[0] === "hive" && args[1] === "ship" || args[0] === "gh" && args[1] === "pr" && args[2] === "create");
+			});
+			return index === segments.length - 1 || safeSuffix ? target : null;
+		}
 		if (["add", "status"].includes(words[i])) continue;
 		return null;
 	}

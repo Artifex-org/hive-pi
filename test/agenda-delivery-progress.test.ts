@@ -19,7 +19,7 @@ describe("delivery milestones", () => {
 		expect(deliveryMilestone("gh pr create && false", url, false)).toBe(true);
 		expect(deliveryMilestone("gh pr create && false", "already exists:\n" + url, false)).toBe(false);
 	});
-	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change"])("observes %s only when HEAD actually changes", async command => {
+	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change", "git commit -q -m change && git push origin HEAD", "git commit -q -m change && echo done"])("observes %s only when HEAD actually changes", async command => {
 		const pi = createFakePi(); let head = "old";
 		registerDeliveryProgress(pi.api, () => head);
 		const call = () => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "q", input: { command } });

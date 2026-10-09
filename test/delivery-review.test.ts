@@ -133,8 +133,10 @@ describe("delivery review", () => {
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
 			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0]).toBeUndefined();
-		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git add --renormalize . && git commit -m change && git push origin HEAD", cwd } }))[0])
-			.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		for (const command of ["git add --renormalize . && git commit -m change && git push origin HEAD", "git commit -am change && git push origin HEAD", "git commit -m change code.ts && git push origin HEAD"]) {
+			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0])
+				.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		}
 		git("add", "--renormalize", ".");
 		expect(captureDeliveryDiff(cwd)!.text).toContain("export const staged");
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
