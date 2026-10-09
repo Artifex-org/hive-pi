@@ -19,9 +19,11 @@
  * timer, exactly as `agmsg` does for identity resolution.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { hiveBaseURL, readJSON } from "../hive-common/identity.ts";
@@ -86,7 +88,16 @@ export interface ProbeDeps {
 	 * of those and silently wrong in the rest.
 	 */
 	resolveModuleFile: (specifier: string) => string | null;
+	/**
+	 * Listen on a fresh unix-socket path in the temp dir, then close it and
+	 * remove the path. Optional so a test that does not care stays as it was;
+	 * absent, the unix-socket row is `unknown`.
+	 */
+	listenUnix?: () => Promise<UnixListenResult>;
 }
+
+/** What one unix-socket listen attempt established. */
+export type UnixListenResult = { ok: true } | { ok: false; code: string; message: string };
 
 export type Probe = (deps: ProbeDeps) => Promise<Omit<ProbeResult, "at">>;
 
@@ -810,6 +821,76 @@ export const harnessUpdateProbe: Probe = async (deps) => {
 };
 
 /**
+ * Can this session listen on a unix socket? (HIV-3802 eval, 2026-10-08)
+ *
+ * srt's seccomp filter refuses `socket(AF_UNIX)` outright — the browser,
+ * credential-recovery, kernel and devservices extensions all document it — and
+ * the pi process runs under the same filter as every command it spawns. A
+ * sandboxed agent therefore cannot run any test that listens on a socket PATH.
+ * Measured in the HIV-3802 A/B eval: the pi arm's vitest unix-socket transport
+ * suite timed out 7×5 s, because its harness never surfaced the `listen EPERM`,
+ * and the agent spent the next minutes proving the sandbox was the cause; the
+ * Claude arm's `go test` failed `listen unix …: socket: operation not
+ * permitted` on two unrelated socket tests.
+ *
+ * The answer is a real listen, not a sandbox-detection heuristic: whatever the
+ * policy, this is the call those tests make. The remedy is generic on purpose —
+ * the repo's own fleet steps are what `quality_gate` already knows.
+ */
+export const UNIX_SOCKET_REFUSED_HINT =
+	"the sandbox refuses socket(AF_UNIX): every test or tool that listens on or connects to a unix-socket PATH " +
+	"fails here with EPERM — or just times out, when its harness swallows the listen error. Do not debug that " +
+	"locally or weaken the test: run those tests on the fleet with `quality_gate` (it lists this repo's steps) " +
+	"or `hive check --step <step>`, and report them as not run locally. TCP on 127.0.0.1 is unaffected";
+
+export const unixSocketProbe: Probe = async (deps) => {
+	const row = { id: "unix-sockets", label: "unix sockets" } as const;
+	if (!deps.listenUnix) return { ...row, status: "unknown", detail: "no listener probe in this process" };
+	const outcome = await deps.listenUnix();
+	if (outcome.ok) return { ...row, status: "ready", detail: "a unix-socket listen succeeds here" };
+	// EPERM is the seccomp refusal; EACCES is the same answer from an LSM
+	// policy. Anything else (ENOSPC, a temp dir we could not create) says
+	// nothing about the policy, so it is `unknown`, never `absent`.
+	if (outcome.code === "EPERM" || outcome.code === "EACCES") {
+		return { ...row, status: "absent", detail: `listen on a unix-socket path: ${outcome.code}`, hint: UNIX_SOCKET_REFUSED_HINT };
+	}
+	return { ...row, status: "unknown", detail: `unix-socket listen probe failed: ${outcome.code}` };
+};
+
+/** One real listen on a throwaway path; the path and its directory are always removed. */
+export function listenUnixSocket(base: string = tmpdir()): Promise<UnixListenResult> {
+	let dir: string;
+	try {
+		dir = mkdtempSync(join(base, "pi-readiness-"));
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code ?? "ERROR";
+		return Promise.resolve({ ok: false, code: `temp dir ${code}`, message: (error as Error).message });
+	}
+	const cleanup = () => rmSync(dir, { recursive: true, force: true });
+	return new Promise<UnixListenResult>((resolve) => {
+		const server = createServer();
+		server.once("error", (error: NodeJS.ErrnoException) => {
+			cleanup();
+			resolve({ ok: false, code: error.code ?? "ERROR", message: error.message });
+		});
+		try {
+			server.listen(join(dir, "probe.sock"), () => {
+				server.close(() => {
+					cleanup();
+					resolve({ ok: true });
+				});
+			});
+		} catch (error) {
+			// A path the kernel cannot take (too long for sun_path) throws here.
+			cleanup();
+			resolve({ ok: false, code: (error as NodeJS.ErrnoException).code ?? "ERROR", message: (error as Error).message });
+			return;
+		}
+		server.unref();
+	});
+}
+
+/**
  * The delegation lane: which model a `subagent` worker will run on, and
  * whether THIS machine holds a credential for its provider.
  *
@@ -869,6 +950,7 @@ export const BASE_PROBES: { id: string; label: string; probe: Probe }[] = [
 	{ id: "gh", label: "gh auth", probe: ghProbe },
 	{ id: "devservices.postgres", label: "dev postgres", probe: postgresProbe },
 	{ id: "browser", label: "browser", probe: browserProbe },
+	{ id: "unix-sockets", label: "unix sockets", probe: unixSocketProbe },
 ];
 
 /** Every probe for this session: the fixed set plus one row per MCP server. */
@@ -960,5 +1042,6 @@ export function realDeps(
 			}
 		},
 		toolNames,
+		listenUnix: () => listenUnixSocket(),
 	};
 }

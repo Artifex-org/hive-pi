@@ -124,6 +124,25 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
     job cancelled by the server's own shutdown still writes its usage and a
     wake: "background job <id> was cancelled because the helper server
     restarted; delegate it again".
+  - `hive_watch_run {run, what, project?, pipeline?, timeout_seconds?}` —
+    pi's background run watch (same name, wording and verdicts:
+    `extensions/background/watch-run.ts`, `jobs.ts`). Model-free. Resolves a
+    `#N` through the Hive API (`HIVE_URL`/`HIVE_TOKEN`), runs `hive watch
+    <uuid>` in its own process group, returns at once with `hive-pi-job:
+    watch-…`, and writes exactly ONE `wake` for that job, whatever ends it:
+    the run's verdict (`hive watch` exits 0 = passed, 1 = failed, else the
+    run's state from the API), the wall clock (default 30 min, max 4 h), the
+    model's `background_cancel`, or the server shutting down ("watch it
+    again"). Refused without `HIVE_AUX_SPOOL` (nothing could deliver it).
+    The same SIGKILL residual as background delegations applies: a server
+    killed outright leaves its `hive watch` groups running until they end
+    (at most the watch's own limit).
+    **Driver prerequisite:** Hive's driver delivers a wake only for a job a
+    `mcp__hive-pi__subagent` result announced (`driver-core.mjs`, DRIVER-CONTRACT
+    §2g); until it also reads announcements from `mcp__hive-pi__hive_watch_run`,
+    a watch's wake is logged as unannounced and dropped.
+  - `background_cancel {id}` — stops a running watch or background
+    delegation; the job still writes its one wake, saying it was cancelled.
   - `advisor` — the transcript serialised by pi's `serializeConversation`,
     capped by `capTranscript` (400k), sent as an `@file`.
   - `goal_set {condition, replace?, budget?{tokens,hours}}`, `goal_status`,

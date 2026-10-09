@@ -1,7 +1,8 @@
 /**
  * The adapter's MCP server (`cli.ts mcp`): subagent, advisor, goal_set,
  * goal_status, goal_clear, quality_gate, bugfix_evidence, bugfix_root_cause,
- * and the session browser with its flow tools (browser-tools.ts).
+ * hive_watch_run, background_cancel, and the session browser with its flow
+ * tools (browser-tools.ts).
  *
  * Lifetime: the server lives as long as Claude keeps its stdin open. When the
  * input ends (or the process is told to terminate), every background
@@ -28,9 +29,10 @@ import { GOAL_TOOLS, goalClear, goalSet, goalStatus } from "./goal-tools.ts";
 import { serve, type ToolDefinition, type ToolResult, type ToolServer } from "./protocol.ts";
 import { BackgroundJobs, leasedModelEnv, runSubagentTool, subagentToolDefinition } from "./subagent-tool.ts";
 import { BROWSER_TOOLS, BrowserTools } from "./browser-tools.ts";
+import { BACKGROUND_CANCEL_TOOL, cancelBackgroundJob, startWatchRun, WATCH_RUN_TOOL } from "./watch-run-tool.ts";
 
 const SERVER_VERSION = "0.1.0";
-const TOOL_NAMES = new Set(["subagent", "advisor", "goal_set", "goal_status", "goal_clear", "quality_gate", "bugfix_evidence", "bugfix_root_cause"]);
+const TOOL_NAMES = new Set(["subagent", "advisor", "goal_set", "goal_status", "goal_clear", "quality_gate", "bugfix_evidence", "bugfix_root_cause", "hive_watch_run", "background_cancel"]);
 
 export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream, output: NodeJS.WritableStream, log: (line: string) => void): Promise<void> {
 	const dir = stateDir(env);
@@ -57,7 +59,8 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 		version: SERVER_VERSION,
 		instructions:
 			"hive-pi's helpers on non-Anthropic models: delegate to role subagents, consult a cross-family advisor, set a goal " +
-			"a judge holds you to, run the repository's quality gate, and drive this session's own headless browser (browser_*) and its saved flows.",
+			"a judge holds you to, run the repository's quality gate, watch a CI run in the background (hive_watch_run), and drive this " +
+			"session's own headless browser (browser_*) and its saved flows.",
 		has: (name) => TOOL_NAMES.has(name) || browser.has(name),
 		async tools(): Promise<ToolDefinition[]> {
 			let roles: Parameters<typeof subagentToolDefinition>[0] = [];
@@ -70,7 +73,7 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					log(`hive-pi mcp: cannot list subagent roles: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
-			return [subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL, ...BUGFIX_TOOLS, ...BROWSER_TOOLS];
+			return [subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL, ...BUGFIX_TOOLS, WATCH_RUN_TOOL, BACKGROUND_CANCEL_TOOL, ...BROWSER_TOOLS];
 		},
 		async call(name, args, signal) {
 			if (browser.has(name)) return browser.call(name, args, signal);
@@ -93,6 +96,11 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					const readOnly = mode === "plan" || mode === "discuss" || mode === "orchestrate";
 					return runGateTool(readOnly ? { ...args, install: false } : args, cwd, signal);
 				}
+				// Model-free, so offered without a lease: `hive watch` and the Hive API only.
+				case "hive_watch_run":
+					return startWatchRun(args, { cwd, jobs, spool, canWake: Boolean(env.spool), auth });
+				case "background_cancel":
+					return cancelBackgroundJob(args, jobs);
 				case "advisor": {
 					if (unavailable) return noCredential();
 					const pi = await pinned();

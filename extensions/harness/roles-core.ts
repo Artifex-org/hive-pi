@@ -36,6 +36,14 @@ export interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	/**
+	 * A catalog CLASS (`high`, `medium`, `low`, `fast` — the keys of Hive's
+	 * agent-mode catalog) for a role whose work needs a stronger model than the
+	 * cheap delegation lane, without pinning a `provider/id` that drifts with the
+	 * fleet. Only the `subagent` tool resolves it (subagent/model.ts); `model`
+	 * wins over it, and a caller's per-call `model` wins over both.
+	 */
+	tier?: string;
 	opMode?: string;
 	systemPrompt: string;
 	/**
@@ -101,6 +109,7 @@ function loadAgentsFromDir(dir: string, source: AgentConfig["source"], runtime: 
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: frontmatter.model,
+			tier: typeof frontmatter.tier === "string" && /^[a-z0-9_-]{1,32}$/.test(frontmatter.tier) ? frontmatter.tier : undefined,
 			opMode: frontmatter.op_mode,
 			systemPrompt: body,
 			source,

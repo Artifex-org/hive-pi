@@ -21,7 +21,15 @@ path.
 | `PI_READINESS=0` | registers nothing at all |
 
 Rows today: one per configured MCP server, plus `hive`, `openrouter`, `gh`,
-`devservices.postgres`, `browser`, `repo`, and `harness.update`.
+`devservices.postgres`, `browser`, `unix-sockets`, `repo`, and `harness.update`.
+
+`unix-sockets` is one real `listen` on a throwaway path in the temp dir. srt's
+seccomp filter refuses `socket(AF_UNIX)` for the pi process and everything it
+spawns, so in a sandbox every socket-based test fails with EPERM — or times out,
+when its harness swallows the listen error (the HIV-3802 eval's vitest transport
+suite: 7×5 s). The row says so and points at the fleet (`quality_gate`,
+`hive check --step …`); `toolhints` gives the same pointer when the EPERM
+itself shows up in a failed command.
 
 A product MCP (`borealis`, `aurorasvc`) is **not** a capability of every session
 just because it is in the global `mcp.json` (HIV-2639). Off-project it gets

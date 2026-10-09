@@ -62,7 +62,16 @@ import { isOverflowWedged } from "../hive-common/overflow.ts";
 import { announceOwnWork } from "../hive-common/own-work.ts";
 import { createdPullURL } from "../hive-common/pull-delivery.ts";
 import { createWaker } from "../hive-common/waker.ts";
-import { resolveRunUUID, runStateNote, watchCommand } from "./watch-run.ts";
+import {
+	fetchRunJSON,
+	resolveRunUUID,
+	runStateNote,
+	WATCH_RUN_DESCRIPTION,
+	WATCH_RUN_GUIDELINE,
+	WATCH_RUN_PARAMS,
+	WATCH_VERDICT_NOTE,
+	watchCommand,
+} from "./watch-run.ts";
 import { strandedIndexLock } from "./indexlock.ts";
 import {
 	BACKGROUND_CANCEL_CHANNEL,
@@ -103,31 +112,6 @@ const DELIVERABLE_MODES = new Set(["tui", "rpc"]);
 
 function textResult(text: string, isError = false) {
 	return { content: [{ type: "text" as const, text }], details: {}, isError };
-}
-
-/** How long a run-number lookup may take before we stop waiting on it. */
-const RESOLVE_TIMEOUT_MS = 5_000;
-
-/**
- * One bounded GET, and it never throws.
- *
- * Bounded because this sits in front of starting a job: a hung lookup would
- * turn "return immediately" — the entire point of the tool — into a stall, and
- * a tool that blocks while promising not to is worse than one that fails.
- */
-async function fetchJSON(url: string, headers: Record<string, string>) {
-	try {
-		const res = await fetch(url, { headers, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
-		let body: unknown = null;
-		try {
-			body = await res.json();
-		} catch {
-			/* a non-JSON body is an error body; `ok` already carries the verdict */
-		}
-		return { ok: res.ok, status: res.status, body };
-	} catch {
-		return { ok: false, status: 0, body: null };
-	}
 }
 
 export default function background(pi: ExtensionAPI) {
@@ -309,7 +293,7 @@ export default function background(pi: ExtensionAPI) {
 		const auth = resolveAuth();
 		if (!auth) return;
 		const ownerGeneration = generation;
-		const note = await runStateNote(job.runID, { baseURL: auth.url, token: auth.token, getJSON: fetchJSON });
+		const note = await runStateNote(job.runID, { baseURL: auth.url, token: auth.token, getJSON: fetchRunJSON });
 		if (!note || generation !== ownerGeneration) return;
 		const current = jobs.get(id);
 		if (current) jobs.set(id, appendOutput(current, `\n${note}\n`));
@@ -738,33 +722,15 @@ export default function background(pi: ExtensionAPI) {
 	registerGuardedTool(pi, {
 		name: "hive_watch_run",
 		label: "Background",
-		description:
-			"Watch a Hive CI run to completion in the background and return immediately. Use this INSTEAD of " +
-			"calling wait_for_run repeatedly: wait_for_run is a request with a timeout, so a run longer than " +
-			"that timeout costs you one turn and one full duplicate result per re-call. This is a stream — it " +
-			"ends when the run ends, and you are told once, with the run's own verdict. Carry on with " +
-			"something else meanwhile; use get_run or explain_failure when you actually need a detail.",
+		description: WATCH_RUN_DESCRIPTION,
 		promptSnippet: "hive_watch_run: watch a CI run in the background instead of re-calling wait_for_run",
-		promptGuidelines: [
-			"If you find yourself calling wait_for_run a second time on the same run, stop and use " +
-				"hive_watch_run instead — every further re-call costs a turn and a duplicate result for no new information.",
-		],
+		promptGuidelines: [WATCH_RUN_GUIDELINE],
 		parameters: Type.Object({
-			run: Type.String({
-				description: "The run's UUID, or the #N shown in the Hive UI and in `hive runs`.",
-			}),
-			what: Type.String({
-				description:
-					"A short human-readable description, e.g. 'waiting for the Borealis ci gate'. " +
-					"Shown to the person watching instead of a bare command line.",
-			}),
-			project: Type.Optional(
-				Type.String({ description: "Project, to disambiguate a run NUMBER (numbers are per pipeline)." }),
-			),
-			pipeline: Type.Optional(Type.String({ description: "Pipeline, to further disambiguate a run number." })),
-			timeout_seconds: Type.Optional(
-				Type.Number({ description: "Wall-clock limit. Default 1800 (30 min), maximum 14400 (4 h)." }),
-			),
+			run: Type.String({ description: WATCH_RUN_PARAMS.run }),
+			what: Type.String({ description: WATCH_RUN_PARAMS.what }),
+			project: Type.Optional(Type.String({ description: WATCH_RUN_PARAMS.project })),
+			pipeline: Type.Optional(Type.String({ description: WATCH_RUN_PARAMS.pipeline })),
+			timeout_seconds: Type.Optional(Type.Number({ description: WATCH_RUN_PARAMS.timeout_seconds })),
 		}),
 		capability: { executes: true },
 		execute: async (_id, params, _signal, _onUpdate, ctx) => {
@@ -779,7 +745,7 @@ export default function background(pi: ExtensionAPI) {
 			const resolved = await resolveRunUUID(params.run, params.project, params.pipeline, {
 				baseURL: auth.url,
 				token: auth.token,
-				getJSON: fetchJSON,
+				getJSON: fetchRunJSON,
 			});
 			if ("error" in resolved) return textResult(resolved.error, true);
 
@@ -791,9 +757,7 @@ export default function background(pi: ExtensionAPI) {
 				timeoutSeconds: params.timeout_seconds,
 				mode: ctx.mode,
 				runID: resolved.uuid,
-				note:
-					"The job's own outcome IS the run's verdict — `hive watch` exits with the run's result — so a " +
-					"`done` completion means the run passed and `failed` means it did not.",
+				note: WATCH_VERDICT_NOTE,
 			});
 		},
 	});

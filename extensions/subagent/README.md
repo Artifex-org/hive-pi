@@ -8,7 +8,8 @@ The executable extension and baseline roles live in this package. The extension 
 
 Highest precedence first:
 
-1. **The role's own `model:` frontmatter** — a per-role pin is deliberate tuning and is never overridden. Only `retriever` sets one today.
+1. **The role's own `model:` frontmatter** — a per-role pin is deliberate tuning and is never overridden. No shipped role sets one today.
+   **`tier:`** names a CLASS from Hive's agent-mode catalog (`high`, `medium`, `low`, `fast`) instead of a `provider/id` that drifts with the fleet: the worker runs that catalog mode when this machine can, and otherwise the delegation lane below, with a `[model note]` saying so. Only `code-reviewer` sets one (`high`). `model:` wins over `tier:`; the agenda executor's role stages ignore `tier:`.
 2. **`PI_SUBAGENT_MODEL`** — set by whoever launched the session. Hive stamps it on a workstation agent launch from the models configured on its Factory settings page, so an orchestrated run uses the fleet's models rather than this machine's.
 3. **`subagentDefaultModel` in `~/.pi/agent/settings.json`** — currently `openrouter/deepseek/deepseek-v4-flash`. This is what a hand-started interactive session uses.
 
@@ -27,7 +28,7 @@ A worker that exits 0 with a final message announcing work ("Now updating Agents
 ## Local role inventory
 
 - Domain: `borealis-trader`, `babysit-build`, `incident-responder`, `k8s-deployment-manager`, `omarchy-config-manager`, `aurora-developer`
-- Read-only: `research`, `code-reviewer`
+- Read-only: `research`, `code-reviewer` (shipped here since HIV-3802's eval; a same-named file in `~/.pi/agent/agents` — e.g. an organisation overlay — shadows it)
 - Focused cheap writers: `lint-fixer`, `test-fixer`, `doc-writer`
 
 ## Upstream example documentation

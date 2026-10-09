@@ -167,6 +167,13 @@ export function restartedText(jobId: string, agent: string, what: string): strin
 	return `Background job ${jobId} (${agent} — ${what}) was cancelled because the helper server restarted; delegate it again.`;
 }
 
+/** The wake for an aborted job: cancelled by the model, or lost to a server restart. */
+export function abortedText(signal: AbortSignal, jobId: string, agent: string, what: string): string {
+	return cancelledByCaller(signal)
+		? `Background job ${jobId} (${agent} — ${what}) was cancelled at your request (background_cancel).`
+		: restartedText(jobId, agent, what);
+}
+
 export interface SubagentHost {
 	/** The session's operating mode (control.json), read per call. */
 	opMode(): OpMode;
@@ -179,7 +186,18 @@ export interface SubagentHost {
 	canWake: boolean;
 }
 
-/** Background delegations of this MCP server; all are aborted when it exits. */
+/** The abort reason of a job the model cancelled (`background_cancel`), as opposed to a server shutdown. */
+export const CANCELLED_BY_CALLER = "cancelled-by-caller";
+
+/** True when a job's signal was aborted by `background_cancel`, not by the server going away. */
+export function cancelledByCaller(signal: AbortSignal): boolean {
+	return signal.aborted && signal.reason === CANCELLED_BY_CALLER;
+}
+
+/**
+ * Background jobs of this MCP server — delegations and run watches; all are
+ * aborted when it exits.
+ */
 export class BackgroundJobs {
 	private seq = 0;
 	private readonly log: (line: string) => void;
@@ -193,12 +211,12 @@ export class BackgroundJobs {
 		return this.running.size;
 	}
 
-	start(run: (signal: AbortSignal, id: string) => Promise<void>): string {
+	start(run: (signal: AbortSignal, id: string) => Promise<void>, prefix = "sub"): string {
 		this.seq += 1;
 		// Unique beyond this process: an MCP server restarted mid-session starts
 		// counting again, and the driver matches a wake to the call that
 		// announced it by this id alone.
-		const id = `sub-${this.seq}-${randomUUID().slice(0, 8)}`;
+		const id = `${prefix}-${this.seq}-${randomUUID().slice(0, 8)}`;
 		const controller = new AbortController();
 		// A job that throws past its own handling is reported, never left as an
 		// unhandled rejection — that would take the whole MCP server, and every
@@ -208,6 +226,18 @@ export class BackgroundJobs {
 			.finally(() => this.running.delete(id));
 		this.running.set(id, { controller, done });
 		return id;
+	}
+
+	/**
+	 * Abort one running job at the model's request. The job still settles — and
+	 * writes its one wake — itself: the driver holds an announced job as running
+	 * until that wake arrives.
+	 */
+	cancel(id: string): boolean {
+		const entry = this.running.get(id);
+		if (!entry) return false;
+		entry.controller.abort(CANCELLED_BY_CALLER);
+		return true;
 	}
 
 	/** Abort every job and wait for each worker to unwind (writer locks released, children reaped). */
@@ -298,16 +328,17 @@ export async function runSubagentTool(args: Record<string, unknown>, host: Subag
 				spoolResults(host.spool, [result]);
 				const completion = backgroundCompletion(result, jobSignal.aborted);
 				text = jobSignal.aborted
-					? restartedText(jobId, agentName, what)
+					? abortedText(jobSignal, jobId, agentName, what)
 					: [`Background delegation \`${jobId}\` (${agentName} — ${what}) ${completion.status}${completion.exitCode !== undefined ? ` (exit ${completion.exitCode})` : ""}.`, completion.summary].filter(Boolean).join("\n\n");
 			} catch (error) {
 				if (error instanceof DelegationAborted) {
-					// The only abort is the server shutting down (the driver restarts
-					// Claude on a credential renewal or account switch). The spend so
-					// far still counts, and the model must hear that the job is gone —
-					// otherwise it waits for a completion that will never come.
+					// Aborted by the server shutting down (the driver restarts Claude
+					// on a credential renewal or account switch) or by the model's own
+					// background_cancel. The spend so far still counts, and the model
+					// must hear that the job is gone — otherwise it waits for a
+					// completion that will never come.
 					spoolResults(host.spool, [error.result]);
-					text = restartedText(jobId, agentName, what);
+					text = abortedText(jobSignal, jobId, agentName, what);
 				} else {
 					text = `Background delegation \`${jobId}\` (${agentName} — ${what}) failed: the delegation threw: ${error instanceof Error ? error.message : String(error)}`;
 				}

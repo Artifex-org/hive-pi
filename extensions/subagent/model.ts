@@ -141,7 +141,7 @@ export function cheapLaneMode<M extends CatalogMode>(
  * getSubagentDefaultModel()`); `requested` is the caller's explicit override.
  */
 export async function chooseWorkerModel(
-	opts: { requested?: string; preferred?: string; roleName: string },
+	opts: { requested?: string; preferred?: string; roleName: string; tier?: string },
 	env: WorkerModelEnv | undefined,
 ): Promise<WorkerModelChoice> {
 	const requested = opts.requested?.trim();
@@ -158,6 +158,23 @@ export async function chooseWorkerModel(
 			};
 		}
 		return { spec: requested };
+	}
+
+	// A role's catalog CLASS (`tier:` frontmatter): the catalog's mode with that
+	// key when this machine can run it. Otherwise the ordinary delegation lane,
+	// SAID — a review that quietly ran on the cheap lane is the failure the tier
+	// exists to prevent, so the caller must be able to see it happened.
+	const tier = opts.tier?.trim();
+	if (tier && env) {
+		const mode = (await safeCatalog(env)).find((m) => m?.key === tier && typeof m.model === "string" && m.model.includes("/"));
+		if (mode && configured(mode.model)) return { spec: mode.model };
+		const lane = await chooseWorkerModel({ preferred: opts.preferred, roleName: opts.roleName }, env);
+		if (lane.refusal) return lane;
+		const why = mode
+			? `the catalog's "${tier}" mode (${mode.model}) is not configured on this machine`
+			: `the Hive catalog offers no "${tier}" mode here (or could not be read)`;
+		const ranOn = lane.spec ?? "pi's default model";
+		return { spec: lane.spec, note: `role "${opts.roleName}" asks for the "${tier}" class, but ${why}; it ran on ${ranOn}.${lane.note ? ` ${lane.note}` : ""}` };
 	}
 
 	const preferred = opts.preferred?.trim() || undefined;

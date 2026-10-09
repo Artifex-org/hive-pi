@@ -29,6 +29,61 @@
  * `what` a schema field makes this a tool.
  */
 
+/**
+ * The tool's contract, shared by pi's `hive_watch_run` (background/index.ts)
+ * and the Claude adapter's (claude/mcp/watch-run-tool.ts): one wording, so the
+ * two harnesses cannot drift into describing different tools.
+ */
+export const WATCH_RUN_DESCRIPTION =
+	"Watch a Hive CI run to completion in the background and return immediately. Use this INSTEAD of " +
+	"calling wait_for_run repeatedly: wait_for_run is a request with a timeout, so a run longer than " +
+	"that timeout costs you one turn and one full duplicate result per re-call. This is a stream — it " +
+	"ends when the run ends, and you are told once, with the run's own verdict. Carry on with " +
+	"something else meanwhile; use get_run or explain_failure when you actually need a detail.";
+
+export const WATCH_RUN_GUIDELINE =
+	"If you find yourself calling wait_for_run a second time on the same run, stop and use " +
+	"hive_watch_run instead — every further re-call costs a turn and a duplicate result for no new information.";
+
+export const WATCH_RUN_PARAMS = {
+	run: "The run's UUID, or the #N shown in the Hive UI and in `hive runs`.",
+	what:
+		"A short human-readable description, e.g. 'waiting for the Borealis ci gate'. " +
+		"Shown to the person watching instead of a bare command line.",
+	project: "Project, to disambiguate a run NUMBER (numbers are per pipeline).",
+	pipeline: "Pipeline, to further disambiguate a run number.",
+	timeout_seconds: "Wall-clock limit. Default 1800 (30 min), maximum 14400 (4 h).",
+} as const;
+
+export const WATCH_VERDICT_NOTE =
+	"The job's own outcome IS the run's verdict — `hive watch` exits with the run's result — so a " +
+	"`done` completion means the run passed and `failed` means it did not.";
+
+/** How long a run-number lookup may take before we stop waiting on it. */
+const RESOLVE_TIMEOUT_MS = 5_000;
+
+/**
+ * One bounded GET, and it never throws.
+ *
+ * Bounded because this sits in front of starting a job: a hung lookup would
+ * turn "return immediately" — the entire point of the tool — into a stall, and
+ * a tool that blocks while promising not to is worse than one that fails.
+ */
+export async function fetchRunJSON(url: string, headers: Record<string, string>): Promise<{ ok: boolean; status: number; body: unknown }> {
+	try {
+		const res = await fetch(url, { headers, signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS) });
+		let body: unknown = null;
+		try {
+			body = await res.json();
+		} catch {
+			/* a non-JSON body is an error body; `ok` already carries the verdict */
+		}
+		return { ok: res.ok, status: res.status, body };
+	} catch {
+		return { ok: false, status: 0, body: null };
+	}
+}
+
 /** A run reference is either the UUID or the `#N` every human-facing surface shows. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

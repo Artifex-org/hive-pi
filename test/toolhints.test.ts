@@ -420,3 +420,28 @@ describe("the remote half of the branch collision", () => {
 		expect(matchHint("bash", rejected)?.id).toBe("git-branch-ref-collision-remote");
 	});
 });
+
+describe("the unix-socket sandbox refusal (HIV-3802 eval)", () => {
+	// Verbatim from the eval: Node from the pi arm, Go from the Claude arm.
+	const NODE =
+		"Error: listen EPERM: operation not permitted /tmp/hc-simple.sock\n    at Server.setupListenHandle [as _listen2] (node:net:2145:21)";
+	const GO =
+		"--- FAIL: TestLinearWriteBudgetIsConsumedAndThenRefuses (0.00s)\n" +
+		"    hivecap_linear_test.go:46: listen on Hive capability socket: listen unix /tmp/claude/factory-hive-capability-2618847105/capability.sock: socket: operation not permitted";
+
+	it("names the sandbox and the fleet path for Node's and Go's spelling", () => {
+		for (const text of [NODE, GO, "Error: connect EPERM /run/user/1000/hive-recovery.sock"]) {
+			const hint = matchHint("bash", text);
+			expect(hint?.id, text).toBe("unix-socket-refused");
+			expect(hint?.hint).toMatch(/quality_gate/);
+			expect(hint?.hint).toMatch(/hive check --step/);
+		}
+		expect(matchHint("background_bash", GO)?.id).toBe("unix-socket-refused");
+	});
+
+	it("stays silent on a TCP bind refusal and on prose about sockets", () => {
+		expect(matchHint("bash", "Error: listen EPERM: operation not permitted 0.0.0.0:80")).toBeNull();
+		expect(matchHint("bash", "listen tcp 127.0.0.1:80: bind: permission denied")).toBeNull();
+		expect(matchHint("bash", "the tests listen on a unix socket and may need EPERM handling")).toBeNull();
+	});
+});
