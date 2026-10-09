@@ -85,7 +85,7 @@ function str(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-export async function startWatchRun(args: Record<string, unknown>, host: WatchHost, announcementSignal?: AbortSignal): Promise<ToolResult> {
+export async function startWatchRun(args: Record<string, unknown>, host: WatchHost): Promise<ToolResult> {
 	const run = str(args.run);
 	const what = str(args.what);
 	if (!run) return { text: "`run` is required: the run's UUID or the #N shown in the Hive UI.", isError: true };
@@ -118,19 +118,10 @@ export async function startWatchRun(args: Record<string, unknown>, host: WatchHo
 		return { text: `Already running ${host.jobs.size} hive-pi background jobs (the limit). Wait for one to finish, or background_cancel one.`, isError: true };
 	}
 
-	if (announcementSignal?.aborted) return { text: "Request cancelled before watch registration; the fleet run is untouched.", isError: true };
-	// The gate's response is the announcement. If MCP suppresses that response,
-	// release the local watcher (never the fleet run) and emit no orphan wake.
-	let id = "";
-	const unannounced = () => host.jobs.cancel(id);
-	id = host.jobs.start(async (signal, jobId) => {
-		try {
-			const text = await watchToEnd({ uuid, what, jobId, timeoutMs, signal, cwd: host.cwd, env: host.env ?? process.env, deps });
-			if (!announcementSignal?.aborted) host.spool.wake(jobId, text);
-		} finally { announcementSignal?.removeEventListener("abort", unannounced); }
+	const id = host.jobs.start(async (signal, jobId) => {
+		const text = await watchToEnd({ uuid, what, jobId, timeoutMs, signal, cwd: host.cwd, env: host.env ?? process.env, deps });
+		host.spool.wake(jobId, text);
 	}, "watch");
-	if (announcementSignal?.aborted) unannounced();
-	else announcementSignal?.addEventListener("abort", unannounced, { once: true });
 	return {
 		// The `hive-pi-job:` line is the driver's handshake: it delivers a wake
 		// only for a job id it saw announced in a tool result.

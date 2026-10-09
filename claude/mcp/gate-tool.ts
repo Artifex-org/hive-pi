@@ -126,12 +126,13 @@ export function parseGateParams(args: Record<string, unknown>): QualityGateParam
 	return params;
 }
 
-export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal, watchRun?: (run: string, cwd: string, announcementSignal: AbortSignal) => Promise<{ text: string; isError?: boolean }>): Promise<ToolResult> {
-	// MCP suppresses the response to a cancelled request. Its job announcement
-	// could never reach the driver, so do not start an unannounceable watch.
-	const host: GateHost = { ...nodeGateHost, watchRun: watchRun ? (run, watchCwd) => signal.aborted
-		? Promise.resolve({ text: "The MCP request was cancelled; no background watch was started. The fleet run is not cancelled.", isError: true })
-		: watchRun(run, watchCwd, signal) : undefined };
+export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal): Promise<ToolResult> {
+	// The driver's announcement allowlist accepts hive_watch_run, not
+	// quality_gate. Do not create a job whose verdict wake would be dropped.
+	const host: GateHost = { ...nodeGateHost, watchRun: async () => ({
+		text: "Claude's driver requires a separate hive_watch_run call to announce the job. Call that tool with the run reference above for one background verdict wake.",
+		isError: true,
+	}) };
 	const result = await runQualityGate(host, parseGateParams(args), cwd, signal);
 	const first = result.content[0];
 	return { text: first && first.type === "text" ? first.text : "quality_gate produced no report." };

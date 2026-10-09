@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runToolCall, type AgentTool } from "@earendil-works/pi-agent-core";
 import gate from "../extensions/gate/index.ts";
 import background from "../extensions/background/index.ts";
+import { runGateTool } from "../claude/mcp/gate-tool.ts";
 import type { HiveTask } from "../extensions/gate/hivecheck.ts";
 import { createFakePi } from "./fake-pi.ts";
 
@@ -79,6 +80,19 @@ async function verdict(pi: ReturnType<typeof createFakePi>) {
 }
 
 describe("quality_gate foreground handoff", () => {
+	it("returns an explicit Claude watcher call without creating an unannounceable job", async () => {
+		vi.useFakeTimers();
+		const result = runGateTool({ only: "test" }, dir, new AbortController().signal);
+		await vi.waitFor(() => expect(api.request).toHaveBeenCalled());
+		await vi.advanceTimersByTimeAsync(120_000);
+		const output = await result;
+		expect(output.text).toContain(REF.id);
+		expect(output.text).toContain("requires a separate hive_watch_run call");
+		expect(output.text).toContain("No background watch was started");
+		expect(output.text).not.toContain("hive-pi-job:");
+		expect(api.request.mock.calls.some((args) => String(args[2]).endsWith("/cancel"))).toBe(false);
+	});
+
 	it("returns at the bound, never cancels running work, and sends exactly one verdict wake", async () => {
 		const s = await start();
 		await vi.advanceTimersByTimeAsync(120_000);
