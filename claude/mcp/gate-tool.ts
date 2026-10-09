@@ -141,6 +141,9 @@ export async function runGateTool(args: Record<string, unknown>, cwd: string, si
 	const first = result.content[0];
 	const report = first && first.type === "text" ? first.text : "quality_gate produced no report.";
 	// MCP drops cancelled responses; retain their run reference before returning.
-	if (stateDir) writeJsonAtomic(join(stateDir, "quality-gate-reports", `${Date.now()}-${randomUUID()}.json`), { cwd, report });
+	if (stateDir) {
+		try { writeJsonAtomic(join(stateDir, "quality-gate-reports", `${Date.now()}-${randomUUID()}.json`), { cwd, report }); }
+		catch (error) { return { text: `${report}\n\nCould not retain the gate report in session state: ${String(error)}. Save the run reference above before proceeding.`, isError: true }; }
+	}
 	return { text: report };
 }

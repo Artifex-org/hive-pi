@@ -17,9 +17,9 @@ export interface CallerSite { symbol: string; path: string; line: number; }
 export interface CallerInventory { sites: CallerSite[]; notes: string[]; }
 export type CallerGrep = (symbol: string, repo: string, timeoutMs: number) => { text: string; incomplete?: string };
 
-/** Declarations only: Go exported functions/methods, JS/TS exports, public Rust/Python functions. */
+/** Declarations only: Go functions/methods, JS/TS exports, public Rust/Python functions. */
 function functionName(line: string): string | undefined {
-	return /^\s*func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)\s*[(\[]/.exec(line)?.[1]
+	return /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[(\[]/.exec(line)?.[1]
 		?? /^\s*export\s+(?:default\s+)?(?:async\s+)?function\s+([\w$]+)\s*[(<]/.exec(line)?.[1]
 		?? /^\s*export\s+(?:const|let)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:<[^;]{1,256}>\s*)?(?:function\b|(?:\([^)]*\)|[\w$]+)\s*(?::[^=]*)?=>)/.exec(line)?.[1]
 		?? /^\s*(?:pub(?:\([^)]*\))?\s+(?:async\s+)?fn|(?:async\s+)?def)\s+([A-Za-z]\w*)\s*[(<]/.exec(line)?.[1]

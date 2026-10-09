@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runToolCall, type AgentTool } from "@earendil-works/pi-agent-core";
 import gate from "../extensions/gate/index.ts";
 import background from "../extensions/background/index.ts";
+import * as claudeState from "../claude/state.ts";
 import { runGateTool } from "../claude/mcp/gate-tool.ts";
 import type { HiveTask } from "../extensions/gate/hivecheck.ts";
 import { createFakePi } from "./fake-pi.ts";
@@ -93,6 +94,19 @@ describe("quality_gate foreground handoff", () => {
 		expect(api.request.mock.calls.some((args) => String(args[2]).endsWith("/cancel"))).toBe(false);
 	});
 
+	it("retains the run reference in the response when Claude recovery storage fails", async () => {
+		vi.useFakeTimers();
+		const write = vi.spyOn(claudeState, "writeJsonAtomic").mockImplementation(() => { throw new Error("ENOSPC"); });
+		try {
+			const result = runGateTool({ only: "test" }, dir, new AbortController().signal, dir);
+			await vi.waitFor(() => expect(api.request).toHaveBeenCalled());
+			await vi.advanceTimersByTimeAsync(120_000);
+			const output = await result;
+			expect(output.isError).toBe(true); expect(output.text).toContain(REF.id);
+			expect(output.text).toContain("NOT cancelled"); expect(output.text).toContain("Could not retain the gate report");
+			expect(output.text).toContain("ENOSPC");
+		} finally { write.mockRestore(); }
+	});
 	it("returns at the bound, never cancels running work, and sends exactly one verdict wake", async () => {
 		const s = await start();
 		await vi.advanceTimersByTimeAsync(120_000);

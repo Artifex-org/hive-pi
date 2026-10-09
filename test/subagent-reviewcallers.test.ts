@@ -67,6 +67,12 @@ describe("caller-aware review scope", () => {
 		writeFileSync(join(repo, "api.ts"), body + "    throw new Error();\n  }\n}\n"); git("add", "."); git("commit", "-m", "method contract");
 		expect(withReviewCallers(captureDeliveryDiff(repo)!).callers?.sites).toEqual([{ symbol: "fetch", path: "caller.ts", line: 1 }]);
 	});
+	it("discovers cross-file package-local Go callers after a body-only change", () => {
+		const local = "func parseToken() error {\n" + " // unchanged\n".repeat(12) + " panic(err)\n}\n";
+		const changed = "--- a/api.go\n+++ b/api.go\n@@ -14 +14 @@\n- return err\n+ panic(err)\n";
+		expect(discoverCallers("/repo", changed, ["api.go"], () => ({ text: "caller.go:3: parseToken()" }), () => local).sites)
+			.toEqual([{ symbol: "parseToken", path: "caller.go", line: 3 }]);
+	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
@@ -110,7 +116,7 @@ describe("caller-aware review scope", () => {
 	});
 	it("recognises Go methods, TS exports and Python functions but not call expressions", () => {
 		const p = ["--- a/x.ts", "+++ b/x.ts", "@@ -1 +1 @@", "-export function Fetch() {}", "+export async function Fetch() { return 1; }", "+obj.Unrelated()", "+func (c *Client) PullFiles() error {", "+def fetch_data():", "+func private() {}", "+export const CONSTANT = 1;", "+export const arrow = (x) => x;"].join("\n");
-		expect(changedFunctionNames(p, () => "").names).toEqual(["Fetch", "PullFiles", "fetch_data", "arrow"]);
+		expect(changedFunctionNames(p, () => "").names).toEqual(["Fetch", "PullFiles", "fetch_data", "private", "arrow"]);
 	});
 	it("caps symbols, source files, call sites and per-grep output, and reports the limits", () => {
 		const wide = Array.from({ length: CALLER_FILE_CAP + 4 }, (_, n) => `--- a/f${n}.go\n+++ b/f${n}.go\n@@ -1 +1 @@\n-old\n+new`).join("\n");
