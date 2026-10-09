@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -95,6 +95,17 @@ describe("caller-aware review scope", () => {
 		const generator = "--- a/api.ts\n+++ b/api.ts\n@@ -1 +1 @@\n-export function* records() {}\n+export function* records() { yield 1; }\n";
 		expect(changedFunctionNames(generator, () => "").names).toEqual(["records"]);
 	});
+	it("rejects symlinked special files without a blocking or unbounded read", () => {
+		const repo = mkdtempSync(join(tmpdir(), "special-callers-")); dirs.push(repo);
+		symlinkSync("/dev/zero", join(repo, "api.ts"));
+		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -1 +1 @@\n-old\n+new";
+		expect(discoverCallers(repo, changed, ["api.ts"]).notes.join(" ")).toContain("Could not scan api.ts");
+	});
+	it("keeps caller-only outline entries out of the existing symbol-list workflow", () => {
+		const source = "class Client {\n  fetch(\n    options: string,\n  ) {\n    return options;\n  }\n}\n";
+		expect(lensSymbols.listSymbols(source, "api.ts").some((s) => s.signature.startsWith("fetch"))).toBe(false);
+		expect(lensSymbols.listSymbols(source, "api.ts", 65, undefined, true).some((s) => s.signature.startsWith("fetch"))).toBe(true);
+	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
@@ -179,7 +190,7 @@ describe("caller-aware review scope", () => {
 			try {
 				const result = changedFunctionNames(changed, () => dense);
 				expect(scan).not.toHaveBeenCalled();
-				expect(outline).toHaveBeenCalledExactlyOnceWith(dense, "dense.ts", CALLER_DECLARATION_CAP + 1, expect.any(Function));
+				expect(outline).toHaveBeenCalledExactlyOnceWith(dense, "dense.ts", CALLER_DECLARATION_CAP + 1, expect.any(Function), true);
 				expect(outline.mock.results[0].value).toHaveLength(CALLER_DECLARATION_CAP + 1);
 				expect(result.notes.join(" ")).toContain(`capped at ${CALLER_DECLARATION_CAP} declarations`);
 			} finally { scan.mockRestore(); outline.mockRestore(); }

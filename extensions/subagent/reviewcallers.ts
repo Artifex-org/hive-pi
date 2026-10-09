@@ -1,6 +1,6 @@
 /** Bounded textual caller inventory, not a language-server reference index. */
 import { execFileSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
 import { resolve } from "node:path";
 import { listSymbols } from "../lens/symbols.ts";
 
@@ -67,7 +67,7 @@ export function changedFunctionNames(patch: string, readSource: (path: string, r
 		if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
 		const sourceLines = source.split("\n");
 		let candidateCap = false;
-		const outline = listSymbols(source, file, CALLER_DECLARATION_CAP + 1, () => { candidateCap = true; });
+		const outline = listSymbols(source, file, CALLER_DECLARATION_CAP + 1, () => { candidateCap = true; }, true);
 		if (candidateCap || outline.length > CALLER_DECLARATION_CAP) notes.push(`Source outline for ${file} capped at ${CALLER_DECLARATION_CAP} declarations/candidates.`);
 		// A single bounded outline, not repeated whole-file span scans. Windows
 		// extend to the next top-level declaration, conservatively including
@@ -116,8 +116,20 @@ export function discoverCallers(repo: string, patch: string, changedPaths: reado
 			cwd: repo, encoding: "utf8", timeout: 300, maxBuffer: CALLER_SOURCE_BYTES, stdio: ["ignore", "pipe", "ignore"],
 		});
 		const absolute = resolve(repo, file);
-		if (!absolute.startsWith(`${resolve(repo)}/`) || statSync(absolute).size > CALLER_SOURCE_BYTES) return null;
-		return readFileSync(absolute, "utf8");
+		if (!absolute.startsWith(`${resolve(repo)}/`) || !lstatSync(absolute).isFile()) return null;
+		const fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		try {
+			const stat = fstatSync(fd);
+			if (!stat.isFile() || stat.size > CALLER_SOURCE_BYTES) return null;
+			const bytes = Buffer.alloc(CALLER_SOURCE_BYTES + 1);
+			let count = 0;
+			while (count < bytes.length) {
+				const n = readSync(fd, bytes, count, bytes.length - count, null);
+				if (n === 0) break;
+				count += n;
+			}
+			return count > CALLER_SOURCE_BYTES ? null : bytes.subarray(0, count).toString("utf8");
+		} finally { closeSync(fd); }
 	} catch { return null; } // explicitly reported by changedFunctionNames
 }): CallerInventory {
 	const deadline = Date.now() + CALLER_SEARCH_MS;
