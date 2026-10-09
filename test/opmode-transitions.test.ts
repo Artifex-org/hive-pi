@@ -25,7 +25,7 @@ afterEach(() => setHouseProfileForTest(null));
 
 import opmodeExtension from "../extensions/opmode/index.ts";
 import planExtension from "../extensions/plan/index.ts";
-import { createFakePi, type FakePi } from "./fake-pi.ts";
+import { createFakePi, scopedExtensionApi, type FakePi } from "./fake-pi.ts";
 
 /** The tools whose presence the assertions turn on, plus a couple of readers. */
 const TOOLS = [
@@ -42,7 +42,7 @@ const TOOLS = [
 	"orchestrate",
 ];
 
-async function boot(): Promise<FakePi> {
+async function boot(startInPlan = false, planFirst = true, flags: Record<string, unknown> = {}): Promise<FakePi> {
 	const pi = createFakePi();
 	for (const name of TOOLS) {
 		pi.api.registerTool({
@@ -53,9 +53,10 @@ async function boot(): Promise<FakePi> {
 			execute: async () => ({ content: [], details: {} }),
 		} as never);
 	}
-	// Load order mirrors production: both are plain extensions on one bus.
-	planExtension(pi.api);
-	opmodeExtension(pi.api);
+	// Production discovers opmode before plan; exercise either load order.
+	for (const extension of planFirst ? [planExtension, opmodeExtension] : [opmodeExtension, planExtension]) extension(scopedExtensionApi(pi));
+	if (startInPlan) pi.flags.set("op-mode", "plan");
+	for (const [name, value] of Object.entries(flags)) pi.flags.set(name, value);
 	await pi.emit({ type: "session_start", reason: "startup" });
 	return pi;
 }
@@ -175,6 +176,35 @@ describe("tool-set ownership across mode transitions", () => {
 });
 
 describe("the two extensions agree about the plan posture", () => {
+	it.each([true, false])("enforces --op-mode plan at startup (planFirst=%s)", async (planFirst) => {
+		const pi = await boot(true, planFirst);
+		// bindExtensions can re-emit startup for the same session without shutdown.
+		await pi.emit({ type: "session_start", reason: "startup" });
+		const repeated = await pi.emit({ type: "tool_call", toolName: "write", input: {} });
+		expect(repeated.some(v => (v as { block?: boolean } | undefined)?.block)).toBe(true);
+		// Also check a new session identity, with no state restored.
+		await pi.emit({ type: "session_start", reason: "new" }, { sessionId: "second-session" });
+		const verdicts = await pi.emit({ type: "tool_call", toolName: "write", input: { path: "src/new.ts", content: "x" } });
+		expect(verdicts.some((v) => (v as { block?: boolean } | undefined)?.block)).toBe(true);
+		await pi.runCommand("plan", "exit");
+		for (const name of TOOLS) expect(active(pi).has(name)).toBe(true);
+	});
+
+	it.each([true, false])("resolves legacy --plan and explicit posture consistently (planFirst=%s)", async (planFirst) => {
+		for (const [flags, expected] of [
+			[{ plan: true }, "plan"],
+			[{ plan: true, "op-mode": "build" }, "build"],
+			[{ plan: true, "op-mode": "invalid" }, "plan"],
+			[{}, "build"],
+		] as const) {
+			const pi = await boot(false, planFirst, flags);
+			const modes = pi.busEvents.filter(e => e.name === "hive.opmode.state");
+			expect((modes.at(-1)?.payload as { mode: string }).mode).toBe(expected);
+			const verdicts = await pi.emit({ type: "tool_call", toolName: "write", input: {} });
+			expect(verdicts.some(v => (v as { block?: boolean } | undefined)?.block)).toBe(expected === "plan");
+		}
+	});
+
 	// The hole PLAN_MODE_STATE_CHANNEL closes: without the feedback, opmode would
 	// keep reporting `plan` — and the Hive workspace would keep showing a
 	// read-only session — after the enforcement had been switched off.

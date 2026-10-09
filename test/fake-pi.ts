@@ -221,6 +221,19 @@ export interface FakePi {
 	activeToolsHistory: string[][];
 }
 
+/** Match pi loader.ts: getFlag sees only flags registered by this extension. */
+export function scopedExtensionApi(fake: FakePi): ExtensionAPI {
+	const ownedFlags = new Set<string>();
+	return {
+		...fake.api,
+		registerFlag(name, options) {
+			ownedFlags.add(name);
+			fake.api.registerFlag(name, options);
+		},
+		getFlag: name => ownedFlags.has(name) ? fake.api.getFlag(name) : undefined,
+	};
+}
+
 /** pi's literal stale-context message — matched by extensions that guard on it. */
 export const STALE_CTX_MESSAGE = "extension ctx is stale";
 

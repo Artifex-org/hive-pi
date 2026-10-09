@@ -395,6 +395,8 @@ export default function (pi: ExtensionAPI) {
 	 * notify through. Goes stale on session replacement; every use is guarded.
 	 */
 	let heldCtx: ExtensionContext | null = null;
+	let initializedSessionId: string | null = null;
+	let startupRequest: PlanControlEvent | null = null;
 	/** Which branch the document in `doc` was built from — see the re-derive handler. */
 	const branchWatch = createBranchWatch();
 
@@ -1343,11 +1345,29 @@ export default function (pi: ExtensionAPI) {
 	/* Lifecycle                                                               */
 	/* ---------------------------------------------------------------------- */
 
+	// Startup is a rendezvous, not a timed retry: either extension may initialize
+	// first, but a launch request must never be erased by our later reset.
+	const applyStartup = (action: PlanControlEvent["action"]) => {
+		active = action === "enter" || (action === "sync" && pi.getFlag("plan") === true);
+		if (active) narrowTools();
+		else restoreTools();
+		paint();
+		announceMode();
+	};
+
 	// The conductor's doorbell: enter plan mode without a typed command. A
 	// no-op when the mode is already active, so a user-typed `/plan` and a
 	// conductor request cannot fight.
 	pi.events.on(PLAN_CONTROL_CHANNEL, (payload) => {
 		const event = payload as PlanControlEvent | undefined;
+		if (event?.startupSessionId) {
+			if (!["enter", "exit", "sync"].includes(event.action)) return;
+			// Retain launch intent even when applied immediately: bindExtensions may
+			// emit startup again for the SAME session without a shutdown in between.
+			startupRequest = event;
+			if (event.startupSessionId === initializedSessionId) applyStartup(event.action);
+			return;
+		}
 		// `exit` arrives when the operating-mode axis leaves the plan posture
 		// (opmode delegates that posture here rather than running a second
 		// read-only gate). A no-op when the mode is already off, symmetrically
@@ -1464,15 +1484,19 @@ export default function (pi: ExtensionAPI) {
 		paint();
 	});
 
-	// `--plan` is honoured once, on the first session build. Doing it here rather
-	// than in the factory means `pi.getAllTools()` sees the full registry —
-	// including tools other extensions register after us.
+	// Apply only after our reset and with the complete tool registry. Opmode's
+	// explicit launch mode wins over --plan, without cross-extension flag reads.
 	pi.on("session_start", (_event, ctx) => {
-		if (pi.getFlag("plan") !== true || active) return;
-		active = true;
-		narrowTools();
-		paint();
-		announceMode();
+		initializedSessionId = ctx.sessionManager.getSessionId();
+		if (startupRequest?.startupSessionId !== initializedSessionId) startupRequest = null;
+		applyStartup(startupRequest?.action ?? "sync");
+	});
+	pi.on("session_shutdown", () => {
+		// Reload preserves the old runtime's active loadout. Restore our snapshot
+		// while it is still live, before a fresh plan owner snapshots it again.
+		restoreTools();
+		initializedSessionId = null;
+		startupRequest = null;
 	});
 
 	/* ---------------------------------------------------------------------- */
