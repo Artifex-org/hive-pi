@@ -76,7 +76,8 @@ export function keyCodes(code: string | undefined): { windowsVirtualKeyCode?: nu
 /** Any character that is not a C0 control or DEL: text that could be a secret. */
 const PRINTABLE = /[^\u0000-\u001f\u007f]/;
 
-export type SurfaceCommandError = "password_field" | "invalid" | "failed" | "no_operator_tab" | "no_lease";
+export type SurfaceCommandError =
+  | "password_field" | "invalid" | "failed" | "no_operator_tab" | "no_lease" | "take_over_required";
 
 export interface SurfaceLease {
   id: string;
@@ -813,12 +814,21 @@ export class BrowserSurfaceBridge {
 
   private async runCommand(raw: unknown): Promise<void> {
     if (this.stopped) return;
-    const checked = checkSurfaceCommand(raw, readLease(this.config));
+    const lease = readLease(this.config);
+    const checked = checkSurfaceCommand(raw, lease);
     if (!checked.ok) {
       if (checked.id) this.writeResult(checked.id, checked.error);
       return;
     }
     const command = checked.command;
+    // A remote operator's shared lease ("own tab") may open and switch tabs,
+    // but drives the agent's own page only by taking it over, which pauses
+    // the agent. Enforced here, where the view is known, not in a viewer. The
+    // desktop app's lease (no holder) keeps driving the agent page as before.
+    if (command.kind !== "tab" && lease?.holder === "relay" && lease.exclusive !== true && this.inputTarget() === this.agent) {
+      this.writeResult(command.id, "take_over_required");
+      return;
+    }
     let dispatched: Dispatched;
     try {
       dispatched = await withTimeout(this.dispatch(command), COMMAND_TIMEOUT_MS, command.kind);
@@ -899,7 +909,9 @@ export class BrowserSurfaceBridge {
    * page that cannot answer (mid-navigation) refuses rather than guesses.
    */
   private async refuseIntoPassword(target: SurfaceTarget): Promise<void> {
-    const frames = target.page.frames().slice(0, MAX_FRAMES_CHECKED);
+    // Past the cap a password field could sit in a frame nobody asked: refuse.
+    if (target.page.frames().length > MAX_FRAMES_CHECKED) throw new SurfaceRefusal("password_field");
+    const frames = target.page.frames();
     const main = target.page.mainFrame();
     const answers = await withTimeout(
       Promise.all(frames.map((frame) =>

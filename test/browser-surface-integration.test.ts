@@ -91,12 +91,14 @@ describe.skipIf(!enabled)("browser surface FIFO integration", () => {
 	const leaseID = "relay-browser-surface-it-0123";
 	let commandSeq = 0;
 
-	function writeLease(fields: { exclusive?: boolean; expires_at?: number } = {}): void {
+	// Without a holder this is the desktop app's lease, which drives the agent
+	// page directly; a remote operator's lease names holder "relay".
+	function writeLease(fields: { exclusive?: boolean; expires_at?: number; holder?: string } = {}): void {
 		const lease = {
 			id: leaseID,
 			generation,
 			expires_at: fields.expires_at ?? Date.now() + 60_000,
-			holder: "relay",
+			...(fields.holder ? { holder: fields.holder } : {}),
 			...(fields.exclusive ? { exclusive: true } : {}),
 		};
 		fs.writeFileSync(path.join(dir, "lease.json"), JSON.stringify(lease), { mode: 0o600 });
@@ -251,6 +253,17 @@ describe.skipIf(!enabled)("browser surface FIFO integration", () => {
 		expect(await run({ kind: "key", event_type: "keyUp", key: "Shift", code: "ShiftLeft" })).toMatchObject({ ok: true });
 		expect(await page.inputValue("#p")).toBe("");
 		await page.focus("#t");
+	}, 30_000);
+
+	it("a remote operator's shared lease drives only its own tab; the agent page needs a take-over", async () => {
+		writeLease({ holder: "relay" });
+		expect(await run({ kind: "navigate", url: `${base}/next` })).toMatchObject({ ok: false, error: "take_over_required" });
+		expect(await run({ kind: "insert_text", text: "x" })).toMatchObject({ ok: false, error: "take_over_required" });
+		expect(await run({ kind: "tab", action: "open", url: `${base}/op` })).toMatchObject({ ok: true });
+		expect(await run({ kind: "history", action: "reload" })).toMatchObject({ ok: true });
+		expect(await run({ kind: "tab", action: "close" })).toMatchObject({ ok: true });
+		expect(page.url()).toBe(`${base}/`);
+		writeLease();
 	}, 30_000);
 
 	it("opens, views and closes an operator tab in the agent's context; the screencast follows the view", async () => {
