@@ -71,12 +71,22 @@ export function changedFunctionNames(patch: string, readSource: (path: string, r
 		// A single bounded outline, not repeated whole-file span scans. Windows
 		// extend to the next top-level declaration, conservatively including
 		// later members/nested functions rather than trusting parsed body ends.
+		const candidates: { name: string; line: number; endLine: number }[] = [];
 		for (const [index, declaration] of outline.slice(0, CALLER_DECLARATION_CAP).entries()) {
 			if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
 			const name = functionName(sourceLines.slice(declaration.line - 1, declaration.line + 7).join("\n"));
 			if (!name) continue;
 			const endLine = outline.slice(index + 1).find((next) => next.depth === 0)?.line ?? sourceLines.length + 1;
-			if (hunks.some((h) => h.start < endLine && h.end >= declaration.line)) names.add(name);
+			if (hunks.some((h) => h.start < endLine && h.end >= declaration.line)) candidates.push({ name, line: declaration.line, endLine });
+		}
+		// Conservative windows overlap. Preserve each hunk's closest declaration
+		// before older, potentially unrelated members can spend the symbol budget.
+		for (const hunk of hunks) {
+			const nearest = candidates.filter((c) => hunk.start < c.endLine && hunk.end >= c.line).sort((a, b) => b.line - a.line)[0];
+			if (nearest) names.add(nearest.name);
+		}
+		for (const candidate of candidates.sort((a, b) => b.line - a.line)) {
+			names.add(candidate.name);
 			if (names.size > CALLER_SYMBOL_CAP) break;
 		}
 		if (names.size > CALLER_SYMBOL_CAP) break;

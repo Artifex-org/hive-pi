@@ -98,6 +98,14 @@ describe("caller-aware review scope", () => {
 		expect(discoverCallers("/repo", changed, ["api.rs"], grep, () => rust).sites).toEqual([{ symbol: "fetch", path: "client.rs", line: 4 }]);
 		expect(grep).toHaveBeenCalledWith("fetch", "/repo", expect.any(Number));
 	});
+	it("prioritizes a changed final method before conservative earlier windows spend the symbol cap", () => {
+		const rust = "impl Client {\n" + Array.from({ length: 18 }, (_, n) => `    pub fn fetch${n}(&self) {\n${"        // unchanged\n".repeat(12)}        ${n === 17 ? "changed();" : "unchanged();"}\n    }\n`).join("") + "}\n";
+		const line = rust.split("\n").findIndex((row) => row.includes("changed();") && !row.includes("unchanged();")) + 1;
+		const changed = `--- a/api.rs\n+++ b/api.rs\n@@ -${line} +${line} @@ impl Client {\n-        unchanged();\n+        changed();\n`;
+		const result = discoverCallers("/repo", changed, ["api.rs"], (symbol) => ({ text: symbol === "fetch17" ? "caller.rs:4: client.fetch17()" : "" }), () => rust);
+		expect(result.sites).toEqual([{ symbol: "fetch17", path: "caller.rs", line: 4 }]);
+		expect(result.notes.join(" ")).toContain(`capped at ${CALLER_SYMBOL_CAP} functions`);
+	});
 	it("discovers body-only Rust changes after a multiline where clause", () => {
 		const rust = "impl Client {\n    pub fn fetch<T>(&self, value: T) -> Result<T, Error>\n    where\n        T: Clone,\n    {\n" + "        // body\n".repeat(12) + "        Err(error)\n    }\n}\n";
 		const changed = "--- a/api.rs\n+++ b/api.rs\n@@ -18 +18 @@ impl Client {\n-        Ok(value)\n+        Err(error)\n";
