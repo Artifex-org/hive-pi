@@ -11,6 +11,7 @@ import {
 import {
 	ADVISE_LEDGER_ID,
 	createConductorPolicy,
+	createConductorAdvicePolicy,
 	describeConductor,
 	deriveGoalCondition,
 	FRAME_INJECTION,
@@ -227,15 +228,15 @@ describe("conductor policy", () => {
 		expect(policy.decide(contextWith(emptyLedger, open))).toBeNull();
 	});
 
-	it("execute → verify when every todo is closed, with a one-shot advisor nudge", async () => {
+	it("execute → verify when every todo is closed, without late advice", async () => {
 		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0));
 		const policy = createConductorPolicy(hooks);
 		const done = signalsWith({ tasks: { total: 3, pending: 0, inProgress: 0, completed: 3 } });
 		const work = policy.decide(contextWith(emptyLedger, done));
 		const outcome = await work!.run();
 		expect(item()?.stage).toBe("verify");
-		expect(outcome.inject).toContain("advisor");
-		expect(outcome.ledger).toBeDefined();
+		expect(outcome.inject).toBeUndefined();
+		expect(outcome.ledger).toBeUndefined();
 	});
 
 	it("execute → verify advances silently once the advisor nudge is spent", async () => {
@@ -249,6 +250,21 @@ describe("conductor policy", () => {
 		expect(outcome.inject).toBeUndefined();
 	});
 
+	it("nudges at the first milestone with an active goal and open todos, once per session", async () => {
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), { state: "active" } as GoalItem);
+		const policy = createConductorAdvicePolicy(hooks);
+		const open = signalsWith({ tasks: { total: 3, pending: 2, inProgress: 1, completed: 0 } });
+		expect(policy.decide(contextWith(emptyLedger, open))).toBeNull();
+		const milestone = { ...open, deliveryStarted: true };
+		const outcome = await policy.decide(contextWith(emptyLedger, milestone))!.run();
+		expect(outcome.inject).toContain("first commit or PR opening");
+		expect(item()?.stage).toBe("verify");
+		const ledger = outcome.ledger!(emptyLedger);
+		expect(policy.decide(contextWith(ledger, milestone))).toBeNull();
+		expect(createConductorPolicy(hooks).decide(contextWith(ledger, milestone))).toBeNull();
+		hooks.commit(withStage(item()!, "execute", 10));
+		expect(policy.decide(contextWith(ledger, milestone))).toBeNull();
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});
@@ -267,7 +283,7 @@ describe("conductor policy", () => {
 	it("verify with no prCheck hands over to consolidate with a skip metric", async () => {
 		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "verify", 0));
 		const policy = createConductorPolicy(hooks);
-		const work = policy.decide(contextWith(emptyLedger, signalsWith({})));
+		const work = policy.decide(contextWith(emptyLedger, signalsWith({ tasks: { total: 1, pending: 0, inProgress: 0, completed: 1 } })));
 		const outcome = await work!.run();
 		expect(outcome.metric.outcome).toBe("skip");
 		expect(outcome.inject).toBeUndefined();

@@ -141,7 +141,7 @@ export function suggestsHandoff(
 export const ADVISE_LEDGER_ID = "conductor:advise";
 
 export const ADVISE_INJECTION = [
-	"Conductor: the work looks complete. Before delivery checks, review any advisory composition lint returned by plan_ready;",
+	"Conductor: the first commit or PR opening marks execute→verify. Before continuing delivery, review any advisory composition lint returned by plan_ready;",
 	"this is the one execute→verify reminder, charged to the existing conductor:advise ledger.",
 	"If an `advisor` tool is available, call it once for a final review of this work — then address anything real it raises.",
 ].join(" ");
@@ -328,13 +328,21 @@ function decideExecute(hooks: ConductorHooks, context: PolicyContext, signals: S
 	// verdict is the completion signal and todo state is advisory.
 	const done = goal ? goalDone : allTasksDone(signals);
 	if (!done) return null;
-	// The execute→verify seam is the last settle where advice can still change
-	// the outcome cheaply — after verify the work is being judged, not shaped.
-	// One nudge, ever (HIV-1247); a rehydrated session at cap advances silently
-	// exactly as before.
-	if (atCap(context.ledger, ADVISE_LEDGER_ID, 1)) {
-		return silentAdvance(hooks, "verify");
-	}
+	return silentAdvance(hooks, "verify");
+}
+
+/** Early policy: run at the post-tool boundary and before the goal judge. */
+export function createConductorAdvicePolicy(hooks: ConductorHooks): Policy {
+	return { name: "conductor-advice", decide(context) {
+		const signals = context.signals;
+		if (!hooks.enabled() || !signals?.deliveryStarted || !signals.userTurns ||
+			atCap(context.ledger, ADVISE_LEDGER_ID, 1)) return null;
+		if (!hooks.current() && assessComplexity(signals.lastUserPrompt, signals.tasks.total) !== "complex") return null;
+		return adviceTransition(hooks);
+	} };
+}
+
+function adviceTransition(hooks: ConductorHooks): PolicyWork {
 	return {
 		name: "conductor",
 		status: "conductor: entering verify stage",
@@ -366,6 +374,10 @@ function decideExecute(hooks: ConductorHooks, context: PolicyContext, signals: S
  * harness checking at all, and get neither tier.
  */
 function decideVerify(hooks: ConductorHooks, context: PolicyContext): PolicyWork | null {
+	// Advice can move us here while CI/tasks remain open. Do not consolidate
+	// until the original completion contract is met.
+	const goal = hooks.goal();
+	if (goal ? goal.state !== "achieved" : !context.signals || !allTasksDone(context.signals)) return null;
 	const loaded = loadHarnessConfig(context.cwd);
 	const prCheck = loaded?.config.prCheck?.trim();
 	if (!loaded) {

@@ -21,6 +21,61 @@ function repo() {
 const substantive = Array.from({ length: 12 }, (_, i) => `export const n${i} = ${i};`).join("\n") + "\n";
 
 describe("delivery review", () => {
+	it.each([
+		"hive ship --no-pr && gh pr create",
+		"hive ship --no-pr && gh pr create --title 'review stamped'",
+		"HIVE_PRESIGN_REQUIRED=1 git push",
+		"git commit -m 'code && docs' && hive ship && git push",
+		"git status; FORCE_COLOR='1 2' HIVE_PRESIGN_REQUIRED=1 git push",
+	])("requires a matching review for %s", async command => {
+		const { cwd, git } = repo();
+		writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		vi.stubEnv("PI_DELIVERY_REVIEW", "1");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		const deliver = () => pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } });
+		const refused = (await deliver())[0] as { block: boolean; reason: string };
+		expect(refused.block).toBe(true);
+		expect(refused.reason).toContain("no matching completed foreground review");
+		expect(refused.reason).not.toContain("diff unavailable");
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await deliver())[0]).toBeUndefined();
+		writeFileSync(join(cwd, "code.ts"), substantive + "export const later = 1;\n"); git("add", ".");
+		expect((await deliver())[0]).toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
+	it("checks the last delivery first without hiding earlier unsupported pushes", () => {
+		expect(deliveryTargets("git -C /first push && cd /last && gh pr create", "/repo")).toEqual(["/last", "/first"]);
+		expect(deliveryTargets("git push other HEAD && gh pr create", "/repo")).toEqual(["/repo", null]);
+	});
+	it("does not authorize alternate configuration or ignored files staged by force", async () => {
+		const { cwd, git } = repo();
+		writeFileSync(join(cwd, ".gitignore"), "generated.ts\n"); git("add", "."); git("commit", "-m", "ignore");
+		writeFileSync(join(cwd, "generated.ts"), substantive);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		expect(needsDeliveryReview(captureDeliveryDiff(cwd)!)).toBe(false);
+		for (const command of ["git add -f generated.ts && git commit -m code && git push",
+			"git add --force generated.ts; hive ship", `git -C "${cwd}" add -f generated.ts && git push`,
+			"HOME=/other git push", "XDG_CONFIG_HOME=/other git push",
+			"git status > code.ts; git add code.ts; git commit -m code; git push",
+			'SETTING="$(echo changed >> code.ts)" git push',
+			'SETTING=$(echo changed >> code.ts) git push',
+			'git status "$(echo changed >> code.ts)" && git push']) {
+			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0])
+				.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		}
+	});
+	it("distinguishes unsupported shapes from an unavailable diff", async () => {
+		const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);
+		for (const command of ["git checkout work && git push", "git push other HEAD"]) {
+			const result = (await pi.emit({ type: "tool_call", toolName: "bash", input: { command } }))[0] as { reason: string };
+			expect(result.reason).toContain("Unsupported command shape:");
+			expect(result.reason).toContain("standalone");
+			expect(result.reason).not.toContain("diff unavailable");
+		}
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push" } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("Complete delivery diff unavailable") });
+	});
 	it("recognizes real delivery, not echo, status, dry runs, or PR reads", () => {
 		for (const c of ["git push -u origin HEAD", "git -C /repo push", "git push && gh pr create", "gh pr create --title 'change'", "git status\ngit push",  'gh pr create --body "$(cat body.md)"']) expect(deliveryCommand(c), c).toBe(true);
 		for (const c of ["echo 'git push'", "git push --dry-run", "git status", "gh pr view", "cat README.md", 'echo "git status\ngit push"']) expect(deliveryCommand(c), c).toBe(false);

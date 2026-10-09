@@ -106,6 +106,11 @@ describe("planSignalOf", () => {
 });
 
 describe("deriveSignals", () => {
+	it("reads session-wide delivery progress even after branch navigation", () => {
+		const milestone = { customType: "agenda-delivery-progress", data: { reached: true } };
+		expect(deriveSignals([milestone], []).deliveryStarted).toBe(true);
+		expect(deriveSignals([milestone], [milestone]).deliveryStarted).toBe(true);
+	});
 	it("takes the NEWEST user prompt and counts user turns", () => {
 		const branch = [
 			{ message: { role: "user", content: "first ask" } },

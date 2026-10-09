@@ -15,6 +15,7 @@
  */
 
 import { PLAN_ENTRY_TYPE, rehydratePlan, type PlanPhase } from "../plan/state.ts";
+import { DELIVERY_PROGRESS_ENTRY } from "./delivery-progress.ts";
 
 export interface TasksSignal {
 	total: number;
@@ -68,6 +69,8 @@ export interface ContextSignal {
 export interface SessionSignals {
 	tasks: TasksSignal;
 	plan: PlanSignal;
+	/** First successful commit or PR opening, persisted from tool evidence. */
+	deliveryStarted: boolean;
 	/** Window pressure, or an all-null signal when it could not be read. */
 	context: ContextSignal;
 	/**
@@ -93,6 +96,7 @@ export const emptyContextSignal: ContextSignal = { tokens: null, window: 0, perc
 export const emptySignals: SessionSignals = {
 	tasks: { total: 0, pending: 0, inProgress: 0, completed: 0 },
 	plan: { phase: null, revision: 0, stepCount: 0, goal: "" },
+	deliveryStarted: false,
 	context: emptyContextSignal,
 	lastUserPrompt: "",
 	userTurns: 0,
@@ -259,6 +263,7 @@ export function deriveSignals(
 	}
 
 	return {
+		deliveryStarted: entries.some(raw => (raw as RawEntry)?.customType === DELIVERY_PROGRESS_ENTRY),
 		tasks: tasksSignalOf(entries),
 		plan: planSignalOf(entries),
 		context: contextSignalOf(contextUsage),
