@@ -40,7 +40,7 @@ describe("delivery milestones", () => {
 			expect(pi.entries).toEqual([{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }]);
 		} finally { rmSync(cwd, { recursive: true, force: true }); }
 	});
-	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change", "git commit -q -m change && git push origin HEAD", "git commit -q -m change && echo done"])("observes %s only when HEAD actually changes", async command => {
+	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change", "git commit -q -m change && git push origin HEAD", "git commit -q -m change && echo done", "git commit -q -m change && git push origin HEAD\n"])("observes %s only when HEAD actually changes", async command => {
 		const pi = createFakePi(); let head = "old";
 		registerDeliveryProgress(pi.api, () => head);
 		const call = () => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "q", input: { command } });
@@ -59,6 +59,7 @@ describe("delivery milestones", () => {
 		["git commit -m change", "[work abc1234] change"],
 		["git commit -m change 2>&1", "[work abc1234] change"],
 		["gh pr create 2>&1", "https://github.com/owner/repo/pull/123"],
+		["gh pr create\n", "https://github.com/owner/repo/pull/123"],
 		["HIVE_PRESIGN_REQUIRED=1 git -C /repo commit -m change && false", "[work (root-commit) abc1234] change"],
 		["gh pr create", "https://github.com/owner/repo/pull/123"],
 		["gh pr create && echo done", "https://github.com/owner/repo/pull/123\ndone"],

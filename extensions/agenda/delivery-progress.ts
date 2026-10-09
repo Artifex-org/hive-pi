@@ -16,7 +16,7 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 	if (pipeline) return false; // the shell exit code may belong to cat, not the creator
 	// In an all-success && chain, successful tool completion also establishes
 	// the earlier creator succeeded. Do not infer that across ; or || recovery.
-	const allSuccessChain = !/[;\n]|\|\|/.test(command.replace(/'[^']*'|"[^"\\]*"/g, ""));
+	const allSuccessChain = !/[;\n]|\|\|/.test(command.trim().replace(/'[^']*'|"[^"\\]*"/g, ""));
 	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment, true);
 		if (!words) continue;
@@ -69,7 +69,7 @@ function commitCheckout(command: string, cwd: string): string | null {
 		// Quiet commit/push/reporting chains are safe when all && steps succeed.
 		if (words[i] === "commit") {
 			if (words.slice(i + 1).some(arg => ["--dry-run", "--short", "--long", "--porcelain"].includes(arg))) return null;
-			const safeSuffix = !/[;\n]|\|\|/.test(command.replace(/'[^']*'|"[^"\\]*"/g, "")) && segments.slice(index + 1).every(tail => {
+			const safeSuffix = !/[;\n]|\|\|/.test(command.trim().replace(/'[^']*'|"[^"\\]*"/g, "")) && segments.slice(index + 1).every(tail => {
 				const args = literalWords(tail);
 				while (args && /^[A-Za-z_]\w*=/.test(args[0] ?? "")) args.shift();
 				return args && (["echo", "printf"].includes(args[0]) || args[0] === "git" && args[1] === "push" || args[0] === "hive" && args[1] === "ship" || args[0] === "gh" && args[1] === "pr" && args[2] === "create");
