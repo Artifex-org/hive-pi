@@ -255,6 +255,17 @@ describe.skipIf(!enabled)("browser surface FIFO integration", () => {
 		await page.focus("#t");
 	}, 30_000);
 
+	it("re-sends the current picture on refresh, without a lease, for a reader that just attached", async () => {
+		writeLease({ expires_at: 0 });
+		// A static page has stopped producing screencast frames by now.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		const at = mark();
+		await send({ kind: "refresh" }, { lease_id: undefined, generation: undefined });
+		const again = await frame(at, (m) => m.view === "agent");
+		expect(again.bytes).toBeGreaterThan(100);
+		writeLease();
+	}, 30_000);
+
 	it("a remote operator's shared lease drives only its own tab; the agent page needs a take-over", async () => {
 		writeLease({ holder: "relay" });
 		expect(await run({ kind: "navigate", url: `${base}/next` })).toMatchObject({ ok: false, error: "take_over_required" });

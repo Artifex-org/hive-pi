@@ -800,6 +800,14 @@ export class BrowserSurfaceBridge {
   private enqueue(line: string): void {
     let raw: unknown;
     try { raw = JSON.parse(line); } catch { return; }
+    // A reader that just attached (the relay, when its first viewer arrives)
+    // asks for the current picture: a static page sends no screencast frames,
+    // so without this a viewer of an idle page would wait for one forever.
+    // It only repeats what is on screen, so it needs no lease and no answer.
+    if ((raw as { kind?: unknown } | null)?.kind === "refresh") {
+      if (this.lastFrame && this.lastFrame.target === this.casting) this.emitFrame();
+      return;
+    }
     if (this.queuedCommands >= MAX_QUEUED_COMMANDS) {
       const id = commandID(raw);
       if (id) this.writeResult(id, "failed");
