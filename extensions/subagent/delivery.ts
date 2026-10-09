@@ -27,8 +27,21 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		const cleaned = segment.replace(/^\s*(?:\w+=\S+\s+)*/, "");
 		const assignments = segment.slice(0, segment.length - cleaned.length);
 		const configuredEnv = /\b(?!(?:PI_DELIVERY_REVIEW|FORCE_COLOR)=)\w+=/.test(assignments);
-		if (/^gh\s+pr\s+create\b/.test(cleaned)) {
-			targets.push(preceded || configuredEnv || /(?:^|\s)(?:--repo|--head|--base|-R|-H|-B)(?:\s|=)/.test(cleaned) ? null : dir);
+		if (/^gh\s/.test(cleaned)) {
+			const tokens = literalWords(cleaned, true);
+			if (!tokens) { if (/\bpr\s+create\b/.test(cleaned)) targets.push(null); continue; }
+			let i = 1, targetOverride = false;
+			while (tokens[i]?.startsWith("-")) {
+				targetOverride = true;
+				i += ["--repo", "--hostname", "-R"].includes(tokens[i]) ? 2 : 1;
+			}
+			if (tokens[i] !== "pr" || tokens[i + 1] !== "create") continue;
+			for (i += 2; i < tokens.length; i++) {
+				const option = tokens[i].split("=")[0];
+				if (["--repo", "--head", "--base", "-R", "-H", "-B"].includes(option)) targetOverride = true;
+				if (!tokens[i].includes("=") && ["--repo", "--head", "--base", "-R", "-H", "-B", "--title", "--body", "--body-file", "-t", "-b", "-F", "--assignee", "--reviewer", "--label", "--milestone", "--project", "--template"].includes(option)) i++;
+			}
+			targets.push(preceded || configuredEnv || targetOverride ? null : dir);
 			continue;
 		}
 		if (!/^git\s/.test(cleaned)) continue;

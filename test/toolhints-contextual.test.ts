@@ -61,6 +61,7 @@ describe("added Go tests vs the selected run", () => {
 		expect(await goTestHint("go test -run '^TestOther$'", cwd)).toContain("TestUntracked");
 		// Two invocations: each uses its own last flag, never the final command's
 		// regex for the whole shell batch. Both run against a real merge-base.
+		git("config", "color.diff", "always");
 		git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD");
 		expect(await goTestHint("go test -run '^TestOther$'", cwd)).toContain("TestUntracked");
 		const batch = await goTestHint(`cd '${cwd}' && go test -run '^TestCommitted$' && go test -run '^TestStaged$'`, "/tmp");

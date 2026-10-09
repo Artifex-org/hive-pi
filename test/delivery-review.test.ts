@@ -25,6 +25,16 @@ describe("delivery review", () => {
 		for (const c of ["git push -u origin HEAD", "git -C /repo push", "git push && gh pr create", "gh pr create --title 'change'", "git status\ngit push",  'gh pr create --body "$(cat body.md)"']) expect(deliveryCommand(c), c).toBe(true);
 		for (const c of ["echo 'git push'", "git push --dry-run", "git status", "gh pr view", "cat README.md", 'echo "git status\ngit push"']) expect(deliveryCommand(c), c).toBe(false);
 	});
+	it("recognizes gh global options without treating quoted body prose as options", () => {
+		expect(deliveryTargets("gh --repo owner/repo pr create --title change --body description", "/repo")).toEqual([null]);
+		for (const body of ['"Adds support for --base selection"', '"--base"', '"$(cat body.md)"']) expect(deliveryTargets(`gh pr create --title change --body ${body}`, "/repo")).toEqual(["/repo"]);
+	});
+	it("ignores forced Git color when deciding whether code is substantive", () => {
+		const { cwd, git } = repo(); git("config", "color.diff", "always");
+		writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		const change = captureDeliveryDiff(cwd)!;
+		expect(change.text).not.toContain("\u001b["); expect(needsDeliveryReview(change)).toBe(true);
+	});
 	it("cheaply exempts docs-only and a single <=5-line change, not untracked code or large diffs", () => {
 		expect(needsDeliveryReview({ ...diff, files: ["README.md", "docs/a.rst"] })).toBe(false);
 		expect(needsDeliveryReview({ ...diff, files: ["a.ts"] })).toBe(false);

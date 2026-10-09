@@ -233,7 +233,7 @@ export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = del
 	let text = "";
 	const changed = new Set<string>();
 	for (const [label, args] of [[`Committed (${head} merge-base)`, [base, "HEAD"]], ["Staged vs HEAD", ["--cached", "HEAD"]], ["Unstaged vs index", []]] as const) {
-		const patch = git(["diff", "--no-ext-diff", "-p", ...args], repo);
+		const patch = git(["diff", "--no-color", "--no-ext-diff", "-p", ...args], repo);
 		const names = git(["diff", "--name-only", "-z", ...args], repo);
 		if (patch === null || names === null) return null;
 		for (const path of names.split("\0").filter(Boolean)) changed.add(path);

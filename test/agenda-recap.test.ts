@@ -6,7 +6,11 @@
  * that drives the workspace triage.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+const runRecap = vi.hoisted(() => vi.fn());
+vi.mock("../extensions/agenda/spawn.ts", async (importOriginal) => ({
+	...await importOriginal<typeof import("../extensions/agenda/spawn.ts")>(), runOneShot: runRecap,
+}));
 import agenda from "../extensions/agenda/index.ts";
 import { contextTreeEnvelope, recapTranscript } from "../extensions/agenda/index.ts";
 import { buildJudgePrompt } from "../extensions/agenda/goal.ts";
@@ -126,6 +130,23 @@ describe("the settle observer", () => {
 		return fake.entries.filter((entry) => entry.customType === "agent-status");
 	}
 
+	it("replaces a stale in-flight recap with the latest settled transcript", async () => {
+		vi.useFakeTimers(); runRecap.mockReset();
+		try {
+			let resolveFirst!: (value: unknown) => void;
+			runRecap.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; })).mockResolvedValue({ exitCode: 0, timedOut: false, text: "Latest work recap" });
+			const fake = createFakePi(); agenda(fake.api);
+			const initial = [{ message: { role: "assistant", content: "Earlier work ".repeat(100) } }];
+			await settle(fake, initial); await vi.advanceTimersByTimeAsync(0);
+			await settle(fake, [...initial, { message: { role: "assistant", content: "Newer turn evidence" } }]);
+			resolveFirst({ exitCode: 0, timedOut: false, text: "Stale earlier recap" });
+			await vi.advanceTimersByTimeAsync(1);
+			expect(runRecap).toHaveBeenCalledTimes(2);
+			expect(runRecap.mock.calls[1][0].prompt).toContain("Newer turn evidence");
+			expect((statusEntries(fake).at(-1)?.data as { recap: string }).recap).toBe("Latest work recap");
+			expect(statusEntries(fake).some((e) => (e.data as { recap: string }).recap === "Stale earlier recap")).toBe(false);
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); runRecap.mockReset(); }
+	});
 	it("appends a status entry and rings the doorbell on settle", async () => {
 		const fake = createFakePi();
 		agenda(fake.api);

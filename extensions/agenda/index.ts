@@ -482,6 +482,7 @@ export default function (pi: ExtensionAPI) {
 	let statusRevision = 0;
 	let lastRecapTail = "";
 	let recapInFlight = false;
+	let pendingRecap: (() => void) | null = null;
 	let sessionGeneration = 0;
 	const autoShutdownEnabled = process.env.PI_AGENDA_AUTO_SHUTDOWN === "1";
 	const unattendedHiveLaunch = isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID);
@@ -506,7 +507,7 @@ export default function (pi: ExtensionAPI) {
 		if (changed) paintConductor();
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	const observeSettled = (_event: unknown, ctx: ExtensionContext) => {
 		if (IS_WORKER) return;
 		let transcript = "";
 		let asksQuestion = false;
@@ -528,8 +529,9 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		const activeRecap = liveRecap(asksQuestion);
-		const wantRecap =
-			!activeRecap && !recapInFlight && transcript.length >= MIN_TRANSCRIPT_CHARS && transcript !== lastRecapTail;
+		const changedTranscript = transcript.length >= MIN_TRANSCRIPT_CHARS && transcript !== lastRecapTail;
+		pendingRecap = !activeRecap && recapInFlight && changedTranscript ? () => observeSettled(null, ctx) : null;
+		const wantRecap = !activeRecap && !recapInFlight && changedTranscript;
 
 		const persistStatus = (recap: string) => {
 			statusRevision++;
@@ -586,13 +588,18 @@ export default function (pi: ExtensionAPI) {
 				})
 				.catch(() => { if (recapRevision === statusRevision && recapGeneration === sessionGeneration) persistStatus(""); })
 				.finally(() => {
+					if (recapGeneration !== sessionGeneration) return;
 					recapInFlight = false;
+					const pending = pendingRecap;
+					pendingRecap = null;
+					if (pending) { pending(); return; }
 					// The recap is part of the completion barrier: only after its
 					// status entry has been attempted may the session close.
 					scheduleAutoShutdown(ctx, asksQuestion);
 				});
 		}, 0);
-	});
+	};
+	pi.on("agent_settled", observeSettled);
 
 	/**
 	 * Close only a finished, unattended session. The final conductor transition

@@ -26,9 +26,9 @@ export async function boundedFile(path: string): Promise<string> {
 }
 
 /** Literal shell words only. Dynamic shell expressions are not guessed. */
-export function literalWords(segment: string): string[] | null {
+export function literalWords(segment: string, allowDynamicValues = false): string[] | null {
 	const words = segment.match(/(?:[^\s'"\\]+|'[^']*'|"[^"\\]*")+/g) ?? [];
-	if (words.join(" ").replace(/\s/g, "") !== segment.replace(/\s/g, "") || words.some((w) => /\$(?:[\w{(?!@#$*\-])|`|\\/.test(w.replace(/'[^']*'/g, "")))) return null;
+	if (words.join(" ").replace(/\s/g, "") !== segment.replace(/\s/g, "") || (!allowDynamicValues && words.some((w) => /\$(?:[\w{(?!@#$*\-])|`|\\/.test(w.replace(/'[^']*'/g, ""))))) return null;
 	return words.map((w) => w.replace(/'([^']*)'|"([^"]*)"/g, (_all, a, b) => a ?? b));
 }
 
@@ -96,7 +96,7 @@ export async function goTestHint(command: string, cwd: string, git: GitRead = gi
 			}
 			if (!head) throw new Error("no declared or conventional base ref");
 			const base = (await scanGit(["merge-base", "HEAD", head], dir)).trim();
-			const diff = await scanGit(["diff", "--no-ext-diff", "--unified=0", base, "--", "*_test.go"], dir);
+			const diff = await scanGit(["diff", "--no-color", "--no-ext-diff", "--unified=0", base, "--", "*_test.go"], dir);
 			const untracked = (await scanGit(["ls-files", "--others", "--exclude-standard", "--", "*_test.go"], dir)).trim().split("\n").filter(Boolean);
 			if (untracked.length > 8) throw new Error("more than eight untracked test files");
 			let additions = diff;
