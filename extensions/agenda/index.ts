@@ -415,6 +415,9 @@ export default function (pi: ExtensionAPI) {
 		if (IS_WORKER) return;
 		sessionGeneration++;
 		hadLiveRecap = false;
+		recapInFlight = false;
+		pendingRecap = null;
+		lastRecapTail = "";
 		autoShutdownScheduled = false;
 		heldCtx = ctx;
 		// Ephemeral per-session state — unlike goals, deliberately NOT persisted:

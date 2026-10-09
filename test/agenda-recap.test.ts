@@ -147,6 +147,20 @@ describe("the settle observer", () => {
 			expect(statusEntries(fake).some((e) => (e.data as { recap: string }).recap === "Stale earlier recap")).toBe(false);
 		} finally { vi.clearAllTimers(); vi.useRealTimers(); runRecap.mockReset(); }
 	});
+	it("does not retain an old session's in-flight recap latch", async () => {
+		vi.useFakeTimers(); runRecap.mockReset();
+		try {
+			let resolveOld!: (value: unknown) => void;
+			runRecap.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; })).mockResolvedValue({ exitCode: 0, timedOut: false, text: "New session recap" });
+			const fake = createFakePi(); agenda(fake.api);
+			await settle(fake, [{ message: { role: "assistant", content: "Old transcript ".repeat(100) } }]); await vi.advanceTimersByTimeAsync(0);
+			await fake.emit({ type: "session_start", reason: "new" });
+			await settle(fake, [{ message: { role: "assistant", content: "New transcript ".repeat(100) } }]); await vi.advanceTimersByTimeAsync(0);
+			expect(runRecap).toHaveBeenCalledTimes(2);
+			resolveOld({ exitCode: 0, timedOut: false, text: "Old session recap" }); await vi.advanceTimersByTimeAsync(1);
+			expect((statusEntries(fake).at(-1)?.data as { recap: string }).recap).toBe("New session recap");
+		} finally { vi.clearAllTimers(); vi.useRealTimers(); runRecap.mockReset(); }
+	});
 	it("appends a status entry and rings the doorbell on settle", async () => {
 		const fake = createFakePi();
 		agenda(fake.api);
