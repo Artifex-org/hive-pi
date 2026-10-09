@@ -94,7 +94,7 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					// (pre-tool also denies the tool there under plan and discuss).
 					const mode = (dir ? readControl(dir) : DEFAULT_CONTROL).opMode;
 					const readOnly = mode === "plan" || mode === "discuss" || mode === "orchestrate";
-					return runGateTool(readOnly ? { ...args, install: false } : args, cwd, signal, (run, watchCwd) => startWatchRun({ run, what: "waiting for the quality gate verdict", timeout_seconds: 14_400 }, { cwd: watchCwd, jobs, spool, canWake: Boolean(env.spool), auth }));
+					return runGateTool(readOnly ? { ...args, install: false } : args, cwd, signal, (run, watchCwd, announcementSignal) => startWatchRun({ run, what: "waiting for the quality gate verdict", timeout_seconds: 14_400 }, { cwd: watchCwd, jobs, spool, canWake: Boolean(env.spool), auth }, announcementSignal));
 				}
 				// Model-free, so offered without a lease: `hive watch` and the Hive API only.
 				case "hive_watch_run":

@@ -126,12 +126,12 @@ export function parseGateParams(args: Record<string, unknown>): QualityGateParam
 	return params;
 }
 
-export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal, watchRun?: GateHost["watchRun"]): Promise<ToolResult> {
+export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal, watchRun?: (run: string, cwd: string, announcementSignal: AbortSignal) => Promise<{ text: string; isError?: boolean }>): Promise<ToolResult> {
 	// MCP suppresses the response to a cancelled request. Its job announcement
 	// could never reach the driver, so do not start an unannounceable watch.
 	const host: GateHost = { ...nodeGateHost, watchRun: watchRun ? (run, watchCwd) => signal.aborted
 		? Promise.resolve({ text: "The MCP request was cancelled; no background watch was started. The fleet run is not cancelled.", isError: true })
-		: watchRun(run, watchCwd) : undefined };
+		: watchRun(run, watchCwd, signal) : undefined };
 	const result = await runQualityGate(host, parseGateParams(args), cwd, signal);
 	const first = result.content[0];
 	return { text: first && first.type === "text" ? first.text : "quality_gate produced no report." };
