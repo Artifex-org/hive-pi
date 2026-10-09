@@ -873,12 +873,19 @@ export function listenUnixSocket(base: string = tmpdir()): Promise<UnixListenRes
 			cleanup();
 			resolve({ ok: false, code: error.code ?? "ERROR", message: error.message });
 		});
-		server.listen(join(dir, "probe.sock"), () => {
-			server.close(() => {
-				cleanup();
-				resolve({ ok: true });
+		try {
+			server.listen(join(dir, "probe.sock"), () => {
+				server.close(() => {
+					cleanup();
+					resolve({ ok: true });
+				});
 			});
-		});
+		} catch (error) {
+			// A path the kernel cannot take (too long for sun_path) throws here.
+			cleanup();
+			resolve({ ok: false, code: (error as NodeJS.ErrnoException).code ?? "ERROR", message: (error as Error).message });
+			return;
+		}
 		server.unref();
 	});
 }

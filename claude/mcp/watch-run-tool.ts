@@ -113,6 +113,10 @@ export async function startWatchRun(args: Record<string, unknown>, host: WatchHo
 	if ("error" in resolved) return { text: resolved.error, isError: true };
 	const uuid = resolved.uuid;
 	const timeoutMs = resolveTimeoutMs(timeoutSeconds);
+	// Again after the lookup's await: a parallel batch all passed the first check.
+	if (host.jobs.size >= MAX_CONCURRENT) {
+		return { text: `Already running ${host.jobs.size} hive-pi background jobs (the limit). Wait for one to finish, or background_cancel one.`, isError: true };
+	}
 
 	const id = host.jobs.start(async (signal, jobId) => {
 		const text = await watchToEnd({ uuid, what, jobId, timeoutMs, signal, cwd: host.cwd, env: host.env ?? process.env, deps });
@@ -160,6 +164,8 @@ async function watchToEnd(o: {
 		let settled = false;
 		/** Set when WE end the watch (clock, cancel, shutdown): the exit that follows is our kill, not a verdict. */
 		let forced: Ending | undefined;
+		/** Set once `hive watch` itself has exited: from then on its code IS the verdict, whatever ends the wait. */
+		let exited: { code: number | null } | undefined;
 		const finish = (value: Ending) => {
 			if (settled) return;
 			settled = true;
@@ -185,12 +191,14 @@ async function watchToEnd(o: {
 		 */
 		const end = (why: Ending) => {
 			if (settled || forced) return;
-			forced = why;
+			// Already exited with a verdict, only a descendant still holds the pipes:
+			// report the verdict, not our own clock or cancel.
+			forced = exited ? { kind: "exit", code: exited.code } : why;
 			signalGroup("SIGTERM");
 			// Not unref'd: during a shutdown these two are what keeps the process
 			// alive long enough to deliver the SIGKILL. Both are bounded.
 			const kill = setTimeout(() => signalGroup("SIGKILL"), KILL_GRACE_MS);
-			const giveUp = setTimeout(() => finish(why), KILL_GRACE_MS + 500);
+			const giveUp = setTimeout(() => finish(forced as Ending), KILL_GRACE_MS + 500);
 			child.once("close", () => {
 				clearTimeout(kill);
 				clearTimeout(giveUp);
@@ -206,6 +214,7 @@ async function watchToEnd(o: {
 		// A descendant that keeps the pipes open would hold `close` back forever;
 		// the exit code is the verdict, so settle from `exit` after a grace for the tail.
 		child.once("exit", (code) => {
+			exited = { code };
 			setTimeout(() => {
 				if (settled || forced) return;
 				signalGroup("SIGKILL");
@@ -244,5 +253,5 @@ export function cancelBackgroundJob(args: Record<string, unknown>, jobs: Backgro
 	const id = str(args.id);
 	if (!id) return { text: "`id` is required: the job id its start announced.", isError: true };
 	if (!jobs.cancel(id)) return { text: `No running hive-pi background job \`${id}\` — it has finished already, or the id is wrong.`, isError: true };
-	return { text: `Cancelling background job \`${id}\`. Its completion notice will say it was cancelled.` };
+	return { text: `Cancelling background job \`${id}\`. Its one completion notice says how it ended — cancelled, unless it had already finished.` };
 }

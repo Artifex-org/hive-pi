@@ -234,11 +234,11 @@ export const HINTS: readonly ToolHint[] = [
 		match:
 			/\b(?:listen|connect) EPERM(?:: operation not permitted)? \/[^\s'"]+|\b(?:listen|dial) unix(?:gram|packet)? \S+: (?:socket|bind|connect): operation not permitted/,
 		hint:
-			"That is the SANDBOX, not your code: srt's seccomp filter refuses socket(AF_UNIX), so every unix-socket " +
-			"listen or connect fails here with EPERM — and a test harness that does not surface the listen error just " +
+			"In a sandboxed launch that is the SANDBOX, not your code (`readiness` shows it as `unix sockets` absent): " +
+			"srt's seccomp filter refuses socket(AF_UNIX), so every unix-socket listen or connect fails with EPERM — and a test harness that does not surface the listen error just " +
 			"times out instead. Do not debug it further locally and do not weaken the test: run those tests on the " +
 			"fleet — `quality_gate` (it lists this repo's steps) or `hive check --step <step>` — and report them as not " +
-			"run locally. TCP on 127.0.0.1 is unaffected. `readiness` reports this up front as `unix sockets`.",
+			"run locally. TCP on 127.0.0.1 is unaffected.",
 		evidence:
 			"HIV-3802 A/B eval 2026-10-08: the pi arm's vitest unix-socket transport suite timed out 7×5s and the agent " +
 			"isolated `listen EPERM: operation not permitted /tmp/hc-simple.sock` by hand; the Claude arm's `go test` failed " +

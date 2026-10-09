@@ -229,14 +229,16 @@ describe("hive_watch_run", () => {
 	/** Real processes on a shared workstation: wakes are polled for up to 15 s. */
 	const PROCESS_TEST_TIMEOUT_MS = 30_000;
 
-	/** A fake `hive` on PATH: `hive watch <uuid>` records its pid, prints, sleeps, exits with the given code. */
+	/** A fake `hive` on PATH: `hive watch <uuid>` records its pid and its sleep's, prints, sleeps, exits with the given code. */
 	function fakeHiveCli(sleepSeconds: number, exitCode: number): { env: Record<string, string>; pids: () => number[] } {
 		const bin = join(launch.root, "bin");
 		mkdirSync(bin, { recursive: true });
 		const log = join(launch.root, "hive-watch.log");
 		writeFileSync(
 			join(bin, "hive"),
-			`#!/bin/bash\necho "$$" >> ${JSON.stringify(log)}\necho "watching $2"\nsleep ${sleepSeconds}\necho "run $2 finished"\nexit ${exitCode}\n`,
+			// The sleep is a GRANDCHILD of the watch's shell, so a kill that reaches
+			// only the direct child would leave it running — and fail the test.
+			`#!/bin/bash\necho "$$" >> ${JSON.stringify(log)}\necho "watching $2"\nsleep ${sleepSeconds} &\necho "$!" >> ${JSON.stringify(log)}\nwait $!\necho "run $2 finished"\nexit ${exitCode}\n`,
 		);
 		chmodSync(join(bin, "hive"), 0o755);
 		const pids = () => {
@@ -296,15 +298,15 @@ describe("hive_watch_run", () => {
 		const started = await c.call("hive_watch_run", { run: RUN, what: "waiting for the PR gate" });
 		const id = /^hive-pi-job: (\S+)$/m.exec(started.text)?.[1] as string;
 		const deadline = Date.now() + 10_000;
-		while (Date.now() < deadline && cli.pids().length === 0) await new Promise((r) => setTimeout(r, 50));
-		const [pid] = cli.pids();
-		expect(alive(pid)).toBe(true);
+		while (Date.now() < deadline && cli.pids().length < 2) await new Promise((r) => setTimeout(r, 50));
+		const pids = cli.pids();
+		expect(pids.every(alive)).toBe(true);
 		const cancelled = await c.call("background_cancel", { id });
 		expect(cancelled.isError).toBe(false);
 		const [wake] = await wakes(1);
 		expect(wake).toMatchObject({ job: id });
 		expect(String(wake?.text)).toContain("cancelled at your request");
-		expect(alive(pid)).toBe(false);
+		expect(pids.some(alive)).toBe(false);
 		expect((await c.call("background_cancel", { id })).isError).toBe(true);
 		await new Promise((r) => setTimeout(r, 500));
 		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(1);
@@ -316,13 +318,25 @@ describe("hive_watch_run", () => {
 		const started = await c.call("hive_watch_run", { run: RUN, what: "waiting for the PR gate" });
 		const id = /^hive-pi-job: (\S+)$/m.exec(started.text)?.[1];
 		const deadline = Date.now() + 10_000;
-		while (Date.now() < deadline && cli.pids().length === 0) await new Promise((r) => setTimeout(r, 50));
+		while (Date.now() < deadline && cli.pids().length < 2) await new Promise((r) => setTimeout(r, 50));
 		expect(await c.close()).toBe(0);
-		expect(alive(cli.pids()[0])).toBe(false);
+		expect(cli.pids().some(alive)).toBe(false);
 		const all = launch.spoolRecords().filter((r) => r.kind === "wake");
 		expect(all).toHaveLength(1);
 		expect(all[0]).toMatchObject({ job: id });
 		expect(String(all[0]?.text)).toContain("was cancelled because the helper server restarted");
+	}, PROCESS_TEST_TIMEOUT_MS);
+
+	it("ends a watch at its wall clock, kills it, and says the verdict is still open", async () => {
+		const cli = fakeHiveCli(60, 0);
+		const c = await connect(cli.env);
+		const started = await c.call("hive_watch_run", { run: RUN, what: "waiting for the PR gate", timeout_seconds: 1 });
+		expect(started.text).toContain("Limit 1s");
+		const [wake] = await wakes(1);
+		expect(String(wake?.text)).toContain("hit its 1s limit without the run's verdict");
+		expect(cli.pids().some(alive)).toBe(false);
+		await new Promise((r) => setTimeout(r, 500));
+		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(1);
 	}, PROCESS_TEST_TIMEOUT_MS);
 
 	it("refuses without a spool to wake through, and refuses a malformed run reference", async () => {
