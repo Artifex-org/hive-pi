@@ -175,7 +175,9 @@ export function listSymbols(
 		const top = decl.test(lines[i]);
 		// One level only. Listing every member of every nested scope turns an
 		// outline back into the file, which is the thing it exists to avoid.
-		const nested = !top && member.test(lines[i]);
+		const wrappedMethod = lang !== "python" && /^[ \t]+(?!(?:if|for|while|switch|catch)\b)[\w$]+\s*\(\s*$/.test(lines[i]) &&
+			/^\s*\)\s*(?::[^;{}]*)?\s*\{/m.test(lines.slice(i + 1, i + 8).join("\n"));
+		const nested = !top && (member.test(lines[i]) || wrappedMethod);
 		if (!top && !nested) continue;
 		// Rejected comment/string candidates also incur a prefix scan.
 		if (++candidates > maxSymbols) { onCandidateCap?.(); break; }

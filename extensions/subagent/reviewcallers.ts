@@ -19,7 +19,7 @@ export type CallerGrep = (symbol: string, repo: string, timeoutMs: number) => { 
 /** Declarations only: Go functions/methods, JS/TS exports, public Rust/Python functions. */
 function functionName(line: string): string | undefined {
 	return /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[(\[]/.exec(line)?.[1]
-		?? /^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+([\w$]+)\s*[(<]/.exec(line)?.[1]
+		?? /^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s*\*)?\s+([\w$]+)\s*[(<]/.exec(line)?.[1]
 		?? /^\s*(?:export\s+)?(?:const|let)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:<[^;]{1,256}>\s*)?(?:function\b|(?:\([^)]*\)|[\w$]+)\s*(?::[^=]*)?=>)/.exec(line)?.[1]
 		?? /^\s*(?:pub(?:\([^)]*\))?\s+(?:async\s+)?fn|(?:async\s+)?def)\s+([A-Za-z]\w*)\s*[(<]/.exec(line)?.[1]
 		?? /^\s*(?:(?:public|private|protected|static|async|abstract|override|readonly)\s+)*(?!(?:if|for|while|switch|catch|constructor)\b)([\w$]+)\s*(?:<[^;]{1,256}>\s*)?\([^)]*\)\s*(?::[^;{]+)?\s*\{/.exec(line)?.[1];

@@ -85,6 +85,16 @@ describe("caller-aware review scope", () => {
 		expect(discoverCallers("/repo", changed, ["api.ts"], () => ({ text: rows }), () => "").sites)
 			.toEqual([{ symbol: "fetch", path: "wrapper.ts", line: 1 }]);
 	});
+	it("discovers ordinary multiline class methods and generator body changes", () => {
+		for (const [symbol, source, line] of [["fetch", "export class Client {\n  fetch(\n    options: string,\n  ) {\n" + "    // body\n".repeat(12) + "    throw new Error();\n  }\n}\n", 17],
+			["records", "export function* records() {\n" + "  // body\n".repeat(12) + "  throw new Error();\n}\n", 14]] as const) {
+			const changed = `--- a/api.ts\n+++ b/api.ts\n@@ -${line} +${line} @@\n- old\n+ new`;
+			expect(discoverCallers("/repo", changed, ["api.ts"], () => ({ text: `caller.ts:2: ${symbol}()` }), () => source).sites)
+				.toEqual([{ symbol, path: "caller.ts", line: 2 }]);
+		}
+		const generator = "--- a/api.ts\n+++ b/api.ts\n@@ -1 +1 @@\n-export function* records() {}\n+export function* records() { yield 1; }\n";
+		expect(changedFunctionNames(generator, () => "").names).toEqual(["records"]);
+	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
