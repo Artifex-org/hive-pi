@@ -246,7 +246,7 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 			if (!seenOpen) {
 				if (ch === "(") signatureParens++;
 				if (ch === ")") signatureParens = Math.max(0, signatureParens - 1);
-				if (ch === "<") signatureAngles++;
+				if (ch === "<" && next !== "-") signatureAngles++;
 				if (ch === ">") signatureAngles = Math.max(0, signatureAngles - 1);
 				if (ch === "{" && (signatureParens > 0 || signatureAngles > 0 || signatureTypes > 0 || line.slice(0, c).trimEnd().endsWith(":"))) {
 					signatureTypes++; continue;

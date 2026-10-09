@@ -163,6 +163,13 @@ describe("caller-aware review scope", () => {
 			expect(lensSymbols.findSymbol(repeated, "api.ts", "Same", 3)).toHaveLength(3);
 		} finally { scan.mockRestore(); }
 	});
+	it("preserves Go bodies after receive-only and send-only channel parameters", () => {
+		for (const channel of ["<-chan int", "chan<- int"]) {
+			const go = `func Consume(ch ${channel}) {\n log.Println(\"starting\")\n process(ch)\n}\n`;
+			const span = lensSymbols.findSymbol(go, "api.go", "Consume")[0];
+			expect(span.endLine).toBe(4); expect(span.text).toContain("process(ch)");
+		}
+	});
 	it("includes source discovery in the shared wall-clock budget", () => {
 		vi.useFakeTimers(); vi.setSystemTime(0);
 		const grep = vi.fn(() => ({ text: "" }));
