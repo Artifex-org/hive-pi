@@ -73,6 +73,12 @@ describe("caller-aware review scope", () => {
 		expect(discoverCallers("/repo", changed, ["api.go"], () => ({ text: "caller.go:3: parseToken()" }), () => local).sites)
 			.toEqual([{ symbol: "parseToken", path: "caller.go", line: 3 }]);
 	});
+	it("discovers body changes in functions exported through a separate list", () => {
+		const source = "function fetchData() {\n" + "  // unchanged\n".repeat(12) + "  throw new Error();\n}\nexport { fetchData };\n";
+		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -14 +14 @@\n-  return fallback;\n+  throw new Error();\n";
+		expect(discoverCallers("/repo", changed, ["api.ts"], () => ({ text: "caller.ts:2: fetchData()" }), () => source).sites)
+			.toEqual([{ symbol: "fetchData", path: "caller.ts", line: 2 }]);
+	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
@@ -168,6 +174,13 @@ describe("caller-aware review scope", () => {
 			const go = `func Consume(ch ${channel}) {\n log.Println(\"starting\")\n process(ch)\n}\n`;
 			const span = lensSymbols.findSymbol(go, "api.go", "Consume")[0];
 			expect(span.endLine).toBe(4); expect(span.text).toContain("process(ch)");
+		}
+	});
+	it("preserves callback-wrapped arrow and function initializer bodies", () => {
+		for (const callback of ["() =>", "function ()"]) {
+			const source = `const handler = wrap(${callback} {\n first();\n second();\n});\n`;
+			const span = lensSymbols.findSymbol(source, "api.ts", "handler")[0];
+			expect(span.endLine).toBe(4); expect(span.text).toContain("second()");
 		}
 	});
 	it("includes source discovery in the shared wall-clock budget", () => {

@@ -206,6 +206,10 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 	let signatureParens = 0;
 	let signatureAngles = 0;
 	let signatureTypes = 0;
+	// A wrapper's parentheses enclose executable code, not a declaration's
+	// parameter types. Keep its full initializer rather than stopping at a type.
+	const wrappedInitializer = /^\s*(?:export\s+)?(?:const|let|var)\b/.test(lines[start]) &&
+		!/^\s*(?:export\s+)?(?:const|let|var)\s+[\w$]+(?:\s*:[^=]+)?\s*=\s*(?:async\s+)?(?:<[^>]+>\s*)?(?:\(|function\b)/.test(lines[start]);
 	let inBlockComment = false;
 
 	for (let i = start; i < lines.length; i++) {
@@ -243,7 +247,7 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 			}
 			// Braces inside parameters/generic arguments or an inline return type
 			// belong to the signature, not the executable body.
-			if (!seenOpen) {
+			if (!seenOpen && !wrappedInitializer) {
 				if (ch === "(") signatureParens++;
 				if (ch === ")") signatureParens = Math.max(0, signatureParens - 1);
 				if (ch === "<" && next !== "-") signatureAngles++;
