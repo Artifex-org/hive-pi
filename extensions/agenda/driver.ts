@@ -289,6 +289,12 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		if (eligible.length === 0) return;
 
 		const gen = generation;
+		const adviceBefore = count(ledger, ADVISE_LEDGER_ID);
+		let injectionAccepted = false;
+		const acceptInjection = () => {
+			injectionAccepted = true;
+			if (count(ledger, ADVISE_LEDGER_ID) > adviceBefore) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
+		};
 
 		inSettle = true;
 		try {
@@ -323,10 +329,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					// becomes a path around payload.ts's allowlist.
 					onMetric: (name, outcome, value) => emitMetric(pi, name, outcome, value),
 					ledger: () => ledger,
-					setLedger: (next) => {
-						if (count(next, ADVISE_LEDGER_ID) > count(ledger, ADVISE_LEDGER_ID)) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
-						ledger = next;
-					},
+					setLedger: (next) => { ledger = next; },
 				},
 			);
 			if (!injection) return;
@@ -337,6 +340,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					// turn_end continues INSIDE the current run (turn_start, not
 					// agent_start). Its advice must not hold a later settle hostage.
 					if (boundary === "settle") settleClaims.claim("agenda");
+					acceptInjection();
 					return injection.text;
 				} catch {
 					return; // session went away mid-check
@@ -347,6 +351,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					{ customType: "agenda", content: injection.text, display: true },
 					{ deliverAs: "followUp", triggerTurn: true },
 				);
+				acceptInjection();
 				pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: injection.policy } satisfies AgendaInjectionEvent);
 				settleClaims.claim("agenda");
 			} catch {
@@ -356,6 +361,14 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		} catch {
 			/* a policy threw; never take the harness down with it */
 		} finally {
+			// A live user-message check can discard advice after policy work.
+			// Keep other retry charges, but do not spend an undelivered reminder.
+			if (gen === generation && !injectionAccepted && count(ledger, ADVISE_LEDGER_ID) > adviceBefore) {
+				const iterations = { ...ledger.iterations };
+				if (adviceBefore) iterations[ADVISE_LEDGER_ID] = adviceBefore;
+				else delete iterations[ADVISE_LEDGER_ID];
+				ledger = { ...ledger, iterations };
+			}
 			inSettle = false;
 		}
 	}

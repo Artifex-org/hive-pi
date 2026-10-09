@@ -8,7 +8,7 @@ import { createConductor, withStage } from "../extensions/agenda/conductor-state
 import { installDriver } from "../extensions/agenda/driver.ts";
 import { deliveryMilestone, registerDeliveryProgress, DELIVERY_PROGRESS_ENTRY, ADVICE_GIVEN_ENTRY } from "../extensions/agenda/delivery-progress.ts";
 import type { GoalItem } from "../extensions/agenda/goal-state.ts";
-import { createFakePi } from "./fake-pi.ts";
+import { createFakePi, type FakeCtxOptions } from "./fake-pi.ts";
 
 describe("delivery milestones", () => {
 	it("does not record failed duplicate-PR creation even when the error includes its URL", async () => {
@@ -22,8 +22,9 @@ describe("delivery milestones", () => {
 		expect(deliveryMilestone("gh pr create 2>&1 | cat", "already exists:\n" + url, true)).toBe(false);
 		expect(deliveryMilestone("gh pr create && false", url, false)).toBe(true);
 		expect(deliveryMilestone("gh pr create && false", "already exists:\n" + url, false)).toBe(false);
+		expect(deliveryMilestone("gh pr create && gh pr checks --watch", url + "\nGraphQL: checks failed", false)).toBe(true);
 	});
-	it("observes an actual quiet commit when a later push fails, using commit-specific reflog evidence", async () => {
+	it.each(["git commit -q -m change", "git -c user.name=Test -c user.email=test@example.com commit -q -m change"])("observes actual %s when a later push fails, using commit-specific reflog evidence", async command => {
 		const cwd = mkdtempSync(join(tmpdir(), "milestone-"));
 		const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
 		try {
@@ -31,9 +32,9 @@ describe("delivery milestones", () => {
 			writeFileSync(join(cwd, "code.ts"), "export const code = 0;\n"); git("add", "."); git("commit", "-qm", "initial");
 			writeFileSync(join(cwd, "code.ts"), "export const code = 1;\n"); git("add", ".");
 			const pi = createFakePi(); registerDeliveryProgress(pi.api);
-			const input = { cwd, command: "git commit -q -m change && git push origin HEAD" };
+			const input = { cwd, command: command + " && git push origin HEAD" };
 			await pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "partial", input });
-			git("commit", "-qm", "change");
+			git(...(command.includes("-c") ? ["-c", "user.name=Test", "-c", "user.email=test@example.com"] : []), "commit", "-qm", "change");
 			await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "partial", input,
 				content: [{ type: "text", text: "fatal: authentication failed" }], isError: true });
 			expect(pi.entries).toEqual([{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }]);
@@ -56,6 +57,8 @@ describe("delivery milestones", () => {
 	});
 	it.each([
 		["git commit -m change", "[work abc1234] change"],
+		["git commit -m change 2>&1", "[work abc1234] change"],
+		["gh pr create 2>&1", "https://github.com/owner/repo/pull/123"],
 		["HIVE_PRESIGN_REQUIRED=1 git -C /repo commit -m change && false", "[work (root-commit) abc1234] change"],
 		["gh pr create", "https://github.com/owner/repo/pull/123"],
 		["gh pr create && echo done", "https://github.com/owner/repo/pull/123\ndone"],
@@ -77,6 +80,29 @@ describe("delivery milestones", () => {
 });
 
 describe("advisor timing", () => {
+	it("does not spend or persist advice dropped when a user message arrives during policy work", async () => {
+		const pi = createFakePi(); let item = withStage(createConductor("c", 0), "execute", 0);
+		const advice = createConductorAdvicePolicy({ current: () => item, commit: next => { item = next; }, goal: () => null, enabled: () => true, requestPlanMode: () => {} });
+		const driver = installDriver(pi.api, { policies: [advice], turnPolicies: [advice] });
+		const branch = [{ message: { role: "user", content: "Implement HIV-3838 with tests and deliver one PR" } }];
+		const ctx: FakeCtxOptions = { branch, idle: false, pendingMessages: false };
+		await pi.emit({ type: "session_start" }, ctx);
+		await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "c", input: { command: "git commit -m change" },
+			content: [{ type: "text", text: "[work abc1234] change" }], isError: false });
+		ctx.branch = [...branch, ...pi.entries];
+		let metrics = 0;
+		const unsubscribe = pi.api.events.on("hive.metric", () => { metrics++; ctx.pendingMessages = true; });
+		await pi.emit({ type: "turn_end" }, ctx); unsubscribe();
+		expect(metrics).toBe(1);
+		expect(pi.messages).toHaveLength(0);
+		expect(driver.ledger().iterations[ADVISE_LEDGER_ID]).toBeUndefined();
+		expect(pi.entries.filter(entry => entry.customType === ADVICE_GIVEN_ENTRY)).toHaveLength(0);
+		ctx.pendingMessages = false;
+		await pi.emit({ type: "session_start" }, { ...ctx, entries: [...branch, ...pi.entries] });
+		await pi.emit({ type: "turn_end" }, ctx);
+		expect(pi.messages).toHaveLength(1);
+		expect(pi.entries.filter(entry => entry.customType === ADVICE_GIVEN_ENTRY)).toHaveLength(1);
+	});
 	it.each([
 		["git commit -m change", "[work abc1234] change"],
 		["gh pr create", "https://github.com/owner/repo/pull/123"],

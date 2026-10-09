@@ -11,7 +11,8 @@ export const ADVICE_GIVEN_ENTRY = "agenda-advice-given";
 export function deliveryMilestone(command: string, output: string, succeeded = true): boolean {
 	if (command.length > 8192) return false;
 	let pipeline = false;
-	const segments = splitCommands(command, true, () => { pipeline = true; });
+	const parsed = command.replace(/\d*[<>]&\s*(?:\d+|-)/g, "");
+	const segments = splitCommands(parsed, true, () => { pipeline = true; });
 	if (pipeline) return false; // the shell exit code may belong to cat, not the creator
 	// In an all-success && chain, successful tool completion also establishes
 	// the earlier creator succeeded. Do not infer that across ; or || recovery.
@@ -34,9 +35,9 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 			const url = /https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/.test(output);
 			// gh prints the created URL on its own line. A later && suffix may
 			// fail, but duplicate/error output must not masquerade as creation.
-			const partialSuccess = /^https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?\s*$/m.test(output) &&
-				allSuccessChain && index < segments.length - 1 &&
-				!/(?:already exists|permission denied|fatal:|error:|HTTP [45]\d\d|GraphQL)/i.test(output);
+			const createdUrl = /^https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?\s*$/m.exec(output);
+			const partialSuccess = createdUrl && allSuccessChain && index < segments.length - 1 &&
+				!/(?:already exists|permission denied|fatal:|error:|HTTP [45]\d\d|GraphQL)/i.test(output.slice(0, createdUrl.index));
 			if (url && (succeeded && (index === segments.length - 1 || allSuccessChain) || partialSuccess)) return true;
 		}
 	}
@@ -47,7 +48,7 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 function commitCheckout(command: string, cwd: string): string | null {
 	if (command.length > 8192) return null;
 	let dir = cwd, pipeline = false;
-	const segments = splitCommands(command, true, () => { pipeline = true; });
+	const segments = splitCommands(command.replace(/\d*[<>]&\s*(?:\d+|-)/g, ""), true, () => { pipeline = true; });
 	if (pipeline) return null;
 	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment);
@@ -59,7 +60,11 @@ function commitCheckout(command: string, cwd: string): string | null {
 		}
 		if (words[0] !== "git") continue;
 		let i = 1, target = dir;
-		while (words[i] === "-C" && words[i + 1]) { target = resolve(target, words[i + 1]); i += 2; }
+		while (["-C", "-c"].includes(words[i]) && words[i + 1]) {
+			if (words[i] === "-C") target = resolve(target, words[i + 1]);
+			else if (!/^user\.(?:name|email)=/.test(words[i + 1])) return null;
+			i += 2;
+		}
 		// HEAD-only evidence requires a real commit and no HEAD-changing suffix.
 		// Quiet commit/push/reporting chains are safe when all && steps succeed.
 		if (words[i] === "commit") {
