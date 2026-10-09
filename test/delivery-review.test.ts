@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deliveryCommand, deliveryTargets, needsDeliveryReview, registerDeliveryReview, reviewFingerprint } from "../extensions/subagent/delivery.ts";
@@ -66,6 +66,21 @@ describe("delivery review", () => {
 			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0])
 				.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
 		}
+	});
+	it("requires post-commit review when hooks can generate unreviewed code", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		const hook = join(cwd, ".git", "hooks", "pre-commit");
+		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' > generated.ts\ngit add generated.ts\n"); chmodSync(hook, 0o755);
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git commit -m code && hive ship && git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("executable hooks") });
+		git("commit", "-m", "hook generated");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const generated");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
 	});
 	it("distinguishes unsupported shapes from an unavailable diff", async () => {
 		const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);

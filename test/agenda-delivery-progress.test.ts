@@ -13,6 +13,11 @@ describe("delivery milestones", () => {
 		const call = () => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "q", input: { command: "git commit -q -m change" } });
 		const result = () => pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "q", input: { command: "git commit -q -m change" }, content: [], isError: false });
 		await call(); await result(); expect(pi.entries).toHaveLength(0);
+		const fallback = "git commit -q -m change || git checkout other";
+		await pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "f", input: { command: fallback } });
+		head = "other";
+		await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "f", input: { command: fallback }, content: [], isError: false });
+		expect(pi.entries).toHaveLength(0);
 		await call(); head = "new"; await result();
 		expect(pi.entries).toEqual([{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }]);
 	});

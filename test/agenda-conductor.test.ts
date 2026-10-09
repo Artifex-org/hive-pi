@@ -275,6 +275,14 @@ describe("conductor policy", () => {
 		await next!.run();
 		expect(item()?.stage).toBe("frame");
 	});
+	it("offers advice for the session\'s first commit even on a simple task, not on a later complex read", async () => {
+		const { hooks } = makeHooks();
+		const policy = createConductorAdvicePolicy(hooks);
+		const simple = signalsWith({ lastUserPrompt: "Fix a typo", deliveryStarted: true });
+		const outcome = await policy.decide(contextWith(emptyLedger, simple))!.run();
+		expect(outcome.inject).toContain("advisor");
+		expect(policy.decide(contextWith(outcome.ledger!(emptyLedger), signalsWith({ deliveryStarted: true })))).toBeNull();
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});

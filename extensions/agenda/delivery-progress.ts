@@ -36,7 +36,8 @@ export function deliveryMilestone(command: string, output: string): boolean {
 function commitCheckout(command: string, cwd: string): string | null {
 	if (command.length > 8192) return null;
 	let dir = cwd;
-	for (const segment of splitCommands(command, true)) {
+	const segments = splitCommands(command, true);
+	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment);
 		if (!words) return null;
 		while (/^[A-Za-z_]\w*=/.test(words[0] ?? "")) words.shift();
@@ -47,7 +48,10 @@ function commitCheckout(command: string, cwd: string): string | null {
 		if (words[0] !== "git") continue;
 		let i = 1, target = dir;
 		while (words[i] === "-C" && words[i + 1]) { target = resolve(target, words[i + 1]); i += 2; }
-		if (words[i] === "commit") return target;
+		// HEAD-only evidence is attributable only to a final standalone commit,
+		// optionally after cd; checkout/reset fallbacks must never count.
+		if (words[i] === "commit") return index === segments.length - 1 ? target : null;
+		return null;
 	}
 	return null;
 }

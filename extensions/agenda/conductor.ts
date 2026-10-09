@@ -337,7 +337,6 @@ export function createConductorAdvicePolicy(hooks: ConductorHooks): Policy {
 		const signals = context.signals;
 		if (!hooks.enabled() || !signals?.deliveryStarted || !signals.userTurns ||
 			atCap(context.ledger, ADVISE_LEDGER_ID, 1)) return null;
-		if (!hooks.current() && assessComplexity(signals.lastUserPrompt, signals.tasks.total) !== "complex") return null;
 		return adviceTransition(hooks, signals);
 	} };
 }
