@@ -1,4 +1,4 @@
-import { canonicalMcpToolName } from "../mcp-common/names.ts";
+import { canonicalMcpToolName, nativeMcpToolName } from "../mcp-common/names.ts";
 import { readOnlyMcpTools } from "../profile-common/profile.ts";
 /**
  * What a session may do while a plan is being written.
@@ -40,7 +40,7 @@ const MUTATING_BUILTINS = new Set(["edit", "write", "multiedit", "notebook_edit"
  * Prefix matching, because a tool family is namespaced (`plan_approve`,
  * `tasks_list`) and the useful unit of trust is the family, not the individual
  * tool. Note what is NOT here: an MCP server prefix. A server's tools are
- * allowed one at a time, by exact name, from the house profile — see below.
+ * allowed one at a time, by exact reviewed name — see below.
  */
 const READ_ONLY_PREFIXES = [
 	"plan_", // this extension's own tools
@@ -58,6 +58,15 @@ const READ_ONLY_TOOLS = new Set([
 	// direct `write`. `tool_search` only declares tools for the next call.
 	"codemode",
 	"tool_search",
+	// Harness wrappers around the same reviewed Hive knowledge reads.
+	"knowledge_search",
+	"knowledge_grep",
+	"knowledge_get",
+	"knowledge_multi_get",
+	"knowledge_collections",
+	// sessionIdentity.ts stores only this session's kickoff metadata (also
+	// synced to its own Hive identity by identitySync.ts), never work state.
+	"session_context",
 	"web_search",
 	"web_fetch",
 	"subagent", // read-only roles are enforced by the role, not here
@@ -80,44 +89,83 @@ const READ_ONLY_TOOLS = new Set([
 export type PlanToolVerdict = { allowed: true } | { allowed: false; reason: string };
 
 /**
- * The small MCP/card surface discussion mode may use without becoming a way to
- * mutate a live system. Keep this explicit: MCP tool names are not sufficient
- * evidence of safety, and plan mode deliberately does not inherit this list.
+ * Shared, exact MCP reads for plan, discussion and orchestrate research.
+ *
+ * Each Hive name below was checked against its handler in internal/mcp/ at
+ * hive 20267981ffa9b67e7e8a3582ff60a77c4aa46f31 (2026-10-09), including the
+ * called read helpers. None changes tickets, claims, communications, documents,
+ * scheduler configuration, runs or deployments. Knowledge reads record access
+ * provenance/counters; pull reads may fill a read-through cache. Those are read
+ * bookkeeping, not permission to write content or dispatch work.
+ *
+ * Linear's external handlers are not in Hive's tree: the three exact Linear
+ * names were checked against their published retrieve/list contracts instead.
+ * No server prefix or name heuristic, and no assumption about readOnlyHint.
  */
-const DISCUSSION_READ_ONLY_TOOLS = new Set([
-	"render_chart",
-	"knowledge_search",
-	"knowledge_grep",
-	"knowledge_get",
-	"knowledge_multi_get",
-	"knowledge_collections",
-	"hive_get_task_logs",
-	"hive_wait_for_run",
+export const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
+	// Tickets: linearticket.go, related_work.go, work_context.go, linearboard.go.
+	"hive_get_ticket",
+	"hive_search_tickets",
+	"hive_find_related_work",
+	"hive_get_work_context",
+	"hive_get_board",
+	"hive_my_tickets",
+	// Coordination snapshots: occupancy.go, communications_tools.go.
+	"hive_get_occupancy",
+	"hive_list_communications",
+	"hive_get_communication",
+	// Knowledge content/collection reads: knowledge.go (NOT knowledge_write.go).
+	"hive_knowledge_search",
+	"hive_knowledge_grep",
+	"hive_knowledge_get",
+	"hive_knowledge_multi_get",
+	"hive_knowledge_collections",
+	// Fleet snapshots/analytics: agentcapacity.go, observability.go, queues.go,
+	// scheduler_settings.go, breadth.go and metrics.go.
+	"hive_list_clusters",
+	"hive_fleet_status",
+	"hive_list_queues",
+	"hive_get_scheduler_settings",
+	"hive_get_topology",
+	"hive_get_constraint_cost",
+	"hive_get_queue_wait",
+	"hive_get_step_durations",
+	// Runs: tools.go, runtests.go, reads.go; explain_failure delegates to
+	// internal/diagnose/explain.go, which only assembles diagnostic evidence.
+	"hive_list_runs",
 	"hive_get_run",
-	"hive_get_pull",
+	"hive_get_run_tests",
+	"hive_get_run_reports",
+	"hive_get_task_logs",
 	"hive_explain_failure",
+	// Health/state: testpghealth.go (sampler snapshot), deploy.go, tools.go,
+	// reads.go (GitHub GETs and Hive queries, never a merge/deploy).
+	"hive_get_test_pg_health",
+	"hive_get_deploy_status",
+	"hive_get_readiness",
+	"hive_list_projects",
+	"hive_get_pull",
+	"hive_list_pulls",
+	"linear_get_issue",
+	"linear_list_issues",
+	"linear_list_comments",
 ]);
 
-/**
- * Live cards whose server contracts are read-only monitoring queries.
- *
- * EXACT NAMES, from the house profile, never a server prefix. The list is an
- * assertion that somebody read that tool's implementation; a prefix would
- * silently extend the claim to every tool the server grows afterwards, which is
- * precisely the review this list stands in for. MCP servers in practice do not
- * publish read-only annotations the harness could consume instead.
- *
- * Empty with no profile: nothing is pre-approved, and plan mode asks. That is
- * the conservative direction, and the only safe default for a server this
- * harness knows nothing about.
- */
-// A function, not a module-level constant, so the value is not pinned at IMPORT
-// — which on a machine being provisioned would be whatever existed before the
-// profile was linked in. `houseProfile()` caches on first read, so this is still
-// resolved once per process, not once per call; what it buys is that the first
-// read happens when the gate is first consulted rather than when some unrelated
-// extension imported this module.
+// Keep the existing discussion-only surface, without promoting supervision or
+// organisation-specific cards into plan mode. wait_for_run is a blocking
+// supervision request, not a bounded research snapshot. Its old permission in
+// discussion/orchestrate stays intact; plan reads get_run instead.
+const DISCUSSION_READ_ONLY_TOOLS = new Set(["render_chart", "hive_wait_for_run"]);
 const discussionReadOnlyMcpTools = () => readOnlyMcpTools();
+
+function isReviewedMcpRead(name: string): boolean {
+	const canonical = canonicalMcpToolName(name);
+	if (!READ_ONLY_MCP_TOOLS.has(canonical)) return false;
+	// Flattening alone loses the server/tool boundary: mcp__hive_get__run
+	// is NOT mcp__hive__get_run. The reviewed servers here are hive and linear.
+	const separator = canonical.indexOf("_");
+	return name === canonical || name === nativeMcpToolName(canonical.slice(0, separator), canonical.slice(separator + 1));
+}
 
 const MCP_DISCOVERY_KEYS = new Set([
 	"connect",
@@ -131,7 +179,9 @@ const MCP_DISCOVERY_KEYS = new Set([
 	"server",
 ]);
 
-export function classifyTool(name: string): PlanToolVerdict {
+export function classifyTool(name: string, input?: unknown): PlanToolVerdict {
+	if (name === "mcp") return classifyMcpRequest(input, "Plan", isReviewedMcpRead);
+	if (isReviewedMcpRead(name)) return { allowed: true };
 	if (MUTATING_BUILTINS.has(name)) {
 		return { allowed: false, reason: `\`${name}\` writes to disk. Plan mode is read-only.` };
 	}
@@ -147,52 +197,53 @@ export function classifyTool(name: string): PlanToolVerdict {
 	};
 }
 
-/**
- * Discussion shares plan's read-only base but may inspect live state through
- * cards. `mcpScript` remains denied because arbitrary JavaScript can call a
- * mutating MCP tool; the single-call gateway is admitted only for discovery or
- * the named read-only Borealis cards above.
- */
-export function classifyDiscussionTool(name: string, input: unknown): PlanToolVerdict {
-	const base = classifyTool(name);
-	// Lists are keyed by the adapter form (`hive_get_run`); pi's native MCP
-	// names the same tool `mcp__hive__get_run`. Canonicalised once here so a
-	// rename can never silently fail closed (mcp-common/names.ts).
-	const canonical = canonicalMcpToolName(name);
-	if (base.allowed || DISCUSSION_READ_ONLY_TOOLS.has(canonical)) return { allowed: true };
-	// Same both-envelopes rule as orchestrate below: a promoted MCP tool arrives
-	// under its own name, and a read-only card is read-only either way round.
-	if (discussionReadOnlyMcpTools().has(canonical)) return { allowed: true };
-	if (name !== "mcp") return base;
+/** Single-call MCP gateway, matching the adapter's dispatch order. */
+function classifyMcpRequest(input: unknown, posture: string, permits: (name: string) => boolean): PlanToolVerdict {
 	if (!input || typeof input !== "object" || Array.isArray(input)) {
-		return { allowed: false, reason: "Discussion mode requires a structured MCP request." };
+		return { allowed: false, reason: `${posture} mode requires a structured MCP request.` };
 	}
-
-	const params = input as { tool?: unknown; action?: unknown };
-	// Match the adapter's dispatch order: action wins over tool. Otherwise an
-	// auth action could smuggle past the card allowlist by naming a safe tool.
+	const params = input as { tool?: unknown; action?: unknown; server?: unknown };
+	// action wins over tool: an auth action must not smuggle past a safe name.
 	if (params.action !== undefined) {
 		return params.action === "ui-messages"
 			? { allowed: true }
-			: {
-					allowed: false,
-					reason: "Discussion mode permits MCP discovery and UI messages, not authentication actions.",
-				};
+			: { allowed: false, reason: `${posture} mode permits MCP discovery and UI messages, not authentication actions.` };
 	}
-	if (typeof params.tool === "string") {
-		return discussionReadOnlyMcpTools().has(params.tool)
-			? { allowed: true }
-			: {
-					allowed: false,
-					reason:
-						`Discussion mode permits only its read-only MCP cards; \`${params.tool}\` is not one of them. ` +
-						"Switch to build mode for a mutating or unreviewed MCP call.",
-				};
+	if (params.tool !== undefined) {
+		const tool = typeof params.tool === "string" ? params.tool : "";
+		const canonical = canonicalMcpToolName(tool);
+		if (tool && permits(tool)) {
+			// The adapter's explicit server override controls dispatch. A reviewed
+			// hive_get_run must not be redirected to hive_get's unreviewed `run`.
+			if (READ_ONLY_MCP_TOOLS.has(canonical) && params.server !== undefined &&
+				params.server !== canonical.slice(0, canonical.indexOf("_"))) {
+				return { allowed: false, reason: `${posture} mode requires the reviewed MCP tool's own server.` };
+			}
+			return { allowed: true };
+		}
+		return {
+			allowed: false,
+			reason: posture === "Orchestrate" ? orchestrateMcpRefusal(canonical) :
+				`${posture} mode permits only reviewed read-only MCP tools; \`${String(params.tool)}\` is not one of them.`,
+		};
 	}
-	const keys = Object.keys(params);
-	return keys.every((key) => MCP_DISCOVERY_KEYS.has(key))
+	return Object.keys(params).every((key) => MCP_DISCOVERY_KEYS.has(key))
 		? { allowed: true }
-		: { allowed: false, reason: "Discussion mode permits only MCP discovery or reviewed read-only cards." };
+		: { allowed: false, reason: `${posture} mode permits only MCP discovery or reviewed tools.` };
+}
+
+function isDiscussionMcpRead(name: string): boolean {
+	const canonical = canonicalMcpToolName(name);
+	// Do not let a profile fallback re-admit a shared-name boundary collision.
+	if (READ_ONLY_MCP_TOOLS.has(canonical)) return isReviewedMcpRead(name);
+	return DISCUSSION_READ_ONLY_TOOLS.has(canonical) || discussionReadOnlyMcpTools().has(canonical);
+}
+
+/** Discussion retains its organisation-specific cards and supervision reads. */
+export function classifyDiscussionTool(name: string, input: unknown): PlanToolVerdict {
+	if (name === "mcp") return classifyMcpRequest(input, "Discussion", isDiscussionMcpRead);
+	const base = classifyTool(name, input);
+	return base.allowed || isDiscussionMcpRead(name) ? { allowed: true } : base;
 }
 
 /** Direct tools whose whole contract is coordination or verification. */
@@ -226,7 +277,8 @@ const ORCHESTRATE_TOOLS = new Set([
  * trigger, deploy and secret mutations. A newly added MCP tool stays denied
  * until somebody reads its contract and adds it here deliberately.
  */
-// Alphabetical, and it includes the READ-ONLY ticket tools on purpose.
+// Alphabetical mode-specific extras; research reads are inherited from the
+// shared set above. Keep legacy supervision reads here, not in plan mode.
 //
 // The list permits reading one ticket (get_ticket, get_board) and even WRITING
 // them (claim_ticket, comment_ticket, move_ticket_state), but until this fix it
@@ -337,48 +389,27 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_encounter_communication",
 	"hive_end_agent_session",
 	"hive_evaluate_pipeline",
-	"hive_explain_failure",
-	"hive_find_related_work",
 	"hive_find_similar_failures",
-	"hive_fleet_status",
 	"hive_force_kill_agent_session",
 	"hive_get_agent_command",
 	"hive_get_agent_spend",
 	"hive_get_agent_startup",
-	"hive_get_board",
-	"hive_get_communication",
 	"hive_get_factory_provider_limits",
 	"hive_get_factory_tier_health",
-	"hive_get_occupancy",
 	"hive_get_origin_pull",
 	"hive_get_project_goal_work",
 	"hive_get_project_goals",
-	"hive_get_pull",
 	"hive_get_pull_comments",
-	"hive_get_readiness",
 	"hive_get_review_rejections",
-	"hive_get_run",
 	"hive_get_run_changes",
-	"hive_get_run_reports",
-	"hive_get_run_tests",
-	"hive_get_task_logs",
-	"hive_get_test_pg_health",
-	"hive_get_ticket",
-	"hive_get_work_context",
 	"hive_launch_teammate",
 	"hive_list_agent_launches",
 	"hive_list_agent_sessions",
-	"hive_list_clusters",
-	"hive_list_communications",
 	"hive_list_credential_catalog",
-	"hive_list_projects",
-	"hive_list_pulls",
 	"hive_list_run_completions",
-	"hive_list_runs",
 	"hive_list_teams",
 	"hive_list_teammates",
 	"hive_message_teammate",
-	"hive_my_tickets",
 	"hive_move_ticket_state",
 	"hive_offload_to_factory",
 	"hive_patch_communication",
@@ -393,25 +424,21 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
 	"hive_reply_communication",
 	"hive_report_issue",
 	"hive_retry_run",
-	"hive_search_tickets",
 	"hive_set_run_priority",
 	"hive_steer_agent",
 	"hive_wait_for_run",
 	"hive_watch_ticket",
 	"hive_whoami",
 	"linear_get_document",
-	"linear_get_issue",
 	"linear_get_issue_status",
 	"linear_get_milestone",
 	"linear_get_project",
 	"linear_get_team",
 	"linear_get_user",
-	"linear_list_comments",
 	"linear_list_cycles",
 	"linear_list_documents",
 	"linear_list_issue_labels",
 	"linear_list_issue_statuses",
-	"linear_list_issues",
 	"linear_list_milestones",
 	"linear_list_projects",
 	"linear_list_teams",
@@ -456,24 +483,7 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 	// which reach nobody until someone reads them.
 	if (ORCHESTRATE_MCP_TOOLS.has(canonical)) return { allowed: true };
 	if (name === "mcp") {
-		if (!input || typeof input !== "object" || Array.isArray(input)) {
-			return { allowed: false, reason: "Orchestrate mode requires a structured MCP request." };
-		}
-		const params = input as { tool?: unknown; action?: unknown };
-		if (params.action !== undefined) {
-			return params.action === "ui-messages"
-				? { allowed: true }
-				: { allowed: false, reason: "Orchestrate mode permits MCP discovery and UI messages, not authentication actions." };
-		}
-		if (typeof params.tool === "string") {
-			return ORCHESTRATE_MCP_TOOLS.has(params.tool) || discussionReadOnlyMcpTools().has(params.tool)
-				? { allowed: true }
-				: { allowed: false, reason: orchestrateMcpRefusal(params.tool) };
-		}
-		const keys = Object.keys(params);
-		return keys.every((key) => MCP_DISCOVERY_KEYS.has(key))
-			? { allowed: true }
-			: { allowed: false, reason: "Orchestrate mode permits only MCP discovery or reviewed coordination tools." };
+		return classifyMcpRequest(input, "Orchestrate", (tool) => ORCHESTRATE_MCP_TOOLS.has(canonicalMcpToolName(tool)) || isDiscussionMcpRead(tool));
 	}
 
 	const base = classifyDiscussionTool(name, input);
@@ -764,7 +774,7 @@ export function classifyCommand(command: string, posture = "Plan"): PlanToolVerd
  * hook both answer from this, so the composition exists once.
  */
 export function planToolVerdict(name: string, input: unknown): PlanToolVerdict {
-	const verdict = classifyTool(name);
+	const verdict = classifyTool(name, input);
 	if (!verdict.allowed || name !== "bash") return verdict;
 	const command = (input as { command?: unknown } | undefined)?.command;
 	return classifyCommand(typeof command === "string" ? command : "");
@@ -1093,7 +1103,11 @@ const DENIED_SHORT: Record<string, string> = {
 /** Flags that turn an otherwise-read-only command into a writer. */
 function hasSafeArguments(command: string, args: string[]): boolean {
 	const universallyForbidden = new Set(["-i", "-delete", "-o"]);
-	if (args.some((arg) => universallyForbidden.has(arg) || longOptionHit(arg, UNIVERSAL_DENIED_LONG))) return false;
+	// grep/rg -i means ignore case, not in-place editing. Do not weaken -i
+	// for writers such as sed/yq, or change quote/redirect/subshell handling.
+	const caseInsensitiveReader = command === "grep" || command === "rg";
+	if (args.some((arg) => (universallyForbidden.has(arg) && !(arg === "-i" && caseInsensitiveReader)) ||
+		longOptionHit(arg, UNIVERSAL_DENIED_LONG))) return false;
 	const deniedLong = DENIED_LONG[command];
 	if (deniedLong && args.some((arg) => longOptionHit(arg, deniedLong))) return false;
 	const deniedShort = DENIED_SHORT[command];

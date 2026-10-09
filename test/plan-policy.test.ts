@@ -85,6 +85,17 @@ describe("shell — plain read-only commands", () => {
 		expect(allowed("wc -l extensions/plan/state.ts")).toBe(true);
 	});
 
+	it("allows case-insensitive grep with quoted escaped alternation, not writes after it", () => {
+		const command = String.raw`grep -n -i "spillover\|templa" docs/dsl.md`;
+		expect(allowed(command)).toBe(true);
+		expect(classifyOrchestrateCommand(command).allowed).toBe(true);
+		expect(allowed(String.raw`rg -i "spillover\|templa" docs/dsl.md`)).toBe(true);
+		for (const suffix of [" > out", " < input", " $(touch out)", " && touch out", " &"]) {
+			expect(allowed(command + suffix), suffix).toBe(false);
+		}
+		expect(allowed("sed -i 's/a/b/' docs/dsl.md")).toBe(false);
+	});
+
 	it("allows a pipeline of readers", () => {
 		expect(allowed("cat package.json | jq .name")).toBe(true);
 		expect(allowed("ls src && ls test")).toBe(true);
@@ -644,8 +655,8 @@ describe("native MCP names (HIV-3745)", () => {
 		}
 	});
 
-	it("plan mode never allows a native MCP tool by name — only the gateway", () => {
-		expect(classifyTool("mcp__hive__get_run").allowed).toBe(false);
+	it("plan mode permits reviewed native MCP reads and still gates nested calls", () => {
+		expect(classifyTool("mcp__hive__get_run").allowed).toBe(true);
 		// The gateway is allowed because each nested call it makes is classified
 		// by this same policy through the tool_call pipeline.
 		expect(classifyTool("codemode").allowed).toBe(true);
