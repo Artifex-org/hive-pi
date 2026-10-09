@@ -5,6 +5,12 @@ import path from "node:path";
 export interface BrowserSurfaceConfig {
   dir: string;
   frameFIFO: string;
+  /**
+   * hive-agent's relay reads this second frame FIFO. The node creates it
+   * (0600) when it runs a relay; an older node does not, and the bridge then
+   * skips it — so it is not required to exist here.
+   */
+  relayFrameFIFO: string;
   controlFIFO: string;
   manifest: string;
   lease: string;
@@ -48,6 +54,7 @@ export function browserSurfaceConfig(env: NodeJS.ProcessEnv): BrowserSurfaceConf
   return {
     dir: resolved,
     frameFIFO,
+    relayFrameFIFO: expectedPath(resolved, "relay-frames.fifo"),
     controlFIFO,
     manifest,
     lease: expectedPath(resolved, "lease.json"),

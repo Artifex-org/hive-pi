@@ -179,6 +179,20 @@ The same contract pi's browser follows, so nothing on the node changes:
   FIFOs the node creates): `manifest.json` (`ready` → `ended`), JPEG frames on
   `frames.fifo`, input from `control.fifo` (lease-checked), and
   `latest-web.{jpg,json}` every 2 s. The desktop reads the dir directly.
+- **Interactive live view** (hive `docs/agent-live-browser.md` §1–4) — every
+  line written to `frames.fifo` also goes to `relay-frames.fifo` when the node
+  made one (hive-agent's relay reads it; each FIFO has its own latest-frame
+  backlog). Frames carry `view` (`agent`/`operator`), `operator_tab` and
+  `agent_paused`; each command with an `id` is answered with a
+  `control_result` (`error`: `password_field`, `invalid`, `failed`,
+  `no_operator_tab`, `no_lease`). Beyond navigate/mouse/key the controller can
+  scroll (wheel deltas), paste (`insert_text`), go back/forward/reload, and
+  open one operator tab in the agent's browser context; the screencast and
+  input follow the page in view. Text never reaches a focused password field.
+  While an unexpired lease with `exclusive: true` holds the agent's own page,
+  the agent's page tools (all but `browser_console`) fail with "The operator
+  has taken control of this browser from Hive's live view…"; without a live
+  lease the view returns to the agent page.
 - **Hive web UI** — in a pi session hive-remote relays `latest-web.*` to
   `PUT /agent-sessions/{id}/surfaces/{HIVE_LAUNCH_ID}` (+ `/snapshot`). A
   Claude session has no hive-remote and the driver does not relay surfaces,
