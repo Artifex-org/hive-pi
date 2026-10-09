@@ -9,7 +9,7 @@
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
 
 import {
@@ -58,6 +58,14 @@ function deps(overrides: Partial<ProbeDeps> = {}): ProbeDeps {
 }
 
 describe("runProbe", () => {
+	it("supports the first-turn socket deadline without declaring absence", async () => {
+		vi.useFakeTimers();
+		try {
+			const pending = runProbe("unix-sockets", "unix sockets", () => new Promise(() => {}), deps(), 250);
+			await vi.advanceTimersByTimeAsync(250);
+			expect(await pending).toMatchObject({ status: "unknown", detail: "probe failed or timed out" });
+		} finally { vi.useRealTimers(); }
+	});
 	it("converts a throwing probe into `unknown`, never a crash", async () => {
 		const out = await runProbe(
 			"boom",

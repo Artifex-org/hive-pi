@@ -100,6 +100,8 @@ export {
 	type SubagentUsageByModel,
 } from "./delegate.ts";
 
+import { DELIVERY_REVIEW_GUIDANCE, registerDeliveryReview } from "./delivery.ts";
+
 const COLLAPSED_ITEM_COUNT = 10;
 
 function formatTokens(count: number): string {
@@ -434,6 +436,7 @@ function structuredRequest(schema: unknown): StructuredRequest | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+	registerDeliveryReview(pi);
 	pi.on("tool_execution_end", (event) => {
 		if (event.toolName === "subagent") stopSubagentWidget(pi, event.toolCallId);
 	});
@@ -514,6 +517,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use subagent for read-heavy exploration, routine fixes, tests, documentation, and first-pass review; parallelize only read-only roles in one worktree.",
 			"Verify subagent results before relying on them — a confident summary is not evidence.",
+			DELIVERY_REVIEW_GUIDANCE,
 		],
 		parameters: SubagentParams,
 

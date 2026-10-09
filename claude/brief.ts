@@ -21,6 +21,7 @@ import { hiveAuth, modelUnavailableReason, type AdapterEnv } from "./env.ts";
 import { isConfiguredWith, leasedProviders } from "./models.ts";
 import { loadPinnedPi } from "./pi-runtime.ts";
 import type { Spool } from "./spool.ts";
+import { CLAUDE_HELPER_GUIDANCE } from "./guidance.ts";
 
 export type BriefResult = { brief: string } | { brief: null; reason: string };
 
@@ -56,5 +57,5 @@ export async function runBriefCommand(cwd: string, prompt: string, env: AdapterE
 		model: result.model,
 		elapsedMs: result.elapsedMs,
 	});
-	return { brief: text };
+	return { brief: `${text}\n\n${CLAUDE_HELPER_GUIDANCE}` };
 }

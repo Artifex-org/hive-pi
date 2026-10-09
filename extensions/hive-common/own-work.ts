@@ -21,24 +21,32 @@ export interface OwnWorkEvent {
 	by: string;
 	/** Its currently running jobs. */
 	running: number;
+	/** Human-readable work labels, never commands or captured output. */
+	descriptions?: readonly string[];
 }
 
-export function announceOwnWork(pi: ExtensionAPI, by: string, running: number): void {
-	pi.events.emit(OWN_WORK_CHANNEL, { by, running } satisfies OwnWorkEvent);
+export function announceOwnWork(pi: ExtensionAPI, by: string, running: number, descriptions?: readonly string[]): void {
+	pi.events.emit(OWN_WORK_CHANNEL, { by, running, ...(descriptions ? { descriptions } : {}) } satisfies OwnWorkEvent);
 }
 
 export interface OwnWork {
 	running(): number;
+	descriptions?(): string[];
 }
 
 export function trackOwnWork(pi: ExtensionAPI): OwnWork {
 	const counts = new Map<string, number>();
+	const labels = new Map<string, string[]>();
 	pi.events.on(OWN_WORK_CHANNEL, (data: unknown) => {
 		const event = data as Partial<OwnWorkEvent> | undefined;
-		if (typeof event?.by !== "string" || typeof event.running !== "number") return;
+		if (typeof event?.by !== "string" || typeof event.running !== "number" || !Number.isFinite(event.running) || event.running < 0) return;
 		counts.set(event.by, event.running);
+		labels.set(event.by, event.running > 0
+			? (Array.isArray(event.descriptions) && event.descriptions.length > 0 ? event.descriptions : [`${event.running} ${event.by} job(s)`]).filter((s) => typeof s === "string").slice(0, 4).map((s) => s.slice(0, 120))
+			: []);
 	});
 	return {
+		descriptions: () => [...labels.values()].flat(),
 		running: () => {
 			let total = 0;
 			for (const count of counts.values()) total += count;

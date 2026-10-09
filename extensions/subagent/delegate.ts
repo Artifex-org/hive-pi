@@ -52,7 +52,7 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
-import { captureReviewDiff, citedOutsideDiff, isReviewRole, outsideDiffWarning, reviewScopeFiles, reviewTaskWithDiff } from "./reviewdiff.ts";
+import { captureDeliveryDiff, captureReviewDiff, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewScopeFiles, reviewTaskWithDiff } from "./reviewdiff.ts";
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 
 /**
@@ -487,6 +487,7 @@ export async function runSingleAgent(
 	schema?: StructuredRequest,
 	requestedModel?: string,
 	env?: WorkerModelEnv,
+	reviewPrepared = false,
 ): Promise<SingleResult> {
 	const agent = resolveAgent(agents, agentName);
 
@@ -653,12 +654,15 @@ export async function runSingleAgent(
 
 		// A review role is handed the change it is reviewing (reviewdiff.ts):
 		// left to find it, a worker reviewed files that were not in the diff.
-		let effectiveTask = task;
+		const neutralize = agent.name === "code-reviewer" && !reviewPrepared;
+		let effectiveTask = neutralize ? neutralReviewTask(task) : task;
 		if (isReviewRole(agent.name)) {
-			const diff = captureReviewDiff(executionCwd, task);
+			const diff = agent.name === "code-reviewer" ? captureDeliveryDiff(executionCwd, task) : captureReviewDiff(executionCwd, task);
 			if (diff) {
-				effectiveTask = reviewTaskWithDiff(task, diff);
+				effectiveTask = reviewTaskWithDiff(task, diff, neutralize);
 				currentResult.reviewFiles = reviewScopeFiles(diff);
+			} else if (agent.name === "code-reviewer") {
+				effectiveTask += "\nComplete merge-base diff unavailable. Review the requested scope paths, but report delivery scope as unverified; do not invent a change inventory.";
 			}
 		}
 		args.push(`Task: ${effectiveTask}`);
@@ -877,6 +881,10 @@ export async function runAgentWithSchema(
 	requestedModel?: string,
 	env?: WorkerModelEnv,
 ): Promise<SingleResult> {
+	// Only the author's initial request is neutralized. Runtime continuation
+	// and schema-validation feedback must survive all subsequent attempts.
+	const reviewPrepared = resolveAgent(agents, agentName)?.name === "code-reviewer";
+	if (reviewPrepared) task = neutralReviewTask(task);
 	let attemptTask = task;
 	let attemptModel = requestedModel;
 	let result = await runSingleAgent(
@@ -892,6 +900,7 @@ export async function runAgentWithSchema(
 		schema,
 		attemptModel,
 		env,
+		reviewPrepared,
 	);
 	const readOnly = !agentIsWriterCapable(resolveAgent(agents, agentName));
 
@@ -922,6 +931,7 @@ export async function runAgentWithSchema(
 				schema,
 				alternate,
 				env,
+				reviewPrepared,
 			);
 			const attemptedMessages = [...messagesForTelemetry(result), ...messagesForTelemetry(retried)];
 			const refusal = `${result.model ?? "the delegation default"} refused: ${(result.errorMessage ?? "").slice(0, 160)}`;
@@ -955,6 +965,7 @@ export async function runAgentWithSchema(
 			schema,
 			attemptModel,
 			env,
+			reviewPrepared,
 		);
 		const attemptedMessages = [...messagesForTelemetry(result), ...messagesForTelemetry(retried)];
 		if (isFailedResult(retried)) {
@@ -985,6 +996,7 @@ export async function runAgentWithSchema(
 			schema,
 			attemptModel,
 			env,
+			reviewPrepared,
 		);
 		// Keep the retry only if it is not worse: a retry that crashed leaves the
 		// original answer, which at least contained the work.

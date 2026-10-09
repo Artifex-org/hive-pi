@@ -40,7 +40,7 @@ import { Type } from "typebox";
 
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
-import { realDeps, runAll } from "./probes.ts";
+import { realDeps, runAll, runProbe, unixSocketProbe } from "./probes.ts";
 import type { McpServerDef } from "./mcp.ts";
 import {
 	applyResults,
@@ -70,18 +70,10 @@ function disabled(env: Record<string, string | undefined>): boolean {
 	return env.PI_READINESS === "0";
 }
 
-/**
- * The snapshot injection is separately gated, and **opt-in** (`=1`).
- *
- * Default-on would ship the one arm this work is supposed to MEASURE on
- * plausibility — HIV-1633's own text says not to, and HIV-1969's verification
- * section commits to keeping it off until HIV-1629's eval corpus can tell
- * whether it moves mean turns and tool calls. The probes, the tool, the deck
- * and `/readiness` all work regardless; this flag governs only the tokens that
- * enter the model's context unasked.
- */
-function snapshotEnabled(env: Record<string, string | undefined>): boolean {
-	return env.PI_READINESS_SNAPSHOT === "1";
+/** HIV-3802: sandbox launches need the capability limits before their first test. */
+export function snapshotEnabled(env: Record<string, string | undefined>): boolean {
+	if (env.PI_READINESS_SNAPSHOT === "0") return false;
+	return env.PI_READINESS_SNAPSHOT === "1" || Boolean(env.HIVE_LAUNCH_ID && env.SANDBOX_RUNTIME === "1");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -90,6 +82,8 @@ export default function (pi: ExtensionAPI) {
 	let state: ReadinessState = emptyReadiness(Date.now());
 	let latestCtx: ExtensionContext | null = null;
 	let probing = false;
+	let generation = 0;
+	let socketChecked = false;
 	/** Armed by session_start, consumed by the first before_agent_start. */
 	let snapshotPending = false;
 
@@ -123,15 +117,18 @@ export default function (pi: ExtensionAPI) {
 	const probe = async (): Promise<ReadinessState> => {
 		if (probing) return state;
 		probing = true;
+		const gen = generation;
 		try {
 			const deps = realDeps(() => toolNames(pi), process.cwd(), () => registeredMcpServers(pi));
 			const results = await runAll(deps);
+			if (gen !== generation) return state;
+			socketChecked ||= results.some((row) => row.id === "unix-sockets");
 			const applied = applyResults(state, results);
 			state = applied.state;
 			if (applied.changed) publish();
 			return state;
 		} finally {
-			probing = false;
+			if (gen === generation) probing = false;
 		}
 	};
 
@@ -152,15 +149,18 @@ export default function (pi: ExtensionAPI) {
 	 * nothing in context still costs an `appendEntry` per firing.
 	 */
 	const MCP_SETTLE_MS = 6_000;
-	const scheduleSettle = () => {
+	const scheduleSettle = (gen: number) => {
 		const timer = setTimeout(() => {
-			void probe();
+			if (gen === generation) void probe();
 		}, MCP_SETTLE_MS);
 		timer.unref?.();
 	};
 
 	pi.on("session_start", (event, ctx) => {
 		latestCtx = ctx;
+		const gen = ++generation;
+		probing = false;
+		socketChecked = false;
 		const reason = (event as { reason?: string }).reason;
 		// Restore first: a `/reload` or a fork inherits a perfectly good readout,
 		// and re-probing from zero would blank the deck for a few seconds for
@@ -177,11 +177,12 @@ export default function (pi: ExtensionAPI) {
 		// Detached: the handler returns now, the probes run after it. This is the
 		// whole reason the extension does not cost startup latency.
 		const timer = setTimeout(() => {
-			void probe().then(scheduleSettle);
+			if (gen === generation) void probe().then(() => { if (gen === generation) scheduleSettle(gen); });
 		}, 0);
 		timer.unref?.();
 	});
 
+	pi.on("session_shutdown", () => { generation++; latestCtx = null; });
 	pi.events.on(DECK_SYNC_CHANNEL, () => paintDeck());
 
 	/**
@@ -192,14 +193,27 @@ export default function (pi: ExtensionAPI) {
 	 * resume/fork (where it is already in the transcript) and never per turn —
 	 * a per-turn injection is the classic prompt-cache bug (technique #1).
 	 *
-	 * It ships whatever the probes have established BY THEN and does not wait
-	 * for them. Waiting would trade the cost this extension exists to remove for
-	 * the same cost in a different place.
+	 * Ships established rows without awaiting the full probe set. A sandboxed
+	 * launch establishes its socket row now (<=250ms, unknown on timeout), even
+	 * if a restored readout described a different environment.
 	 */
-	pi.on("before_agent_start", () => {
+	pi.on("before_agent_start", async () => {
 		if (!snapshotPending) return;
 		snapshotPending = false;
-		if (!snapshotEnabled(process.env) || isEmpty(state)) return;
+		if (!snapshotEnabled(process.env)) return;
+		// The detached full probe can still be warming on the very first turn.
+		// Establish the one sandbox-sensitive row now, within runProbe's deadline;
+		// never await the whole credential/network/browser probe set here.
+		if (process.env.HIVE_LAUNCH_ID && process.env.SANDBOX_RUNTIME === "1" && !socketChecked) {
+			const deps = realDeps(() => toolNames(pi), process.cwd(), () => registeredMcpServers(pi));
+			const gen = generation;
+			const row = await runProbe("unix-sockets", "unix sockets", unixSocketProbe, deps, 250);
+			if (gen !== generation) return;
+			socketChecked = true;
+			state = applyResults(state, [row]).state;
+			publish();
+		}
+		if (isEmpty(state)) return;
 		const text = snapshotBlock(state, Date.now());
 		if (!text) return;
 		// The injection shape `session-context.ts` uses: a custom-typed message

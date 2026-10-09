@@ -81,6 +81,17 @@ export function buildRecapPrompt(transcript: string): string {
 	].join("\n");
 }
 
+/** Live lifecycle evidence outranks transcript prose, including a stale greeting. */
+export function activeWorkRecap(goal: string | null, jobs: readonly string[], asksQuestion = false): string | null {
+	if (!goal && jobs.length === 0) return null;
+	const clean = (text: string, cap: number) => redactEvidence(text).replace(/\s+/g, " ").trim().slice(0, cap);
+	return sanitizeRecap([
+		asksQuestion ? "Needs input" : "",
+		goal ? `Goal: ${clean(goal, 100)}` : "",
+		jobs.length > 0 ? `Running: ${jobs.slice(0, 3).map((j) => clean(j, 60)).join(", ")}` : "",
+	].filter(Boolean).join("; "));
+}
+
 /** One line, bounded — whatever shape the model actually returned. */
 export function sanitizeRecap(text: string): string {
 	const line = text.trim().split("\n")[0]?.trim() ?? "";

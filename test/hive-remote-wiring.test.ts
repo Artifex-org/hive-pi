@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import agenda from "../extensions/agenda/index.ts";
+import { announceOwnWork } from "../extensions/hive-common/own-work.ts";
 import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL } from "../extensions/hive-common/channels.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
@@ -779,6 +781,22 @@ describe("attach", () => {
 		for (const name of ["request_workspace", "list_workspace_catalog"]) {
 			expect(fake.tools.some((tool) => tool.name === name)).toBe(true);
 		}
+	});
+
+	it("replaces a finished live-work recap on the outgoing Hive beat", async () => {
+		const hive = fakeHive({});
+		agenda(fake.api);
+		hiveRemote(fake.api, deps(config({ reportActivity: true })));
+		const ctx = { entries: fake.entries as SessionEntryLike[] };
+		await attachAndSettle(fake, ctx);
+		announceOwnWork(fake.api, "background", 1, ["building"]);
+		await fake.emit({ type: "agent_settled" }, ctx);
+		await vi.advanceTimersByTimeAsync(10);
+		expect(hive.calls.filter((c) => c.path.endsWith("/activity")).at(-1)?.body?.recap).toBe("Running: building");
+		announceOwnWork(fake.api, "background", 0);
+		await fake.emit({ type: "agent_settled" }, ctx);
+		await vi.advanceTimersByTimeAsync(10);
+		expect(hive.calls.filter((c) => c.path.endsWith("/activity")).at(-1)?.body?.recap).toBe("No active goal or background work");
 	});
 
 	it("re-arms the Detail recap after compaction once attached", async () => {

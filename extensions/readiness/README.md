@@ -17,7 +17,7 @@ path.
 | `readiness` (tool) | every row, re-probed; the model calls it before relying on a capability |
 | `/readiness` | the same, for the human |
 | deck section `env` | only the rows that are **not** ready — nothing at rest |
-| `[Environment Snapshot]` | injected once at first agent start — **opt-in**, `PI_READINESS_SNAPSHOT=1` |
+| `[Environment Snapshot]` | once at first agent start — **default for sandboxed Hive launches**; `PI_READINESS_SNAPSHOT=0` opts out, `=1` opts in elsewhere |
 | `PI_READINESS=0` | registers nothing at all |
 
 Rows today: one per configured MCP server, plus `hive`, `openrouter`, `gh`,
@@ -76,18 +76,18 @@ paying for itself twice in one afternoon:
    cache answers "what can this server do" with no connection and no cost —
    which is exactly the distinction the row draws: **tools known ≠ connected**.
 
-## Why the snapshot is opt-in
+## Snapshot default (HIV-3802)
 
-Everything else here is free of model context: the probes cost no tokens, the
-tool is called only when the model wants it, the deck section is terminal-only.
-The snapshot is the one part that puts tokens into the window **unasked**, and
-it is therefore the one part whose value is a claim rather than an observation.
+The sandbox evaluation exposed repeated 5s socket-fixture timeouts after a
+readiness row had already diagnosed the restriction. Sandboxed Hive launches
+(`HIVE_LAUNCH_ID` + `SANDBOX_RUNTIME=1`) now receive the snapshot once before
+their first turn, never on resume/fork/reload or every turn. Elsewhere it remains
+opt-in. `PI_READINESS_SNAPSHOT=0` explicitly disables it everywhere.
 
-HIV-1633 says not to ship it on plausibility, and it is gated on HIV-1629's
-eval corpus being able to tell whether it moves mean turns and mean tool calls.
-So it ships **off** (`PI_READINESS_SNAPSHOT=1` to arm it), and the flag flips
-when the corpus discriminates — not before. Shipping it on by default while the
-ticket says "measure first" would be the thing this repo files tickets about.
+The first sandbox turn establishes its socket row within 250ms if the detached
+probes have not established it in this session. A timeout says **unknown**, not
+absent; restored rows from another environment do not satisfy this check. No
+credential/network/browser probe is awaited here.
 
 ## Why there is no push
 
@@ -105,7 +105,7 @@ something actually moved.
 
 ## Cost
 
-Nothing runs inside an event handler. `session_start` captures ctx, rehydrates
+The full probe set is detached. `session_start` captures ctx, rehydrates
 the previous snapshot and arms an unref'd `setTimeout(…, 0)`; every probe runs
 after the handler has returned. pi awaits handlers serially, so the alternative
 would have made seven probes part of the first turn — buying the latency this

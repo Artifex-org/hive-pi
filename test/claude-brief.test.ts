@@ -42,6 +42,9 @@ describe("brief", () => {
 		expect(out.brief).toContain("<!-- brief:v1 model=zai/glm-low");
 		expect(out.brief).toContain("Make the parser accept empty input");
 		expect(out.brief).toContain("extractJsonObject handles fences");
+		for (const name of ["quality_gate", "hive_watch_run", "subagent", "goal_set"]) expect(out.brief).toContain(`mcp__hive-pi__${name}`);
+		expect(out.brief).toContain("before pushing");
+		expect(out.brief).toContain("instead of sleep-polling CI");
 		const lanes = launch.calls();
 		expect(lanes.length).toBeGreaterThan(0);
 		for (const call of lanes) {

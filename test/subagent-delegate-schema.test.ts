@@ -49,6 +49,19 @@ describe("delegate.ts schema requests", () => {
 		expect(launch.calls()[0].input).toContain("Required output format");
 	});
 
+	it("keeps schema-retry feedback for neutral code review, without the author's framing", async () => {
+		launch.setReplies([
+			{ match: "A previous attempt at this exact task", text: '```json\n{"count": 2}\n```' },
+			{ match: "Required output format", text: '```json\n{"count": "wrong"}\n```' },
+		]);
+		const h = host(); h.agents[0] = { ...h.agents[0], name: "code-reviewer" };
+		const schema = { type: "object", properties: { count: { type: "number" } }, required: ["count"] };
+		const outcome = await runSingleDelegation({ agent: "code-reviewer", task: "Review /tmp/example.ts; my design is safe", model: "zai/glm-low", schema: { schema, support: structuredSupport } }, "off", h);
+		expect(outcome.results[0].structured).toEqual({ count: 2 });
+		expect(launch.calls()).toHaveLength(2);
+		for (const call of launch.calls()) { expect(call.input).toContain("/tmp/example.ts"); expect(call.input).not.toContain("my design is safe"); }
+		expect(launch.calls()[1].input).toContain("A previous attempt at this exact task");
+	});
 	it("without a request, the worker sees no schema instruction", async () => {
 		const outcome = await runSingleDelegation({ agent: "research", task: "count things", model: "zai/glm-low" }, "off", host());
 		expect(outcome.results[0].structured).toBeUndefined();

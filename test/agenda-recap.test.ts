@@ -13,12 +13,15 @@ import { buildJudgePrompt } from "../extensions/agenda/goal.ts";
 import { TOOL_CALL_ARGS_CHARS } from "../extensions/agenda/recap.ts";
 import {
 	buildRecapPrompt,
+	activeWorkRecap,
 	latestAgentStatus,
 	mechanicalTaskState,
 	sanitizeRecap,
 } from "../extensions/agenda/recap.ts";
 import { AGENT_STATUS_CHANNEL } from "../extensions/hive-common/channels.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
+import { createGoal } from "../extensions/agenda/goal-state.ts";
+import { announceOwnWork } from "../extensions/hive-common/own-work.ts";
 
 describe("mechanicalTaskState", () => {
 	it("a question outranks everything — done-ness does not answer it", () => {
@@ -156,6 +159,36 @@ describe("the settle observer", () => {
 		await settle(fake, [{ message: { role: "assistant", content: "two" } }]);
 		const revisions = statusEntries(fake).map((entry) => (entry.data as { revision: number }).revision);
 		expect(revisions).toEqual([1, 2]);
+	});
+});
+
+describe("live-work recap precedence (HIV-3802)", () => {
+	it("stays null with no active work; bounded goal/job lines never become greetings", () => {
+		expect(activeWorkRecap(null, [])).toBeNull();
+		expect(activeWorkRecap("Deliver a green PR", ["watching CI #42"])).toContain("Running: watching CI #42");
+		expect(activeWorkRecap("x".repeat(500), ["y".repeat(500)])!.length).toBeLessThanOrEqual(200);
+	});
+	it("uses restored active goal and running jobs even under the model recap gate", async () => {
+		const pi = createFakePi(); agenda(pi.api);
+		const goal = createGoal("test-goal", "PR created and checks green", 1);
+		await pi.emit({ type: "session_start" }, { branch: [{ customType: "agenda", data: goal }] });
+		announceOwnWork(pi.api, "background", 1, ["watching CI #42"]);
+		await pi.emit({ type: "agent_settled" }, { branch: [{ message: { role: "assistant", content: "I'm ready to help. What would you like me to work on?" } }] });
+		const item = pi.entries.find((e) => e.customType === "agent-status")!.data as { recap: string };
+		expect(item.recap).toContain("PR created and checks green"); expect(item.recap).toContain("watching CI #42");
+		expect(item.recap).not.toContain("ready to help");
+	});
+	it("jobs alone drive the recap and a finished job disappears", async () => {
+		const pi = createFakePi(); agenda(pi.api); announceOwnWork(pi.api, "background", 1, ["building"]);
+		await pi.emit({ type: "agent_settled" });
+		expect((pi.entries.at(-1)!.data as { recap: string }).recap).toBe("Running: building");
+		announceOwnWork(pi.api, "background", 0, []); await pi.emit({ type: "agent_settled" });
+		expect((pi.entries.at(-1)!.data as { recap: string }).recap).toBe("No active goal or background work");
+	});
+	it("does not invent completion for a still-running process-owned job on session change", async () => {
+		const pi = createFakePi(); agenda(pi.api); announceOwnWork(pi.api, "background", 1, ["old job"]);
+		await pi.emit({ type: "session_start", reason: "new" }); await pi.emit({ type: "agent_settled" });
+		expect((pi.entries.at(-1)!.data as { recap: string }).recap).toContain("old job");
 	});
 });
 

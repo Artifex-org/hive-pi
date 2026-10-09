@@ -4,8 +4,8 @@
  * The reasoning, the rules and the evidence for each signature live in
  * `./hints.ts`. This file is the pi wiring and one decision worth stating here:
  * it is a `tool_result` handler, which pi awaits INSIDE the agent loop, so
- * everything it does is a regex over at most 4KB of tail text and a string
- * append. No fs, no network, no model call, nothing that can hang a turn.
+ * static signatures scan at most 4KB. The three contextual checks in
+ * contextual.ts have separate byte/time budgets; no network or model calls.
  *
  * ## Why annotate rather than teach
  *
@@ -19,9 +19,10 @@
  *
  * - **Never replaces the original output.** The error is the evidence; the hint
  *   is appended after it, tagged, so the model can tell ours from the tool's.
- * - **Never fires on success.** A hint on a working call is pure context tax.
- * - **At most one hint per result**, and only for a signature in the table.
- *   Silence is the correct output for an error nobody has studied yet.
+ * - **Success stays quiet** except proven codemode truncation or Go -run
+ *   omissions (and the MCP proxy's error-as-success lookup response).
+ * - **At most one hint per result.** Unknown signatures stay silent;
+ *   a budgeted contextual check reports NOT checked rather than guessing.
  * - **Never touches `details` or `isError`.** A hint is not a verdict, and a
  *   consumer that branches on those must see exactly what the tool returned.
  */
@@ -30,6 +31,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { EMPTY_CORPUS, corpusFromRegistry } from "../mcp-common/search.ts";
 import { matchHint, renderHint, scanTail } from "./hints.ts";
+import { codemodeTruncationHint, goRunPatterns, goTestHint, SCAN_BYTES, socketTimeoutHint, type ObservedRead } from "./contextual.ts";
 
 /** Off switch, for a session where the extra sentences are unwanted. */
 function disabled(env: Record<string, string | undefined>): boolean {
@@ -74,11 +76,50 @@ export function appendHint(content: unknown, text: string): { type: "text"; text
 export default function (pi: ExtensionAPI) {
 	if (disabled(process.env)) return;
 
-	pi.on("tool_result", (event) => {
-		// Only failures need a next move; scanning every success would put a regex
-		// over every tool result in the session for nothing.
+	// Parent ids are provided by pi for nested calls. Keep only bounded read
+	// evidence, and discard it when the parent finishes or the session changes.
+	const reads = new Map<string, { items: ObservedRead[]; omitted: number }>();
+	pi.on("session_start", () => reads.clear());
+	pi.on("session_shutdown", () => reads.clear());
+	pi.on("tool_call", (event) => {
+		if (event.toolName === "codemode") {
+			if (reads.size >= 8) reads.delete(reads.keys().next().value!);
+			reads.set(event.toolCallId, { items: [], omitted: 0 });
+		}
+	});
+	pi.on("tool_result", async (event, ctx) => {
+		const raw = resultText(event.content);
+		const annotated = (hint: string) => ({ content: appendHint(event.content, hint),
+			...(event.structuredContent !== undefined ? { structuredContent: event.structuredContent } : {}) });
+		if (event.toolName === "read" && event.parentToolCallId) {
+			const observed = reads.get(event.parentToolCallId);
+			const bytes = observed?.items.reduce((n, r) => n + Buffer.byteLength(r.text), 0) ?? 0;
+			if (observed && observed.items.length < 16 && bytes + Buffer.byteLength(raw) <= SCAN_BYTES) {
+				observed.items.push({ path: String(event.input.path ?? "(read)"), text: raw });
+			} else if (observed) observed.omitted++;
+		}
+		if (event.toolName === "codemode") {
+			const observed = reads.get(event.toolCallId) ?? { items: [], omitted: 0 };
+			reads.delete(event.toolCallId);
+			const details = event.details as { fullOutputPath?: string } | undefined;
+			const hint = await codemodeTruncationHint(raw, details?.fullOutputPath, observed.items);
+			if (hint) return annotated(hint + (observed.omitted ? ` ${observed.omitted} additional read(s) beyond the observation budget NOT attributed.` : ""));
+		}
+		if (event.toolName === "bash" || event.toolName === "background_bash") {
+			const command = typeof event.input?.command === "string" ? event.input.command : "";
+			// Capture ctx before awaiting: it can become stale during the scan.
+			const cwd = typeof event.input?.cwd === "string" ? event.input.cwd : ctx.cwd;
+			if (goRunPatterns(command).length > 0) {
+				const hint = await goTestHint(command, cwd);
+				if (hint) return annotated(hint);
+			}
+			if (event.isError) {
+				const hint = await socketTimeoutHint(raw, cwd, Boolean(process.env.SANDBOX_RUNTIME));
+				if (hint) return annotated(hint);
+			}
+		}
 		if (!event.isError) return;
-		const text = scanTail(resultText(event.content));
+		const text = scanTail(raw);
 		if (!text) return;
 
 		const hint = matchHint(event.toolName, text);
@@ -89,6 +130,6 @@ export default function (pi: ExtensionAPI) {
 		// start would miss every server still connecting. A failed call is rare
 		// enough that one pass over the registry costs nothing that matters.
 		const corpus = hint.amend ? corpusFromRegistry(pi.getAllTools()) : EMPTY_CORPUS;
-		return { content: appendHint(event.content, renderHint(hint, text, { corpus })) };
+		return annotated(renderHint(hint, text, { corpus }));
 	});
 }

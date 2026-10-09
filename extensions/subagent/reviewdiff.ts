@@ -20,7 +20,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { dirname, isAbsolute, relative } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { BASE_REF_SCAN, fetchedOriginBase, knownBaseRef } from "../guards-common/git-base.ts";
 
 /** Roles whose whole job is judging a change. Name-based on purpose: user and project roles are not enumerable here. */
 export function isReviewRole(roleName: string): boolean {
@@ -47,7 +48,7 @@ export interface ReviewDiff {
 	/** The unified diff of tracked files, capped — see DIFF_CAP_BYTES. */
 	text: string;
 	/** What was diffed, for the sentence the worker reads. */
-	scope: "working tree vs HEAD" | "branch vs its base";
+	scope: "working tree vs HEAD" | "branch vs its base" | "branch and working tree vs merge-base";
 	truncatedBytes: number;
 }
 
@@ -57,7 +58,7 @@ export const DIFF_CAP_BYTES = 60 * 1024;
 /** Rendered untracked paths. An unignored build directory must not become the prompt. */
 export const UNTRACKED_LIST_CAP = 100;
 
-export type GitRunner = (args: string[], cwd: string) => string | null;
+export type GitRunner = (args: string[], cwd: string, timeoutMs?: number) => string | null;
 
 /**
  * Every git read here is LOCK-FREE, and this runner is the one place that is
@@ -168,8 +169,17 @@ export function parseStatusZ(out: string): { tracked: string[]; untracked: strin
 	return { tracked, untracked };
 }
 
+function baseRef(repo: string, git: GitRunner): string | null {
+	const head = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo);
+	const known = knownBaseRef(head, head?.trim() ? "" : git(BASE_REF_SCAN, repo) ?? "");
+	if (known) return known;
+	const path = git(["rev-parse", "--git-path", "FETCH_HEAD"], repo)?.trim();
+	const origin = git(["config", "--get", "remote.origin.url"], repo)?.trim();
+	return path && origin ? fetchedOriginBase(resolve(repo, path), origin) : null;
+}
+
 function branchChange(repo: string, git: GitRunner): { files: string[]; range: string[] } | null {
-	const head = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo)?.trim();
+	const head = baseRef(repo, git);
 	if (!head) return null;
 	const base = git(["merge-base", "HEAD", head], repo)?.trim();
 	if (!base) return null;
@@ -189,14 +199,73 @@ function splitLines(out: string): string[] {
 		.filter(Boolean);
 }
 
-/** The task a review worker gets: the caller's prose plus the change, delimited as data. */
-export function reviewTaskWithDiff(task: string, diff: ReviewDiff): string {
+/** Keep committed, staged and unstaged evidence separate: a dirty revert must
+ * never cancel a commit (or staged content) that the delivery will send. */
+export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = deliveryGit): ReviewDiff | null {
+	const started = Date.now(), runner = git;
+	git = (args, dir) => {
+		const remaining = 2000 - (Date.now() - started);
+		return remaining <= 0 ? null : runner(args, dir, Math.min(1000, remaining));
+	};
+	const repo = reviewRepoFor(cwd, task, git);
+	if (!repo) return null;
+	// Default pushes must send this branch's HEAD, not matching/all configured
+	// refspecs from other branches. Configuration bytes never enter the prompt.
+	const config = git(["config", "--null", "--list"], repo);
+	if (config === null) return null;
+	let pushDefault = "simple";
+	for (const entry of config.split("\0")) {
+		const separator = entry.indexOf("\n");
+		const key = separator < 0 ? entry : entry.slice(0, separator);
+		const value = separator < 0 ? "" : entry.slice(separator + 1);
+		if (/^remote\..*\.(?:push|mirror)$/.test(key) || ["push.followtags", "push.recurseSubmodules", "push.recursesubmodules"].includes(key)) return null;
+		if (key === "push.default") pushDefault = value;
+	}
+	if (!["simple", "current", "upstream"].includes(pushDefault)) return null;
+	const head = baseRef(repo, git);
+	if (!head) return null;
+	const base = git(["merge-base", "HEAD", head], repo)?.trim();
+	if (!base) return null;
+	const status = git(["status", "--porcelain", "-z", "--untracked-files=all"], repo);
+	if (status === null) return null;
+	let text = "";
+	const changed = new Set<string>();
+	for (const [label, args] of [[`Committed (${head} merge-base)`, [base, "HEAD"]], ["Staged vs HEAD", ["--cached", "HEAD"]], ["Unstaged vs index", []]] as const) {
+		const patch = git(["diff", "--no-ext-diff", "-p", ...args], repo);
+		const names = git(["diff", "--name-only", "-z", ...args], repo);
+		if (patch === null || names === null) return null;
+		for (const path of names.split("\0").filter(Boolean)) changed.add(path);
+		if (patch) text += `${label}:\n${patch}\n`;
+		if (Buffer.byteLength(text) > 256 * 1024) return null;
+	}
+	const files = [...changed].sort();
+	const untracked = parseStatusZ(status).untracked;
+	const callerNamed = citedPaths(task).filter((p) => ![...files, ...untracked].some((f) => samePath(f, p)));
+	return { repo, files, untracked, callerNamed, text, scope: "branch and working tree vs merge-base", truncatedBytes: 0 };
+}
+
+// Rare delivery boundary: lock-free commands, each <=1s / 256KiB. If the
+// complete diff is unavailable the checkpoint requires an explicit override.
+const deliveryGit: GitRunner = (args, cwd, timeoutMs = 1000) => {
+	try { return execFileSync("git", [LOCK_FREE, ...args], { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: 256 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
+	catch { return null; }
+};
+
+export function neutralReviewTask(task: string): string {
+	const paths = citedPaths(task);
+	return NEUTRAL_REVIEW_TASK + (paths.length ? `\nRequested scope paths:\n${paths.map((p) => `- ${p}`).join("\n")}` : "");
+}
+
+export const NEUTRAL_REVIEW_TASK = "Review the change independently. Find concrete failure scenarios and missing regression coverage; report actionable findings with file/line evidence. Do not assume the author's design is correct. Read the listed files as needed. Do not edit files.";
+
+/** Code review carries evidence and scope paths, never the author's design conclusions. */
+export function reviewTaskWithDiff(task: string, diff: ReviewDiff, neutral = false): string {
 	const note = diff.truncatedBytes > 0 ? `\n[diff truncated: ${diff.truncatedBytes} bytes omitted — read the listed files for the rest]` : "";
 	const shownUntracked = diff.untracked.slice(0, UNTRACKED_LIST_CAP);
 	const hiddenUntracked = diff.untracked.length - shownUntracked.length;
 	const changed = diff.files.length + diff.untracked.length;
 	const lines = [
-		task,
+		neutral ? NEUTRAL_REVIEW_TASK : task,
 		"",
 		`What git reports changed (${diff.scope}, in ${diff.repo}): ${changed} file(s)` +
 			(diff.untracked.length > 0
@@ -209,7 +278,7 @@ export function reviewTaskWithDiff(task: string, diff: ReviewDiff): string {
 			: []),
 	];
 	if (diff.callerNamed.length > 0) {
-		lines.push("", "Also in scope — named by the task above:", ...diff.callerNamed.map((file) => `- ${file}`));
+		lines.push("", neutral ? "Additional scope paths (extracted from the request, not its rationale):" : "Also in scope — named by the task above:", ...diff.callerNamed.map((file) => `- ${file}`));
 	}
 	lines.push(
 		"",
@@ -224,7 +293,7 @@ export function reviewTaskWithDiff(task: string, diff: ReviewDiff): string {
 
 // A sentence-ending period still ends the path: "Review /x/model.py." names
 // /x/model.py, and missing it scoped a model-workspace review to the wrong repo.
-const CITED = /(?:^|[\s(`])((?:\/|[\w.-]+\/)[\w./-]+\.(?:ts|tsx|js|jsx|py|go|rs|json|md|yaml|yml|toml|star))(?=[\s:,)`]|\.(?:\s|$)|$)/gm;
+const CITED = /(?:^|[\s(`])((?:\/|[\w.-]+\/)?[\w./-]+\.(?:ts|tsx|js|jsx|py|go|rs|json|md|yaml|yml|toml|star))(?=[\s:;,)`]|\.(?:\s|$)|$)/gm;
 
 /**
  * Cited source paths that are not part of the diff — the measured defect.

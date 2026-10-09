@@ -27,5 +27,4 @@ jobs:
       # skip. `--no-install` runs this checkout's playwright-core, so the
       # browser revision always matches package.json.
       - run: npx --no-install playwright-core install --with-deps chromium-headless-shell
-      - run: npm run typecheck
-      - run: npm test
+      - run: env -u FORCE_COLOR npm run check

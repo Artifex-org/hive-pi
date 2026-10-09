@@ -43,11 +43,22 @@ promoting all 723 cached tools would cost ~133k tokens.
 ## Cost
 
 A `tool_result` handler runs inside the agent loop, which pi awaits serially.
-So: a regex over at most the last 4KB, on failures only, at most one hint, and
-nothing else — no fs, no network, no model call. Successful calls are skipped
-entirely, with one deliberate exception: the `mcp` proxy reports a failed
-*lookup* as an ordinary result (`No tools matching …`), which is precisely the
-case this exists for.
+The static table scans at most the last 4KB. Successful calls stay quiet except
+MCP error-as-success lookups, confirmed codemode truncation, and Go selections
+that omit added tests. At most one hint is appended; verdicts and structured
+payloads are unchanged. No network or model calls.
+
+HIV-3802 contextual checks in `contextual.ts` have explicit budgets:
+- Go `-run`: merge-base + working tree + untracked tests, last flag **per
+  invocation**, at most two invocations / eight untracked files / 100 names /
+  256KiB / a 2s Git deadline. Unsupported regexes or exhausted scans say
+  **NOT checked**, never infer coverage from a green selected run.
+- Codemode: actual truncation marker plus spill metadata, at most 16 observed
+  reads / 256KiB, attributed against the full retained spill. Ordinary terminal
+  previews do not count. Missing or over-budget evidence says NOT attributed.
+- Sandbox timeouts: inspect at most four timed-out Vitest failure sections'
+  source files, each a bounded 256KiB regular file. Only a socket-path bind
+  fixture earns the sandbox pointer; unrelated assertion and TCP failures do not.
 
 `PI_TOOLHINTS=0` registers nothing at all.
 
