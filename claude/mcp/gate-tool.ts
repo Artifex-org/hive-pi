@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { writeJsonAtomic } from "../state.ts";
 import { spawn } from "node:child_process";
 import { killTree, trackTree, treeSpawnOptions } from "../../extensions/hive-common/child-tree.ts";
@@ -142,7 +142,7 @@ export async function runGateTool(args: Record<string, unknown>, cwd: string, si
 	const report = first && first.type === "text" ? first.text : "quality_gate produced no report.";
 	// MCP drops cancelled responses; retain their run reference before returning.
 	if (stateDir) {
-		try { writeJsonAtomic(join(stateDir, "quality-gate-reports", `${Date.now()}-${randomUUID()}.json`), { cwd, report }); }
+		try { writeJsonAtomic(join(stateDir, "quality-gate-reports", `${Date.now()}-${randomUUID()}.json`), { cwd: typeof args.cwd === "string" && args.cwd.trim() ? resolve(cwd, args.cwd.trim()) : cwd, report }); }
 		catch (error) { return { text: `${report}\n\nCould not retain the gate report in session state: ${String(error)}. Save the run reference above before proceeding.`, isError: true }; }
 	}
 	return { text: report };

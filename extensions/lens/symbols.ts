@@ -203,6 +203,9 @@ export function listSymbols(
 function braceEnd(lines: string[], start: number, rust = false): number {
 	let depth = 0;
 	let seenOpen = false;
+	let signatureParens = 0;
+	let signatureAngles = 0;
+	let signatureTypes = 0;
 	let inBlockComment = false;
 
 	for (let i = start; i < lines.length; i++) {
@@ -238,6 +241,18 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 				inString = ch;
 				continue;
 			}
+			// Braces inside parameters/generic arguments or an inline return type
+			// belong to the signature, not the executable body.
+			if (!seenOpen) {
+				if (ch === "(") signatureParens++;
+				if (ch === ")") signatureParens = Math.max(0, signatureParens - 1);
+				if (ch === "<") signatureAngles++;
+				if (ch === ">") signatureAngles = Math.max(0, signatureAngles - 1);
+				if (ch === "{" && (signatureParens > 0 || signatureAngles > 0 || signatureTypes > 0 || line.slice(0, c).trimEnd().endsWith(":"))) {
+					signatureTypes++; continue;
+				}
+				if (ch === "}" && signatureTypes > 0) { signatureTypes--; continue; }
+			}
 			if (ch === "{") {
 				depth++;
 				seenOpen = true;
@@ -250,7 +265,7 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 			}
 			// A statement that ended before any block opened is the whole symbol:
 			// `type ID string`, `type X = Y;`, `const n = 1;`
-			if (ch === ";" && !seenOpen && depth === 0) return i;
+			if (ch === ";" && !seenOpen && depth === 0 && signatureParens === 0 && signatureAngles === 0 && signatureTypes === 0) return i;
 		}
 		// Unbraced single-line declaration (Go has no semicolons).
 		if (!seenOpen && !inBlockComment && !(rust && /\bfn\s/.test(lines[start])) && !/[=(,{[]\s*$/.test(line) && i >= start) {
