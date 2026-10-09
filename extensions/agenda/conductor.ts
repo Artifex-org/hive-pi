@@ -323,6 +323,8 @@ function decidePlan(hooks: ConductorHooks, signals: SessionSignals): PolicyWork 
 
 function completionGoal(hooks: ConductorHooks): GoalItem | null {
 	const goal = hooks.goal();
+	const binding = hooks.current()?.verificationGoalId;
+	if (binding === null || binding !== undefined && (goal?.id ?? "") !== binding) return null;
 	return goal && ["active", "paused", "achieved"].includes(goal.state) ? goal : null;
 }
 
@@ -361,7 +363,10 @@ function adviceTransition(hooks: ConductorHooks, signals: SessionSignals): Polic
 			const now = Date.now();
 			// Advice must not strand a session with no completion contract. Give
 			// it the reminder without creating an unfinishable verify lifecycle.
-			if (hooks.goal()?.state === "active" || signals.tasks.total > 0) hooks.commit(withStage(itemFor(hooks, now), "verify", now));
+			const goal = hooks.goal();
+			if (goal?.state === "active" || signals.tasks.total > 0) hooks.commit({
+				...withStage(itemFor(hooks, now), "verify", now), verificationGoalId: goal?.state === "active" ? goal.id ?? "" : null,
+			});
 			else if (hooks.current()) hooks.commit(withStage(itemFor(hooks, now), "idle", now));
 			return {
 				metric: { outcome: "pass" as const, value: 0 },

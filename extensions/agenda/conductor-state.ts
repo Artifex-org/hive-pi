@@ -31,6 +31,8 @@ export interface ConductorItem {
 	complexity: Complexity;
 	createdAt: number;
 	updatedAt: number;
+	/** Milestone advice binds verification to the active goal, or to current todos. */
+	verificationGoalId?: string | null;
 }
 
 const VALID_STAGES: readonly ConductorStage[] = [
@@ -100,6 +102,8 @@ export function validateConductor(data: unknown): ConductorItem | null {
 			: "unassessed",
 		createdAt: positiveInt(record.createdAt, 0),
 		updatedAt: positiveInt(record.updatedAt, 0),
+		...(record.verificationGoalId === null || typeof record.verificationGoalId === "string"
+			? { verificationGoalId: record.verificationGoalId } : {}),
 	};
 }
 

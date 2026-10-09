@@ -16,7 +16,8 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 	if (pipeline) return false; // the shell exit code may belong to cat, not the creator
 	// In an all-success && chain, successful tool completion also establishes
 	// the earlier creator succeeded. Do not infer that across ; or || recovery.
-	const allSuccessChain = !/[;\n]|\|\|/.test(command.trim().replace(/'[^']*'|"[^"\\]*"/g, ""));
+	const syntax = command.trim().replace(/'[^']*'|"[^"\\]*"/g, "");
+	const allSuccessChain = !/[;\n]|\|\|/.test(syntax);
 	for (const [index, segment] of segments.entries()) {
 		const words = literalWords(segment, true);
 		if (!words) continue;
@@ -35,10 +36,20 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 			const url = /https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\b/.test(output);
 			// gh prints the created URL on its own line. A later && suffix may
 			// fail, but duplicate/error output must not masquerade as creation.
-			const createdUrl = /^https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?\s*$/m.exec(output);
+			const attributable = !syntax.includes("||") && segments.slice(0, index).every(before => {
+				const args = literalWords(before);
+				while (args && /^[A-Za-z_]\w*=/.test(args[0] ?? "")) args.shift();
+				if (!args) return false;
+				if (args[0] === "cd" && args.length === 2) return true;
+				if (args[0] === "hive" && args[1] === "ship" && args.includes("--no-pr")) return true;
+				let verb = 1; while (args[verb] === "-C" || args[verb] === "-c") verb += 2;
+				return args[0] === "git" && ["add", "commit", "push", "status"].includes(args[verb]);
+			});
+			if (!attributable) continue; // a preceding PR view/echo cannot prove creation
+			const createdUrl = /^(?:PR:\s*)?https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?\s*$/m.exec(output);
 			const partialSuccess = createdUrl && allSuccessChain && index < segments.length - 1 &&
 				!/(?:already exists|permission denied|fatal:|error:|HTTP [45]\d\d|GraphQL)/i.test(output.slice(0, createdUrl.index));
-			if (url && (succeeded && allSuccessChain || partialSuccess)) return true;
+			if (url && (succeeded && (index === segments.length - 1 || allSuccessChain) || partialSuccess)) return true;
 		}
 	}
 	return false;

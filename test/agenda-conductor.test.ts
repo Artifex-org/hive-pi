@@ -314,6 +314,24 @@ describe("conductor policy", () => {
 		expect(verified.metric.outcome).toBe("skip");
 		expect(item()?.stage).toBe("consolidate");
 	});
+	it("binds milestone verification to current todos rather than an old achieved goal", async () => {
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "done", 0), { id: "old", state: "achieved" } as GoalItem);
+		const open = signalsWith({ deliveryStarted: true, tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, open))!.run();
+		expect(item()?.verificationGoalId).toBeNull();
+		const persisted = validateConductor(item()); expect(persisted?.verificationGoalId).toBeNull();
+		expect(createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), open))).toBeNull();
+	});
+	it("retains its active goal binding when the original judge later achieves it", async () => {
+		const goal = { id: "current", state: "active" } as GoalItem;
+		const { hooks, item } = makeHooks(withStage(createConductor("c", 0), "execute", 0), goal);
+		const open = signalsWith({ deliveryStarted: true, tasks: { total: 1, pending: 1, inProgress: 0, completed: 0 } });
+		const outcome = await createConductorAdvicePolicy(hooks).decide(contextWith(emptyLedger, open))!.run();
+		expect(validateConductor(item())?.verificationGoalId).toBe("current");
+		goal.state = "achieved";
+		await createConductorPolicy(hooks).decide(contextWith(outcome.ledger!(emptyLedger), open))!.run();
+		expect(item()?.stage).toBe("consolidate");
+	});
 	it("the plan injection carries the advisor line", () => {
 		expect(PLAN_INJECTION).toContain("advisor");
 	});

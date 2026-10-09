@@ -23,6 +23,8 @@ describe("delivery milestones", () => {
 		expect(deliveryMilestone("gh pr create && false", url, false)).toBe(true);
 		expect(deliveryMilestone("gh pr create && false", "already exists:\n" + url, false)).toBe(false);
 		expect(deliveryMilestone("gh pr create && gh pr checks --watch", url + "\nGraphQL: checks failed", false)).toBe(true);
+		expect(deliveryMilestone("hive ship && false", "PR: " + url, false)).toBe(true);
+		expect(deliveryMilestone("gh pr view --json url --jq .url && gh pr create && echo done", url + "\na pull request already exists", false)).toBe(false);
 	});
 	it.each(["git commit -q -m change", "git -c user.name=Test -c user.email=test@example.com commit -q -m change"])("observes actual %s when a later push fails, using commit-specific reflog evidence", async command => {
 		const cwd = mkdtempSync(join(tmpdir(), "milestone-"));
@@ -60,6 +62,7 @@ describe("delivery milestones", () => {
 		["git commit -m change 2>&1", "[work abc1234] change"],
 		["gh pr create 2>&1", "https://github.com/owner/repo/pull/123"],
 		["gh pr create\n", "https://github.com/owner/repo/pull/123"],
+		["cd /repo\ngh pr create --fill", "https://github.com/owner/repo/pull/123"],
 		["HIVE_PRESIGN_REQUIRED=1 git -C /repo commit -m change && false", "[work (root-commit) abc1234] change"],
 		["gh pr create", "https://github.com/owner/repo/pull/123"],
 		["gh pr create && echo done", "https://github.com/owner/repo/pull/123\ndone"],
