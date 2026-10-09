@@ -42,6 +42,20 @@ describe("caller-aware review scope", () => {
 		expect(outsideDiffWarning(outside, reviewScopeFiles(capped).length)).toContain("independently verified affected callers are valid findings");
 		expect(outsideDiffWarning(outside, reviewScopeFiles(capped).length)).toContain("unrelated paths are not");
 	});
+	it("uses each delivery layer's source coordinates after staged line insertions", () => {
+		const repo = mkdtempSync(join(tmpdir(), "layered-callers-")); dirs.push(repo);
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
+		git("init", "-b", "main"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
+		const body = "impl Client {\n    pub fn fetch(&self) -> Result<T> {\n" + "        // body\n".repeat(30);
+		writeFileSync(join(repo, "api.rs"), body + "        Ok(value)\n    }\n}\n");
+		writeFileSync(join(repo, "caller.rs"), "client.fetch();\n");
+		git("add", "."); git("commit", "-m", "base"); git("update-ref", "refs/remotes/origin/main", "HEAD"); git("checkout", "-b", "work");
+		const committed = body + "        Err(error)\n    }\n}\n";
+		writeFileSync(join(repo, "api.rs"), committed); git("add", "."); git("commit", "-m", "body change");
+		writeFileSync(join(repo, "api.rs"), "// prefix\n".repeat(100) + committed); git("add", ".");
+		const review = withReviewCallers(captureDeliveryDiff(repo)!);
+		expect(review.callers?.sites).toEqual([{ symbol: "fetch", path: "caller.rs", line: 1 }]);
+	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
@@ -74,6 +88,14 @@ describe("caller-aware review scope", () => {
 		expect(discoverCallers("/repo", changed, ["api.ts"], grep, () => arrow).sites).toEqual([{ symbol: "fetchData", path: "caller.ts", line: 4 }]);
 		const removed = "--- a/api.ts\n+++ b/api.ts\n@@ -1,5 +0,0 @@\n-export const fetchData = (\n-  id: string,\n-) => {\n-  return old;\n-};\n";
 		expect(changedFunctionNames(removed, () => "").names).toEqual(["fetchData"]);
+	});
+	it("recognises generic exported arrows for declaration and body edits", () => {
+		const generic = "export const fetchData = <T>(id: string) => {\n" + "  // unchanged\n".repeat(12) + "  return updated;\n};\n";
+		const bodyPatch = "--- a/api.ts\n+++ b/api.ts\n@@ -14 +14 @@\n-  return old;\n+  return updated;\n";
+		const grep = () => ({ text: "caller.ts:4: fetchData(id)" });
+		expect(discoverCallers("/repo", bodyPatch, ["api.ts"], grep, () => generic).sites).toHaveLength(1);
+		const declPatch = "--- a/api.ts\n+++ b/api.ts\n@@ -1 +1 @@\n-export const fetchData = <T>(id: string) => 1;\n+export const fetchData = <T>(id: string) => 2;\n";
+		expect(changedFunctionNames(declPatch, () => generic).names).toEqual(["fetchData"]);
 	});
 	it("recognises Go methods, TS exports and Python functions but not call expressions", () => {
 		const p = ["--- a/x.ts", "+++ b/x.ts", "@@ -1 +1 @@", "-export function Fetch() {}", "+export async function Fetch() { return 1; }", "+obj.Unrelated()", "+func (c *Client) PullFiles() error {", "+def fetch_data():", "+func private() {}", "+export const CONSTANT = 1;", "+export const arrow = (x) => x;"].join("\n");

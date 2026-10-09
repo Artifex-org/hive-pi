@@ -21,19 +21,23 @@ export type CallerGrep = (symbol: string, repo: string, timeoutMs: number) => { 
 function functionName(line: string): string | undefined {
 	return /^\s*func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)\s*[(\[]/.exec(line)?.[1]
 		?? /^\s*export\s+(?:default\s+)?(?:async\s+)?function\s+([\w$]+)\s*[(<]/.exec(line)?.[1]
-		?? /^\s*export\s+(?:const|let)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:function\b|(?:\([^)]*\)|[\w$]+)\s*(?::[^=]*)?=>)/.exec(line)?.[1]
+		?? /^\s*export\s+(?:const|let)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:<[^;]{1,256}>\s*)?(?:function\b|(?:\([^)]*\)|[\w$]+)\s*(?::[^=]*)?=>)/.exec(line)?.[1]
 		?? /^\s*(?:pub(?:\([^)]*\))?\s+(?:async\s+)?fn|(?:async\s+)?def)\s+([A-Za-z]\w*)\s*[(<]/.exec(line)?.[1];
 }
 
 /** New-line positions of changed hunks, plus declarations removed by the diff. */
-export function changedFunctionNames(patch: string, readSource: (path: string) => string | null, deadline = Date.now() + CALLER_SEARCH_MS): { names: string[]; notes: string[] } {
+export function changedFunctionNames(patch: string, readSource: (path: string, revision?: "HEAD" | ":") => string | null, deadline = Date.now() + CALLER_SEARCH_MS): { names: string[]; notes: string[] } {
 	const ranges = new Map<string, { start: number; end: number }[]>();
 	const names = new Set<string>();
 	const notes: string[] = [];
 	let path = "";
+	let revision: "HEAD" | ":" | undefined;
 	let spanLookups = 0;
 	const patchLines = patch.split("\n");
 	for (const [index, line] of patchLines.entries()) {
+		if (line.startsWith("Committed (")) { revision = "HEAD"; continue; }
+		if (line === "Staged vs HEAD:") { revision = ":"; continue; }
+		if (line === "Unstaged vs index:") { revision = undefined; continue; }
 		if (line.startsWith("+++ b/")) path = line.slice(6);
 		else if (line === "+++ /dev/null") path = "";
 		else if (line.startsWith("@@")) {
@@ -43,9 +47,10 @@ export function changedFunctionNames(patch: string, readSource: (path: string) =
 			if (headerName) names.add(headerName);
 			if (path) {
 				const start = Number(match[1]);
-				const list = ranges.get(path) ?? [];
+				const key = `${revision ?? ""}\0${path}`;
+				const list = ranges.get(key) ?? [];
 				list.push({ start, end: start + Math.max(1, Number(match[2] ?? 1)) - 1 });
-				ranges.set(path, list);
+				ranges.set(key, list);
 			}
 		} else if (/^[+-](?![+-])/.test(line)) {
 			const name = functionName(line.slice(1)) ?? (/^[+-]\s*export\s+(?:const|let)\b/.test(line)
@@ -54,9 +59,11 @@ export function changedFunctionNames(patch: string, readSource: (path: string) =
 		}
 	}
 	if (ranges.size > CALLER_FILE_CAP) notes.push(`Changed-source scan capped at ${CALLER_FILE_CAP} files.`);
-	for (const [file, hunks] of [...ranges].slice(0, CALLER_FILE_CAP)) {
+	for (const [key, hunks] of [...ranges].slice(0, CALLER_FILE_CAP)) {
+		const [version, file] = key.split("\0");
+		const sourceRevision = version === "HEAD" || version === ":" ? version : undefined;
 		if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
-		const source = readSource(file);
+		const source = readSource(file, sourceRevision);
 		if (source === null) { notes.push(`Could not scan ${file} (missing or over ${CALLER_SOURCE_BYTES} bytes).`); continue; }
 		if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
 		const sourceLines = source.split("\n");
