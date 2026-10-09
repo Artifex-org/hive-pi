@@ -52,6 +52,8 @@ function declPatterns(name: string, lang: Lang): RegExp[] {
 		return [new RegExp(`^[ \\t]*(?:async[ \\t]+)?def[ \\t]+${n}\\b`), new RegExp(`^[ \\t]*class[ \\t]+${n}\\b`)];
 	}
 	return [
+		// Rust public/free functions and impl methods (brace-delimited).
+		new RegExp(`^[ \t]*(?:pub(?:\\([^)]*\\))?[ \t]+)?(?:async[ \t]+)?fn[ \t]+${n}\\b`),
 		// Go: func Name / func (r T) Name / type Name / var|const Name
 		new RegExp(`^[ \\t]*func[ \\t]+(?:\\([^)]*\\)[ \\t]*)?${n}\\b`),
 		new RegExp(`^[ \\t]*type[ \\t]+${n}\\b`),
@@ -136,7 +138,7 @@ export function listSymbols(
 	const decl =
 		lang === "python"
 			? /^(?:async[ \t]+)?(?:def|class)[ \t]+\w/
-			: /^(?:export[ \t]+)?(?:default[ \t]+)?(?:async[ \t]+)?(?:func|function\*?|class|interface|type|enum|const|let|var)[ \t]+/;
+			: /^(?:export[ \t]+)?(?:default[ \t]+)?(?:async[ \t]+)?(?:func|function\*?|class|interface|type|enum|const|let|var)[ \t]+|^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+/;
 	/**
 	 * Members, one level in.
 	 *
@@ -155,8 +157,10 @@ export function listSymbols(
 			? /^[ \t]+(?:async[ \t]+)?(?:def|class)[ \t]+\w/
 			: new RegExp(
 					"^[ \\t]+(?:" +
+						// Rust impl method
+						"(?:pub(?:\\([^)]*\\))?[ \t]+)?(?:async[ \t]+)?fn[ \t]+\\w" +
 						// modifier-led member
-						"(?:public|private|protected|static|readonly|async|get|set)[ \\t]+\\w" +
+						"|(?:public|private|protected|static|readonly|async|get|set)[ \\t]+\\w" +
 						// opens a body
 						"|\\w[\\w$]*[ \\t]*[(<].*\\{[ \\t]*$" +
 						// TS signature with a return annotation

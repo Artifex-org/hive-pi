@@ -18,7 +18,7 @@
 
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 
 import type { GateProgress } from "./stream.ts";
 import { deckLines, deckSummary } from "./hivecheck.ts";
@@ -59,9 +59,18 @@ function publishDeck(pi: ExtensionAPI, progress: GateProgress | null): void {
 }
 
 /** pi's half of the gate's host: the deck bus and `pi.exec`. */
-function piGateHost(pi: ExtensionAPI): GateHost {
+function piGateHost(pi: ExtensionAPI, ctx: ExtensionToolContext): GateHost {
 	return {
 		publishDeck: (progress) => publishDeck(pi, progress),
+		watchRun: async (run) => {
+			const result = await ctx.executeTool("hive_watch_run", {
+				run, what: "waiting for the quality gate verdict", timeout_seconds: 14_400,
+			});
+			return {
+				text: result.result.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"),
+				isError: result.isError,
+			};
+		},
 		exec: async (command, args, options) => {
 			const res = await pi.exec(command, args, options);
 			return { stdout: res.stdout ?? "", stderr: res.stderr ?? "", code: res.code ?? null, killed: res.killed === true };
@@ -87,7 +96,7 @@ export default function (pi: ExtensionAPI) {
 			"check that did not run. " +
 			"In a repo that gates through Hive (hive, Aurora, Borealis-Ops) it runs `hive check` " +
 			"on the fleet against your uncommitted working tree instead — same report, same live " +
-			"progress — so reach for this rather than shelling out to `hive check` yourself.",
+			"progress. Slow runs hand off to hive_watch_run after at most two minutes; you get one completion wake. So reach for this rather than shelling out to `hive check` yourself.",
 		parameters: Type.Object({
 			mode: Type.Optional(
 				StringEnum(["verify", "quick", "standard", "thorough"] as const, {
@@ -156,7 +165,7 @@ export default function (pi: ExtensionAPI) {
 			// Read from ctx BEFORE the first await — it goes stale on resume, fork
 			// and reload.
 			const sessionCwd = (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
-			return runQualityGate(piGateHost(pi), params, sessionCwd, signal, onUpdate);
+			return runQualityGate(piGateHost(pi, ctx), params, sessionCwd, signal, onUpdate);
 		},
 	});
 }

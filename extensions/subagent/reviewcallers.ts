@@ -1,0 +1,107 @@
+/** Bounded textual caller inventory, not a language-server reference index. */
+import { execFileSync } from "node:child_process";
+import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { findSymbol, listSymbols } from "../lens/symbols.ts";
+
+export const CALLER_SYMBOL_CAP = 16;
+export const CALLER_SITE_CAP = 80;
+export const CALLER_FILE_CAP = 20;
+export const CALLER_SOURCE_BYTES = 128 * 1024;
+export const CALLER_GREP_BYTES = 32 * 1024;
+export const CALLER_SEARCH_MS = 2_000;
+
+export interface CallerSite { symbol: string; path: string; line: number; }
+export interface CallerInventory { sites: CallerSite[]; notes: string[]; }
+export type CallerGrep = (symbol: string, repo: string, timeoutMs: number) => { text: string; incomplete?: string };
+
+/** Declarations only: Go exported functions/methods, JS/TS exports, public Rust/Python functions. */
+function functionName(line: string): string | undefined {
+	return /^\s*func\s+(?:\([^)]*\)\s*)?([A-Z]\w*)\s*[(\[]/.exec(line)?.[1]
+		?? /^\s*export\s+(?:default\s+)?(?:async\s+)?function\s+([\w$]+)\s*[(<]/.exec(line)?.[1]
+		?? /^\s*export\s+(?:const|let)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:function\b|(?:\([^)]*\)|[\w$]+)\s*(?::[^=]*)?=>)/.exec(line)?.[1]
+		?? /^\s*(?:pub(?:\([^)]*\))?\s+(?:async\s+)?fn|(?:async\s+)?def)\s+([A-Za-z]\w*)\s*[(<]/.exec(line)?.[1];
+}
+
+/** New-line positions of changed hunks, plus declarations removed by the diff. */
+export function changedFunctionNames(patch: string, readSource: (path: string) => string | null): { names: string[]; notes: string[] } {
+	const ranges = new Map<string, { start: number; end: number }[]>();
+	const names = new Set<string>();
+	const notes: string[] = [];
+	let path = "";
+	for (const line of patch.split("\n")) {
+		if (line.startsWith("+++ b/")) path = line.slice(6);
+		else if (line === "+++ /dev/null") path = "";
+		else if (line.startsWith("@@")) {
+			const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@(.*)$/.exec(line);
+			if (!match) continue;
+			const headerName = functionName(match[3]);
+			if (headerName) names.add(headerName);
+			if (path) {
+				const start = Number(match[1]);
+				const list = ranges.get(path) ?? [];
+				list.push({ start, end: start + Math.max(1, Number(match[2] ?? 1)) - 1 });
+				ranges.set(path, list);
+			}
+		} else if (/^[+-](?![+-])/.test(line)) {
+			const name = functionName(line.slice(1));
+			if (name) names.add(name);
+		}
+	}
+	if (ranges.size > CALLER_FILE_CAP) notes.push(`Changed-source scan capped at ${CALLER_FILE_CAP} files.`);
+	for (const [file, hunks] of [...ranges].slice(0, CALLER_FILE_CAP)) {
+		const source = readSource(file);
+		if (source === null) { notes.push(`Could not scan ${file} (missing or over ${CALLER_SOURCE_BYTES} bytes).`); continue; }
+		for (const declaration of listSymbols(source, file)) {
+			const name = functionName(declaration.signature);
+			if (!name) continue;
+			if (findSymbol(source, file, name).some((span) => hunks.some((h) => h.start <= span.endLine && h.end >= span.startLine))) names.add(name);
+			if (names.size > CALLER_SYMBOL_CAP) break;
+		}
+		if (names.size > CALLER_SYMBOL_CAP) break;
+	}
+	if (names.size > CALLER_SYMBOL_CAP) notes.push(`Changed-symbol scan capped at ${CALLER_SYMBOL_CAP} functions.`);
+	return { names: [...names].slice(0, CALLER_SYMBOL_CAP), notes };
+}
+
+const grepCallers: CallerGrep = (symbol, repo, timeoutMs) => {
+	const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	try {
+		return { text: execFileSync("git", ["--no-optional-locks", "grep", "--no-color", "-n", "-I", "-E", "-m", "8", "--", `(^|[^[:alnum:]_$])${escaped}[[:space:]]*(<[^;()]{1,128}>|\\[[^;()]{1,128}\\]|::<[^;()]{1,128}>)?[[:space:]]*\\(`, "*.go", "*.ts", "*.tsx", "*.js", "*.jsx", "*.py", "*.rs"], {
+			cwd: repo, encoding: "utf8", timeout: timeoutMs, maxBuffer: CALLER_GREP_BYTES, stdio: ["ignore", "pipe", "ignore"],
+		}) };
+	} catch (error) {
+		const failure = error as { status?: number; stdout?: string | Buffer };
+		if (failure.status === 1) return { text: "" }; // git grep's documented no-match result
+		return { text: String(failure.stdout ?? "").slice(0, CALLER_GREP_BYTES), incomplete: `Caller grep for ${symbol} failed or exceeded its time/output bound.` };
+	}
+};
+
+export function discoverCallers(repo: string, patch: string, changedPaths: readonly string[], grep: CallerGrep = grepCallers, readSource = (file: string): string | null => {
+	try {
+		const absolute = resolve(repo, file);
+		if (!absolute.startsWith(`${resolve(repo)}/`) || statSync(absolute).size > CALLER_SOURCE_BYTES) return null;
+		return readFileSync(absolute, "utf8");
+	} catch { return null; } // explicitly reported by changedFunctionNames
+}): CallerInventory {
+	const { names, notes } = changedFunctionNames(patch, readSource);
+	const sites: CallerSite[] = [];
+	const seen = new Set<string>();
+	const deadline = Date.now() + CALLER_SEARCH_MS;
+	for (const symbol of names) {
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) { notes.push(`Caller search stopped at its ${CALLER_SEARCH_MS}ms budget.`); break; }
+		const result = grep(symbol, repo, Math.min(300, remaining));
+		if (result.incomplete) notes.push(result.incomplete);
+		for (const line of result.text.slice(0, CALLER_GREP_BYTES).split("\n")) {
+			const match = /^(.+?):(\d+):(.*)$/.exec(line);
+			if (!match || changedPaths.includes(match[1]) || functionName(match[3]) === symbol) continue;
+			const key = `${symbol}:${match[1]}:${match[2]}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			sites.push({ symbol, path: match[1], line: Number(match[2]) });
+			if (sites.length === CALLER_SITE_CAP) { notes.push(`Caller inventory capped at ${CALLER_SITE_CAP} sites; grep also caps each file at 8 matches per symbol.`); return { sites, notes }; }
+		}
+	}
+	return { sites, notes };
+}

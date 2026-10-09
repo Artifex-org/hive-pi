@@ -17,11 +17,14 @@ import { AGENT_CHECK_PATH, agentCheckArgs, foldSummary, parseSummary, renderVeri
 import { ancestors, gateArgs, gateCandidates, render, selectorMatchedNothing, splitReport, stripAnsi } from "./gate.ts";
 import { consume, emptyProgress, finish, type GateProgress, widgetEnvelope } from "./stream.ts";
 import { recoveryFor, renderReport, stepsFrom } from "./hivecheck.ts";
-import { cancelRun, dispatch, dispatchUnconfirmed, failedTaskLogs, follow, hivePipelineDir, QUEUED_FOLLOW_MINUTES, resolveCheckAuth } from "./hiverun.ts";
+import { dispatch, dispatchUnconfirmed, failedTaskLogs, follow, hivePipelineDir, resolveCheckAuth } from "./hiverun.ts";
 import { GIT_NO_OPTIONAL_LOCKS, repoRoot } from "../hive-common/git.ts";
 
 /** What the gate needs from the harness running it. */
 export interface GateHost {
+	/** Start the host's existing watch job (and its single completion wake). */
+	watchRun?(run: string, cwd: string): Promise<{ text: string; isError?: boolean }>;
+
 	/** Paint (or, with null, clear) the live progress section. Cosmetic: must not throw. */
 	publishDeck(progress: GateProgress | null): void;
 	/** Run a command buffered, killing it at `timeout` ms — pi's `exec` contract. */
@@ -519,22 +522,24 @@ async function runHiveCheck(
 	};
 
 	try {
-		const { progress, tasks, timedOut, stillQueued } = await follow(auth, run.ref, steps, signal, emit);
+		const { progress, tasks, timedOut, stillQueued } = await follow(auth, run.ref, ranSteps, signal, emit);
 		if (signal?.aborted || timedOut) {
-			// An abandoned run would otherwise hold fleet capacity producing a
-			// verdict nobody will read — EXCEPT one that never started, which is
-			// holding nothing. Cancelling that one only guarantees the work is
-			// never done, and the caller has to re-pack and re-upload a snapshot
-			// to ask the same question again.
-			if (!stillQueued) cancelRun(auth, run.ref.id);
+			// Never cancel fleet work: even a queued snapshot can start between
+			// this read and a cancel request. Watching it preserves the verdict.
+			let watch: { text: string; isError?: boolean };
+			try {
+				watch = host.watchRun
+					? await host.watchRun(run.ref.id, cwd)
+					: { text: "This host has no background watcher.", isError: true };
+			} catch (error) {
+				watch = { text: `Background watch could not start: ${String(error)}`, isError: true };
+			}
 			const where = progress.url ?? run.ref.id;
-			const text_ = stillQueued
-				? `NO VERDICT — the run is STILL QUEUED after ${Math.round(QUEUED_FOLLOW_MINUTES)} minutes and has not started; nothing has been checked. ` +
-					`It is NOT cancelled and is still waiting for a fleet slot at ${where}. ` +
-					`Do not re-run the gate — that would queue a second copy behind this one. ` +
-					`Watch it instead (\`hive watch ${run.ref.id}\` in the background) or check back later; ` +
-					`\`fleet_status\` says how busy the fleet is.`
-				: `NO VERDICT — ${timedOut ? "the follow timed out" : "the call was aborted"} while the run was still going. It is still at ${where} (cancel requested).`;
+			const text_ = withNote(
+				`NO VERDICT YET — ${signal?.aborted ? "the call was aborted" : stillQueued ? "all unfinished tasks are waiting for admission" : "the bounded foreground follow ended"}. ` +
+				`Run ${run.ref.id} is NOT cancelled: ${where}. Do not re-dispatch the gate.\n\n` + watch.text +
+				(watch.isError ? `\nNo background watch was started. Use hive_watch_run on ${run.ref.id} or check it with get_run.` : ""),
+			);
 			return {
 				content: [{ type: "text" as const, text: text_ }],
 				details: widgetEnvelope({ ...progress, status: "nosummary" }),

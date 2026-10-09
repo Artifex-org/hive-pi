@@ -126,8 +126,8 @@ export function parseGateParams(args: Record<string, unknown>): QualityGateParam
 	return params;
 }
 
-export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal): Promise<ToolResult> {
-	const result = await runQualityGate(nodeGateHost, parseGateParams(args), cwd, signal);
+export async function runGateTool(args: Record<string, unknown>, cwd: string, signal: AbortSignal, watchRun?: GateHost["watchRun"]): Promise<ToolResult> {
+	const result = await runQualityGate({ ...nodeGateHost, watchRun }, parseGateParams(args), cwd, signal);
 	const first = result.content[0];
 	return { text: first && first.type === "text" ? first.text : "quality_gate produced no report." };
 }

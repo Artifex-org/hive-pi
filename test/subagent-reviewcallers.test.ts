@@ -1,0 +1,88 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { captureDeliveryDiff, citedOutsideDiff, reviewScopeFiles, reviewTaskWithDiff, withReviewCallers } from "../extensions/subagent/reviewdiff.ts";
+import { CALLER_FILE_CAP, CALLER_GREP_BYTES, CALLER_SITE_CAP, CALLER_SYMBOL_CAP, changedFunctionNames, discoverCallers } from "../extensions/subagent/reviewcallers.ts";
+
+const dirs: string[] = [];
+afterEach(() => { vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+const patch = "--- a/api.go\n+++ b/api.go\n@@ -1,4 +1,4 @@\n func PullFiles() error {\n- return nil\n+ return err\n }\n";
+const source = "func PullFiles() error {\n return err\n}\n";
+
+describe("caller-aware review scope", () => {
+	it("includes unchanged callers of a body-only changed exported function, on the real delivery path", () => {
+		const repo = mkdtempSync(join(tmpdir(), "review-callers-")); dirs.push(repo);
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		git("init", "-b", "main"); git("config", "color.grep", "always"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
+		const lines = "func (c *Client) PullFiles() error {\n" + " // unchanged\n".repeat(12);
+		writeFileSync(join(repo, "api.go"), lines + " return nil\n}\n");
+		for (const file of ["panel.go", "coverage.go", "migration.go"]) writeFileSync(join(repo, file), "package api\nfunc caller() { c.PullFiles() }\n");
+		writeFileSync(join(repo, "unrelated.go"), "package api\nfunc Other() {}\n");
+		git("add", "."); git("commit", "-m", "base"); git("update-ref", "refs/remotes/origin/main", "HEAD"); git("checkout", "-b", "work");
+		writeFileSync(join(repo, "api.go"), lines + " return err\n}\n");
+		git("add", "api.go"); git("commit", "-m", "change return contract");
+		const captured = captureDeliveryDiff(repo)!;
+		expect(captured.text).not.toContain("\n func (c *Client) PullFiles"); // declaration is outside ordinary diff context
+		const review = withReviewCallers(captured);
+		expect(review.callers?.sites.map((s) => s.path).sort()).toEqual(["coverage.go", "migration.go", "panel.go"]);
+		const output = "panel.go:2 — broken caller\nunrelated.go:2 — irrelevant";
+		expect(citedOutsideDiff(output, reviewScopeFiles(review))).toEqual(["unrelated.go"]);
+		const task = reviewTaskWithDiff("review", review, true);
+		expect(task).toContain("Callers of changed symbols"); expect(task).toContain("Check EACH listed caller's handling");
+		for (const file of ["panel.go", "coverage.go", "migration.go"]) expect(task).toContain(`${file}:2 — PullFiles(`);
+	});
+	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
+		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
+		git("init", "-b", "main");
+		writeFileSync(join(repo, "client.ts"), "Fetch<User>(input);\n");
+		writeFileSync(join(repo, "client.go"), "Fetch[User](input)\n");
+		writeFileSync(join(repo, "client.rs"), "Fetch::<User>(input);\n");
+		git("add", ".");
+		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -1 +1 @@\n-export function Fetch<T>() {}\n+export function Fetch<T>() { throw new Error(); }\n";
+		expect(discoverCallers(repo, changed, ["api.ts"], undefined, () => "").sites.map((site) => site.path).sort())
+			.toEqual(["client.go", "client.rs", "client.ts"]);
+	});
+	it("discovers a body-only Rust impl method when the hunk header names the impl", () => {
+		const rust = "impl Client {\n    pub fn fetch(&self) -> Result<T> {\n" + "        // body\n".repeat(12) + "        Err(error)\n    }\n}\n";
+		const changed = "--- a/api.rs\n+++ b/api.rs\n@@ -15 +15 @@ impl Client {\n-        Ok(value)\n+        Err(error)\n";
+		const grep = vi.fn(() => ({ text: "client.rs:4: client.fetch()" }));
+		expect(discoverCallers("/repo", changed, ["api.rs"], grep, () => rust).sites).toEqual([{ symbol: "fetch", path: "client.rs", line: 4 }]);
+		expect(grep).toHaveBeenCalledWith("fetch", "/repo", expect.any(Number));
+	});
+	it("recognises Go methods, TS exports and Python functions but not call expressions", () => {
+		const p = ["--- a/x.ts", "+++ b/x.ts", "@@ -1 +1 @@", "-export function Fetch() {}", "+export async function Fetch() { return 1; }", "+obj.Unrelated()", "+func (c *Client) PullFiles() error {", "+def fetch_data():", "+func private() {}", "+export const CONSTANT = 1;", "+export const arrow = (x) => x;"].join("\n");
+		expect(changedFunctionNames(p, () => "").names).toEqual(["Fetch", "PullFiles", "fetch_data", "arrow"]);
+	});
+	it("caps symbols, source files, call sites and per-grep output, and reports the limits", () => {
+		const wide = Array.from({ length: CALLER_FILE_CAP + 4 }, (_, n) => `--- a/f${n}.go\n+++ b/f${n}.go\n@@ -1 +1 @@\n-old\n+new`).join("\n");
+		const read = vi.fn(() => source);
+		expect(changedFunctionNames(wide, read).notes.join(" ")).toContain(`capped at ${CALLER_FILE_CAP} files`);
+		expect(read).toHaveBeenCalledTimes(CALLER_FILE_CAP);
+		const many = patch + Array.from({ length: 30 }, (_, n) => `\n+func F${n}() {}`).join("");
+		const grep = vi.fn(() => ({ text: "" }));
+		expect(discoverCallers("/repo", many, ["api.go"], grep, () => source).notes.join(" ")).toContain(`capped at ${CALLER_SYMBOL_CAP}`);
+		expect(grep).toHaveBeenCalledTimes(CALLER_SYMBOL_CAP);
+		const rows = Array.from({ length: 100 }, (_, n) => `caller${n}.go:2: PullFiles()`).join("\n");
+		const inventory = discoverCallers("/repo", patch, ["api.go"], () => ({ text: rows }), () => source);
+		expect(inventory.sites).toHaveLength(CALLER_SITE_CAP); expect(inventory.notes.join(" ")).toContain(`capped at ${CALLER_SITE_CAP}`);
+		const huge = "x".repeat(CALLER_GREP_BYTES) + "\nlate.go:1: PullFiles()";
+		expect(discoverCallers("/repo", patch, ["api.go"], () => ({ text: huge }), () => source).sites).toHaveLength(0);
+	});
+	it("stops grep work at the shared wall-clock budget", () => {
+		vi.useFakeTimers(); vi.setSystemTime(0);
+		const grep = vi.fn(() => { vi.setSystemTime(2001); return { text: "caller.go:1: PullFiles()" }; });
+		const result = discoverCallers("/repo", patch + "\n+func Another() {}", [], grep, () => source);
+		expect(grep).toHaveBeenCalledTimes(1);
+		expect(result.notes.join(" ")).toContain("2000ms budget");
+	});
+	it("reports unavailable source and grep failures without exempting unrelated files", () => {
+		const removedBody = patch.replace("@@ -1,4 +1,4 @@", "@@ -1,4 +1,4 @@ func PullFiles() error {");
+		const result = discoverCallers("/repo", removedBody, [], () => ({ text: "", incomplete: "grep failed" }), () => null);
+		expect(result.notes).toContain("Could not scan api.go (missing or over 131072 bytes).");
+		// Header/declaration extraction still establishes a changed symbol, but not its callers.
+		expect(result.notes).toContain("grep failed"); expect(result.sites).toEqual([]);
+	});
+});

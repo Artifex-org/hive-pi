@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { fold, humanSecs, isQueued, renderReport, deckSummary } from "../extensions/gate/hivecheck.ts";
+import { fold, humanSecs, isQueued, tasksAwaitingAdmission, renderReport, deckSummary } from "../extensions/gate/hivecheck.ts";
 
 const REF = { id: "8ee772a4-90e2-4b5b-9995-66569a3b6b29", number: 3509 };
 const CREATED = "2026-08-17T21:55:39.000Z";
@@ -108,5 +108,25 @@ describe("humanSecs", () => {
 		expect(humanSecs(60)).toBe("1m");
 		expect(humanSecs(252)).toBe("4m12s");
 		expect(humanSecs(1620)).toBe("27m");
+	});
+});
+
+
+describe("unfinished tasks waiting on admission", () => {
+	it("is queued after a sibling finished, including template and capacity waits", () => {
+		for (const state of ["queued", "ready", "pending", "awaiting_template", "no_capacity", "waiting_for_faster_slot"]) {
+			const tasks = [{ key: "lint", state: "succeeded" }, { key: "test", state }];
+			expect(tasksAwaitingAdmission(tasks)).toBe(true);
+			const p = fold({ run: { state: "running" }, tasks, substeps: [], steps: ["lint", "test"], ref: REF });
+			expect(isQueued(p)).toBe(true);
+			expect(renderReport(p)).toContain("remaining steps are waiting for admission");
+			expect(renderReport(p)).not.toContain("run has not started yet");
+		}
+	});
+	it("does not classify a running, dispatched, unknown or complete task set as queued", () => {
+		for (const state of ["running", "dispatched", "unknown", "succeeded"]) {
+			expect(tasksAwaitingAdmission([{ key: "test", state, defer_reason: "awaiting_template" }])).toBe(false);
+		}
+		expect(tasksAwaitingAdmission([])).toBe(false);
 	});
 });

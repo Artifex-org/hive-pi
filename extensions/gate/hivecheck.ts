@@ -47,6 +47,13 @@ const ACTIVE_TASK = new Set(["running", "dispatched"]);
 /** Run states that mean the run is over. */
 const TERMINAL_RUN = new Set(["succeeded", "failed", "canceled", "error", "timed_out"]);
 
+/** Admission can wait even after a sibling task has completed. */
+export function tasksAwaitingAdmission(tasks: HiveTask[]): boolean {
+	const unfinished = tasks.filter((task) => !TERMINAL_TASK.has(task.state));
+	return unfinished.length > 0 && unfinished.every((task) =>
+		["queued", "pending", "ready", "waiting", "awaiting_template", "no_capacity", "waiting_for_faster_slot"].includes(task.state));
+}
+
 export function isTerminalRun(state: string): boolean {
 	return TERMINAL_RUN.has(state);
 }
@@ -462,11 +469,13 @@ export function fold(input: FoldInput): GateProgress {
 		run_number: ref.number ?? run.number,
 		run_id: ref.id,
 		run_state: run.state,
+		awaiting_admission: tasksAwaitingAdmission(tasks),
 		// How long this has been waiting for a slot, measured from the run's own
 		// creation rather than from when the follow attached: `hive check` packs
 		// and uploads a snapshot first, so the two differ by however long that
 		// took, and the run's clock is the one Hive's own queue stats use.
-		...(queuedSecs !== undefined ? { queued_secs: queuedSecs } : {}),
+		// Once siblings finished, creation age is not the remaining tasks' queue time.
+		...(queuedSecs !== undefined && done === 0 ? { queued_secs: queuedSecs } : {}),
 		...(deferReason !== undefined ? { defer_reason: deferReason } : {}),
 	};
 }
@@ -504,21 +513,10 @@ export function deferReasonOf(tasks: HiveTask[]): string | undefined {
 	return best;
 }
 
-/**
- * Nothing has started yet: the wait is for a fleet slot, not for this code.
- *
- * Derived from the TASKS, not from `run_state`, and that is a measured
- * correction rather than a preference. Hive marks a run `running` the moment it
- * is admitted — observed on run #3262, `"state":"running"` with its only task
- * still `"ready"` eleven minutes in — so the run's own word cannot say whether
- * any work has begun. Nothing finished and nothing on a node can.
- *
- * `run_state !== undefined` keeps this to the hive path: a vendored gate is also
- * momentarily 0-done and 0-running at startup, and "queued" would be the wrong
- * word for a process that is already executing on this machine.
- */
+/** All unfinished tasks are waiting for admission, even if a sibling finished. */
 export function isQueued(p: GateProgress): boolean {
-	return p.status === "running" && p.run_state !== undefined && p.done === 0 && p.running.length === 0;
+	return p.status === "running" && p.run_state !== undefined &&
+		(p.awaiting_admission ?? (p.done === 0 && p.running.length === 0));
 }
 
 /**
@@ -616,15 +614,12 @@ export function renderReport(p: GateProgress, opts: { logs?: { task: string; tai
 		out.push(`FAIL — ${of}${advisory}${secs}`);
 	}
 	else if (isQueued(p)) {
-		// Not the same fact as "still running". A queued run is waiting for a
-		// fleet slot and has looked at nothing yet, and reporting that as work in
-		// progress on this code is the kind of quiet mis-statement this widget
-		// family exists to refuse — measured at 15 minutes behind a PR gate.
+		// Finished siblings do not make the remaining admission wait active work.
 		// The elapsed wait, not just the state. Without it the line is identical
 		// at 10 seconds and at 27 minutes, and only one of those is worth acting
 		// on — see GateProgress.queued_secs.
 		const waited = p.queued_secs !== undefined ? ` for ${humanSecs(p.queued_secs)}` : "";
-		out.push(`QUEUED${waited} — the run has not started yet (waiting for a fleet slot)${secs}`);
+		out.push(`QUEUED${waited} — ${p.done > 0 ? "the remaining steps are waiting for admission" : "the run has not started yet"} (waiting for a fleet slot)${secs}`);
 		// THE CAUSE, AND WHAT NOT TO DO ABOUT IT.
 		//
 		// The line above says the wait is real; on its own it does not say

@@ -52,7 +52,7 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
-import { captureDeliveryDiff, captureReviewDiff, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewFingerprint, reviewScopeFiles, reviewTaskWithDiff, stampableReview } from "./reviewdiff.ts";
+import { captureDeliveryDiff, captureReviewDiff, withReviewCallers, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewFingerprint, reviewScopeFiles, reviewTaskWithDiff, stampableReview } from "./reviewdiff.ts";
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 
 /**
@@ -659,7 +659,8 @@ export async function runSingleAgent(
 		const neutralize = agent.name === "code-reviewer" && !reviewPrepared;
 		let effectiveTask = neutralize ? neutralReviewTask(task) : task;
 		if (isReviewRole(agent.name)) {
-			const diff = agent.name === "code-reviewer" ? captureDeliveryDiff(executionCwd, task) : captureReviewDiff(executionCwd, task);
+			const captured = agent.name === "code-reviewer" ? captureDeliveryDiff(executionCwd, task) : captureReviewDiff(executionCwd, task);
+			const diff = captured ? withReviewCallers(captured) : null;
 			if (diff) {
 				effectiveTask = reviewTaskWithDiff(task, diff, neutralize);
 				currentResult.reviewFiles = reviewScopeFiles(diff);
