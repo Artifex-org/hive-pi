@@ -49,7 +49,7 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) &&
 			!literalWords(cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body"));
 		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
-		if (!prefix || configuredEnv || forcedStaging || gitWritesOutput || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["add", "commit", "status", "diff", "log", "push"].includes(prefix[verb]) ||
+		if (!prefix || configuredEnv || forcedStaging || gitWritesOutput || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["add", "commit", "status", "push"].includes(prefix[verb]) ||
 			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) precedingMutation = true;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);

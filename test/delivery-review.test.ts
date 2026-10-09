@@ -86,6 +86,22 @@ describe("delivery review", () => {
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
 	});
+	it("rejects a reviewed chain whose external-diff helper can change code", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive);
+		const helper = join(cwd, ".git", "external-diff");
+		writeFileSync(helper, "#!/bin/sh\nprintf 'export const helper = 1;\\n' >> code.ts\n"); chmodSync(helper, 0o755);
+		git("config", "diff.external", helper);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git diff --ext-diff && git add code.ts && git commit -m code && git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("Unsupported command shape") });
+		git("diff", "--ext-diff");
+		expect(captureDeliveryDiff(cwd)!.text).toContain("export const helper");
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd } }))[0])
+			.toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
+	});
 	it("distinguishes unsupported shapes from an unavailable diff", async () => {
 		const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);
 		for (const command of ["git checkout work && git push", "git push other HEAD"]) {

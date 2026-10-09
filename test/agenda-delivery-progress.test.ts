@@ -7,6 +7,12 @@ import type { GoalItem } from "../extensions/agenda/goal-state.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 describe("delivery milestones", () => {
+	it("does not record failed duplicate-PR creation even when the error includes its URL", async () => {
+		const pi = createFakePi(); registerDeliveryProgress(pi.api);
+		await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "pr", input: { command: "gh pr create" },
+			content: [{ type: "text", text: "a pull request already exists:\nhttps://github.com/owner/repo/pull/123" }], isError: true });
+		expect(pi.entries).toHaveLength(0);
+	});
 	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change"])("observes %s only when HEAD actually changes", async command => {
 		const pi = createFakePi(); let head = "old";
 		registerDeliveryProgress(pi.api, () => head);
