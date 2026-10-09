@@ -80,8 +80,10 @@ an old note. Dismiss obsolete notes. Silence is not a clean bill of health.
 - Event handlers do not await a model. A detached timer performs the scan; it
   does not delay tools, auto-continue the agent or change its context. No tools,
   messages, system-prompt changes or provider-request hooks are registered.
-- Session entries contain enabled state, budget, notes, quotes and usage counters, not
-  full excerpts. They do not enter LLM context. Existing session export/telemetry
+- Session entries contain enabled state, budget, failed-scan count, notes, quotes and
+  usage counters, not full excerpts. The failed count is what tells a saved session's
+  `scans: 20, notes: [], tokens: 0` apart: twenty provider errors, or twenty scans
+  that found nothing. They do not enter LLM context. Existing session export/telemetry
   retains its own behavior and consent policy.
 - Off/dismiss/session replacement/tree navigation cancel queued and in-flight
   work; generation checks discard late results. Shutdown clears the UI/timers.

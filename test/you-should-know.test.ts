@@ -264,6 +264,19 @@ describe("asynchronous lifecycle", () => {
 		await h.fake.runCommand("you-should-know", "status");
 		expect(h.fake.notifications.at(-1)?.message).toContain(enabled ? "on" : "off");
 	});
+	it("persists failed scans, so a saved session never reads as N clean empty scans", async () => {
+		// HIV-3802 eval, 2026-10-08: 20 scans, every one a provider error (the
+		// catalog's low model was unreachable from the sandbox), persisted as
+		// `scans: 20, notes: [], tokens: 0` — indistinguishable from twenty
+		// scans that found nothing worth surfacing.
+		const failing = { ...reply(""), stopReason: "error" as const };
+		const h = harness(async () => failing); await prose(h.fake);
+		const saved = h.fake.entries.filter(e => e.customType === "you-should-know").at(-1)?.data as { scans: number; failed?: number };
+		expect(saved).toMatchObject({ scans: 1, failed: 1 });
+		await h.fake.emit({ type: "session_start", reason: "resume" }, { branch: [{ type: "custom", customType: "you-should-know", data: saved }] });
+		await h.fake.runCommand("you-should-know", "status");
+		expect(h.fake.notifications.at(-1)?.message).toContain("1 failed");
+	});
 	it("malformed verdict is visibly failed, never a clean empty scan", async () => {
 		const h = harness(async () => reply("NOT JSON")); await prose(h.fake);
 		expect(h.fake.statuses.at(-1)?.text).toContain("failed");

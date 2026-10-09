@@ -20,6 +20,8 @@ const RECEIPTS = "you-should-know.receipts";
 export { DEFAULT_CONFIG, type ScanConfig };
 interface State {
 	sessionId: string; enabled: boolean; scans: number; notes: Note[]; seen: string[]; tokens: number; cost: number;
+	/** Scans that ended without a verdict. Without it a saved session reads N failures as N clean, empty scans. */
+	failed?: number;
 	recording?: boolean; desiredRecording?: boolean;
 }
 export interface ScanRequest { source: string; seen: string[] }
@@ -66,6 +68,7 @@ function restore(data: unknown): State | null {
 		!Array.isArray(s.notes) || s.notes.length > 10 || !Array.isArray(s.seen) || s.seen.length > 100 ||
 		!s.seen.every(q => typeof q === "string" && q.length <= 480 && [...q].length <= 240) ||
 		!Number.isFinite(s.tokens) || s.tokens < 0 || !Number.isFinite(s.cost) || s.cost < 0 ||
+		(s.failed !== undefined && (!Number.isSafeInteger(s.failed) || s.failed < 0 || s.failed > s.scans)) ||
 		(s.recording !== undefined && typeof s.recording !== "boolean") || (s.desiredRecording !== undefined && typeof s.desiredRecording !== "boolean")) return null;
 	try { return { ...s, notes: s.notes.flatMap(n => parseNotes(JSON.stringify({ notes: [{ ...n, text: redactEvidence(n.text), quote: redactEvidence(n.quote), ...(n.expected ? { expected: redactEvidence(n.expected) } : {}), ...(n.impact ? { impact: redactEvidence(n.impact) } : {}) }] }), redactEvidence(n.quote), true)), seen: [...s.seen] }; } catch { return null; }
 }
@@ -242,7 +245,8 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 		} catch (error) {
 			if (gen !== generation) return;
 			const known = ["scanner returned invalid JSON", "scanner returned no notes array", "scanner returned too many notes", "scanner returned an invalid note", "scanner returned an invalid or ungrounded note", "scanner could not finish its response", "scan canceled or timed out", "no Hive catalog auth", "Hive catalog has no low model", "invalid low model spec", "low model is unavailable in this registry", "low model credentials unavailable"];
-			failure = `Scan failed: ${error instanceof Error && known.includes(error.message) ? error.message : "provider request failed"}; this excerpt was not checked.`; save();
+			failure = `Scan failed: ${error instanceof Error && known.includes(error.message) ? error.message : "provider request failed"}; this excerpt was not checked.`;
+			state.failed = (state.failed ?? 0) + 1; save();
 		} finally {
 			// Pair with the baseline off the extraction path. Failed extraction is
 			// UNKNOWN, never a safe skip label. No evidence text/recording writes.
@@ -311,7 +315,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 				case "record-on": case "record-off": record(args.trim().toLowerCase() === "record-on", ctx); ctx.ui.notify(`Recording ${state.recording ? "requested" : "stopped locally"}. Destination writes require an authenticated supported Hive attachment; queued is not delivered.`); return;
 				case "dismiss": apply("dismiss", ctx); ctx.ui.notify("Notes dismissed. Durable findings and real receipts are retained; repeated quotes stay suppressed."); return;
 				case "show": ctx.ui.notify(state.notes.length ? "Earlier output — model interpretations, not current verified blockers:\n\n" + state.notes.map(n => `[${n.kind}] ${n.text}\nSource: ${n.quote}`).join("\n\n") : "No notes. Silence does not mean the work was verified."); return;
-				case "": case "status": ctx.ui.notify(`You should know: ${state.enabled ? "on" : "off"} · ${state.scans}/${cfg.maxScans} scans · ${state.tokens} side-call tokens · $${state.cost.toFixed(4)} reported extraction cost.\nModel: ${model} · recording: ${state.recording ? "on" : "off"}${policyReady ? ` (revision ${recordingRevision})` : " (not negotiated)"} · Jev: ${jev} (${jevDetail}).\nJev prefilter: ${prefilterDetail}.\n${failure || "Only future captured evidence is scanned; no independent verification."}${recordingFailure ? `\n${recordingFailure}` : ""}${transportBusy && !active ? "\nFurther calls wait for the canceled provider request to settle." : ""}\n/you-should-know on | off | show | dismiss | record-on | record-off`); return;
+				case "": case "status": ctx.ui.notify(`You should know: ${state.enabled ? "on" : "off"} · ${state.scans}/${cfg.maxScans} scans${state.failed ? ` (${state.failed} failed)` : ""} · ${state.tokens} side-call tokens · $${state.cost.toFixed(4)} reported extraction cost.\nModel: ${model} · recording: ${state.recording ? "on" : "off"}${policyReady ? ` (revision ${recordingRevision})` : " (not negotiated)"} · Jev: ${jev} (${jevDetail}).\nJev prefilter: ${prefilterDetail}.\n${failure || "Only future captured evidence is scanned; no independent verification."}${recordingFailure ? `\n${recordingFailure}` : ""}${transportBusy && !active ? "\nFurther calls wait for the canceled provider request to settle." : ""}\n/you-should-know on | off | show | dismiss | record-on | record-off`); return;
 				default: ctx.ui.notify("Usage: /you-should-know on | off | status | show | dismiss | record-on | record-off", "warning");
 			}
 		},
