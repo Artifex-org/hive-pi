@@ -305,7 +305,7 @@ export function reviewTaskWithDiff(task: string, diff: ReviewDiff, neutral = fal
 			...diff.callers.notes.map((note) => `[caller search incomplete: ${note}]`),
 			"Check EACH listed caller's handling of the changed signature, return value, error behaviour or timing. " +
 			"Verify the call resolves to the changed function; a broken caller outside the diff is a finding about this change. " +
-			"Discovery is capped (16 symbols, 20 changed files, 80 sites, 8 grep matches per file/symbol, 2s grep budget); grep further if needed.");
+			"Discovery is capped (16 symbols, 20 changed files, 80 sites, 64 declarations/file, 32 span lookups, 8 grep matches per file/symbol, 2s shared source/grep budget); grep further if needed.");
 	}
 	lines.push(
 		"",

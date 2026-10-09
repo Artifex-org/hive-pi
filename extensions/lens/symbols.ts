@@ -102,7 +102,7 @@ function escape(s: string): string {
  * implementation, or a method on two types, and silently picking one would be a
  * confidently wrong answer — the failure mode this tool exists to avoid.
  */
-export function findSymbol(source: string, file: string, name: string): SymbolSpan[] {
+export function findSymbol(source: string, file: string, name: string, maxMatches = Infinity): SymbolSpan[] {
 	if (!name.trim()) return [];
 	const lang = langOf(file);
 	const patterns = declPatterns(name, lang);
@@ -114,7 +114,7 @@ export function findSymbol(source: string, file: string, name: string): SymbolSp
 		if (!patterns.some((p) => p.test(line))) continue;
 		// A declaration inside a comment or string is not a declaration.
 		if (inCommentOrString(lines, i)) continue;
-		const endLine = lang === "python" ? pythonEnd(lines, i) : braceEnd(lines, i);
+		const endLine = lang === "python" ? pythonEnd(lines, i) : braceEnd(lines, i, /\.rs$/i.test(file));
 		const startLine = withDoc(lines, i, lang);
 		out.push({
 			name,
@@ -123,6 +123,7 @@ export function findSymbol(source: string, file: string, name: string): SymbolSp
 			signature: line.trim(),
 			text: lines.slice(startLine, endLine + 1).join("\n"),
 		});
+		if (out.length >= maxMatches) break;
 	}
 	return out;
 }
@@ -132,6 +133,7 @@ export function findSymbol(source: string, file: string, name: string): SymbolSp
 export function listSymbols(
 	source: string,
 	file: string,
+	maxSymbols = Infinity,
 ): { line: number; signature: string; depth: number }[] {
 	const lang = langOf(file);
 	const lines = source.split("\n");
@@ -182,6 +184,7 @@ export function listSymbols(
 			signature: lines[i].trim().replace(/[ \t]*\{[ \t]*$/, ""),
 			depth: top ? 0 : 1,
 		});
+		if (out.length >= maxSymbols) break;
 	}
 	return out;
 }
@@ -197,7 +200,7 @@ export function listSymbols(
  * A declaration with no brace before its statement ends (a Go `type X int`, a
  * TS `type X = Y`, an interface method) ends at that statement.
  */
-function braceEnd(lines: string[], start: number): number {
+function braceEnd(lines: string[], start: number, rust = false): number {
 	let depth = 0;
 	let seenOpen = false;
 	let inBlockComment = false;
@@ -229,6 +232,8 @@ function braceEnd(lines: string[], start: number): number {
 				c++;
 				continue;
 			}
+			// Rust lifetimes/labels ('static, 'a, 'outer:) are not character literals.
+			if (rust && ch === "'" && /^[A-Za-z_]\w*(?![\w'])/.test(line.slice(c + 1))) continue;
 			if (ch === '"' || ch === "'" || ch === "`") {
 				inString = ch;
 				continue;

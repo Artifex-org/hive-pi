@@ -10,6 +10,8 @@ export const CALLER_FILE_CAP = 20;
 export const CALLER_SOURCE_BYTES = 128 * 1024;
 export const CALLER_GREP_BYTES = 32 * 1024;
 export const CALLER_SEARCH_MS = 2_000;
+export const CALLER_DECLARATION_CAP = 64;
+export const CALLER_SPAN_LOOKUP_CAP = 32;
 
 export interface CallerSite { symbol: string; path: string; line: number; }
 export interface CallerInventory { sites: CallerSite[]; notes: string[]; }
@@ -24,11 +26,12 @@ function functionName(line: string): string | undefined {
 }
 
 /** New-line positions of changed hunks, plus declarations removed by the diff. */
-export function changedFunctionNames(patch: string, readSource: (path: string) => string | null): { names: string[]; notes: string[] } {
+export function changedFunctionNames(patch: string, readSource: (path: string) => string | null, deadline = Date.now() + CALLER_SEARCH_MS): { names: string[]; notes: string[] } {
 	const ranges = new Map<string, { start: number; end: number }[]>();
 	const names = new Set<string>();
 	const notes: string[] = [];
 	let path = "";
+	let spanLookups = 0;
 	for (const line of patch.split("\n")) {
 		if (line.startsWith("+++ b/")) path = line.slice(6);
 		else if (line === "+++ /dev/null") path = "";
@@ -50,16 +53,25 @@ export function changedFunctionNames(patch: string, readSource: (path: string) =
 	}
 	if (ranges.size > CALLER_FILE_CAP) notes.push(`Changed-source scan capped at ${CALLER_FILE_CAP} files.`);
 	for (const [file, hunks] of [...ranges].slice(0, CALLER_FILE_CAP)) {
+		if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
 		const source = readSource(file);
 		if (source === null) { notes.push(`Could not scan ${file} (missing or over ${CALLER_SOURCE_BYTES} bytes).`); continue; }
-		for (const declaration of listSymbols(source, file)) {
+		if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
+		const outline = listSymbols(source, file, CALLER_DECLARATION_CAP + 1);
+		if (outline.length > CALLER_DECLARATION_CAP) notes.push(`Source outline for ${file} capped at ${CALLER_DECLARATION_CAP} declarations.`);
+		for (const declaration of outline.slice(0, CALLER_DECLARATION_CAP)) {
+			if (Date.now() >= deadline || spanLookups >= CALLER_SPAN_LOOKUP_CAP) { notes.push("Source discovery stopped at its time/span-lookup budget."); break; }
 			const name = functionName(declaration.signature);
 			if (!name) continue;
-			if (findSymbol(source, file, name).some((span) => hunks.some((h) => h.start <= span.endLine && h.end >= span.startLine))) names.add(name);
+			spanLookups++;
+			const spans = findSymbol(source, file, name, CALLER_DECLARATION_CAP + 1);
+			if (spans.length > CALLER_DECLARATION_CAP) notes.push(`Source spans for ${name} capped at ${CALLER_DECLARATION_CAP} declarations.`);
+			if (spans.slice(0, CALLER_DECLARATION_CAP).some((span) => hunks.some((h) => h.start <= span.endLine && h.end >= span.startLine))) names.add(name);
 			if (names.size > CALLER_SYMBOL_CAP) break;
 		}
-		if (names.size > CALLER_SYMBOL_CAP) break;
+		if (names.size > CALLER_SYMBOL_CAP || spanLookups >= CALLER_SPAN_LOOKUP_CAP) break;
 	}
+	if (spanLookups >= CALLER_SPAN_LOOKUP_CAP) notes.push(`Source span lookups capped at ${CALLER_SPAN_LOOKUP_CAP}.`);
 	if (names.size > CALLER_SYMBOL_CAP) notes.push(`Changed-symbol scan capped at ${CALLER_SYMBOL_CAP} functions.`);
 	return { names: [...names].slice(0, CALLER_SYMBOL_CAP), notes };
 }
@@ -84,10 +96,10 @@ export function discoverCallers(repo: string, patch: string, changedPaths: reado
 		return readFileSync(absolute, "utf8");
 	} catch { return null; } // explicitly reported by changedFunctionNames
 }): CallerInventory {
-	const { names, notes } = changedFunctionNames(patch, readSource);
+	const deadline = Date.now() + CALLER_SEARCH_MS;
+	const { names, notes } = changedFunctionNames(patch, readSource, deadline);
 	const sites: CallerSite[] = [];
 	const seen = new Set<string>();
-	const deadline = Date.now() + CALLER_SEARCH_MS;
 	for (const symbol of names) {
 		const remaining = deadline - Date.now();
 		if (remaining <= 0) { notes.push(`Caller search stopped at its ${CALLER_SEARCH_MS}ms budget.`); break; }

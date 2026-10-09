@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as lensSymbols from "../extensions/lens/symbols.ts";
 import { captureDeliveryDiff, citedOutsideDiff, reviewScopeFiles, reviewTaskWithDiff, withReviewCallers } from "../extensions/subagent/reviewdiff.ts";
-import { CALLER_FILE_CAP, CALLER_GREP_BYTES, CALLER_SITE_CAP, CALLER_SYMBOL_CAP, changedFunctionNames, discoverCallers } from "../extensions/subagent/reviewcallers.ts";
+import { CALLER_DECLARATION_CAP, CALLER_SPAN_LOOKUP_CAP, CALLER_FILE_CAP, CALLER_GREP_BYTES, CALLER_SITE_CAP, CALLER_SYMBOL_CAP, changedFunctionNames, discoverCallers } from "../extensions/subagent/reviewcallers.ts";
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -46,8 +47,8 @@ describe("caller-aware review scope", () => {
 			.toEqual(["client.go", "client.rs", "client.ts"]);
 	});
 	it("discovers a body-only Rust impl method when the hunk header names the impl", () => {
-		const rust = "impl Client {\n    pub fn fetch(&self) -> Result<T> {\n" + "        // body\n".repeat(12) + "        Err(error)\n    }\n}\n";
-		const changed = "--- a/api.rs\n+++ b/api.rs\n@@ -15 +15 @@ impl Client {\n-        Ok(value)\n+        Err(error)\n";
+		const rust = "impl Client {\n    pub fn fetch(&self) -> &'static str {\n        let brace = '}';\n" + "        // body\n".repeat(12) + "        Err(error)\n    }\n}\n";
+		const changed = "--- a/api.rs\n+++ b/api.rs\n@@ -16 +16 @@ impl Client {\n-        Ok(value)\n+        Err(error)\n";
 		const grep = vi.fn(() => ({ text: "client.rs:4: client.fetch()" }));
 		expect(discoverCallers("/repo", changed, ["api.rs"], grep, () => rust).sites).toEqual([{ symbol: "fetch", path: "client.rs", line: 4 }]);
 		expect(grep).toHaveBeenCalledWith("fetch", "/repo", expect.any(Number));
@@ -77,6 +78,24 @@ describe("caller-aware review scope", () => {
 		const result = discoverCallers("/repo", patch + "\n+func Another() {}", [], grep, () => source);
 		expect(grep).toHaveBeenCalledTimes(1);
 		expect(result.notes.join(" ")).toContain("2000ms budget");
+	});
+	it("caps source outline and span work before scanning thousands of functions", () => {
+		const dense = Array.from({ length: 3000 }, (_, n) => `export function F${n}() { return ${n}; }`).join("\n");
+		const changed = "--- a/dense.ts\n+++ b/dense.ts\n@@ -3000 +3000 @@\n-    return old;\n+    return updated;\n";
+		const scan = vi.spyOn(lensSymbols, "findSymbol");
+		try {
+			const result = changedFunctionNames(changed, () => dense);
+			expect(scan.mock.calls.length).toBeLessThanOrEqual(CALLER_SPAN_LOOKUP_CAP);
+			expect(result.notes.join(" ")).toContain(`capped at ${CALLER_DECLARATION_CAP} declarations`);
+			expect(result.notes.join(" ")).toContain(`span lookups capped at ${CALLER_SPAN_LOOKUP_CAP}`);
+		} finally { scan.mockRestore(); }
+	});
+	it("includes source discovery in the shared wall-clock budget", () => {
+		vi.useFakeTimers(); vi.setSystemTime(0);
+		const grep = vi.fn(() => ({ text: "" }));
+		const result = discoverCallers("/repo", patch, [], grep, () => { vi.setSystemTime(2001); return source; });
+		expect(grep).not.toHaveBeenCalled();
+		expect(result.notes.join(" ")).toContain("shared");
 	});
 	it("reports unavailable source and grep failures without exempting unrelated files", () => {
 		const removedBody = patch.replace("@@ -1,4 +1,4 @@", "@@ -1,4 +1,4 @@ func PullFiles() error {");
