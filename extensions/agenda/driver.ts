@@ -398,7 +398,8 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			void runChain(ctx).catch(() => {});
 		},
 		reset: () => {
-			ledger = emptyLedger;
+			// Stop/re-enable resets retry budgets, not the session-wide reminder.
+			ledger = ledger.iterations[ADVISE_LEDGER_ID] ? record(emptyLedger, ADVISE_LEDGER_ID) : emptyLedger;
 			blockedOnUser = false;
 		},
 		blockedOnUser: () => blockedOnUser,

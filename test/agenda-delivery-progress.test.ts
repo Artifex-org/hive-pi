@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createConductorAdvicePolicy, createConductorPolicy, ADVISE_LEDGER_ID } from "../extensions/agenda/conductor.ts";
 import { createConductor, withStage } from "../extensions/agenda/conductor-state.ts";
 import { installDriver } from "../extensions/agenda/driver.ts";
@@ -18,6 +22,22 @@ describe("delivery milestones", () => {
 		expect(deliveryMilestone("gh pr create 2>&1 | cat", "already exists:\n" + url, true)).toBe(false);
 		expect(deliveryMilestone("gh pr create && false", url, false)).toBe(true);
 		expect(deliveryMilestone("gh pr create && false", "already exists:\n" + url, false)).toBe(false);
+	});
+	it("observes an actual quiet commit when a later push fails, using commit-specific reflog evidence", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "milestone-"));
+		const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+		try {
+			git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 0;\n"); git("add", "."); git("commit", "-qm", "initial");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 1;\n"); git("add", ".");
+			const pi = createFakePi(); registerDeliveryProgress(pi.api);
+			const input = { cwd, command: "git commit -q -m change && git push origin HEAD" };
+			await pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "partial", input });
+			git("commit", "-qm", "change");
+			await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "partial", input,
+				content: [{ type: "text", text: "fatal: authentication failed" }], isError: true });
+			expect(pi.entries).toEqual([{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }]);
+		} finally { rmSync(cwd, { recursive: true, force: true }); }
 	});
 	it.each(["git commit -q -m change", "git add code.ts && git commit -q -m change", "git commit -q -m change && git push origin HEAD", "git commit -q -m change && echo done"])("observes %s only when HEAD actually changes", async command => {
 		const pi = createFakePi(); let head = "old";
@@ -92,6 +112,11 @@ describe("advisor timing", () => {
 		await pi.emit({ type: "turn_end" }, ctx());
 		await pi.emit({ type: "agent_before_settle" }, ctx());
 		expect(goalJudgments).toBe(1);
+		// /agenda stop uses reset(); /conductor on must not re-arm advice.
+		driver.reset(); item = withStage(item, "execute", 9);
+		await pi.emit({ type: "turn_end" }, ctx());
+		expect(pi.messages).toHaveLength(1);
+		expect(driver.ledger().iterations[ADVISE_LEDGER_ID]).toBe(1);
 		await pi.emit({ type: "session_start" }, { branch, entries: [...branch, ...pi.entries], idle: false });
 		item = withStage(item, "execute", 10);
 		await pi.emit({ type: "turn_end" }, ctx());

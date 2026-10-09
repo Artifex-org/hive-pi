@@ -83,6 +83,15 @@ const readHead = (cwd: string): string | null => {
 	}).trim(); } catch { return null; }
 };
 
+const committedHead = (cwd: string, sha: string): boolean => {
+	try {
+		const [hash, action] = execFileSync("git", ["--no-optional-locks", "reflog", "-1", "--format=%H%x00%gs", "HEAD"], {
+			cwd, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"],
+		}).trim().split("\0", 2);
+		return hash === sha && /^commit(?: \([^)]+\))?:/.test(action ?? "");
+	} catch { return false; }
+};
+
 export function registerDeliveryProgress(pi: ExtensionAPI, head = readHead): (entries: readonly unknown[]) => void {
 	let seen = false;
 	const pending = new Map<string, { cwd: string; head: string | null }>();
@@ -103,7 +112,8 @@ export function registerDeliveryProgress(pi: ExtensionAPI, head = readHead): (en
 		// A commit/PR may have succeeded before a later command failed. The
 		// concrete summary/URL, rather than the whole chain's exit, decides.
 		const after = before ? head(before.cwd) : null;
-		if (!deliveryMilestone(command, output, !event.isError) && !(!event.isError && after && after !== before?.head)) return;
+		const commit = before && after && after !== before.head && (!event.isError || committedHead(before.cwd, after));
+		if (!deliveryMilestone(command, output, !event.isError) && !commit) return;
 		seen = true;
 		pi.appendEntry(DELIVERY_PROGRESS_ENTRY, { reached: true });
 	});
