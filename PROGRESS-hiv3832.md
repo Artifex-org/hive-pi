@@ -7,4 +7,5 @@
 - Adversarial review found and fixed generic-call discovery, body-only Rust impl discovery, and timeout tests coupled to production constants. A mutation restoring 45 minutes fails the independent 120-second test.
 - Full local `env -u FORCE_COLOR npm run check`: typecheck passes; 5006 tests pass. 30 failures are Unix socket EPERM and writes into the launch-excluded shared scratch root (EROFS); no tests were skipped or weakened to mask these. Two additional initial failures were local TCP fixtures routed via the launch proxy; loopback NO_PROXY resolves them.
 - quality_gate finds no vendored gate here; this public repo's actual gate is npm run check in GitHub Actions.
-- Remaining: final evidence review before first push, one PR, final-head GitHub Actions npm run check and gitleaks green.
+- Later reviews also found and fixed unbounded source span scans, Rust lifetime/character-literal handling, and cancellation-path handoff. Pi now tests its actual nested-call pipeline and detaches the watch signal; MCP cancellation starts no unannounceable watcher. Source discovery and grep share a budget, with explicit outline/span caps.
+- Remaining: final foreground evidence review before first push, one PR, final-head GitHub Actions npm run check and gitleaks green.

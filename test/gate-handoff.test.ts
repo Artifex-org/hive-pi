@@ -2,6 +2,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { runToolCall, type AgentTool } from "@earendil-works/pi-agent-core";
 import gate from "../extensions/gate/index.ts";
 import background from "../extensions/background/index.ts";
 import type { HiveTask } from "../extensions/gate/hivecheck.ts";
@@ -44,12 +45,21 @@ async function start(options: { abort?: AbortSignal; watchError?: boolean } = {}
 	const getTool = (name: string) => pi.tools.find((t) => t.name === name)!.definition.execute as (...args: any[]) => Promise<any>;
 	let firstSnapshot!: () => void;
 	const observed = new Promise<void>((r) => { firstSnapshot = r; });
-	const executeTool = vi.fn(async (name, args) => {
-		// The foreground clock is fake; the actual detached process and waker are not.
+	const executeTool = vi.fn(async (name, args, nestedOptions?: { signal?: AbortSignal }) => {
+		// Run argument validation, abort handling and execution through pi's real
+		// nested-call pipeline, including inherited parent signals.
 		vi.useRealTimers();
-		const result = options.watchError ? { content: [{ type: "text", text: "watcher unavailable" }] } :
-			await getTool(name)("nested", args, undefined, undefined, { mode: "tui", cwd: dir });
-		return { result, isError: options.watchError ?? result.isError ?? false };
+		const definition = pi.tools.find((t) => t.name === name)!.definition;
+		const tool = { ...definition, execute: (id: string, input: unknown, signal?: AbortSignal) =>
+			getTool(name)(id, input, signal, undefined, { mode: "tui", cwd: dir }) } as AgentTool;
+		return runToolCall({ type: "toolCall", id: "nested", name, arguments: args }, {
+			tools: [tool], signal: nestedOptions?.signal ?? options.abort,
+			beforeToolCall: options.watchError ? async () => ({ block: true, reason: "watcher unavailable" }) : undefined,
+			context: { messages: [], tools: [tool] },
+			assistantMessage: { role: "assistant", content: [], api: "openai-responses", provider: "openai", model: "test",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+				stopReason: "toolUse", timestamp: 0 },
+		});
 	});
 	vi.useFakeTimers();
 	const result = getTool("quality_gate")("gate", { only: "lint,test" }, options.abort, firstSnapshot,
@@ -78,7 +88,7 @@ describe("quality_gate foreground handoff", () => {
 		expect(out.content[0].text).toContain("NOT cancelled");
 		expect(s.executeTool).toHaveBeenCalledExactlyOnceWith("hive_watch_run", {
 			run: REF.id, what: "waiting for the quality gate verdict", timeout_seconds: 14_400,
-		});
+		}, { signal: expect.any(AbortSignal) });
 		expect(api.request.mock.calls.every((call) => call[1] === "GET")).toBe(true);
 		await verdict(s.pi);
 	});

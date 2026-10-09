@@ -5,7 +5,8 @@
  * and a fake Hive catalog.
  */
 
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -213,6 +214,30 @@ describe("subagent", () => {
 });
 
 describe("quality_gate", () => {
+	it("does not create an unannounceable watch when MCP cancels a dispatched gate", async () => {
+		const run = "1d363f69-ed6d-40c3-80b1-55bf40cc8640";
+		const repo = join(launch.root, "gate-repo"); mkdirSync(join(repo, ".hive"), { recursive: true });
+		execFileSync("git", ["init", "-b", "main"], { cwd: repo, stdio: "ignore" });
+		writeFileSync(join(repo, ".hive", "main.star"), "pipeline fixture\n");
+		const bin = join(launch.root, "gate-bin"); mkdirSync(bin);
+		const marker = join(launch.root, "unexpected-watch");
+		writeFileSync(join(bin, "hive"), `#!/bin/sh\nif [ "$1" = check ]; then echo 'https://hive.example/runs/${run}'; else echo watch > '${marker}'; fi\n`);
+		chmodSync(join(bin, "hive"), 0o755);
+		hive.gateResponse = { run: { state: "running" }, tasks: [{ key: "test", state: "running" }] };
+		const c = await connect({ ...launch.env, PATH: `${bin}:${launch.env.PATH}` }, repo);
+		const request = c.send("tools/call", { name: "quality_gate", arguments: { only: "test" } });
+		let answered = false; void request.answer.then(() => { answered = true; });
+		const deadline = Date.now() + 10_000;
+		while (!hive.requests.some((r) => r.path === `/api/v1/runs/${run}`) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+		expect(hive.requests.some((r) => r.path === `/api/v1/runs/${run}`)).toBe(true);
+		c.notify("notifications/cancelled", { requestId: request.id });
+		await new Promise((r) => setTimeout(r, 700));
+		expect(answered).toBe(false); expect(existsSync(marker)).toBe(false);
+		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(0);
+		expect(hive.requests.some((r) => r.path.endsWith("/cancel"))).toBe(false);
+		expect((await c.request("ping")).result).toEqual({});
+	}, 15_000);
+
 	it("runs hive-pi's gate discovery and says plainly when a checkout has no gate", async () => {
 		const c = await connect();
 		const empty = mkdtempSync(join(tmpdir(), "no-gate-"));

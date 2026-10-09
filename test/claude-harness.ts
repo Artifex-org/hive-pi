@@ -158,6 +158,7 @@ export function runCli(args: string[], env: Record<string, string>, stdin = "", 
 }
 
 export interface FakeHive {
+	gateResponse?: Record<string, unknown>;
 	url: string;
 	requests: { method: string; path: string; body: unknown; auth: string | undefined }[];
 	modes: { key: string; model: string; thinking?: string }[];
@@ -205,6 +206,7 @@ export async function startFakeHive(): Promise<FakeHive> {
 				res.writeHead(status, { "Content-Type": "application/json" });
 				res.end(JSON.stringify(payload));
 			};
+			if (hive.gateResponse && path.startsWith("/api/v1/runs/")) return json(200, path.endsWith("/substeps") ? { substeps: [] } : hive.gateResponse);
 			if (path === "/api/v1/agent-modes") return json(200, { version: "1", modes: hive.modes });
 			if (path.startsWith("/api/v1/agent-sessions/by-run/")) {
 				return hive.sessionId ? json(200, { id: hive.sessionId }) : json(404, { error: "not found" });

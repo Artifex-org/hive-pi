@@ -65,7 +65,7 @@ function piGateHost(pi: ExtensionAPI, ctx: ExtensionToolContext): GateHost {
 		watchRun: async (run) => {
 			const result = await ctx.executeTool("hive_watch_run", {
 				run, what: "waiting for the quality gate verdict", timeout_seconds: 14_400,
-			});
+			}, { signal: new AbortController().signal });
 			return {
 				text: result.result.content.filter((c) => c.type === "text").map((c) => c.text).join("\n"),
 				isError: result.isError,
