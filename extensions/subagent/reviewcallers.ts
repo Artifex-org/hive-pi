@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { findSymbol, listSymbols } from "../lens/symbols.ts";
+import { listSymbols } from "../lens/symbols.ts";
 
 export const CALLER_SYMBOL_CAP = 16;
 export const CALLER_SITE_CAP = 80;
@@ -11,7 +11,6 @@ export const CALLER_SOURCE_BYTES = 128 * 1024;
 export const CALLER_GREP_BYTES = 32 * 1024;
 export const CALLER_SEARCH_MS = 2_000;
 export const CALLER_DECLARATION_CAP = 64;
-export const CALLER_SPAN_LOOKUP_CAP = 32;
 
 export interface CallerSite { symbol: string; path: string; line: number; }
 export interface CallerInventory { sites: CallerSite[]; notes: string[]; }
@@ -30,10 +29,9 @@ function functionName(line: string): string | undefined {
 export function changedFunctionNames(patch: string, readSource: (path: string, revision?: "HEAD" | ":") => string | null, deadline = Date.now() + CALLER_SEARCH_MS): { names: string[]; notes: string[] } {
 	const ranges = new Map<string, { start: number; end: number }[]>();
 	const names = new Set<string>();
-	const notes: string[] = [];
+	const notes: string[] = ["Source discovery uses conservative declaration windows, not parsed bodies; verify symbol and caller relevance."];
 	let path = "";
 	let revision: "HEAD" | ":" | undefined;
-	let spanLookups = 0;
 	const patchLines = patch.split("\n");
 	for (const [index, line] of patchLines.entries()) {
 		if (line.startsWith("Committed (")) { revision = "HEAD"; continue; }
@@ -70,19 +68,20 @@ export function changedFunctionNames(patch: string, readSource: (path: string, r
 		const sourceLines = source.split("\n");
 		const outline = listSymbols(source, file, CALLER_DECLARATION_CAP + 1);
 		if (outline.length > CALLER_DECLARATION_CAP) notes.push(`Source outline for ${file} capped at ${CALLER_DECLARATION_CAP} declarations.`);
-		for (const declaration of outline.slice(0, CALLER_DECLARATION_CAP)) {
-			if (Date.now() >= deadline || spanLookups >= CALLER_SPAN_LOOKUP_CAP) { notes.push("Source discovery stopped at its time/span-lookup budget."); break; }
+		// A single bounded outline, not repeated whole-file span scans. Windows
+		// extend to the next top-level declaration, conservatively including
+		// later members/nested functions rather than trusting parsed body ends.
+		for (const [index, declaration] of outline.slice(0, CALLER_DECLARATION_CAP).entries()) {
+			if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
 			const name = functionName(sourceLines.slice(declaration.line - 1, declaration.line + 7).join("\n"));
 			if (!name) continue;
-			spanLookups++;
-			const spans = findSymbol(source, file, name, CALLER_DECLARATION_CAP + 1);
-			if (spans.length > CALLER_DECLARATION_CAP) notes.push(`Source spans for ${name} capped at ${CALLER_DECLARATION_CAP} declarations.`);
-			if (spans.slice(0, CALLER_DECLARATION_CAP).some((span) => hunks.some((h) => h.start <= span.endLine && h.end >= span.startLine))) names.add(name);
+			const endLine = outline.slice(index + 1).find((next) => next.depth === 0)?.line ?? sourceLines.length + 1;
+			if (hunks.some((h) => h.start < endLine && h.end >= declaration.line)) names.add(name);
 			if (names.size > CALLER_SYMBOL_CAP) break;
 		}
-		if (names.size > CALLER_SYMBOL_CAP || spanLookups >= CALLER_SPAN_LOOKUP_CAP) break;
+		if (names.size > CALLER_SYMBOL_CAP) break;
 	}
-	if (spanLookups >= CALLER_SPAN_LOOKUP_CAP) notes.push(`Source span lookups capped at ${CALLER_SPAN_LOOKUP_CAP}.`);
+
 	if (names.size > CALLER_SYMBOL_CAP) notes.push(`Changed-symbol scan capped at ${CALLER_SYMBOL_CAP} functions.`);
 	return { names: [...names].slice(0, CALLER_SYMBOL_CAP), notes };
 }

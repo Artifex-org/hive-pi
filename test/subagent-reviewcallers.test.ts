@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as lensSymbols from "../extensions/lens/symbols.ts";
 import { captureDeliveryDiff, citedOutsideDiff, reviewScopeFiles, reviewTaskWithDiff, outsideDiffWarning, withReviewCallers } from "../extensions/subagent/reviewdiff.ts";
-import { CALLER_DECLARATION_CAP, CALLER_SPAN_LOOKUP_CAP, CALLER_FILE_CAP, CALLER_GREP_BYTES, CALLER_SITE_CAP, CALLER_SYMBOL_CAP, changedFunctionNames, discoverCallers } from "../extensions/subagent/reviewcallers.ts";
+import { CALLER_DECLARATION_CAP, CALLER_FILE_CAP, CALLER_GREP_BYTES, CALLER_SITE_CAP, CALLER_SYMBOL_CAP, changedFunctionNames, discoverCallers } from "../extensions/subagent/reviewcallers.ts";
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -146,28 +146,20 @@ describe("caller-aware review scope", () => {
 		expect(grep).toHaveBeenCalledTimes(1);
 		expect(result.notes.join(" ")).toContain("2000ms budget");
 	});
-	it("caps source outline and span work before scanning thousands of functions", () => {
-		const dense = Array.from({ length: 3000 }, (_, n) => `export function F${n}() { return ${n}; }`).join("\n");
-		const changed = "--- a/dense.ts\n+++ b/dense.ts\n@@ -3000 +3000 @@\n-    return old;\n+    return updated;\n";
-		const scan = vi.spyOn(lensSymbols, "findSymbol");
-		try {
-			const result = changedFunctionNames(changed, () => dense);
-			expect(scan.mock.calls.length).toBeLessThanOrEqual(CALLER_SPAN_LOOKUP_CAP);
-			expect(result.notes.join(" ")).toContain(`capped at ${CALLER_DECLARATION_CAP} declarations`);
-			expect(result.notes.join(" ")).toContain(`span lookups capped at ${CALLER_SPAN_LOOKUP_CAP}`);
-		} finally { scan.mockRestore(); }
-	});
-	it("bounds each lookup even when a symbol is declared hundreds of times", () => {
-		const repeated = "export function Same() { return 1; }\n".repeat(500);
-		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -500 +500 @@\n-old\n+new";
-		const scan = vi.spyOn(lensSymbols, "findSymbol");
-		try {
-			const result = changedFunctionNames(changed, () => repeated);
-			expect(result.notes.join(" ")).toContain(`Source spans for Same capped at ${CALLER_DECLARATION_CAP} declarations`);
-			expect(scan.mock.calls.every((args) => args[3] === CALLER_DECLARATION_CAP + 1)).toBe(true);
-			expect(scan.mock.results[0].value).toHaveLength(CALLER_DECLARATION_CAP + 1);
-			expect(lensSymbols.findSymbol(repeated, "api.ts", "Same", 3)).toHaveLength(3);
-		} finally { scan.mockRestore(); }
+	it("caps one outline pass and avoids repeated whole-file symbol scans", () => {
+		for (const dense of [Array.from({ length: 3000 }, (_, n) => `export function F${n}() { return ${n}; }`).join("\n"),
+			"export function Same() { return 1; }\n".repeat(500)]) {
+			const changed = "--- a/dense.ts\n+++ b/dense.ts\n@@ -500 +500 @@\n-old\n+new";
+			const scan = vi.spyOn(lensSymbols, "findSymbol");
+			const outline = vi.spyOn(lensSymbols, "listSymbols");
+			try {
+				const result = changedFunctionNames(changed, () => dense);
+				expect(scan).not.toHaveBeenCalled();
+				expect(outline).toHaveBeenCalledExactlyOnceWith(dense, "dense.ts", CALLER_DECLARATION_CAP + 1);
+				expect(outline.mock.results[0].value).toHaveLength(CALLER_DECLARATION_CAP + 1);
+				expect(result.notes.join(" ")).toContain(`capped at ${CALLER_DECLARATION_CAP} declarations`);
+			} finally { scan.mockRestore(); outline.mockRestore(); }
+		}
 	});
 	it("preserves Go bodies after receive-only and send-only channel parameters", () => {
 		for (const channel of ["<-chan int", "chan<- int"]) {
@@ -181,6 +173,13 @@ describe("caller-aware review scope", () => {
 			const source = `const handler = wrap(${callback} {\n first();\n second();\n});\n`;
 			const span = lensSymbols.findSymbol(source, "api.ts", "handler")[0];
 			expect(span.endLine).toBe(4); expect(span.text).toContain("second()");
+		}
+	});
+	it("preserves existing IIFE and comparison-default symbol reads", () => {
+		for (const [name, source] of [["value", "const value = (() => {\n first();\n return second();\n})();\n"],
+			["choose", "function choose(enabled = count < 3) {\n first();\n return second();\n}\n"]]) {
+			const span = lensSymbols.findSymbol(source, "api.ts", name)[0];
+			expect(span.endLine).toBe(4); expect(span.text).toContain("return second()");
 		}
 	});
 	it("includes source discovery in the shared wall-clock budget", () => {

@@ -52,8 +52,6 @@ function declPatterns(name: string, lang: Lang): RegExp[] {
 		return [new RegExp(`^[ \\t]*(?:async[ \\t]+)?def[ \\t]+${n}\\b`), new RegExp(`^[ \\t]*class[ \\t]+${n}\\b`)];
 	}
 	return [
-		// Rust public/free functions and impl methods (brace-delimited).
-		new RegExp(`^[ \t]*(?:pub(?:\\([^)]*\\))?[ \t]+)?(?:async[ \t]+)?fn[ \t]+${n}\\b`),
 		// Go: func Name / func (r T) Name / type Name / var|const Name
 		new RegExp(`^[ \\t]*func[ \\t]+(?:\\([^)]*\\)[ \\t]*)?${n}\\b`),
 		new RegExp(`^[ \\t]*type[ \\t]+${n}\\b`),
@@ -102,7 +100,7 @@ function escape(s: string): string {
  * implementation, or a method on two types, and silently picking one would be a
  * confidently wrong answer — the failure mode this tool exists to avoid.
  */
-export function findSymbol(source: string, file: string, name: string, maxMatches = Infinity): SymbolSpan[] {
+export function findSymbol(source: string, file: string, name: string): SymbolSpan[] {
 	if (!name.trim()) return [];
 	const lang = langOf(file);
 	const patterns = declPatterns(name, lang);
@@ -114,7 +112,7 @@ export function findSymbol(source: string, file: string, name: string, maxMatche
 		if (!patterns.some((p) => p.test(line))) continue;
 		// A declaration inside a comment or string is not a declaration.
 		if (inCommentOrString(lines, i)) continue;
-		const endLine = lang === "python" ? pythonEnd(lines, i) : braceEnd(lines, i, /\.rs$/i.test(file));
+		const endLine = lang === "python" ? pythonEnd(lines, i) : braceEnd(lines, i);
 		const startLine = withDoc(lines, i, lang);
 		out.push({
 			name,
@@ -123,7 +121,6 @@ export function findSymbol(source: string, file: string, name: string, maxMatche
 			signature: line.trim(),
 			text: lines.slice(startLine, endLine + 1).join("\n"),
 		});
-		if (out.length >= maxMatches) break;
 	}
 	return out;
 }
@@ -200,16 +197,9 @@ export function listSymbols(
  * A declaration with no brace before its statement ends (a Go `type X int`, a
  * TS `type X = Y`, an interface method) ends at that statement.
  */
-function braceEnd(lines: string[], start: number, rust = false): number {
+function braceEnd(lines: string[], start: number): number {
 	let depth = 0;
 	let seenOpen = false;
-	let signatureParens = 0;
-	let signatureAngles = 0;
-	let signatureTypes = 0;
-	// A wrapper's parentheses enclose executable code, not a declaration's
-	// parameter types. Keep its full initializer rather than stopping at a type.
-	const wrappedInitializer = /^\s*(?:export\s+)?(?:const|let|var)\b/.test(lines[start]) &&
-		!/^\s*(?:export\s+)?(?:const|let|var)\s+[\w$]+(?:\s*:[^=]+)?\s*=\s*(?:async\s+)?(?:<[^>]+>\s*)?(?:\(|function\b)/.test(lines[start]);
 	let inBlockComment = false;
 
 	for (let i = start; i < lines.length; i++) {
@@ -239,23 +229,9 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 				c++;
 				continue;
 			}
-			// Rust lifetimes/labels ('static, 'a, 'outer:) are not character literals.
-			if (rust && ch === "'" && /^[A-Za-z_]\w*(?![\w'])/.test(line.slice(c + 1))) continue;
 			if (ch === '"' || ch === "'" || ch === "`") {
 				inString = ch;
 				continue;
-			}
-			// Braces inside parameters/generic arguments or an inline return type
-			// belong to the signature, not the executable body.
-			if (!seenOpen && !wrappedInitializer) {
-				if (ch === "(") signatureParens++;
-				if (ch === ")") signatureParens = Math.max(0, signatureParens - 1);
-				if (ch === "<" && next !== "-") signatureAngles++;
-				if (ch === ">") signatureAngles = Math.max(0, signatureAngles - 1);
-				if (ch === "{" && (signatureParens > 0 || signatureAngles > 0 || signatureTypes > 0 || line.slice(0, c).trimEnd().endsWith(":"))) {
-					signatureTypes++; continue;
-				}
-				if (ch === "}" && signatureTypes > 0) { signatureTypes--; continue; }
 			}
 			if (ch === "{") {
 				depth++;
@@ -269,10 +245,10 @@ function braceEnd(lines: string[], start: number, rust = false): number {
 			}
 			// A statement that ended before any block opened is the whole symbol:
 			// `type ID string`, `type X = Y;`, `const n = 1;`
-			if (ch === ";" && !seenOpen && depth === 0 && signatureParens === 0 && signatureAngles === 0 && signatureTypes === 0) return i;
+			if (ch === ";" && !seenOpen && depth === 0) return i;
 		}
 		// Unbraced single-line declaration (Go has no semicolons).
-		if (!seenOpen && !inBlockComment && !(rust && /\bfn\s/.test(lines[start])) && !/[=(,{[]\s*$/.test(line) && i >= start) {
+		if (!seenOpen && !inBlockComment && !/[=(,{[]\s*$/.test(line) && i >= start) {
 			if (!/^\s*(?:\/\/|#)/.test(line)) return i;
 		}
 	}
