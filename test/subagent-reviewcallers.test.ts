@@ -106,6 +106,18 @@ describe("caller-aware review scope", () => {
 			expect(result.notes.join(" ")).toContain(`span lookups capped at ${CALLER_SPAN_LOOKUP_CAP}`);
 		} finally { scan.mockRestore(); }
 	});
+	it("bounds each lookup even when a symbol is declared hundreds of times", () => {
+		const repeated = "export function Same() { return 1; }\n".repeat(500);
+		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -500 +500 @@\n-old\n+new";
+		const scan = vi.spyOn(lensSymbols, "findSymbol");
+		try {
+			const result = changedFunctionNames(changed, () => repeated);
+			expect(result.notes.join(" ")).toContain(`Source spans for Same capped at ${CALLER_DECLARATION_CAP} declarations`);
+			expect(scan.mock.calls.every((args) => args[3] === CALLER_DECLARATION_CAP + 1)).toBe(true);
+			expect(scan.mock.results[0].value).toHaveLength(CALLER_DECLARATION_CAP + 1);
+			expect(lensSymbols.findSymbol(repeated, "api.ts", "Same", 3)).toHaveLength(3);
+		} finally { scan.mockRestore(); }
+	});
 	it("includes source discovery in the shared wall-clock budget", () => {
 		vi.useFakeTimers(); vi.setSystemTime(0);
 		const grep = vi.fn(() => ({ text: "" }));
