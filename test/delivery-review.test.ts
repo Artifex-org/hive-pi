@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deliveryCommand, deliveryTargets, needsDeliveryReview, registerDeliveryReview } from "../extensions/subagent/delivery.ts";
+import { deliveryCommand, deliveryTargets, needsDeliveryReview, registerDeliveryReview, reviewFingerprint } from "../extensions/subagent/delivery.ts";
 import { BASE_REF_SCAN, fetchedBaseRef, knownBaseRef } from "../extensions/guards-common/git-base.ts";
 import { captureDeliveryDiff, neutralReviewTask, reviewTaskWithDiff, type ReviewDiff } from "../extensions/subagent/reviewdiff.ts";
 import { createFakePi } from "./fake-pi.ts";
@@ -54,11 +54,11 @@ describe("delivery review", () => {
 		const push = (command: string) => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "push", input: { command } }, { cwd: a.cwd });
 		for (const command of [`git -C '${b.cwd}' push`, `cd '${b.cwd}' && git push`]) expect((await push(command))[0]).toMatchObject({ block: true });
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd: b.cwd } });
-		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0 }] } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(b.cwd)!) }] } });
 		b.git("add", "."); b.git("commit", "-m", "code");
 		expect((await push(`git -C '${b.cwd}' push`))[0]).toMatchObject({ block: true });
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "final", input: { agent: "code-reviewer", cwd: b.cwd } });
-		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "final", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0 }] } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "final", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(b.cwd)!) }] } });
 		expect((await push(`git -C '${b.cwd}' push`))[0]).toBeUndefined();
 		writeFileSync(join(b.cwd, "code.ts"), substantive + "export const later = 1;\n");
 		expect((await push(`git -C '${b.cwd}' push`))[0]).toMatchObject({ block: true });
@@ -80,7 +80,7 @@ describe("delivery review", () => {
 		expect(captureDeliveryDiff(cwd)).toBeNull();
 	});
 	it("explicitly refuses dynamic/configured/over-budget delivery targets", () => {
-		for (const c of ['git -C "$REPO" push', "git -c core.worktree=/other push", "GIT_DIR=/other git push", "git push origin feature-branch", "git push --all", "git push other HEAD", "git push https://elsewhere/repo.git HEAD", "cd /clean | cat\ngit push",   "echo " + "x".repeat(8200) + " && git push"]) expect(deliveryTargets(c, "/repo")).toEqual([null]);
+		for (const c of ['git -C "$REPO" push', "git -c core.worktree=/other push", "GIT_DIR=/other git push", "git push origin feature-branch", "git push --all", "git push other HEAD", "git push https://elsewhere/repo.git HEAD", "cd /clean | cat\ngit push", "git checkout work && git push origin HEAD", "gh pr create --head work --base main",    "echo " + "x".repeat(8200) + " && git push"]) expect(deliveryTargets(c, "/repo")).toEqual([null]);
 		expect(deliveryTargets("git -C /repo -C child push", "/tmp")).toEqual(["/repo/child"]);
 		expect(deliveryCommand("git -c x=y status")).toBe(false);
 	});
@@ -118,6 +118,24 @@ describe("delivery review", () => {
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin work", cwd } }))[0]).toMatchObject({ block: true });
 	});
+	it("refuses configured non-origin default destinations and branch switches", async () => {
+		for (const key of ["remote.pushDefault", "branch.work.pushRemote", "branch.work.remote"]) {
+			const { cwd, git } = repo(); git("config", key, "release"); expect(captureDeliveryDiff(cwd)).toBeNull();
+		}
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code"); git("checkout", "main");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		for (const command of ["git checkout work && git push origin HEAD", "gh pr create --head work --base main"]) expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0]).toMatchObject({ block: true });
+	});
+	it("cannot stamp pre-launch evidence that differs from what the worker reviewed", async () => {
+		const pi = createFakePi(); let current = diff; registerDeliveryReview(pi.api, () => current);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd: "/repo" } });
+		const worker = { ...diff, text: diff.text + "\n+worker-only change" };
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(worker) }] } });
+		const push = () => pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push", cwd: "/repo" } });
+		expect((await push())[0]).toMatchObject({ block: true });
+		current = worker; expect((await push())[0]).toMatchObject({ block: true });
+		expect(pi.entries).toHaveLength(0);
+	});
 	it("never stamps an untracked file's name as a content review", async () => {
 		const { cwd } = repo(); writeFileSync(join(cwd, "new.ts"), substantive);
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
@@ -132,7 +150,7 @@ describe("delivery review", () => {
 		const push = () => pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "push", input: { command: "git push" } }, { cwd: "/repo" });
 		expect((await push())[0]).toMatchObject({ block: true, reason: expect.stringContaining("code-reviewer") });
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "review", input: { agent: "code-reviewer", task: "Review" } }, { cwd: "/repo" });
-		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "review", isError: false, input: {}, details: { results: [{ agent: "code-reviewer", exitCode: 0, stopReason: "end" }] } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "review", isError: false, input: {}, details: { results: [{ agent: "code-reviewer", exitCode: 0, stopReason: "end", reviewFingerprint: reviewFingerprint(current) }] } });
 		expect((await push())[0]).toBeUndefined();
 		current = { ...diff, text: diff.text + "\n+another edit" }; expect((await push())[0]).toMatchObject({ block: true });
 	});

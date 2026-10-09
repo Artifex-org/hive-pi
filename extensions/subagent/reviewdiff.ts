@@ -20,6 +20,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { BASE_REF_SCAN, fetchedOriginBase, knownBaseRef } from "../guards-common/git-base.ts";
 
@@ -218,7 +219,8 @@ export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = del
 		const separator = entry.indexOf("\n");
 		const key = separator < 0 ? entry : entry.slice(0, separator);
 		const value = separator < 0 ? "" : entry.slice(separator + 1);
-		if (/^remote\..*\.(?:push|mirror)$/.test(key) || ["push.followtags", "push.recurseSubmodules", "push.recursesubmodules"].includes(key)) return null;
+		if (/^remote\..*\.(?:push|mirror)$/.test(key) || ["push.followtags", "push.recursesubmodules"].includes(key)) return null;
+		if ((key === "remote.pushdefault" || /^branch\..*\.(?:pushremote|remote)$/.test(key)) && value !== "origin") return null;
 		if (key === "push.default") pushDefault = value;
 	}
 	if (!["simple", "current", "upstream"].includes(pushDefault)) return null;
@@ -250,6 +252,15 @@ const deliveryGit: GitRunner = (args, cwd, timeoutMs = 1000) => {
 	try { return execFileSync("git", [LOCK_FREE, ...args], { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: 256 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
 	catch { return null; }
 };
+
+export function stampableReview(diff: ReviewDiff): boolean {
+	return diff.truncatedBytes === 0 && diff.untracked.length === 0 && !/^(?:Binary files|GIT binary patch)/m.test(diff.text);
+}
+
+/** Fingerprint of the evidence actually supplied to the worker. */
+export function reviewFingerprint(diff: ReviewDiff): string {
+	return createHash("sha256").update(JSON.stringify([diff.repo, diff.files, diff.untracked, diff.text.replace(/^index .*$/gm, "")])).digest("hex");
+}
 
 export function neutralReviewTask(task: string): string {
 	const paths = citedPaths(task);

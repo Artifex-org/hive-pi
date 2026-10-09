@@ -10,6 +10,9 @@ later edits, staging or commits invalidate it. Review the final commit before
 pushing. Committed, staged and unstaged evidence is kept separate so a dirty
 revert cannot hide delivered code. Review
 results with errors and background launch receipts never satisfy the checkpoint.
+The worker returns the fingerprint of the evidence supplied in its prompt; the
+checkpoint compares it to current evidence before recording a stamp, never to a
+separate pre-launch snapshot.
 The command's `cd` / `git -C` checkout is checked, not the launch's checkout.
 Newline-separated commands count too; quoted body text does not.
 
@@ -27,7 +30,9 @@ are not evidence of a delivery baseline. No known remote base means no complete
 delivery diff. For bare clones lacking remote refs, Git's FETCH_HEAD is evidence
 only when it records origin's exact URL and a fetched main/master branch.
 The checkpoint supports literal git/gh delivery forms, not
-arbitrary shell programs; dynamic checkouts, git configuration overrides and
+arbitrary shell programs; only literal `cd` prefixes may precede delivery.
+Revision-changing prefixes, alternate PR heads/bases, dynamic checkouts, Git
+configuration overrides and
 over-budget delivery commands require an explicit override. Review is scoped to
 current HEAD to origin: alternate destinations, other explicit source refs,
 matching/all/tag/mirror pushes, configured refspecs and pipelines (whose `cd` may

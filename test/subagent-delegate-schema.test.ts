@@ -6,6 +6,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { captureDeliveryDiff, reviewFingerprint } from "../extensions/subagent/reviewdiff.ts";
 
 import * as structuredSupport from "../extensions/harness/structured.ts";
 import subagentExtension from "../extensions/subagent/index.ts";
@@ -61,6 +65,17 @@ describe("delegate.ts schema requests", () => {
 		expect(launch.calls()).toHaveLength(2);
 		for (const call of launch.calls()) { expect(call.input).toContain("/tmp/example.ts"); expect(call.input).not.toContain("my design is safe"); }
 		expect(launch.calls()[1].input).toContain("A previous attempt at this exact task");
+	});
+	it("returns the fingerprint of the diff actually placed in the worker prompt", async () => {
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: launch.root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		git("init", "-b", "main"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
+		git("add", "."); git("commit", "--allow-empty", "-m", "base"); git("update-ref", "refs/remotes/origin/main", "HEAD"); git("checkout", "-b", "work");
+		writeFileSync(join(launch.root, "code.ts"), "export const reviewedContent = 1;\n"); git("add", "code.ts");
+		const expected = reviewFingerprint(captureDeliveryDiff(launch.root)!);
+		const h = host(); h.agents[0] = { ...h.agents[0], name: "code-reviewer" };
+		const outcome = await runSingleDelegation({ agent: "code-reviewer", task: "Review the change", model: "zai/glm-low" }, "off", h);
+		expect(launch.calls()[0].input).toContain("export const reviewedContent");
+		expect(outcome.results[0].reviewFingerprint).toBe(expected);
 	});
 	it("without a request, the worker sees no schema instruction", async () => {
 		const outcome = await runSingleDelegation({ agent: "research", task: "count things", model: "zai/glm-low" }, "off", host());

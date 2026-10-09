@@ -52,7 +52,7 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
-import { captureDeliveryDiff, captureReviewDiff, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewScopeFiles, reviewTaskWithDiff } from "./reviewdiff.ts";
+import { captureDeliveryDiff, captureReviewDiff, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewFingerprint, reviewScopeFiles, reviewTaskWithDiff, stampableReview } from "./reviewdiff.ts";
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 
 /**
@@ -136,6 +136,8 @@ export interface SingleResult {
 	midWork?: boolean;
 	/** For a review role: the files of the change it was handed (reviewdiff.ts). */
 	reviewFiles?: string[];
+	/** Complete diff fingerprint captured when the review prompt was built. */
+	reviewFingerprint?: string;
 	/** Paths the review cited that are not in that change. */
 	outsideDiff?: string[];
 }
@@ -661,6 +663,7 @@ export async function runSingleAgent(
 			if (diff) {
 				effectiveTask = reviewTaskWithDiff(task, diff, neutralize);
 				currentResult.reviewFiles = reviewScopeFiles(diff);
+				if (agent.name === "code-reviewer" && stampableReview(diff)) currentResult.reviewFingerprint = reviewFingerprint(diff);
 			} else if (agent.name === "code-reviewer") {
 				effectiveTask += "\nComplete merge-base diff unavailable. Review the requested scope paths, but report delivery scope as unverified; do not invent a change inventory.";
 			}
