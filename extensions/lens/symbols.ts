@@ -131,6 +131,7 @@ export function listSymbols(
 	source: string,
 	file: string,
 	maxSymbols = Infinity,
+	onCandidateCap?: () => void,
 ): { line: number; signature: string; depth: number }[] {
 	const lang = langOf(file);
 	const lines = source.split("\n");
@@ -169,12 +170,15 @@ export function listSymbols(
 						")",
 				);
 	const out: { line: number; signature: string; depth: number }[] = [];
+	let candidates = 0;
 	for (let i = 0; i < lines.length; i++) {
 		const top = decl.test(lines[i]);
 		// One level only. Listing every member of every nested scope turns an
 		// outline back into the file, which is the thing it exists to avoid.
 		const nested = !top && member.test(lines[i]);
 		if (!top && !nested) continue;
+		// Rejected comment/string candidates also incur a prefix scan.
+		if (++candidates > maxSymbols) { onCandidateCap?.(); break; }
 		if (inCommentOrString(lines, i)) continue;
 		out.push({
 			line: i + 1,

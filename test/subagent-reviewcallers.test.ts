@@ -79,6 +79,12 @@ describe("caller-aware review scope", () => {
 		expect(discoverCallers("/repo", changed, ["api.ts"], () => ({ text: "caller.ts:2: fetchData()" }), () => source).sites)
 			.toEqual([{ symbol: "fetchData", path: "caller.ts", line: 2 }]);
 	});
+	it("retains a same-name forwarding call on its declaration line", () => {
+		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -1 +1 @@\n-export function fetch() {}\n+export function fetch() { throw new Error(); }\n";
+		const rows = "wrapper.ts:1:export function fetch() { return api.fetch(); }\nonly-declaration.ts:1:export function fetch() { return 1; }";
+		expect(discoverCallers("/repo", changed, ["api.ts"], () => ({ text: rows }), () => "").sites)
+			.toEqual([{ symbol: "fetch", path: "wrapper.ts", line: 1 }]);
+	});
 	it("finds explicit generic callers in TypeScript, Go and Rust", () => {
 		const repo = mkdtempSync(join(tmpdir(), "generic-callers-")); dirs.push(repo);
 		const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "ignore"] });
@@ -163,11 +169,19 @@ describe("caller-aware review scope", () => {
 			try {
 				const result = changedFunctionNames(changed, () => dense);
 				expect(scan).not.toHaveBeenCalled();
-				expect(outline).toHaveBeenCalledExactlyOnceWith(dense, "dense.ts", CALLER_DECLARATION_CAP + 1);
+				expect(outline).toHaveBeenCalledExactlyOnceWith(dense, "dense.ts", CALLER_DECLARATION_CAP + 1, expect.any(Function));
 				expect(outline.mock.results[0].value).toHaveLength(CALLER_DECLARATION_CAP + 1);
 				expect(result.notes.join(" ")).toContain(`capped at ${CALLER_DECLARATION_CAP} declarations`);
 			} finally { scan.mockRestore(); outline.mockRestore(); }
 		}
+	});
+	it("bounds rejected declaration-like template contents as well as accepted symbols", () => {
+		const template = "const text = `\n" + "const x = 1;\n".repeat(5000) + "`;\nexport function Late() {}\n";
+		let capped = false;
+		const outline = lensSymbols.listSymbols(template, "api.ts", CALLER_DECLARATION_CAP + 1, () => { capped = true; });
+		expect(capped).toBe(true); expect(outline).toHaveLength(1);
+		const changed = "--- a/api.ts\n+++ b/api.ts\n@@ -5003 +5003 @@\n-old\n+new";
+		expect(changedFunctionNames(changed, () => template).notes.join(" ")).toContain("declarations/candidates");
 	});
 	it("preserves Go bodies after receive-only and send-only channel parameters", () => {
 		for (const channel of ["<-chan int", "chan<- int"]) {

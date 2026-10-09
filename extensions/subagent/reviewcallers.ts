@@ -66,8 +66,9 @@ export function changedFunctionNames(patch: string, readSource: (path: string, r
 		if (source === null) { notes.push(`Could not scan ${file} (missing or over ${CALLER_SOURCE_BYTES} bytes).`); continue; }
 		if (Date.now() >= deadline) { notes.push("Source discovery stopped at its shared time budget."); break; }
 		const sourceLines = source.split("\n");
-		const outline = listSymbols(source, file, CALLER_DECLARATION_CAP + 1);
-		if (outline.length > CALLER_DECLARATION_CAP) notes.push(`Source outline for ${file} capped at ${CALLER_DECLARATION_CAP} declarations.`);
+		let candidateCap = false;
+		const outline = listSymbols(source, file, CALLER_DECLARATION_CAP + 1, () => { candidateCap = true; });
+		if (candidateCap || outline.length > CALLER_DECLARATION_CAP) notes.push(`Source outline for ${file} capped at ${CALLER_DECLARATION_CAP} declarations/candidates.`);
 		// A single bounded outline, not repeated whole-file span scans. Windows
 		// extend to the next top-level declaration, conservatively including
 		// later members/nested functions rather than trusting parsed body ends.
@@ -130,7 +131,12 @@ export function discoverCallers(repo: string, patch: string, changedPaths: reado
 		if (result.incomplete) notes.push(result.incomplete);
 		for (const line of result.text.slice(0, CALLER_GREP_BYTES).split("\n")) {
 			const match = /^(.+?):(\d+):(.*)$/.exec(line);
-			if (!match || changedPaths.includes(match[1]) || functionName(match[3]) === symbol) continue;
+			if (!match || changedPaths.includes(match[1])) continue;
+			if (functionName(match[3]) === symbol) {
+				const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+				const occurrences = match[3].match(new RegExp(`(^|[^\\w$])${escaped}\\s*(<[^;()]{1,128}>|\\[[^;()]{1,128}\\]|::<[^;()]{1,128}>)?\\s*\\(`, "g")) ?? [];
+				if (occurrences.length <= 1) continue; // declaration only, not a forwarding call
+			}
 			const key = `${symbol}:${match[1]}:${match[2]}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
