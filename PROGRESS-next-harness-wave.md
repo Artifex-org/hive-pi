@@ -1,0 +1,10 @@
+# Next harness wave — local delivery
+
+User asked implement after plan; no push/publication/live installation/merge/deploy or paid-provider benchmark authorized.
+
+Separate slices from base620648f4f:
+- feat-role-capability-inspection: eff82af92bd7ef5f040b986341305e797a8c3406,4files178insertions3deletions. readiness(agent, agentScope) reuses grants/discovery/worker selection; no probe/setup/model side effects, parent registration not worker/servicehealth proof. Focused72tests then final5role tests/typecheck, full303files4903tests/13skip. sub-11 review no bug; advisor's error-rendering+throwing-registry fixes included.
+- test-native-worker-replay:4bfd1852ec0c0e3329ef732ce99ba704e21e4371,3files216insertions. runSingleAgent spawned real native runtime/runPrintMode + fauxProvider, native read, retries5+10ms/backoff, streaming cancellation and observedSIGTERM+session_shutdown marker/PIDreaping. Focused5tests/typecheck passed and finalfull303files4903tests/13skip. sub-13's fetch-vs-OSisolation and marker warnings resolved. Does not exercise productionextensionallowlist/CLIargparser/vendorHTTP/SSE/cache.
+- docs-prefix-cache-measurement:7c615d189783fc03a1f2e5e139c45990b336ea5c,2files89insertions. evals/prefix-cache-measurement.md + READMElink. Existing evals retain metrics but don't isolate prefix/concurrency/warming. Protocol source-checked against native1.0.2settings/defaultstreaming/eligibility and runner/report;60evaltests passed, diffcheckpassed. No paid eval run/no cachecode/measurementclaim.
+
+Integration branch verify-next-harness-wave includes eff82af + cherry-picks22ed73f/b8243ec for jointverification. bg-14 npmruncheck completedexit0: typecheckpassed;304filespassed/4skipped;4908testspassed/13skipped at integratedheadb8243ec. Combinedbranchdiffcheckpassed;9files483insertions3deletions frombase620648f4f; onlythisscratchuntracked. Alllocaldeliverycomplete; cacheexperimentNOTRUN/noresults. quality_gate no configuredextra checks, npmruncheck is realrepoCI gate. Alltasksourcefiles committed; scratch progressnotes excluded. Eachsourcebranch can bepublished separately ifuserauthorizeslater. Worker sub-12 finished; no pendingagents.
