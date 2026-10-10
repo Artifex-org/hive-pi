@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
+import { createServer } from "node:http";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import gateway from "../extensions/mcp-gateway/index.ts";
 import { createFakePi } from "./fake-pi.ts";
@@ -19,6 +20,7 @@ let headers: string[];
 let replyContent: CallToolResult["content"];
 let releaseResponse: (() => void) | undefined;
 let replyIsError: boolean;
+const realFetch = globalThis.fetch;
 const piBin = fileURLToPath(new URL("cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 function config(server: Record<string, unknown> = { url: "https://hive.invalid/mcp", headers: { Authorization: "Bearer test-header" } }) {
 	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { hive: server, linear: { url: "https://linear.invalid/mcp" } } }));
@@ -322,4 +324,38 @@ it("native progress notifications reset the configured idle budget", async () =>
 	await vi.advanceTimersByTimeAsync(1_500);
 	send({ jsonrpc: "2.0", id: request!.id, result: { content: replyContent } }); stream!.close();
 	expect(await result).not.toHaveProperty("isError", true);
+});
+
+it("real HTTP tool redirects cannot resend coordination after Claude posture tightens", async () => {
+	vi.stubGlobal("fetch", realFetch); control("orchestrate");
+	let redirect: (() => void) | undefined, forwarded = 0;
+	const server = createServer(async (req, res) => {
+		if (req.method === "DELETE") { res.end(); return; }
+		if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+		let body = ""; for await (const chunk of req) body += chunk;
+		const message = JSON.parse(body);
+		if (req.url === "/redirected") forwarded++;
+		if (message.method === "tools/call" && req.url === "/mcp") {
+			redirect = () => { res.writeHead(307, { Location: "/redirected" }); res.end(); };
+			return;
+		}
+		if (message.id === undefined) { res.writeHead(202); res.end(); return; }
+		const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "redirect-fixture", version: "1" } }
+			: message.method === "tools/list" ? { tools: [{ name: "steer_agent", inputSchema: { type: "object" } }] }
+			: { content: [{ type: "text", text: "forbidden coordination executed" }] };
+		res.writeHead(200, { "Content-Type": "application/json", "Mcp-Session-Id": "redirect-fixture" });
+		res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+	});
+	await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+	try {
+		const address = server.address(); if (!address || typeof address === "string") throw new Error("No HTTP listener");
+		config({ url: `http://127.0.0.1:${address.port}/mcp`, headers: { Authorization: "Bearer fixture" } });
+		const result = dispatchNativeMcp(env(), dir, { tool: "hive_steer_agent" }, new AbortController().signal);
+		await vi.waitFor(() => expect(redirect).toBeDefined());
+		control("plan"); redirect!();
+		const response = await result;
+		expect(response).toHaveProperty("isError", true); expect(response.text).toContain("outcome unknown"); expect(forwarded).toBe(0);
+	} finally {
+		server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+	}
 });

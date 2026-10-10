@@ -90,7 +90,8 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   helper. Initialization is bounded by the configured native timeout; tool calls
   honor its per-request idle budget (seconds, reset by progress notifications).
   Failures after a tool RPC is sent report an unknown remote outcome; inspect
-  remote state before retrying. This does not bypass Claude's permission checks. Any internal error (bad `control.json`,
+  remote state before retrying. Tool POST redirects are refused; configure the
+  direct MCP endpoint. This does not bypass Claude's permission checks. Any internal error (bad `control.json`,
   malformed input) is a `deny` with the cause, since Claude treats a failing
   PreToolUse hook as "proceed". **Bugfix**: Edit/Write/MultiEdit/NotebookEdit are denied with
   opmode's refusal until the episode records a root cause; Bash stays open,

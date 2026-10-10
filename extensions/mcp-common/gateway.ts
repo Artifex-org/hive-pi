@@ -104,6 +104,9 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 					if (init?.method === "POST" && typeof init.body === "string" && JSON.parse(init.body).method === "tools/call") {
 						signal.throwIfAborted(); authorize(request);
 						dispatched = true;
+						// Automatic redirects would resend a tool POST without
+						// another policy check. Require a direct MCP endpoint.
+						return nativeFetch(url, { ...init, redirect: "error" });
 					}
 					return nativeFetch(url, init);
 				},
