@@ -15,6 +15,13 @@
  * Exactly one wake per announced job, whatever ends it — the run's verdict, the
  * watch's wall clock, the model's `background_cancel`, or the server shutting
  * down — because the driver shows an announced job as running until its wake.
+ *
+ * So, unlike pi's watch, this sends NO early notice for the first failed
+ * test/lint task (`firstFailureScanner`, watch-run.ts): the driver deletes an
+ * announced job on its first wake and drops any later one (hive
+ * cmd/hive-agent/claude-driver/driver-core.mjs `#wake`), so an early wake would
+ * swallow the verdict. That needs a non-terminal spool record from the driver
+ * first — one that is delivered without ending the job.
  */
 
 import { spawn } from "node:child_process";

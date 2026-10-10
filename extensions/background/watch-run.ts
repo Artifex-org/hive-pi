@@ -29,6 +29,10 @@
  * `what` a schema field makes this a tool.
  */
 
+import { StringDecoder } from "node:string_decoder";
+
+import { isGateTaskKey } from "../hive-common/gate-tasks.ts";
+
 /**
  * The tool's contract, shared by pi's `hive_watch_run` (background/index.ts)
  * and the Claude adapter's (claude/mcp/watch-run-tool.ts): one wording, so the
@@ -263,6 +267,87 @@ export function watchCommand(uuid: string): string {
 	if (!isRunUUID(uuid)) throw new Error(`refusing to build a watch command for a non-UUID: ${uuid}`);
 	return `hive watch ${uuid}`;
 }
+
+/**
+ * The first failed gate task in a `hive watch` stream, as soon as it is printed.
+ *
+ * A PR gate fans out into shards, and the run only ends when the last one does.
+ * Measured: a background watch on a gate said nothing for 50 minutes after its
+ * `test-2` shard had failed, because the other shards were still queued — the
+ * server knew, the agent did not. `hive watch` already prints every event as it
+ * arrives (`formatEvent` in hive's internal/hiveclient/sse.go: the type padded
+ * to 22 columns, the task key, then `: <reason>` when there is one), and it
+ * de-duplicates replays across reconnects, so the stream is enough: no CLI
+ * change is needed.
+ *
+ * A failed TASK, not a failed run: the stream carries only the key, and whether
+ * the failure fails the run is the server's call (an allow_failure step, a
+ * failure the trunk baseline masks, or one an on_failure fixer repairs does
+ * not). The notice says exactly that. `task.retrying` is not a failure at all.
+ */
+const FAILED_TASK_LINE = /^task\.(failed|timed_out)\s+(\S+?):?(?:\s|$)/;
+/** `hive watch`'s last line once the run's terminal frame arrived: `run <state>`. */
+const RUN_ENDED_LINE = /^run [a-z_]+$/;
+
+export function failedGateTask(line: string): { key: string; event: string } | null {
+	const match = FAILED_TASK_LINE.exec(line.trim());
+	if (!match || !isGateTaskKey(match[2])) return null;
+	return { key: match[2], event: `task.${match[1]}` };
+}
+
+export interface WatchFailureScanner {
+	/** Feed a stdout chunk; the first failed gate task not skipped, exactly once. */
+	feed(chunk: Buffer): { key: string; event: string; line: string } | null;
+	/** True once the stream printed the run's end — a notice would be stale. */
+	readonly ended: boolean;
+}
+
+/**
+ * Scan a watch's stdout. Chunks split lines (and UTF-8 sequences) anywhere, so
+ * a partial line waits for its newline. `skip` names failures the agent was
+ * already told about (the gate's own result), which are not news.
+ */
+export function watchFailureScanner(skip: (key: string) => boolean = () => false): WatchFailureScanner {
+	const decoder = new StringDecoder("utf8");
+	let partial = "";
+	let found = false;
+	let ended = false;
+	return {
+		get ended() {
+			return ended;
+		},
+		feed(chunk) {
+			const lines = (partial + decoder.write(chunk)).split("\n");
+			partial = lines.pop() ?? "";
+			let result: { key: string; event: string; line: string } | null = null;
+			for (const line of lines) {
+				if (RUN_ENDED_LINE.test(line.trim())) ended = true;
+				const failed = found ? null : failedGateTask(line);
+				if (failed && !skip(failed.key)) {
+					found = true;
+					result = { ...failed, line: line.trim() };
+				}
+			}
+			return result;
+		},
+	};
+}
+
+/** The early notice: a gate task failed, the run is still going. */
+export function firstFailureNotice(o: { id: string; what: string; runID: string; key: string; line: string }): string {
+	return (
+		`Background watch \`${o.id}\` (${o.what}): task \`${o.key}\` failed while run ${o.runID} is still going.\n` +
+		`  ${o.line}\n` +
+		"The run was NOT cancelled and the watch continues; its final verdict still arrives when the run ends, and decides " +
+		"whether this failure counts (an allow_failure step, a failure the trunk baseline masks, or one an on_failure fixer " +
+		`repairs does not). Diagnose \`${o.key}\` now — explain_failure, or get_run_tests with only_unmasked — rather than ` +
+		"waiting for the other tasks; do not re-dispatch the gate."
+	);
+}
+
+export const WATCH_FIRST_FAILURE_NOTE =
+	"If a `test`/`lint` task fails while other tasks are still running, you are also told at once, with its task key; " +
+	"the run is not cancelled and the final verdict still follows.";
 
 /** A run row as the REST endpoint returns it, narrowed to what a note needs. */
 interface RunState {

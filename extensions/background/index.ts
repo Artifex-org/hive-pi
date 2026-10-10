@@ -64,20 +64,25 @@ import { createdPullURL } from "../hive-common/pull-delivery.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import {
 	fetchRunJSON,
+	firstFailureNotice,
 	resolveRunUUID,
 	runStateNote,
 	WATCH_RUN_DESCRIPTION,
 	WATCH_RUN_GUIDELINE,
+	WATCH_FIRST_FAILURE_NOTE,
 	WATCH_RUN_PARAMS,
 	WATCH_VERDICT_NOTE,
 	watchCommand,
+	watchFailureScanner,
 } from "./watch-run.ts";
 import { strandedIndexLock } from "./indexlock.ts";
 import {
 	BACKGROUND_CANCEL_CHANNEL,
 	BACKGROUND_JOB_CHANNEL,
+	WATCH_REPORTED_CHANNEL,
 	type BackgroundCancelEvent,
 	type BackgroundJobEvent,
+	type WatchReportedEvent,
 } from "./channel.ts";
 import {
 	EXIT_SETTLE_GRACE_MS,
@@ -98,6 +103,14 @@ import {
 	type Job,
 } from "./jobs.ts";
 import { exposureFor } from "../loadout/policy.ts";
+
+/**
+ * How long a watch holds its first-failure notice. A watch started on a run that
+ * has already ended replays the whole backlog, prints `run <state>` and exits;
+ * its verdict already carries the failure, and a notice claiming the run is
+ * still going would be false.
+ */
+const FIRST_FAILURE_HOLD_MS = 2_000;
 
 /** Grace period between SIGTERM and SIGKILL when reaping. */
 const KILL_GRACE_MS = 3_000;
@@ -131,6 +144,15 @@ export default function background(pi: ExtensionAPI) {
 	let persistenceFaulted = false;
 	const executions = new Map<string, string>();
 	const waker = createWaker(pi, "background");
+	/** Per run: failures quality_gate's result already reported (channel.ts). */
+	const reportedFailures = new Map<string, Set<string>>();
+	pi.events.on(WATCH_REPORTED_CHANNEL, (data: unknown) => {
+		const event = data as Partial<WatchReportedEvent> | undefined;
+		if (typeof event?.run !== "string" || !Array.isArray(event.keys)) return;
+		const keys = reportedFailures.get(event.run) ?? new Set<string>();
+		for (const key of event.keys) if (typeof key === "string") keys.add(key);
+		reportedFailures.set(event.run, keys);
+	});
 
 	const allJobs = (): Job[] => [...jobs.values()];
 	const record = (job: Job): void => {
@@ -242,6 +264,39 @@ export default function background(pi: ExtensionAPI) {
 			return; // session gone — leave it unannounced rather than lying
 		}
 		jobs.set(job.id, { ...job, notified: true });
+	};
+
+	/**
+	 * The early half of a watch: its first failed gate task, while the run goes on.
+	 *
+	 * A notice, not a completion. The job stays running and its one completion
+	 * still comes, so this rides its own customType: job recovery (journal.ts),
+	 * opmode's result index and the pull reporter all read a `background` message
+	 * as the job's END. Not journaled either — a session restored mid-run gets the
+	 * verdict, which is what a recovered watch can still promise.
+	 */
+	const notifyFirstFailure = (id: string, failure: { key: string; event: string; line: string }): void => {
+		const job = jobs.get(id);
+		if (!job || job.status !== "running" || !job.runID) return;
+		if (persistenceFaulted || overflowWedged() || !latestCtx) return;
+		try { assertRecordedBranch(latestCtx.sessionManager.getBranch(), latestCtx.sessionManager.getSessionFile()); }
+		catch (error) { failSession(error); return; }
+		try {
+			waker.deliver(
+				{
+					customType: "background-progress",
+					content: firstFailureNotice({ id, what: job.what, runID: job.runID, key: failure.key, line: failure.line }),
+					display: true,
+					details: { id, runID: job.runID, task: failure.key, event: failure.event, sessionId, executionId: executions.get(id) },
+				},
+				"completion",
+			);
+		} catch (error) {
+			if (error instanceof Error && "code" in error) failSession(error);
+			// Said in the job's own output, so the verdict that still comes carries it.
+			const current = jobs.get(id);
+			if (current) jobs.set(id, appendOutput(current, `\n[the early notice for failed task ${failure.key} could not be delivered: ${String(error)}]\n`));
+		}
 	};
 
 	/** Clear a job's timer and forget its process handle. */
@@ -537,7 +592,22 @@ export default function background(pi: ExtensionAPI) {
 			const job = jobs.get(id);
 			if (job && chunk.length) jobs.set(id, appendOutput(job, chunk.toString("utf8")));
 		};
-		proc.stdout?.on("data", (chunk: Buffer) => appendSafe(credentialChild.push("stdout", chunk)));
+		// A watch reports its first failed test/lint task while the run continues
+		// (watch-run.ts) — held briefly, and dropped if the run's end arrived or
+		// the watch exited meanwhile: then the verdict alone is the news.
+		const runID = spec.runID;
+		const scanner = runID ? watchFailureScanner((key) => reportedFailures.get(runID)?.has(key) ?? false) : null;
+		let exited = false;
+		proc.on("exit", () => { exited = true; });
+		proc.stdout?.on("data", (chunk: Buffer) => {
+			const safe = credentialChild.push("stdout", chunk);
+			appendSafe(safe);
+			const failure = scanner && current() ? scanner.feed(safe) : null;
+			if (!failure) return;
+			setTimeout(() => {
+				if (current() && !exited && !scanner?.ended) notifyFirstFailure(id, failure);
+			}, FIRST_FAILURE_HOLD_MS).unref();
+		});
 		proc.stderr?.on("data", (chunk: Buffer) => appendSafe(credentialChild.push("stderr", chunk)));
 
 		proc.on("error", (err) => {
@@ -723,7 +793,7 @@ export default function background(pi: ExtensionAPI) {
 	registerGuardedTool(pi, {
 		name: "hive_watch_run",
 		label: "Background",
-		description: WATCH_RUN_DESCRIPTION,
+		description: `${WATCH_RUN_DESCRIPTION} ${WATCH_FIRST_FAILURE_NOTE}`,
 		promptSnippet: "hive_watch_run: watch a CI run in the background instead of re-calling wait_for_run",
 		promptGuidelines: [WATCH_RUN_GUIDELINE],
 		parameters: Type.Object({
@@ -758,7 +828,7 @@ export default function background(pi: ExtensionAPI) {
 				timeoutSeconds: params.timeout_seconds,
 				mode: ctx.mode,
 				runID: resolved.uuid,
-				note: WATCH_VERDICT_NOTE,
+				note: `${WATCH_VERDICT_NOTE} ${WATCH_FIRST_FAILURE_NOTE}`,
 			});
 		},
 	});
