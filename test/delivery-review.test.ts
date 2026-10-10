@@ -174,6 +174,22 @@ describe("delivery review", () => {
 		for (const c of ["git push -u origin HEAD", "git -C /repo push", "git push && gh pr create", "gh pr create --title 'change'", "git status\ngit push",  'gh pr create --body "$(cat body.md)"']) expect(deliveryCommand(c), c).toBe(true);
 		for (const c of ["echo 'git push'", "git push --dry-run", "git status", "gh pr view", "cat README.md", 'echo "git status\ngit push"']) expect(deliveryCommand(c), c).toBe(false);
 	});
+	it("lets help and version invocations through, alone or chained, and still guards every real delivery", async () => {
+		const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);
+		// The reported refusal: a chain in which nothing can push or create a PR.
+		for (const command of ["hive ship --help && gh pr create --help", "git push --help", "git push -h", "gh pr create -h", "hive ship -h",
+			"git --version && gh --version && hive --version", "gh pr create --help | cat", "cd /tmp && hive ship --help"]) {
+			expect(deliveryTargets(command, "/repo"), command).toEqual([]);
+			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command } }))[0], command).toBeUndefined();
+		}
+		// A flag that is an option's value, after a positional `hive` stops parsing at,
+		// behind an assignment, or beside a real delivery: still a delivery.
+		for (const command of ["gh pr create --title --help", "gh pr create --title '--help'", "hive ship x --help", "GH_REPO=a/b gh pr create --help",
+			"hive ship --help && git push", "git push --help && git push origin HEAD", "git -C /other push --help && gh pr create"]) {
+			expect(deliveryCommand(command), command).toBe(true);
+			expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command } }))[0], command).toMatchObject({ block: true });
+		}
+	});
 	it("recognizes gh global options without treating quoted body prose as options", () => {
 		expect(deliveryTargets("gh --repo owner/repo pr create --title change --body description", "/repo")).toEqual([null]);
 		for (const body of ['"Adds support for --base selection"', '"--base"', '"$(cat body.md)"']) expect(deliveryTargets(`gh pr create --title change --body ${body}`, "/repo")).toEqual(["/repo"]);

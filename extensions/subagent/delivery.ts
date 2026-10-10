@@ -23,6 +23,23 @@ function commitPreservesStagedBytes(args: string[]): boolean {
 	return nonInteractive;
 }
 
+/**
+ * `git push --help`, `gh pr create -h`, `hive ship --help`, `gh --version`: an
+ * invocation that only prints help or a version, so it cannot push or open a PR.
+ * Only the literal words `<cli> [subcommand…] <flag> …`, with no assignment in
+ * front and no option before the flag: an option before it could take the flag
+ * as its value (`gh pr create --title --help` creates a PR titled "--help").
+ * git and gh (cobra) honour the flag after positional words; `hive` parses with
+ * Go's `flag`, which stops at the first positional, so `hive ship x --help`
+ * still ships — there the flag must follow the subcommand directly.
+ */
+export function helpInvocation(words: readonly string[] | null): boolean {
+	if (!words || !["git", "gh", "hive"].includes(words[0])) return false;
+	const flag = words.findIndex((word, i) => i > 0 && word.startsWith("-"));
+	if (flag < 0 || !["--help", "-h", "--version"].includes(words[flag])) return false;
+	return words[0] !== "hive" || flag <= 2;
+}
+
 export function deliveryTargets(command: string, cwd: string): (string | null)[] {
 	const targets: (string | null)[] = [];
 	let dir: string | null = cwd;
@@ -36,6 +53,8 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 			continue;
 		}
 		if (!segment.trim()) continue;
+		// Read-only: neither a delivery nor a mutation that precedes one.
+		if (helpInvocation(words)) continue;
 		// Strip assignment WORDS, including quoted values with spaces. Ordinary
 		// process settings do not change the reviewed repo; Git/gh selectors do.
 		// The unquoted branch takes ONE character: `(?:[^\s…]+|…)*` can split an
@@ -122,7 +141,7 @@ function chainHookProblem(command: string, cwd: string): boolean {
 	let dir = cwd;
 	for (const segment of segments) {
 		const words = literalWords(segment);
-		if (!words) continue; // unsupported dynamic shapes are rejected by deliveryTargets
+		if (!words || helpInvocation(words)) continue; // dynamic shapes are rejected by deliveryTargets; help runs no hook
 		while (/^[A-Za-z_]\w*=/.test(words[0] ?? "")) words.shift();
 		if (words[0] === "cd" && words.length === 2) { dir = resolve(dir, words[1]); continue; }
 		if (words[0] !== "git" && !(words[0] === "hive" && words[1] === "ship")) continue;
