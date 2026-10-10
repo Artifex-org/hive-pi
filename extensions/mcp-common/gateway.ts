@@ -1,4 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type * as NativeMcp from "@earendil-works/pi-mcp";
 import type { McpTransport, CallToolResult } from "@earendil-works/pi-mcp";
 import type * as NativeConfig from "../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/config.js";
@@ -16,12 +18,24 @@ export interface GatewayRuntime {
 	tools: typeof NativeTools;
 }
 
-export async function loadGatewayRuntime(entry: string): Promise<GatewayRuntime> {
+const PI_PACKAGE = "@earendil-works/pi-coding-agent";
+
+/**
+ * The native MCP modules of the pi installed at `packageRoot` — the RUNNING
+ * pi's root, never whatever this checkout resolves. A bare module resolution
+ * from here finds hive-pi's devDependency copy (or nothing, once installed
+ * without dev dependencies), not the pi that loaded the extension.
+ */
+export async function loadGatewayRuntime(packageRoot: string): Promise<GatewayRuntime> {
+	const manifest = join(packageRoot, "package.json");
+	const name = existsSync(manifest) ? (JSON.parse(readFileSync(manifest, "utf8")) as { name?: unknown }).name : undefined;
+	if (name !== PI_PACKAGE) throw new Error(`${packageRoot} is not an installed ${PI_PACKAGE} package; the MCP gateway needs the running pi's native MCP runtime.`);
+	const module = (path: string) => import(pathToFileURL(join(packageRoot, "dist", path)).href);
 	const [config, runtime, auth, tools] = await Promise.all([
-		import(new URL("extensions/mcp/config.js", entry).href),
-		import(new URL("extensions/mcp/runtime.js", entry).href),
-		import(new URL("core/auth-storage.js", entry).href),
-		import(new URL("extensions/mcp/tools.js", entry).href),
+		module("extensions/mcp/config.js"),
+		module("extensions/mcp/runtime.js"),
+		module("core/auth-storage.js"),
+		module("extensions/mcp/tools.js"),
 	]);
 	return { config, runtime, auth, tools };
 }
@@ -75,7 +89,19 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 	};
 	const verdict = authorize();
 	if (!verdict.updatedInput) throw new Error("MCP gateway requires one reviewed tool call, not discovery or authentication actions.");
-	const request = verdict.updatedInput;
+	let request = verdict.updatedInput;
+	if (verdict.uniqueServer && typeof request.tool === "string") {
+		// A profile grant names `server_tool` without its boundary. Every
+		// configured server it could start with is a candidate, whatever server
+		// the caller named: two candidates mean the grant is ambiguous here.
+		const tool = request.tool;
+		const owners = loaded.servers.filter(server => tool.startsWith(`${server.name}_`) && tool.length > server.name.length + 1);
+		if (owners.length !== 1 || (request.server !== undefined && request.server !== owners[0].name)) {
+			throw new Error(`Profile-granted MCP tool "${tool}" must map to exactly one configured server; it maps to ${owners.length ? owners.map(server => `"${server.name}"`).join(", ") : "none"}.`);
+		}
+		request = { ...request, server: owners[0].name };
+		authorize(request); // the bound pair must itself be one the grant permits
+	}
 	if (typeof request.tool !== "string" || typeof request.server !== "string") throw new Error("Missing reviewed MCP dispatch identity.");
 	if (request.args !== undefined && (!request.args || typeof request.args !== "object" || Array.isArray(request.args))) throw new Error("MCP args must be an object.");
 	const rawTool = request.tool.slice(request.server.length + 1);

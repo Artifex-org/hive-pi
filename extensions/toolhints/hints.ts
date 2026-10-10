@@ -266,9 +266,10 @@ export const HINTS: readonly ToolHint[] = [
 		toolMatch: (name) => name.startsWith("mcp__") || /^(hive|linear|asfam|freecad|filecloud|homectl)_/.test(name),
 		match: UNKNOWN_TOOL,
 		hint:
-			"MCP tools are named `mcp__<server>__<tool>` (for example `mcp__hive__get_run`); the older `hive_get_run` " +
-			"form no longer exists. Find the exact name with `tool_search` or, inside `codemode`, " +
-			"`searchTools(\"<words>\")` / `describeNamespace(\"mcp__<server>\")`.",
+			"MCP tools are registered as `mcp__<server>__<tool>`; the flattened `hive_get_run` is not a tool name. " +
+			"In build or bugfix mode, call the exact registered name — find it with `tool_search` or, inside `codemode`, " +
+			"`searchTools(\"<words>\")` / `describeNamespace(\"mcp__<server>\")`. In plan, discuss or orchestrate mode " +
+			"direct MCP calls are refused: use the gateway, `mcp({tool: \"hive_get_run\", args: {...}})`.",
 		amend: unknownMcpToolAmendment,
 		evidence:
 			"HIV-3745: the adapter promoted tools as `<server>_<tool>`; native MCP registers `mcp__<server>__<tool>`, and role files, " +

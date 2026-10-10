@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { preToolDecision } from "../claude/hooks/pre-tool.ts";
 import { DEFAULT_CONTROL } from "../claude/state.ts";
 import { nativeMcpToolName } from "../extensions/mcp-common/names.ts";
-import { READ_ONLY_MCP_TOOLS, classifyDiscussionTool, classifyOrchestrateTool, classifyTool, planToolVerdict } from "../extensions/plan/policy.ts";
+import { READ_ONLY_MCP_TOOLS, classifyDiscussionTool, classifyOrchestrateTool, classifyTool, planToolVerdict, type PlanToolVerdict } from "../extensions/plan/policy.ts";
 import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
 import { makeLaunch, REPO, runCli } from "./claude-harness.ts";
 
@@ -66,13 +66,61 @@ describe("reviewed live research in read-only modes", () => {
 		}
 	});
 
-	it("denies profile-granted canonical, native and direct aliases in every read-only mode", () => {
-		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__hive_get__run", "mcp__hive_knowledge__search", "mcp__linear_get__issue", "alpha_read_metrics", "mcp__alpha__read_metrics"] });
-		for (const name of ["mcp__hive_get__run", "mcp__hive_knowledge__search", "mcp__linear_get__issue", "alpha_read_metrics", "mcp__alpha__read_metrics"]) {
+	it("refuses the ten mutating Hive tools in discussion, and the four orchestrate does not coordinate", () => {
+		// Explicit inventories, not derived from the classifier under test.
+		const mutations = ["trigger_run", "cancel_run", "claim_ticket", "comment_ticket", "launch_teammate", "steer_agent", "set_queue_concurrency", "set_cluster_labels", "knowledge_write", "create_communication"];
+		const orchestrateRefused = ["trigger_run", "set_queue_concurrency", "set_cluster_labels", "knowledge_write"];
+		const refusals: [string, (name: string, input: unknown) => PlanToolVerdict, string[], string][] = [
+			["discuss", classifyDiscussionTool, mutations, "Discussion mode permits only reviewed read-only MCP tools"],
+			["orchestrate", classifyOrchestrateTool, orchestrateRefused, "Orchestrate mode does not permit MCP tool"],
+		];
+		for (const [mode, classify, tools, reason] of refusals) {
+			const opMode = mode as "discuss" | "orchestrate";
+			for (const tool of tools) {
+				for (const name of [`hive_${tool}`, nativeMcpToolName("hive", tool)]) {
+					expect(classify(name, {}).allowed, `${mode} direct: ${name}`).toBe(false);
+					const gateway = classify("mcp", { tool: name, args: {} });
+					expect(gateway.allowed === false && gateway.reason, `${mode} gateway: ${name}`).toContain(reason);
+					const hookName = name.startsWith("mcp__") ? name : `mcp__hive-pi__${name}`;
+					for (const [tool_name, tool_input] of [[hookName, {}], ["mcp__hive-pi__mcp", { tool: name, args: {} }]] as const) {
+						expect(preToolDecision({ tool_name, tool_input }, { ...DEFAULT_CONTROL, opMode }), `${mode} hook ${tool_name}: ${name}`).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+					}
+				}
+			}
+		}
+		// Positive control: orchestrate's coordination list really admits the other six.
+		for (const tool of mutations.filter((tool) => !orchestrateRefused.includes(tool))) {
+			expect(classifyOrchestrateTool("mcp", { tool: `hive_${tool}` }).allowed, tool).toBe(true);
+		}
+	});
+
+	it("honours profile grants only through the discussion/orchestrate gateway, never direct or in plan", () => {
+		const grants = ["mcp__hive_get__run", "mcp__hive_knowledge__search", "mcp__linear_get__issue", "alpha_read_metrics", "mcp__alpha__read_metrics"];
+		setHouseProfileForTest({ readOnlyMcpTools: grants });
+		for (const name of grants) {
 			for (const [mode, classify] of Object.entries(readModes)) {
+				const opMode = mode as "plan" | "discuss" | "orchestrate";
 				expect(classify(name, {}).allowed, `${mode}: ${name}`).toBe(false);
-				expect(classify("mcp", { tool: name, args: {} }).allowed, `${mode} gateway: ${name}`).toBe(false);
-				expect(preToolDecision({ tool_name: name, tool_input: {} }, { ...DEFAULT_CONTROL, opMode: mode as "plan" | "discuss" | "orchestrate" }), `${mode} hook: ${name}`).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+				expect(preToolDecision({ tool_name: name, tool_input: {} }, { ...DEFAULT_CONTROL, opMode }), `${mode} hook: ${name}`).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+				const gateway = preToolDecision({ tool_name: "mcp__hive-pi__mcp", tool_input: { tool: name, args: {} } }, { ...DEFAULT_CONTROL, opMode });
+				if (mode === "plan") {
+					expect(classify("mcp", { tool: name, args: {} }).allowed, `${mode} gateway: ${name}`).toBe(false);
+					expect(gateway, `${mode} gateway hook: ${name}`).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+					continue;
+				}
+				// A lookalike spelling of a fixed read through the gateway takes that
+				// reviewed binding; a native-form grant pins its declared server; the
+				// open `server_tool` grant leaves the server to the gateway.
+				const expected: Record<string, Record<string, unknown>> = {
+					mcp__hive_get__run: { tool: "hive_get_run", server: "hive_get", args: {} },
+					mcp__hive_knowledge__search: { tool: "hive_knowledge_search", server: "hive_knowledge", args: {} },
+					mcp__linear_get__issue: { tool: "linear_get_issue", server: "linear_get", args: {} },
+					alpha_read_metrics: { tool: "alpha_read_metrics", args: {} },
+					mcp__alpha__read_metrics: { tool: "alpha_read_metrics", args: {} },
+				};
+				const open = !("server" in expected[name]);
+				expect(classify("mcp", { tool: name, args: {} }), `${mode} gateway: ${name}`).toEqual({ allowed: true, updatedInput: expected[name], ...(open ? { uniqueServer: true } : {}) });
+				expect(gateway, `${mode} gateway hook: ${name}`).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: expected[name] } });
 			}
 		}
 	});
@@ -96,14 +144,14 @@ describe("reviewed live research in read-only modes", () => {
 		}
 	});
 
-	it("keeps fixed discussion cards/waits and orchestrate coordination without promoting them into plan", () => {
+	it("keeps discussion cards/waits, profile grants and orchestrate coordination out of plan", () => {
 		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha__read_metrics"] });
 		for (const name of ["hive_wait_for_run", "mcp__hive__wait_for_run", "alpha_read_metrics", "mcp__alpha__read_metrics"]) {
 			expect(planToolVerdict(name, {}).allowed, name).toBe(false);
 			expect(planToolVerdict("mcp", { tool: name }).allowed, name).toBe(false);
 			for (const classify of [classifyDiscussionTool, classifyOrchestrateTool]) {
 				expect(classify(name, {}).allowed, name).toBe(false);
-				expect(classify("mcp", { tool: name, server: name.includes("alpha") ? "alpha" : "hive" }).allowed, name).toBe(name.includes("wait_for_run"));
+				expect(classify("mcp", { tool: name, server: name.includes("alpha") ? "alpha" : "hive" }).allowed, name).toBe(true);
 			}
 		}
 		for (const name of ["hive_claim_ticket", "hive_launch_teammate", "mcp__hive__steer_agent", "mcp__linear__save_comment"]) {
@@ -113,36 +161,35 @@ describe("reviewed live research in read-only modes", () => {
 		}
 	});
 
-	it("denies profile entries rather than inferring server boundaries", () => {
-		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha_ops__read_metrics"] });
+	it("pins native-form profile grants to their declared server and leaves open grants to the gateway", () => {
 		const native = "mcp__alpha_ops__read_metrics";
 		for (const [mode, classify] of Object.entries({ discuss: classifyDiscussionTool, orchestrate: classifyOrchestrateTool })) {
-			expect(classify(native, {}).allowed).toBe(false);
-			expect(classify("alpha_ops_read_metrics", {}).allowed).toBe(false);
-			expect(classify("mcp", { tool: native, args: {} }).allowed).toBe(false);
-			expect(classify("mcp", { tool: "alpha_ops_read_metrics", server: "alpha_ops", args: {} }).allowed).toBe(false);
-			expect(classify("mcp", { tool: "alpha_ops_read_metrics", args: {} }).allowed).toBe(false);
-			expect(classify("mcp__alpha__ops_read_metrics", {}).allowed).toBe(false);
-			expect(classify("mcp", { tool: "mcp__alpha__ops_read_metrics", server: "alpha", args: {} }).allowed).toBe(false);
-			expect(classify("mcp", { tool: "alpha_ops_read_metrics", server: "alpha", args: {} }).allowed).toBe(false);
-			expect(classify("mcp", { tool: native, server: "alpha", args: {} }).allowed).toBe(false);
-			expect(preToolDecision({ tool_name: native, tool_input: {} }, { ...DEFAULT_CONTROL, opMode: mode as "discuss" | "orchestrate" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
-			expect(preToolDecision({ tool_name: "mcp__hive-pi__mcp", tool_input: { tool: native, args: {} } }, { ...DEFAULT_CONTROL, opMode: mode as "discuss" | "orchestrate" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+			const opMode = mode as "discuss" | "orchestrate";
+			setHouseProfileForTest({ readOnlyMcpTools: [native] });
+			// Direct spellings never prove a raw pair.
+			for (const direct of [native, "alpha_ops_read_metrics", "mcp__alpha__ops_read_metrics"]) {
+				expect(classify(direct, {}).allowed, `${mode}: ${direct}`).toBe(false);
+				expect(preToolDecision({ tool_name: direct, tool_input: {} }, { ...DEFAULT_CONTROL, opMode })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+			}
+			for (const input of [{ tool: native }, { tool: "alpha_ops_read_metrics" }, { tool: "mcp__alpha__ops_read_metrics" }, { tool: "alpha_ops_read_metrics", server: "alpha_ops" }]) {
+				expect(classify("mcp", input), `${mode}: ${JSON.stringify(input)}`).toEqual({ allowed: true, updatedInput: { ...input, tool: "alpha_ops_read_metrics", server: "alpha_ops" } });
+			}
+			// The declared server is the only one: a different prefix is not the reviewed tool.
+			for (const server of ["alpha", "beta", "alpha_ops_read_metrics", "alpha_ops_", "", 1, null]) {
+				expect(classify("mcp", { tool: "alpha_ops_read_metrics", server }).allowed, `${mode} server ${String(server)}`).toBe(false);
+			}
+			expect(classify("mcp", { tool: "alpha_ops_read_metrics_extra" }).allowed, `${mode} near miss`).toBe(false);
+
+			// The open `server_tool` form names no boundary: any real prefix is
+			// admitted here, and the gateway binds the one configured owner.
+			setHouseProfileForTest({ readOnlyMcpTools: ["alpha_ops_read_metrics"] });
+			for (const input of [{ tool: "alpha_ops_read_metrics" }, { tool: "alpha_ops_read_metrics", server: "alpha" }, { tool: "alpha_ops_read_metrics", server: "alpha_ops" }]) {
+				expect(classify("mcp", input), `${mode} open: ${JSON.stringify(input)}`).toEqual({ allowed: true, updatedInput: { ...input, tool: "alpha_ops_read_metrics" }, uniqueServer: true });
+			}
+			expect(classify("mcp", { tool: "alpha_ops_read_metrics", server: "beta" }).allowed).toBe(false);
 		}
 		expect(planToolVerdict(native, {}).allowed).toBe(false);
-		for (const ambiguous of ["mcp__alpha__ops__read_metrics", "mcp__alpha___read_metrics", "mcp__alpha__read_metrics_"]) {
-			setHouseProfileForTest({ readOnlyMcpTools: [ambiguous] });
-			for (const classify of [classifyDiscussionTool, classifyOrchestrateTool]) {
-				expect(classify(ambiguous, {}).allowed).toBe(false);
-				expect(classify("mcp", { tool: ambiguous }).allowed).toBe(false);
-				expect(classify("mcp", { tool: ambiguous, server: "alpha__ops" }).allowed).toBe(false);
-			}
-		}
-		setHouseProfileForTest({ readOnlyMcpTools: ["alpha_ops_read_metrics"] });
-		for (const classify of [classifyDiscussionTool, classifyOrchestrateTool]) {
-			expect(classify(native, {}).allowed).toBe(false);
-			expect(classify("mcp", { tool: "alpha_ops_read_metrics", server: "alpha_ops" }).allowed).toBe(false);
-		}
+		expect(planToolVerdict("mcp", { tool: native }).allowed).toBe(false);
 	});
 
 	it("allows kickoff context and harness knowledge wrappers, never session pivots or content writes", () => {

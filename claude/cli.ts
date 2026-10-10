@@ -53,7 +53,7 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 				const { currentEpisode } = await import("./bugfix.ts");
 				rootCause = currentEpisode(dir, control)?.rootCause != null;
 			}
-			print(preToolDecision(input, control, rootCause));
+			print(preToolDecision(input, control, rootCause, env.configDir));
 			return;
 		}
 		case "prompt": {

@@ -5,7 +5,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -113,6 +114,63 @@ describe("hook pre-tool", () => {
 			hookSpecificOutput: { permissionDecision: "deny" },
 		});
 		expect(preToolDecision({ tool_name: "Bash", tool_input: { command: "git status" } }, control("plan"))).toBeNull();
+	});
+
+	it("lets plan mode write ONLY this session's own Claude plan documents", () => {
+		const config = mkdtempSync(join(tmpdir(), "claude-config-"));
+		const plans = join(config, "plans");
+		mkdirSync(plans);
+		const plan = (tool_name: string, file_path: string, configDir: string | null = config, cwd?: string) =>
+			preToolDecision({ tool_name, tool_input: { file_path, content: "# Plan" }, cwd }, control("plan"), false, configDir ?? undefined);
+		const denied = { hookSpecificOutput: { permissionDecision: "deny" } };
+		try {
+			// The plan document itself: no decision, so Claude's own permission prompt still applies.
+			for (const tool of ["Write", "Edit", "MultiEdit"]) expect(plan(tool, join(plans, "quiet-river.md")), tool).toBeNull();
+			expect(plan("Write", "plans/quiet-river.md", config, config)).toBeNull();
+			writeFileSync(join(plans, "existing.md"), "# Plan");
+			expect(plan("Edit", join(plans, "existing.md"))).toBeNull();
+
+			const sibling = mkdtempSync(join(tmpdir(), "claude-config-"));
+			mkdirSync(join(sibling, "plans"));
+			symlinkSync("/etc/hostname", join(plans, "linked.md"));
+			for (const [label, target, configDir] of [
+				["no config dir from the launch", join(plans, "a.md"), null],
+				["another launch's plans", join(sibling, "plans", "a.md"), config],
+				["the config dir itself", join(config, "settings.md"), config],
+				["a lookalike directory", join(config, "plans-other", "a.md"), config],
+				["a nested directory", join(plans, "sub", "a.md"), config],
+				["traversal out of plans", join(plans, "..", "settings.json"), config],
+				["traversal that lands back in a .md", `${plans}/../plans/../CLAUDE.md`, config],
+				["a non-markdown file", join(plans, "a.sh"), config],
+				["a symlinked plan file", join(plans, "linked.md"), config],
+				["the repository", join(REPO, "README.md"), config],
+			] as const) {
+				expect(plan("Write", target, configDir), label).toMatchObject(denied);
+			}
+			// Only the editors: a notebook or a shell write is still a write.
+			expect(preToolDecision({ tool_name: "NotebookEdit", tool_input: { notebook_path: join(plans, "a.md") } }, control("plan"), false, config)).toMatchObject(denied);
+			expect(preToolDecision({ tool_name: "Bash", tool_input: { command: `echo x > ${join(plans, "a.md")}` } }, control("plan"), false, config)).toMatchObject(denied);
+			// Plan mode's exemption only: discussion and orchestration stay read-only.
+			for (const mode of ["discuss", "orchestrate"] as const) {
+				expect(preToolDecision({ tool_name: "Write", tool_input: { file_path: join(plans, "a.md") } }, control(mode), false, config), mode).toMatchObject(denied);
+			}
+
+			// A plans directory that resolves outside the config dir is not this session's.
+			rmSync(plans, { recursive: true });
+			symlinkSync(sibling, plans);
+			expect(plan("Write", join(plans, "a.md"))).toMatchObject(denied);
+			rmSync(sibling, { recursive: true, force: true });
+		} finally {
+			rmSync(config, { recursive: true, force: true });
+		}
+	});
+
+	it("derives the plan directory from the launch's config dir in the shipped hook", async () => {
+		launch = makeLaunch();
+		launch.writeControl({ opMode: "plan" });
+		const write = (file_path: string) => runCli(["hook", "pre-tool"], launch.env, JSON.stringify({ tool_name: "Write", tool_input: { file_path, content: "# Plan" } }));
+		expect((await write(join(launch.configDir, "plans", "quiet-river.md"))).stdout).toBe("");
+		expect(JSON.parse((await write(join(launch.root, "plans", "quiet-river.md"))).stdout)).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
 	});
 
 	it("does not gate build, bugfix once a root cause is recorded, or Claude tools pi has no name for", () => {
