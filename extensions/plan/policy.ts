@@ -1,4 +1,5 @@
-import { canonicalMcpToolName, nativeMcpToolName } from "../mcp-common/names.ts";
+import { canonicalMcpToolName, nativeMcpServer, nativeMcpToolName } from "../mcp-common/names.ts";
+import { readOnlyMcpTools } from "../profile-common/profile.ts";
 /**
  * What a session may do while a plan is being written.
  *
@@ -85,7 +86,14 @@ const READ_ONLY_TOOLS = new Set([
 	"TaskGet",
 ]);
 
-export type PlanToolVerdict = { allowed: true; updatedInput?: Record<string, unknown> } | { allowed: false; reason: string };
+/**
+ * `uniqueServer`: the request names a profile grant, whose flattened
+ * `server_tool` spelling does not say where the server name ends. The gateway
+ * must bind it to the ONE configured server that name can belong to, or refuse.
+ */
+export type PlanToolVerdict =
+	| { allowed: true; updatedInput?: Record<string, unknown>; uniqueServer?: true }
+	| { allowed: false; reason: string };
 
 /**
  * Shared, exact MCP reads for plan, discussion and orchestrate research.
@@ -94,8 +102,9 @@ export type PlanToolVerdict = { allowed: true; updatedInput?: Record<string, unk
  * hive 20267981ffa9b67e7e8a3582ff60a77c4aa46f31 (2026-10-09), including the
  * called read helpers. None changes tickets, claims, communications, documents,
  * scheduler configuration, runs or deployments. Knowledge reads record access
- * provenance/counters; pull reads may fill a read-through cache. Those are read
- * bookkeeping, not permission to write content or dispatch work.
+ * provenance/counters; pull reads may fill a read-through cache; explain_failure
+ * and get_run_tests write the two rows named at their entries below. Those are
+ * read bookkeeping, not permission to write content or dispatch work.
  *
  * Linear's external handlers are not in Hive's tree: the three exact Linear
  * names were checked against their published retrieve/list contracts instead.
@@ -129,8 +138,17 @@ export const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
 	"hive_get_constraint_cost",
 	"hive_get_queue_wait",
 	"hive_get_step_durations",
-	// Runs: tools.go, runtests.go, reads.go; explain_failure delegates to
-	// internal/diagnose/explain.go, which only assembles diagnostic evidence.
+	// Runs: tools.go, runtests.go, reads.go. Two of these write a little, and
+	// stay because diagnosing a red run is the core plan/discuss question
+	// (re-checked at hive d588389f52c2, 2026-10-10):
+	// - explain_failure attaches exact verified prior fixes; when it shows any
+	//   it upserts which ones into failure_prior_fix_snapshots
+	//   (similar_failures.go exactPriorFixEvidence) — a record of evidence
+	//   shown for that run, the same row the scheduler writes.
+	// - get_run_tests resolves the PR's trunk baseline; when the git mirror
+	//   lacks the merge-base commit it sets repos.sync_requested
+	//   (trunkAncestrySource onMiss → RequestRepoSync), asking the mirror to
+	//   fetch from origin. No repository content, run or ticket changes.
 	"hive_list_runs",
 	"hive_get_run",
 	"hive_get_run_tests",
@@ -150,11 +168,33 @@ export const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
 	"linear_list_comments",
 ]);
 
-// Keep the existing discussion-only surface, without promoting supervision or
-// generic profile grants into restricted modes. wait_for_run is a blocking
-// supervision request, not a bounded research snapshot. Its old permission in
-// discussion/orchestrate stays intact; plan reads get_run instead.
+// The discussion-only surface. wait_for_run is a blocking supervision request,
+// not a bounded research snapshot: discussion/orchestrate keep it, plan reads
+// get_run instead. House-profile grants (below) are discussion/orchestrate
+// only too, as they were before the gateway.
 const DISCUSSION_READ_ONLY_MCP_TOOLS = new Set(["hive_wait_for_run"]);
+
+/**
+ * House-profile `readOnlyMcpTools`: an organisation's reviewed reads of its
+ * OWN servers, honoured only through the gateway. A native-form grant
+ * (`mcp__alpha__read_metrics`) declares its server; the usual `server_tool`
+ * form (`asfam_asfam_deploy_last`) does not say where the server ends, so the
+ * gateway binds it to the single configured server it can belong to
+ * (`uniqueServer`) and refuses an ambiguous one.
+ *
+ * Returns the servers the matching grants declare — empty when any matching
+ * grant is in the open `server_tool` form — or undefined for no grant.
+ * Resolved per call: `houseProfile()` caches, and a test may swap it.
+ */
+function profileGrantServers(name: string): string[] | undefined {
+	const canonical = canonicalMcpToolName(name);
+	const matching = [...readOnlyMcpTools()].filter((grant) => canonicalMcpToolName(grant) === canonical);
+	if (matching.length === 0) return undefined;
+	const declared = matching.map((grant) => nativeMcpServer(grant));
+	return declared.every((server) => server !== null) ? [...new Set(declared as string[])] : [];
+}
+
+const isProfileGrant = (name: string) => profileGrantServers(name) !== undefined;
 function isExactMcpName(name: string, names: ReadonlySet<string>): boolean {
 	const canonical = canonicalMcpToolName(name);
 	if (!names.has(canonical)) return false;
@@ -193,7 +233,7 @@ export function classifyTool(name: string, input?: unknown): PlanToolVerdict {
 }
 
 /** Single-call production MCP gateway; no discovery or authentication actions. */
-function classifyMcpRequest(input: unknown, posture: string, permits: (name: string) => boolean): PlanToolVerdict {
+function classifyMcpRequest(input: unknown, posture: string, permits: (name: string) => boolean, grants = false): PlanToolVerdict {
 	if (!input || typeof input !== "object" || Array.isArray(input)) {
 		return { allowed: false, reason: `${posture} mode requires a structured MCP request.` };
 	}
@@ -217,6 +257,22 @@ function classifyMcpRequest(input: unknown, posture: string, permits: (name: str
 			// gateway operation, including discussion/orchestration-specific cards.
 			return { allowed: true, updatedInput: { ...input, tool: canonical, server } };
 		}
+		const declared = tool && grants ? profileGrantServers(tool) : undefined;
+		if (declared) {
+			// An explicit server must be a real prefix of the grant, and one the
+			// grant declares when it declares any.
+			const server = params.server;
+			if (server !== undefined && (typeof server !== "string" || !canonical.startsWith(`${server}_`) || canonical.length <= server.length + 1 ||
+				(declared.length > 0 && !declared.includes(server)))) {
+				return { allowed: false, reason: `${posture} mode requires a profile-granted MCP tool's own server and an unambiguous identity.` };
+			}
+			const bound = server ?? (declared.length === 1 ? declared[0] : undefined);
+			// A declared server pins the exact reviewed pair; anything else is
+			// bound by the gateway to the one configured server that can own it.
+			return bound !== undefined && declared.includes(bound)
+				? { allowed: true, updatedInput: { ...input, tool: canonical, server: bound } }
+				: { allowed: true, updatedInput: { ...input, tool: canonical }, uniqueServer: true };
+		}
 		return {
 			allowed: false,
 			reason: posture === "Orchestrate" ? orchestrateMcpRefusal(canonical) :
@@ -233,12 +289,12 @@ function isDiscussionMcpRead(name: string): boolean {
 	return false;
 }
 
-/** Discussion retains fixed cards and supervision reads, not profile grants. */
+/** Discussion adds fixed cards, supervision waits and profile grants, all via the gateway. */
 export function classifyDiscussionTool(name: string, input: unknown): PlanToolVerdict {
-	if (name === "mcp") return classifyMcpRequest(input, "Discussion", isDiscussionMcpRead);
+	if (name === "mcp") return classifyMcpRequest(input, "Discussion", isDiscussionMcpRead, true);
 	const base = classifyTool(name, input);
 	if (base.allowed || name === "render_chart") return { allowed: true };
-	return isDiscussionMcpRead(name) ? directMcpVerdict(name) : base;
+	return isDiscussionMcpRead(name) || isProfileGrant(name) ? directMcpVerdict(name) : base;
 }
 
 /** Direct tools whose whole contract is coordination or verification. */
@@ -462,12 +518,12 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 	// names whose registrations may capture a different raw dispatch target.
 	if (isExactMcpName(name, ORCHESTRATE_MCP_TOOLS)) return directMcpVerdict(name);
 	if (name === "mcp") {
-		return classifyMcpRequest(input, "Orchestrate", (tool) => isExactMcpName(tool, ORCHESTRATE_MCP_TOOLS) || isDiscussionMcpRead(tool));
+		return classifyMcpRequest(input, "Orchestrate", (tool) => isExactMcpName(tool, ORCHESTRATE_MCP_TOOLS) || isDiscussionMcpRead(tool), true);
 	}
 
 	const base = classifyDiscussionTool(name, input);
 	if (base.allowed || ORCHESTRATE_TOOLS.has(name)) return { allowed: true };
-	if (isDiscussionMcpRead(name)) return base;
+	if (isDiscussionMcpRead(name) || isProfileGrant(name)) return base;
 	if (ORCHESTRATE_MCP_ALIASES[canonical]) return { allowed: false, reason: orchestrateMcpRefusal(canonical) };
 	return {
 		allowed: false,

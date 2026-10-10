@@ -38,7 +38,13 @@ The deliverable is your answer, in prose, in this turn. Concretely:
   exhaustive survey, and say plainly when you are uncertain or when the honest
   answer is "the code does not support that conclusion".
 - **Disagree when you disagree.** A discussion whose only function is to confirm
-  the user's framing is a waste of the mode.`;
+  the user's framing is a waste of the mode.
+
+Live Hive and Linear reads go through the MCP gateway: call
+\`mcp({tool: "hive_<name>", args: {...}})\` (\`mcp__hive-pi__mcp\` in Claude Code),
+e.g. \`mcp({tool: "hive_get_run", args: {run_id: "..."}})\`. A direct MCP tool
+(\`mcp__hive__get_run\`) is refused in this mode because its name cannot prove
+which server and tool it reaches; the gateway binds the reviewed pair.`;
 
 const ORCHESTRATE = `${OP_MODE_MARKER}
 # Orchestrate mode
@@ -101,6 +107,12 @@ Stay active as the team's control loop:
 7. **Wait efficiently.** Worker messages, finish nudges, and Factory completion
    notices are doorbells. Do not tight-poll; use durable completion cursors only
    to recover after a disconnect.
+
+Coordination and research MCP calls go through the gateway: call
+\`mcp({tool: "hive_<name>", args: {...}})\` (\`mcp__hive-pi__mcp\` in Claude Code),
+e.g. \`mcp({tool: "hive_steer_agent", args: {...}})\`. A direct MCP tool
+(\`mcp__hive__steer_agent\`) is refused in this mode because its name cannot
+prove which server and tool it reaches; the gateway binds the reviewed pair.
 
 Communicate material status, decisions, blockers, and completion to the operator.
 Never claim implementation credit: name the teammate or Factory run that did it

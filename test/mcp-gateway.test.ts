@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PassThrough } from "node:stream";
 import { createServer } from "node:http";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import gateway from "../extensions/mcp-gateway/index.ts";
 import { createFakePi } from "./fake-pi.ts";
 import planExtension from "../extensions/plan/index.ts";
@@ -12,15 +12,21 @@ import { OP_MODE_STATE_CHANNEL, PLAN_MODE_STATE_CHANNEL, PLAN_CONTROL_CHANNEL, Q
 import { dispatchNativeMcp } from "../claude/mcp/native-gateway.ts";
 import { runMcpServer } from "../claude/mcp/server.ts";
 import { DEFAULT_CONTROL } from "../claude/state.ts";
+import { preToolDecision } from "../claude/hooks/pre-tool.ts";
+import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
 import type { CallToolResult } from "@earendil-works/pi-mcp";
 import type { ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
-let dir: string, calls: string[], closed: number, pending: number, stall: string | undefined;
+let dir: string, calls: string[], targets: string[], closed: number, pending: number, stall: string | undefined;
 let headers: string[];
 let replyContent: CallToolResult["content"];
 let releaseResponse: (() => void) | undefined;
 let replyIsError: boolean;
 const realFetch = globalThis.fetch;
+// The ten mutating Hive tools #151's review named, and the four of them that
+// orchestrate does NOT permit (its coordination list admits the other six).
+const MUTATIONS = ["trigger_run", "cancel_run", "claim_ticket", "comment_ticket", "launch_teammate", "steer_agent", "set_queue_concurrency", "set_cluster_labels", "knowledge_write", "create_communication"];
+const ORCHESTRATE_REFUSED = ["trigger_run", "set_queue_concurrency", "set_cluster_labels", "knowledge_write"];
 const piBin = fileURLToPath(new URL("cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 function config(server: Record<string, unknown> = { url: "https://hive.invalid/mcp", headers: { Authorization: "Bearer test-header" } }) {
 	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { hive: server, linear: { url: "https://linear.invalid/mcp" } } }));
@@ -31,15 +37,15 @@ function control(mode: string) {
 }
 const env = () => ({ piBin, piAgentDir: dir, configDir: dir });
 beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "gateway-")); calls = []; closed = 0; pending = 0; headers = []; stall = undefined; releaseResponse = undefined;
+	dir = mkdtempSync(join(tmpdir(), "gateway-")); calls = []; targets = []; closed = 0; pending = 0; headers = []; stall = undefined; releaseResponse = undefined;
 	replyContent = [{ type: "text", text: "live-read" }]; replyIsError = false;
 	config(); control("plan"); vi.stubEnv("PI_CODING_AGENT_DIR", dir);
-	vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
+	vi.stubGlobal("fetch", async (url: unknown, init?: RequestInit) => {
 		if (init?.method === "DELETE") { closed++; return new Response(null, { status: 200 }); }
 		if (init?.method !== "POST") return new Response(null, { status: 405 });
 		headers.push(new Headers(init.headers).get("Authorization") ?? "");
 		const message = JSON.parse(String(init.body));
-		if (message.method === "tools/call") calls.push(message.params.name);
+		if (message.method === "tools/call") { calls.push(message.params.name); targets.push(String(url)); }
 		if (message.method === stall) {
 			pending++;
 			return new Promise<Response>((resolve, reject) => {
@@ -53,7 +59,7 @@ beforeEach(() => {
 		}
 		if (message.id === undefined) return new Response(null, { status: 202 });
 		const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
-			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "steer_agent", "trigger_run", "wait_for_run"].map(name => ({ name, inputSchema: { type: "object" } })) }
+			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "wait_for_run", "read_metrics", "metrics", ...MUTATIONS].map(name => ({ name, inputSchema: { type: "object" } })) }
 			: { content: replyContent, isError: replyIsError };
 		return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers: { "Content-Type": "application/json", "Mcp-Session-Id": "fixture" } });
 	});
@@ -398,4 +404,97 @@ it("both adapters preserve the actual raw result identity instead of splitting s
 	const error = await dispatchNativeMcp(env(), dir, { tool: "mcp__alpha_beta__get_run" }, new AbortController().signal);
 	expect(error.text).toContain("alpha_beta/get_run"); expect(error).toHaveProperty("isError", true);
 	expect(calls).toEqual(["get_run", "get_run"]);
+});
+
+describe("mutating Hive tools in restricted modes", () => {
+	const text = (result: unknown) => JSON.stringify(result);
+	it("discussion refuses all ten through both gateways, by policy, before any egress", async () => {
+		control("discuss");
+		const { execute } = piGateway("discuss");
+		for (const tool of MUTATIONS) {
+			for (const spelling of [`hive_${tool}`, `mcp__hive__${tool}`]) {
+				const pi = await execute({ tool: spelling, args: {} });
+				expect(pi, `pi ${spelling}`).toHaveProperty("isError", true);
+				expect(text(pi), `pi ${spelling}`).toContain("Discussion mode permits only reviewed read-only MCP tools");
+				const claude = await dispatchNativeMcp(env(), dir, { tool: spelling, args: {} }, new AbortController().signal);
+				expect(claude.isError, `claude ${spelling}`).toBe(true);
+				expect(claude.text, `claude ${spelling}`).toContain("Discussion mode permits only reviewed read-only MCP tools");
+			}
+		}
+		expect(calls).toEqual([]); expect(headers).toEqual([]);
+	});
+	it("orchestrate refuses the four it does not coordinate and still dispatches the six it does", async () => {
+		control("orchestrate");
+		const { execute } = piGateway("orchestrate");
+		for (const tool of ORCHESTRATE_REFUSED) {
+			const pi = await execute({ tool: `hive_${tool}`, args: {} });
+			expect(pi, tool).toHaveProperty("isError", true);
+			expect(text(pi), tool).toContain(`Orchestrate mode does not permit MCP tool \`hive_${tool}\``);
+			const claude = await dispatchNativeMcp(env(), dir, { tool: `mcp__hive__${tool}`, args: {} }, new AbortController().signal);
+			expect(claude.isError, tool).toBe(true);
+			expect(claude.text, tool).toContain(`Orchestrate mode does not permit MCP tool \`hive_${tool}\``);
+		}
+		expect(calls).toEqual([]); expect(headers).toEqual([]);
+		const coordinated = MUTATIONS.filter(tool => !ORCHESTRATE_REFUSED.includes(tool));
+		expect(coordinated).toHaveLength(6);
+		for (const tool of coordinated) expect(await execute({ tool: `hive_${tool}`, args: {} }), tool).not.toHaveProperty("isError", true);
+		expect(calls).toEqual(coordinated);
+	});
+	it.each([
+		["op mode plan", (pi: ReturnType<typeof createFakePi>) => pi.api.events.emit(OP_MODE_STATE_CHANNEL, { mode: "plan" })],
+		["a read-only plan over build", (pi: ReturnType<typeof createFakePi>) => pi.api.events.emit(PLAN_MODE_STATE_CHANNEL, { active: true, readOnly: true })],
+	])("the pi gateway alone refuses writes under %s, with no plan hook loaded", async (_label, enterPlan) => {
+		// Only the gateway extension is registered: no plan extension, so no
+		// tool_call hook stands in front of it. The refusal is the gateway's own.
+		const { pi, execute } = piGateway("build");
+		enterPlan(pi);
+		for (const tool of MUTATIONS) {
+			const result = await execute({ tool: `hive_${tool}`, args: {} });
+			expect(result, tool).toHaveProperty("isError", true);
+			expect(text(result), tool).toContain("Plan mode permits only reviewed read-only MCP tools");
+		}
+		expect(calls).toEqual([]); expect(headers).toEqual([]);
+		expect(await execute({ tool: "hive_get_run", args: {} })).not.toHaveProperty("isError", true);
+		expect(calls).toEqual(["get_run"]);
+	});
+});
+
+describe("house-profile read grants through the gateway", () => {
+	const servers = (names: string[]) => writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: Object.fromEntries(names.map(name => [name, { url: `https://${name.replace(/_/g, "-")}.invalid/mcp` }])) }));
+	beforeEach(() => control("discuss"));
+	afterEach(() => setHouseProfileForTest(null));
+	const both = async (mode: string, input: Record<string, unknown>) => [
+		await piGateway(mode).execute(input),
+		await dispatchNativeMcp(env(), dir, input, new AbortController().signal),
+	];
+	it.each(["discuss", "orchestrate"])("%s dispatches an open grant to its one configured owner in both gateways", async mode => {
+		control(mode); servers(["alpha", "hive"]); setHouseProfileForTest({ readOnlyMcpTools: ["alpha_read_metrics"] });
+		for (const result of await both(mode, { tool: "alpha_read_metrics", args: {} })) expect(result).not.toHaveProperty("isError", true);
+		expect(calls).toEqual(["read_metrics", "read_metrics"]);
+		expect(targets.every(target => target.startsWith("https://alpha.invalid/"))).toBe(true);
+	});
+	it("refuses an open grant two configured servers could own, before any egress", async () => {
+		servers(["alpha", "alpha_read"]); setHouseProfileForTest({ readOnlyMcpTools: ["alpha_read_metrics"] });
+		for (const input of [{ tool: "alpha_read_metrics" }, { tool: "alpha_read_metrics", server: "alpha" }, { tool: "alpha_read_metrics", server: "alpha_read" }]) {
+			for (const result of await both("discuss", input)) {
+				expect(result).toHaveProperty("isError", true);
+				expect(JSON.stringify(result)).toContain("must map to exactly one configured server");
+			}
+		}
+		expect(calls).toEqual([]); expect(headers).toEqual([]);
+	});
+	it("pins a native-form grant to its declared server even beside a colliding prefix", async () => {
+		servers(["alpha", "alpha_read"]); setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha_read__metrics"] });
+		for (const result of await both("discuss", { tool: "alpha_read_metrics" })) expect(result).not.toHaveProperty("isError", true);
+		expect(calls).toEqual(["metrics", "metrics"]);
+		expect(targets.every(target => target.startsWith("https://alpha-read.invalid/"))).toBe(true);
+		for (const result of await both("discuss", { tool: "alpha_read_metrics", server: "alpha" })) expect(result).toHaveProperty("isError", true);
+		expect(calls).toHaveLength(2);
+	});
+	it("never honours a grant in plan mode or for a direct call", async () => {
+		control("plan"); servers(["alpha"]); setHouseProfileForTest({ readOnlyMcpTools: ["alpha_read_metrics"] });
+		for (const result of await both("plan", { tool: "alpha_read_metrics" })) expect(result).toHaveProperty("isError", true);
+		expect(preToolDecision({ tool_name: "mcp__alpha__read_metrics", tool_input: {} }, { ...DEFAULT_CONTROL, opMode: "discuss" })).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+		expect(calls).toEqual([]);
+	});
 });

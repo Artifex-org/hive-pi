@@ -1,5 +1,3 @@
-import { pathToFileURL } from "node:url";
-import { join } from "node:path";
 import { callGateway, loadGatewayRuntime } from "../../extensions/mcp-common/gateway.ts";
 import { readControl, DEFAULT_CONTROL } from "../state.ts";
 import { stateDir, type AdapterEnv } from "../env.ts";
@@ -12,7 +10,7 @@ export async function dispatchNativeMcp(env: AdapterEnv, cwd: string, input: Rec
 		const dir = stateDir(env);
 		const currentMode = () => (dir ? readControl(dir) : DEFAULT_CONTROL).opMode;
 		const mode = currentMode();
-		const modules = await loadGatewayRuntime(pathToFileURL(join(piPackageRoot(env.piBin), "dist", "index.js")).href);
+		const modules = await loadGatewayRuntime(piPackageRoot(env.piBin));
 		const { result, server, tool } = await callGateway(input, { agentDir: env.piAgentDir, cwd, projectTrusted: false, mode, currentMode, signal }, modules);
 		const converted = await modules.tools.convertMcpResult(server, tool, result);
 		return {

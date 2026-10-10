@@ -23,6 +23,10 @@ import { loadPinnedPi } from "./pi-runtime.ts";
 import type { Spool } from "./spool.ts";
 import { CLAUDE_HELPER_GUIDANCE } from "./guidance.ts";
 
+/** A watch reports Hive's verdict; polling GitHub beside it only reads a lagging copy. */
+const WATCH_GUIDANCE =
+	"A `hive_watch_run` watch is enough; GitHub's status lags Hive's verdict by up to a minute, so do not also poll.";
+
 export type BriefResult = { brief: string } | { brief: null; reason: string };
 
 export async function runBriefCommand(cwd: string, prompt: string, env: AdapterEnv, spool: Spool): Promise<BriefResult> {
@@ -57,5 +61,5 @@ export async function runBriefCommand(cwd: string, prompt: string, env: AdapterE
 		model: result.model,
 		elapsedMs: result.elapsedMs,
 	});
-	return { brief: `${text}\n\n${CLAUDE_HELPER_GUIDANCE}` };
+	return { brief: `${text}\n\n${CLAUDE_HELPER_GUIDANCE} ${WATCH_GUIDANCE}` };
 }

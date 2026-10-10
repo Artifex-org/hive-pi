@@ -25,6 +25,15 @@ import {
 
 const allowed = (command: string) => classifyCommand(command).allowed;
 
+/**
+ * Orchestrate permits this MCP operation ONLY through the bound gateway: both
+ * direct spellings (flattened and native) are refused, the `mcp` call passes.
+ */
+const gatewayOnly = (tool: string) =>
+	!classifyOrchestrateTool(tool, {}).allowed &&
+	!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
+	classifyOrchestrateTool("mcp", { tool }).allowed;
+
 describe("tool classification", () => {
 	it("allows read-only builtins and denies writers", () => {
 		expect(classifyTool("read").allowed).toBe(true);
@@ -43,12 +52,18 @@ describe("tool classification", () => {
 	});
 
 	// Stored profile metadata is not trusted raw identity provenance.
-	it("denies profile-listed MCP tools in every read-only mode", () => {
+	it("honours profile-listed MCP reads only through the discussion/orchestrate gateway", () => {
 		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha__read_metrics"] });
 		try {
 			for (const classify of [classifyTool, classifyDiscussionTool, classifyOrchestrateTool]) {
 				expect(classify("mcp__alpha__read_metrics", {}).allowed).toBe(false);
-				expect(classify("mcp", { tool: "mcp__alpha__read_metrics", args: {} }).allowed).toBe(false);
+			}
+			expect(classifyTool("mcp", { tool: "mcp__alpha__read_metrics", args: {} }).allowed).toBe(false);
+			for (const classify of [classifyDiscussionTool, classifyOrchestrateTool]) {
+				// A native-form grant declares its server: the reviewed pair is pinned.
+				expect(classify("mcp", { tool: "mcp__alpha__read_metrics", args: {} })).toEqual({
+					allowed: true, updatedInput: { tool: "alpha_read_metrics", server: "alpha", args: {} },
+				});
 			}
 		} finally {
 			setHouseProfileForTest(null);
@@ -277,14 +292,11 @@ describe("the blocked segment is named", () => {
  */
 describe("orchestrate — reads the mode needs to supervise", () => {
 	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
-	const bothEnvelopes = (tool: string) =>
-		!classifyOrchestrateTool(tool, {}).allowed &&
-		!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
-		classifyOrchestrateTool("mcp", { tool }).allowed;
 
-	it("permits the read-only Hive queries under BOTH calling conventions", () => {
-		// Direct and wrapped are the same operation; #52 established the rule and
-		// these six were simply missing from the list it consults.
+	it("permits the read-only Hive queries through the bound gateway only", () => {
+		// These six were missing from the list the mode consults. Since #151 a
+		// direct MCP name is refused in every restricted mode (it cannot prove
+		// its raw server/tool pair); the gateway call is the permitted route.
 		for (const tool of [
 			"hive_list_runs",
 			"hive_get_run_tests",
@@ -293,7 +305,7 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 			"hive_get_factory_provider_limits",
 			"hive_list_credential_catalog",
 		]) {
-			expect(bothEnvelopes(tool), tool).toBe(true);
+			expect(gatewayOnly(tool), tool).toBe(true);
 		}
 	});
 
@@ -316,7 +328,7 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 			"linear_get_issue",
 			"linear_list_comments",
 		]) {
-			expect(bothEnvelopes(tool), tool).toBe(true);
+			expect(gatewayOnly(tool), tool).toBe(true);
 		}
 	});
 
@@ -373,10 +385,6 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 
 describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
-	const bothEnvelopes = (tool: string) =>
-		!classifyOrchestrateTool(tool, {}).allowed &&
-		!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
-		classifyOrchestrateTool("mcp", { tool }).allowed;
 
 	it("permits capacity reads, Hive bug reports and ticket comments", () => {
 		// hive_list_clusters: refused 3x while reading agent_lane capacity before
@@ -385,7 +393,7 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 		// the already-permitted hive_comment_ticket. hive_get_test_pg_health: a
 		// fleet read the lead needed to decide whether a run could start.
 		for (const tool of ["hive_list_clusters", "hive_report_issue", "linear_save_comment", "hive_get_test_pg_health"]) {
-			expect(bothEnvelopes(tool), tool).toBe(true);
+			expect(gatewayOnly(tool), tool).toBe(true);
 		}
 	});
 
@@ -485,19 +493,14 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 });
 
 describe("orchestrate — supervised transcript read (2026-10-04 papercut sweep)", () => {
-	const bothEnvelopes = (tool: string) =>
-		!classifyOrchestrateTool(tool, {}).allowed &&
-		!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
-		classifyOrchestrateTool("mcp", { tool }).allowed;
 
-	it("permits the reviewed read-only transcript operation under every envelope", () => {
+	it("permits the reviewed read-only transcript operation through the bound gateway only", () => {
 		// Root 1d6c9048 was refused `mcp__hive__read_agent_transcript` on its
 		// controlled verifier: "not on orchestrate mode's coordination
-		// allowlist". The adapter form, the native pi form, and the `mcp`
-		// wrapper are the same operation; the allowlist is keyed by operation,
-		// not envelope (#52 rule). The wrapper speaks adapter-form names by
-		// convention — even long-allowed tools are refused in wrapper-native
-		// form — so the matrix below pins the adapter wrapper only. What this
+		// allowlist". The operation is now permitted through the bound `mcp`
+		// gateway, which accepts either spelling and binds the raw pair; both
+		// direct spellings stay refused, since neither proves which server and
+		// tool it dispatches to (#151). What this
 		// repo can pin is the policy decision per name; that codemode-nested
 		// calls actually pass through this classifier is pi's tool_call
 		// contract (_executeNestedToolCall → _beforeToolCall), not this
@@ -505,7 +508,8 @@ describe("orchestrate — supervised transcript read (2026-10-04 papercut sweep)
 		for (const tool of ["hive_read_agent_transcript", "mcp__hive__read_agent_transcript"]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
 		}
-		expect(bothEnvelopes("hive_read_agent_transcript"), "mcp wrapper").toBe(true);
+		expect(gatewayOnly("hive_read_agent_transcript"), "mcp wrapper").toBe(true);
+		expect(classifyOrchestrateTool("mcp", { tool: "mcp__hive__read_agent_transcript" }).allowed, "native spelling via the gateway").toBe(true);
 	});
 
 	it("still refuses neighbours the review did not cover", () => {

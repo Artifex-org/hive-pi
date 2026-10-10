@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getPackageDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { agentDir } from "../mcp-common/config.ts";
@@ -38,7 +38,9 @@ export default function (pi: ExtensionAPI) {
 			const controller = new AbortController(); controllers.set(controller, undefined);
 			const task = (async () => {
 				try {
-					const modules = await loadGatewayRuntime(import.meta.resolve("@earendil-works/pi-coding-agent"));
+					// pi's loader binds this import to the RUNNING pi (an alias in a Node
+					// install, a virtual module in a bundle), so its package dir is that pi's.
+					const modules = await loadGatewayRuntime(getPackageDir());
 					const { result, server, tool } = await callGateway(input, {
 						agentDir: agentDir(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), mode: planActive ? "plan" : mode,
 						currentMode: effectiveMode,

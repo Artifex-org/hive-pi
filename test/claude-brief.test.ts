@@ -45,6 +45,7 @@ describe("brief", () => {
 		for (const name of ["quality_gate", "hive_watch_run", "subagent", "goal_set"]) expect(out.brief).toContain(`mcp__hive-pi__${name}`);
 		expect(out.brief).toContain("before pushing");
 		expect(out.brief).toContain("instead of sleep-polling CI");
+		expect(out.brief).toContain("A `hive_watch_run` watch is enough; GitHub's status lags Hive's verdict by up to a minute, so do not also poll.");
 		const lanes = launch.calls();
 		expect(lanes.length).toBeGreaterThan(0);
 		for (const call of lanes) {

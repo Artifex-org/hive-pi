@@ -24,7 +24,8 @@
  * without granting permission or bypassing Claude's own checks.
  */
 
-import { isAbsolute, resolve } from "node:path";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { decide, realProbe } from "../../extensions/guards-common/worktree-guard.ts";
 import { opModeShellVerdict, opModeToolVerdict } from "../../extensions/opmode/verdict.ts";
 import { planToolVerdict } from "../../extensions/plan/policy.ts";
@@ -45,6 +46,44 @@ export const CLAUDE_TO_PI_TOOL: Readonly<Record<string, string>> = {
 function editTarget(toolName: string, input: Record<string, unknown>): string | undefined {
 	const raw = toolName === "NotebookEdit" ? input.notebook_path : input.file_path;
 	return typeof raw === "string" && raw ? raw : undefined;
+}
+
+/** Claude's own file tools that may write its plan document. */
+const PLAN_FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+
+/** `realpath` of what exists, the lexical path of what does not yet. */
+function realOrSelf(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
+}
+
+/**
+ * Is this Claude Code writing its OWN plan document — `<config dir>/plans/<name>.md`?
+ *
+ * Claude's native plan mode saves the plan there before ExitPlanMode presents
+ * it; refusing that write leaves the approval UI with no plan and costs the
+ * agent a turn. The exemption is that one directory of THIS session's config
+ * dir (the launch's `HIVE_CLAUDE_CONFIG_DIR`, never the tool input), one level
+ * deep, `.md` only — and judged where the bytes land: an existing symlinked
+ * target, or a plans dir that resolves outside the config dir, is refused.
+ */
+export function isOwnPlanFile(claudeName: string, input: Record<string, unknown>, cwd: string | undefined, configDir: string | undefined): boolean {
+	if (!configDir || !PLAN_FILE_TOOLS.has(claudeName)) return false;
+	const target = editTarget(claudeName, input);
+	if (!target) return false;
+	const path = isAbsolute(target) ? resolve(target) : cwd ? resolve(cwd, target) : undefined;
+	const plans = join(resolve(configDir), "plans");
+	if (!path || dirname(path) !== plans || !path.endsWith(".md")) return false;
+	if (existsSync(plans) && realpathSync(plans) !== join(realOrSelf(resolve(configDir)), "plans")) return false;
+	try {
+		if (!lstatSync(path).isFile()) return false;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+	}
+	return true;
 }
 
 /** The adapter's own MCP server: its tools are pi's tools under Claude's MCP names. */
@@ -107,14 +146,20 @@ function readOnlyDecision(mode: ReadOnlyMode, claudeName: string, input: Record<
 }
 
 /**
+ * `configDir` is the launch's Claude config dir, which holds this session's
+ * plan documents (isOwnPlanFile).
+ *
  * `rootCauseRecorded` is the bugfix gate's key (claude/bugfix.ts): until the
  * episode records a root cause, bugfix mode denies the file-mutating tools
  * with opmode's own refusal, naming the tools by their Claude names.
  */
-export function preToolDecision(input: HookInput, control: Control, rootCauseRecorded = false): HookOutput {
+export function preToolDecision(input: HookInput, control: Control, rootCauseRecorded = false, configDir?: string): HookOutput {
 	const claudeName = input.tool_name ?? "";
 	const toolInput = input.tool_input ?? {};
 	const mode = control.opMode;
+	// Claude's plan document is the plan mode's own output, not a change to the
+	// work: no decision, so Claude's own permission check still applies.
+	if (mode === "plan" && isOwnPlanFile(claudeName, toolInput, input.cwd, configDir)) return null;
 	if (mode === "plan" || mode === "discuss" || mode === "orchestrate") {
 		const decision = readOnlyDecision(mode, claudeName, toolInput);
 		if (decision) return decision;

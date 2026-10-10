@@ -76,11 +76,14 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   (native and flattened aliases) are denied: native registration sanitizes raw
   tool names, so neither spelling proves dispatch identity. Use the bound
   gateway, which pins the reviewed raw server/tool pair instead. Organization-specific
-  `readOnlyMcpTools` profile grants are temporarily gated in all restricted modes:
-  flattened and sanitized native names cannot authenticate raw dispatch IDs.
-  Restoring those grants requires trusted registration metadata in a later change.
-  Fixed discussion cards/waits and orchestration coordination remain available
-  through the shipped gateway. It reuses pinned Pi MCP config, HTTP transport
+  `readOnlyMcpTools` profile grants are honoured in discuss/orchestrate (never plan)
+  through the gateway only: a native-form grant (`mcp__alpha__read_metrics`) pins
+  its declared server; an open `server_tool` grant is bound to the ONE configured
+  server whose name prefixes it, and refused when two could. Fixed discussion
+  cards/waits and orchestration coordination remain available through the
+  shipped gateway. In plan mode, Write/Edit/MultiEdit of this session's own plan
+  document (`$HIVE_CLAUDE_CONFIG_DIR/plans/<name>.md`, not a symlink) gets no
+  decision, so Claude's native plan mode can save it; every other write is denied. It reuses pinned Pi MCP config, HTTP transport
   and lease-scoped OAuth storage; stdio is refused to avoid duplicate processes.
   Claude ignores project overrides and does not use machine-store credentials.
   Provider-token auth is supported in native Pi; Claude requires OAuth or an

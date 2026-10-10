@@ -151,13 +151,16 @@ describe("the discuss gate", () => {
 		}
 	});
 
-	it("rejects unsupported discovery, profile cards, MCP scripts and mutations", () => {
-		// Profile metadata does not grant calls. Local rendering remains available.
+	it("admits profile cards through the gateway; rejects discovery, MCP scripts and mutations", () => {
+		// Profile grants are reviewed reads, bound by the gateway to one configured
+		// server. Discovery has no gateway action. Local rendering remains available.
 		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha__read_chart", "mcp__alpha__deploy_history"] });
 		try {
 			expect(classifyDiscussionTool("mcp", { search: "chart", server: "alpha" }).allowed).toBe(false);
-			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_chart", server: "alpha", args: { hours: 24 } }).allowed).toBe(false);
-			expect(classifyDiscussionTool("mcp", { tool: "alpha_deploy_history", server: "alpha", args: { stack: "prod" } }).allowed).toBe(false);
+			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_chart", server: "alpha", args: { hours: 24 } }).allowed).toBe(true);
+			expect(classifyDiscussionTool("mcp", { tool: "alpha_deploy_history", server: "alpha", args: { stack: "prod" } }).allowed).toBe(true);
+			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_chart", server: "beta", args: {} }).allowed).toBe(false);
+			expect(classifyDiscussionTool("alpha_read_chart", {}).allowed).toBe(false);
 			expect(classifyDiscussionTool("render_chart", {}).allowed).toBe(true);
 			expect(classifyDiscussionTool("mcpScript", { code: "return 1" }).allowed).toBe(false);
 			expect(classifyDiscussionTool("mcp", { tool: "alpha_start_trading", args: {} }).allowed).toBe(false);
@@ -267,12 +270,11 @@ describe("the orchestrate gate", () => {
 		expect(noVar.reason).not.toContain("printenv");
 	});
 
-	it("permits every coordination verb through BOTH calling conventions", () => {
-		// An MCP tool reaches the model wrapped (`mcp {tool}`) and DIRECT (promoted
-		// under its own name). Measured 2026-09-04 on the first orchestrator
-		// launched after the posture went live: every one of these was refused
-		// direct and allowed wrapped, so the mode denied the coordination verbs it
-		// exists to permit and the lead fell back to notes nobody reads.
+	it("permits every coordination verb through the bound gateway, never direct", () => {
+		// Measured 2026-09-04: refusing these verbs left a lead with notes nobody
+		// reads. They stay permitted, through the `mcp` gateway; a direct MCP name
+		// is refused because it cannot prove its raw server/tool pair (#151), and
+		// the refusal names the gateway call to make instead.
 		for (const tool of [
 			"hive_message_teammate",
 			"hive_steer_agent",
@@ -285,13 +287,15 @@ describe("the orchestrate gate", () => {
 			"hive_search_tickets",
 		]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} alias`).toBe(false);
-			expect(classifyOrchestrateTool(nativeMcpToolName("hive", tool.slice(5)), {}).allowed, `${tool} native direct`).toBe(false);
+			const native = classifyOrchestrateTool(nativeMcpToolName("hive", tool.slice(5)), {});
+			expect(native.allowed, `${tool} native direct`).toBe(false);
+			expect(native.allowed === false && native.reason, `${tool} refusal names the gateway`).toContain(`mcp({tool: "${tool}"})`);
 			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, `${tool} wrapped`).toBe(true);
 		}
 	});
 
-	it("denies an implementation tool under BOTH conventions too", () => {
-		// The envelope must not become a bypass in the other direction either.
+	it("denies an implementation tool directly and through the gateway", () => {
+		// The gateway must not become a bypass for what the mode refuses.
 		for (const tool of ["hive_trigger_run", "linear_create_issue"]) {
 			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} direct`).toBe(false);
 			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, `${tool} wrapped`).toBe(false);
