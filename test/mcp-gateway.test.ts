@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import gateway from "../extensions/mcp-gateway/index.ts";
 import { createFakePi } from "./fake-pi.ts";
 import planExtension from "../extensions/plan/index.ts";
-import { OP_MODE_STATE_CHANNEL, PLAN_CONTROL_CHANNEL, QUESTION_REMOTE_CHANNEL } from "../extensions/hive-common/channels.ts";
+import { OP_MODE_STATE_CHANNEL, PLAN_MODE_STATE_CHANNEL, PLAN_CONTROL_CHANNEL, QUESTION_REMOTE_CHANNEL } from "../extensions/hive-common/channels.ts";
 import { dispatchNativeMcp } from "../claude/mcp/native-gateway.ts";
 import { runMcpServer } from "../claude/mcp/server.ts";
 import { DEFAULT_CONTROL } from "../claude/state.ts";
@@ -17,6 +17,7 @@ import type { ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-co
 let dir: string, calls: string[], closed: number, pending: number, stall: string | undefined;
 let headers: string[];
 let replyContent: CallToolResult["content"];
+let releaseResponse: (() => void) | undefined;
 const piBin = fileURLToPath(new URL("cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 function config(server: Record<string, unknown> = { url: "https://hive.invalid/mcp", headers: { Authorization: "Bearer test-header" } }) {
 	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { hive: server, linear: { url: "https://linear.invalid/mcp" } } }));
@@ -27,7 +28,7 @@ function control(mode: string) {
 }
 const env = () => ({ piBin, piAgentDir: dir, configDir: dir });
 beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "gateway-")); calls = []; closed = 0; pending = 0; headers = []; stall = undefined;
+	dir = mkdtempSync(join(tmpdir(), "gateway-")); calls = []; closed = 0; pending = 0; headers = []; stall = undefined; releaseResponse = undefined;
 	replyContent = [{ type: "text", text: "live-read" }];
 	config(); control("plan"); vi.stubEnv("PI_CODING_AGENT_DIR", dir);
 	vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
@@ -38,7 +39,11 @@ beforeEach(() => {
 		if (message.method === "tools/call") calls.push(message.params.name);
 		if (message.method === stall) {
 			pending++;
-			return new Promise<Response>((_resolve, reject) => {
+			return new Promise<Response>((resolve, reject) => {
+				releaseResponse = () => {
+					pending--; init.signal?.removeEventListener("abort", abort);
+					resolve(new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: replyContent } }), { headers: { "Content-Type": "application/json" } }));
+				};
 				const abort = () => { pending--; reject(new DOMException("aborted", "AbortError")); };
 				if (init.signal?.aborted) abort(); else init.signal?.addEventListener("abort", abort, { once: true });
 			});
@@ -248,4 +253,21 @@ it("preserves embedded resources, text blobs and links through Claude stdio fram
 	await vi.waitFor(() => expect(lines).toContain("Diagnostic evidence"));
 	expect(lines).toContain("Blob evidence"); expect(lines).toContain("report://44"); expect(lines).toContain("More evidence");
 	input.end(); await serving;
+});
+
+it.each([
+	["build", "bugfix", "hive_trigger_run"],
+	["plan", "build", "hive_get_run"],
+	["orchestrate", "plan", "hive_get_run"],
+])("preserves still-authorized delayed responses across %s to %s", async (from, to, tool) => {
+	const { pi, execute } = piGateway(from);
+	if (from === "plan") pi.api.events.emit(PLAN_MODE_STATE_CHANNEL, { active: true, readOnly: true });
+	stall = "tools/call"; const result = execute({ tool });
+	await vi.waitFor(() => expect(pending).toBe(1));
+	pi.api.events.emit(OP_MODE_STATE_CHANNEL, { mode: to });
+	if (from === "plan") pi.api.events.emit(PLAN_MODE_STATE_CHANNEL, { active: false, readOnly: false });
+	expect(pending).toBe(1);
+	releaseResponse!();
+	expect(await result).not.toHaveProperty("isError", true);
+	expect(calls).toEqual([tool.slice("hive_".length)]); expect(pending).toBe(0);
 });

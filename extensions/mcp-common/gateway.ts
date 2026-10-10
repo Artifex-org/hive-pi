@@ -5,7 +5,7 @@ import type * as NativeConfig from "../../node_modules/@earendil-works/pi-coding
 import type * as NativeRuntime from "../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js";
 import type * as NativeTools from "../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/tools.js";
 import type * as NativeAuth from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
-import { classifyTool, classifyDiscussionTool, classifyOrchestrateTool } from "../plan/policy.ts";
+import { classifyTool, classifyDiscussionTool, classifyOrchestrateTool, type PlanToolVerdict } from "../plan/policy.ts";
 import type { OpMode } from "../opmode/modes.ts";
 
 /** The pinned native implementation owns config validation and OAuth refresh. */
@@ -34,6 +34,14 @@ export interface GatewayContext {
 	currentMode?: () => OpMode;
 	signal?: AbortSignal;
 	providerToken?: (provider: string) => Promise<string | undefined>;
+	onBound?: (request: Record<string, unknown>) => void;
+}
+
+/** The same effective policy drives egress checks and cancellation decisions. */
+export function gatewayToolVerdict(mode: OpMode, input: Record<string, unknown>): PlanToolVerdict {
+	if (mode === "build" || mode === "bugfix") return { allowed: true };
+	const classify = mode === "plan" ? classifyTool : mode === "discuss" ? classifyDiscussionTool : classifyOrchestrateTool;
+	return classify("mcp", input);
 }
 
 /** Raw dispatch: fixed inventories in restricted modes, configured identities otherwise. */
@@ -54,11 +62,9 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 	};
 	const authorize = (bound?: Record<string, unknown>) => {
 		const mode = context.currentMode?.() ?? context.mode;
-		if (mode === "build" || mode === "bugfix") return { allowed: true, updatedInput: bound ?? unrestrictedRequest() };
-		const classify = mode === "plan" ? classifyTool : mode === "discuss" ? classifyDiscussionTool : classifyOrchestrateTool;
-		const verdict = classify("mcp", bound ?? input);
+		const verdict = gatewayToolVerdict(mode, bound ?? input);
 		if (!verdict.allowed) throw new Error(verdict.reason);
-		return verdict;
+		return verdict.updatedInput ? verdict : { ...verdict, updatedInput: bound ?? unrestrictedRequest() };
 	};
 	const verdict = authorize();
 	if (!verdict.updatedInput) throw new Error("MCP gateway requires one reviewed tool call, not discovery or authentication actions.");
@@ -71,6 +77,7 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 	if (modules.config.getMcpToolExposure(entry.config, rawTool) === "hidden") throw new Error(`MCP tool "${request.server}/${rawTool}" is hidden in the trusted configuration.`);
 	if (!("url" in entry.config)) throw new Error(`MCP server "${request.server}" uses stdio; this gateway does not spawn duplicate servers. Configure HTTP for gateway calls.`);
 	if (entry.config.auth?.provider && !context.providerToken) throw new Error("Provider-token MCP auth requires the native Pi session; use OAuth or a configured header in Claude.");
+	context.onBound?.({ tool: request.tool, server: request.server });
 	const signal = AbortSignal.any([AbortSignal.timeout(45_000), ...(context.signal ? [context.signal] : [])]);
 	signal.throwIfAborted();
 	const transports = new Set<McpTransport>();
