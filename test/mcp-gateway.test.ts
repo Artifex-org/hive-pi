@@ -11,10 +11,12 @@ import { OP_MODE_STATE_CHANNEL, PLAN_CONTROL_CHANNEL, QUESTION_REMOTE_CHANNEL } 
 import { dispatchNativeMcp } from "../claude/mcp/native-gateway.ts";
 import { runMcpServer } from "../claude/mcp/server.ts";
 import { DEFAULT_CONTROL } from "../claude/state.ts";
+import type { CallToolResult } from "@earendil-works/pi-mcp";
 import type { ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 let dir: string, calls: string[], closed: number, pending: number, stall: string | undefined;
 let headers: string[];
+let replyContent: CallToolResult["content"];
 const piBin = fileURLToPath(new URL("cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 function config(server: Record<string, unknown> = { url: "https://hive.invalid/mcp", headers: { Authorization: "Bearer test-header" } }) {
 	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { hive: server, linear: { url: "https://linear.invalid/mcp" } } }));
@@ -26,6 +28,7 @@ function control(mode: string) {
 const env = () => ({ piBin, piAgentDir: dir, configDir: dir });
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "gateway-")); calls = []; closed = 0; pending = 0; headers = []; stall = undefined;
+	replyContent = [{ type: "text", text: "live-read" }];
 	config(); control("plan"); vi.stubEnv("PI_CODING_AGENT_DIR", dir);
 	vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
 		if (init?.method === "DELETE") { closed++; return new Response(null, { status: 200 }); }
@@ -43,7 +46,7 @@ beforeEach(() => {
 		if (message.id === undefined) return new Response(null, { status: 202 });
 		const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
 			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "steer_agent", "trigger_run"].map(name => ({ name, inputSchema: { type: "object" } })) }
-			: { content: [{ type: "text", text: "live-read" }] };
+			: { content: replyContent };
 		return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers: { "Content-Type": "application/json", "Mcp-Session-Id": "fixture" } });
 	});
 });
@@ -230,4 +233,19 @@ it("requires an explicit server for ambiguous unrestricted raw boundaries", asyn
 	expect(calls).toEqual([]);
 	expect(await execute({ tool: "hive_get_run", server: "hive" })).not.toHaveProperty("isError", true);
 	expect(calls).toEqual(["get_run"]);
+});
+
+it("preserves embedded resources, text blobs and links through Claude stdio framing", async () => {
+	replyContent = [
+		{ type: "resource", resource: { uri: "report://42", text: "Diagnostic evidence" } },
+		{ type: "resource", resource: { uri: "report://43", mimeType: "text/plain", blob: Buffer.from("Blob evidence").toString("base64") } },
+		{ type: "resource_link", uri: "report://44", name: "Follow-up", description: "More evidence" },
+	];
+	const input = new PassThrough(), output = new PassThrough(); let lines = "";
+	output.on("data", chunk => { lines += chunk; });
+	const serving = runMcpServer({ ...env(), configDir: dir }, input, output, () => {});
+	input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "mcp", arguments: { tool: "hive_get_run" } } })}\n`);
+	await vi.waitFor(() => expect(lines).toContain("Diagnostic evidence"));
+	expect(lines).toContain("Blob evidence"); expect(lines).toContain("report://44"); expect(lines).toContain("More evidence");
+	input.end(); await serving;
 });
