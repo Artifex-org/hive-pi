@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
+import { nativeMcpToolName } from "../extensions/mcp-common/names.ts";
 import {
 	BUGFIX_WITHHELD_TOOLS,
 	DEFAULT_OP_MODE,
@@ -150,15 +151,13 @@ describe("the discuss gate", () => {
 		}
 	});
 
-	it("allows discovery and a profile-reviewed card, but not MCP scripts or mutations", () => {
-		// WHICH cards are reviewed is the house profile's answer. The gate's own
-		// rules — discovery is fine, an unlisted tool is not, `mcpScript` never is,
-		// an auth action never is — are what this pins.
-		setHouseProfileForTest({ readOnlyMcpTools: ["alpha_read_chart", "alpha_deploy_history"] });
+	it("allows discovery but gates profile cards, MCP scripts and mutations", () => {
+		// Profile metadata does not grant calls. Discovery and local rendering remain available.
+		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha__read_chart", "mcp__alpha__deploy_history"] });
 		try {
 			expect(classifyDiscussionTool("mcp", { search: "chart", server: "alpha" }).allowed).toBe(true);
-			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_chart", args: { hours: 24 } }).allowed).toBe(true);
-			expect(classifyDiscussionTool("mcp", { tool: "alpha_deploy_history", args: { stack: "prod" } }).allowed).toBe(true);
+			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_chart", server: "alpha", args: { hours: 24 } }).allowed).toBe(false);
+			expect(classifyDiscussionTool("mcp", { tool: "alpha_deploy_history", server: "alpha", args: { stack: "prod" } }).allowed).toBe(false);
 			expect(classifyDiscussionTool("render_chart", {}).allowed).toBe(true);
 			expect(classifyDiscussionTool("mcpScript", { code: "return 1" }).allowed).toBe(false);
 			expect(classifyDiscussionTool("mcp", { tool: "alpha_start_trading", args: {} }).allowed).toBe(false);
@@ -231,7 +230,8 @@ describe("the orchestrate gate", () => {
 
 	it("allows the supervision tools the week of 2026-09-21 refused", () => {
 		for (const tool of ["hive_answer_question", "hive_fleet_status", "hive_get_project_goal_work"]) {
-			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} direct`).toBe(true);
+			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} alias`).toBe(false);
+			expect(classifyOrchestrateTool(nativeMcpToolName("hive", tool.slice(5)), {}).allowed, `${tool} native direct`).toBe(false);
 			expect(classifyOrchestrateTool("mcp", { tool }).allowed, `${tool} wrapped`).toBe(true);
 		}
 	});
@@ -284,7 +284,8 @@ describe("the orchestrate gate", () => {
 			"hive_get_ticket",
 			"hive_search_tickets",
 		]) {
-			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} direct`).toBe(true);
+			expect(classifyOrchestrateTool(tool, {}).allowed, `${tool} alias`).toBe(false);
+			expect(classifyOrchestrateTool(nativeMcpToolName("hive", tool.slice(5)), {}).allowed, `${tool} native direct`).toBe(false);
 			expect(classifyOrchestrateTool("mcp", { tool, args: {} }).allowed, `${tool} wrapped`).toBe(true);
 		}
 	});

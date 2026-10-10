@@ -149,9 +149,8 @@ describe("tool-set ownership across mode transitions", () => {
 	});
 
 	it("keeps the read-only MCP card gateway visible in discussion mode", async () => {
-		// Which cards are reviewed comes from the house profile; the gateway's own
-		// behaviour is what this pins.
-		setHouseProfileForTest({ readOnlyMcpTools: ["alpha_read_chart"] });
+		// The profile grant remains denied; gateway visibility and local rendering remain.
+		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha__read_chart"] });
 		const pi = await boot();
 
 		await pi.runCommand("mode", "discuss");
@@ -164,7 +163,7 @@ describe("tool-set ownership across mode transitions", () => {
 			toolName: "mcp",
 			input: { tool: "alpha_read_chart", args: { hours: 24 } },
 		});
-		expect(safe.some((result) => (result as { block?: boolean } | undefined)?.block)).toBe(false);
+		expect(safe.some((result) => (result as { block?: boolean } | undefined)?.block)).toBe(true);
 
 		const blocked = await pi.emit({
 			type: "tool_call",

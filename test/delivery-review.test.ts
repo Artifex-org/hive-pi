@@ -12,7 +12,10 @@ const repos: string[] = [];
 afterEach(() => { vi.unstubAllEnvs(); for (const dir of repos.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function repo() {
 	const cwd = mkdtempSync(join(tmpdir(), "delivery-")); repos.push(cwd);
-	const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+	// Independently created peers must share their seed commit even if fixture
+	// creation crosses a second under the parallel full suite.
+	const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		env: { ...process.env, GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z" } });
 	git("init", "-b", "main"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
 	writeFileSync(join(cwd, "code.ts"), "export const n = 0;\n"); writeFileSync(join(cwd, "README.md"), "base\n");
 	git("add", "."); git("commit", "-m", "base"); git("update-ref", "refs/remotes/origin/main", "HEAD"); git("checkout", "-b", "work");
@@ -137,6 +140,9 @@ describe("delivery review", () => {
 		const helper = join(cwd, ".git", "clean-filter");
 		writeFileSync(helper, "#!/bin/sh\ncat >/dev/null\nif [ -e .git/index.lock ]; then printf 'export const staged = 2;\\n'; else printf 'export const preview = 1;\\n'; fi\n"); chmodSync(helper, 0o755);
 		git("config", "filter.transform.clean", helper);
+		// Force a stat/content change; an untouched cached file need not run a
+		// newly configured clean filter when git diff refreshes the index.
+		writeFileSync(join(cwd, "code.ts"), "input for clean filter\n");
 		writeFileSync(join(cwd, "README.md"), "docs only\n");
 		expect(captureDeliveryDiff(cwd)!.text).toContain("export const preview");
 		const pi = createFakePi(); registerDeliveryReview(pi.api);

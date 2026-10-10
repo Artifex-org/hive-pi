@@ -1,0 +1,154 @@
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import gateway from "../extensions/mcp-gateway/index.ts";
+import { createFakePi } from "./fake-pi.ts";
+import { OP_MODE_STATE_CHANNEL } from "../extensions/hive-common/channels.ts";
+import { dispatchNativeMcp } from "../claude/mcp/native-gateway.ts";
+import { runMcpServer } from "../claude/mcp/server.ts";
+import { DEFAULT_CONTROL } from "../claude/state.ts";
+import type { ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+
+let dir: string, calls: string[], closed: number, pending: number, stall: string | undefined;
+let headers: string[];
+const piBin = fileURLToPath(new URL("cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
+function config(server: Record<string, unknown> = { url: "https://hive.invalid/mcp", headers: { Authorization: "Bearer test-header" } }) {
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { hive: server, linear: { url: "https://linear.invalid/mcp" } } }));
+}
+function control(mode: string) {
+	mkdirSync(join(dir, "hive-pi"), { recursive: true });
+	writeFileSync(join(dir, "hive-pi", "control.json"), JSON.stringify({ ...DEFAULT_CONTROL, opMode: mode }));
+}
+const env = () => ({ piBin, piAgentDir: dir, configDir: dir });
+beforeEach(() => {
+	dir = mkdtempSync(join(tmpdir(), "gateway-")); calls = []; closed = 0; pending = 0; headers = []; stall = undefined;
+	config(); control("plan"); vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+	vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
+		if (init?.method === "DELETE") { closed++; return new Response(null, { status: 200 }); }
+		if (init?.method !== "POST") return new Response(null, { status: 405 });
+		headers.push(new Headers(init.headers).get("Authorization") ?? "");
+		const message = JSON.parse(String(init.body));
+		if (message.method === "tools/call") calls.push(message.params.name);
+		if (message.method === stall) {
+			pending++;
+			return new Promise<Response>((_resolve, reject) => {
+				const abort = () => { pending--; reject(new DOMException("aborted", "AbortError")); };
+				if (init.signal?.aborted) abort(); else init.signal?.addEventListener("abort", abort, { once: true });
+			});
+		}
+		if (message.id === undefined) return new Response(null, { status: 202 });
+		const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
+			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "steer_agent"].map(name => ({ name, inputSchema: { type: "object" } })) }
+			: { content: [{ type: "text", text: "live-read" }] };
+		return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers: { "Content-Type": "application/json", "Mcp-Session-Id": "fixture" } });
+	});
+});
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); });
+function piGateway(mode = "plan", trusted = false) {
+	const pi = createFakePi(); gateway(pi.api); pi.api.events.emit(OP_MODE_STATE_CHANNEL, { mode });
+	const ctx = { cwd: dir, isProjectTrusted: () => trusted, modelRegistry: { getApiKeyForProvider: async () => "provider-fixture" } } as unknown as ExtensionToolContext;
+	const tool = pi.tools.find(tool => tool.name === "mcp")!.definition as unknown as ToolDefinition;
+	return { pi, execute: (input: Record<string, unknown>, signal?: AbortSignal) => tool.execute("id", input, signal, undefined, ctx) };
+}
+it("shipped Pi registration calls exact raw names, not the sanitized mutating collider", async () => {
+	const { execute } = piGateway();
+	expect(await execute({ tool: "mcp__hive__get_run" })).not.toHaveProperty("isError", true);
+	expect(await execute({ tool: "linear_get_issue" })).not.toHaveProperty("isError", true);
+	expect(calls).toEqual(["get_run", "get_issue"]); expect(closed).toBe(2);
+	expect(await execute({ tool: "hive_get-run" })).toHaveProperty("isError", true);
+	expect(await execute({ tool: "hive_get_run", server: "hive_get" })).toHaveProperty("isError", true);
+	expect(calls).toEqual(["get_run", "get_issue"]);
+});
+it("shipped Pi gateway enforces mode changes and retains fixed coordination", async () => {
+	const { execute, pi } = piGateway("discuss");
+	expect(await execute({ tool: "hive_steer_agent" })).toHaveProperty("isError", true);
+	pi.api.events.emit(OP_MODE_STATE_CHANNEL, { mode: "orchestrate" });
+	expect(await execute({ tool: "mcp__hive__steer_agent" })).not.toHaveProperty("isError", true);
+	expect(calls).toEqual(["steer_agent"]);
+});
+it("uses native provider-token authentication in Pi", async () => {
+	config({ url: "https://hive.invalid/mcp", auth: { provider: "fixture" } });
+	expect(await piGateway().execute({ tool: "hive_get_run" })).not.toHaveProperty("isError", true);
+	expect(headers.length).toBeGreaterThan(0); expect(headers.every(header => header === "Bearer provider-fixture")).toBe(true);
+});
+it("honors disabled servers, refuses stdio, and ignores untrusted project overrides", async () => {
+	mkdirSync(join(dir, ".pi")); writeFileSync(join(dir, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { hive: { enabled: false } } }));
+	expect(await piGateway("plan", false).execute({ tool: "hive_get_run" })).not.toHaveProperty("isError", true);
+	expect(await piGateway("plan", true).execute({ tool: "hive_get_run" })).toHaveProperty("isError", true);
+	config({ command: "do-not-spawn" });
+	expect(await piGateway().execute({ tool: "hive_get_run" })).toHaveProperty("isError", true);
+	expect(calls).toEqual(["get_run"]);
+});
+it("preserves hidden server/tool restrictions before authentication or dispatch", async () => {
+	config({ url: "https://hive.invalid/mcp", exposure: "hidden" });
+	expect(await piGateway().execute({ tool: "hive_get_run" })).toHaveProperty("isError", true);
+	config({ url: "https://hive.invalid/mcp", toolExposure: { get_run: "hidden" } });
+	expect(await piGateway().execute({ tool: "hive_get_run" })).toHaveProperty("isError", true);
+	expect(await dispatchNativeMcp(env(), dir, { tool: "hive_get_run" }, new AbortController().signal)).toHaveProperty("isError", true);
+	expect(headers).toEqual([]); expect(calls).toEqual([]);
+});
+it.each(["initialize", "tools/call"])("cancels %s and closes the owned HTTP transport", async method => {
+	stall = method; const controller = new AbortController();
+	const result = piGateway().execute({ tool: "hive_get_run" }, controller.signal);
+	await vi.waitFor(() => expect(pending).toBe(1)); controller.abort();
+	expect(await result).toHaveProperty("isError", true); expect(pending).toBe(0);
+});
+it("the shipped Claude tools/list and tools/call dispatch through the leased native transport", async () => {
+	const input = new PassThrough(), output = new PassThrough(); let lines = "";
+	output.on("data", chunk => { lines += chunk.toString(); });
+	const serving = runMcpServer(env(), input, output, () => {});
+	const request = (id: number, method: string, params: unknown = {}) => input.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+	request(1, "tools/list");
+	await vi.waitFor(() => expect(lines).toContain('"name":"mcp"'));
+	request(2, "tools/call", { name: "mcp", arguments: { tool: "mcp__hive__get_run" } });
+	await vi.waitFor(() => expect(calls).toEqual(["get_run"]));
+	await vi.waitFor(() => expect(lines).toContain("live-read"));
+	input.end(); await serving; expect(closed).toBe(1);
+});
+it("Claude validates its actual mode and never falls back to a machine store", async () => {
+	vi.stubEnv("PI_CODING_AGENT_DIR", join(dir, "machine-store"));
+	expect(await dispatchNativeMcp(env(), dir, { tool: "linear_get_issue" }, new AbortController().signal)).not.toHaveProperty("isError", true);
+	expect(existsSync(join(dir, "machine-store"))).toBe(false);
+	expect(await dispatchNativeMcp({ piBin }, dir, { tool: "hive_get_run" }, new AbortController().signal)).toHaveProperty("isError", true);
+	control("orchestrate");
+	expect(await dispatchNativeMcp(env(), dir, { tool: "hive_steer_agent" }, new AbortController().signal)).not.toHaveProperty("isError", true);
+	expect(calls).toEqual(["get_issue", "steer_agent"]);
+});
+
+it("cancels queued coordination when the real mode channel tightens", async () => {
+	stall = "initialize";
+	const { execute, pi } = piGateway("orchestrate");
+	const result = execute({ tool: "hive_steer_agent" });
+	await vi.waitFor(() => expect(pending).toBe(1));
+	pi.api.events.emit(OP_MODE_STATE_CHANNEL, { mode: "plan" });
+	expect(await result).toHaveProperty("isError", true);
+	expect(calls).toEqual([]); expect(pending).toBe(0);
+});
+it("Claude rechecks control state after asynchronous initialization", async () => {
+	control("orchestrate");
+	const fetcher = globalThis.fetch;
+	let release: (() => void) | undefined;
+	vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+		if (init?.method === "POST" && JSON.parse(String(init.body)).method === "initialize") await new Promise<void>(resolve => { release = resolve; });
+		return fetcher(url, init);
+	});
+	const result = dispatchNativeMcp(env(), dir, { tool: "hive_steer_agent" }, new AbortController().signal);
+	await vi.waitFor(() => expect(release).toBeDefined());
+	control("plan"); release!();
+	expect(await result).toHaveProperty("isError", true); expect(calls).toEqual([]);
+});
+it("Claude reads leased OAuth credentials, never the machine store", async () => {
+	const url = "https://linear.invalid/mcp", key = `mcp__linear|${url}`;
+	const state = (token: string) => JSON.stringify({ [key]: { serverUrl: url, tokens: { access_token: token, token_type: "Bearer" }, tokensExpireAt: Date.now() + 3_600_000 } });
+	writeFileSync(join(dir, "mcp-auth.json"), state("lease-fixture"));
+	const machine = join(dir, "machine"); mkdirSync(machine);
+	writeFileSync(join(machine, "mcp-auth.json"), state("machine-fixture"));
+	vi.stubEnv("PI_CODING_AGENT_DIR", machine);
+	expect(await dispatchNativeMcp(env(), dir, { tool: "linear_get_issue" }, new AbortController().signal)).not.toHaveProperty("isError", true);
+	expect(headers.length).toBeGreaterThan(0);
+	expect(headers.every(header => header === "Bearer lease-fixture")).toBe(true);
+	expect(calls).toEqual(["get_issue"]);
+});

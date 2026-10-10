@@ -1334,6 +1334,7 @@ export default function (pi: ExtensionAPI) {
 
 		const verdict = planToolVerdict(event.toolName, event.input);
 		if (!verdict.allowed) return { block: true, reason: gateReason(verdict.reason) };
+		if (verdict.updatedInput) Object.assign(event.input, verdict.updatedInput);
 	});
 
 	pi.on("before_agent_start", (event) => {

@@ -74,6 +74,7 @@ describe("mcp protocol", () => {
 			"goal_set",
 			"goal_status",
 			"hive_watch_run",
+			"mcp",
 			"quality_gate",
 			"record_playwright_flow",
 			"report_dev_server",

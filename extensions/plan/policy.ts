@@ -1,5 +1,4 @@
 import { canonicalMcpToolName, nativeMcpToolName } from "../mcp-common/names.ts";
-import { readOnlyMcpTools } from "../profile-common/profile.ts";
 /**
  * What a session may do while a plan is being written.
  *
@@ -86,7 +85,7 @@ const READ_ONLY_TOOLS = new Set([
 	"TaskGet",
 ]);
 
-export type PlanToolVerdict = { allowed: true } | { allowed: false; reason: string };
+export type PlanToolVerdict = { allowed: true; updatedInput?: Record<string, unknown> } | { allowed: false; reason: string };
 
 /**
  * Shared, exact MCP reads for plan, discussion and orchestrate research.
@@ -152,19 +151,27 @@ export const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 // Keep the existing discussion-only surface, without promoting supervision or
-// organisation-specific cards into plan mode. wait_for_run is a blocking
+// generic profile grants into restricted modes. wait_for_run is a blocking
 // supervision request, not a bounded research snapshot. Its old permission in
 // discussion/orchestrate stays intact; plan reads get_run instead.
-const DISCUSSION_READ_ONLY_TOOLS = new Set(["render_chart", "hive_wait_for_run"]);
-const discussionReadOnlyMcpTools = () => readOnlyMcpTools();
-
-function isReviewedMcpRead(name: string): boolean {
+const DISCUSSION_READ_ONLY_MCP_TOOLS = new Set(["hive_wait_for_run"]);
+function isExactMcpName(name: string, names: ReadonlySet<string>): boolean {
 	const canonical = canonicalMcpToolName(name);
-	if (!READ_ONLY_MCP_TOOLS.has(canonical)) return false;
-	// Flattening alone loses the server/tool boundary: mcp__hive_get__run
-	// is NOT mcp__hive__get_run. The reviewed servers here are hive and linear.
+	if (!names.has(canonical)) return false;
+	// Flattening loses the server/tool boundary: mcp__hive_get__run is NOT
+	// mcp__hive__get_run. Canonical aliases are usable only inside a bound gateway.
 	const separator = canonical.indexOf("_");
-	return name === canonical || name === nativeMcpToolName(canonical.slice(0, separator), canonical.slice(separator + 1));
+	return separator > 0 && (name === canonical || name === nativeMcpToolName(canonical.slice(0, separator), canonical.slice(separator + 1)));
+}
+
+const isReviewedMcpRead = (name: string) => isExactMcpName(name, READ_ONLY_MCP_TOOLS);
+
+function directMcpVerdict(name: string): PlanToolVerdict {
+	const canonical = canonicalMcpToolName(name);
+	return {
+		allowed: false,
+		reason: `Direct MCP call \`${name}\` has no trusted raw server/tool identity. Use the bound gateway \`mcp({tool: "${canonical}"})\` instead.`,
+	};
 }
 
 const MCP_DISCOVERY_KEYS = new Set([
@@ -181,7 +188,7 @@ const MCP_DISCOVERY_KEYS = new Set([
 
 export function classifyTool(name: string, input?: unknown): PlanToolVerdict {
 	if (name === "mcp") return classifyMcpRequest(input, "Plan", isReviewedMcpRead);
-	if (isReviewedMcpRead(name)) return { allowed: true };
+	if (isReviewedMcpRead(name)) return directMcpVerdict(name);
 	if (MUTATING_BUILTINS.has(name)) {
 		return { allowed: false, reason: `\`${name}\` writes to disk. Plan mode is read-only.` };
 	}
@@ -213,13 +220,16 @@ function classifyMcpRequest(input: unknown, posture: string, permits: (name: str
 		const tool = typeof params.tool === "string" ? params.tool : "";
 		const canonical = canonicalMcpToolName(tool);
 		if (tool && permits(tool)) {
-			// The adapter's explicit server override controls dispatch. A reviewed
-			// hive_get_run must not be redirected to hive_get's unreviewed `run`.
-			if (READ_ONLY_MCP_TOOLS.has(canonical) && params.server !== undefined &&
-				params.server !== canonical.slice(0, canonical.indexOf("_"))) {
-				return { allowed: false, reason: `${posture} mode requires the reviewed MCP tool's own server.` };
+			// Only fixed Hive/Linear inventories reach this branch. Profile grants
+			// are gated: native sanitization cannot authenticate raw dispatch IDs.
+			const server = canonical.slice(0, canonical.indexOf("_"));
+			if (params.server !== undefined && params.server !== server) {
+				return { allowed: false, reason: `${posture} mode requires the reviewed MCP tool's own server and an unambiguous identity.` };
 			}
-			return { allowed: true };
+			// Bind implicit dispatch too: flattened hive_get_run could otherwise
+			// select hive_get/run. Translate native spelling for every permitted
+			// gateway operation, including discussion/orchestration-specific cards.
+			return { allowed: true, updatedInput: { ...input, tool: canonical, server } };
 		}
 		return {
 			allowed: false,
@@ -234,16 +244,17 @@ function classifyMcpRequest(input: unknown, posture: string, permits: (name: str
 
 function isDiscussionMcpRead(name: string): boolean {
 	const canonical = canonicalMcpToolName(name);
-	// Do not let a profile fallback re-admit a shared-name boundary collision.
 	if (READ_ONLY_MCP_TOOLS.has(canonical)) return isReviewedMcpRead(name);
-	return DISCUSSION_READ_ONLY_TOOLS.has(canonical) || discussionReadOnlyMcpTools().has(canonical);
+	if (DISCUSSION_READ_ONLY_MCP_TOOLS.has(canonical)) return isExactMcpName(name, DISCUSSION_READ_ONLY_MCP_TOOLS);
+	return false;
 }
 
-/** Discussion retains its organisation-specific cards and supervision reads. */
+/** Discussion retains fixed cards and supervision reads, not profile grants. */
 export function classifyDiscussionTool(name: string, input: unknown): PlanToolVerdict {
 	if (name === "mcp") return classifyMcpRequest(input, "Discussion", isDiscussionMcpRead);
 	const base = classifyTool(name, input);
-	return base.allowed || isDiscussionMcpRead(name) ? { allowed: true } : base;
+	if (base.allowed || name === "render_chart") return { allowed: true };
+	return isDiscussionMcpRead(name) ? directMcpVerdict(name) : base;
 }
 
 /** Direct tools whose whole contract is coordination or verification. */
@@ -463,31 +474,16 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 			reason: `\`${name}\` can execute hidden implementation work. Orchestrate mode requires visible Hive teammates or Factory runs.`,
 		};
 	}
-	// The SAME allowlist answers both calling conventions.
-	//
-	// An MCP tool reaches the model two ways: wrapped, as `mcp {tool: "x"}`, and
-	// DIRECT, as a tool literally named `x` — the adapter promotes them, so both
-	// are live in one session. Consulting ORCHESTRATE_MCP_TOOLS only inside the
-	// `mcp` branch made the wrapper the sole permitted route, which is a
-	// distinction the allowlist never meant to draw: it is a list of OPERATIONS,
-	// not of envelopes.
-	//
-	// Measured 2026-09-04 on the first orchestrator launched after the posture
-	// went live (session cb62a18c): `hive_message_teammate`, `hive_steer_agent`,
-	// `hive_read_inbox`, `hive_launch_teammate`, `hive_post_team_note`,
-	// `hive_end_agent_session` and `hive_list_teammates` were ALL refused
-	// direct — every coordination verb the mode exists to permit — while each
-	// was allowed through the wrapper. The lead filed it as
-	// "refuses native `hive_message_teammate` ... while operating contract
-	// requires messaging supervised workers" and fell back to durable notes,
-	// which reach nobody until someone reads them.
-	if (ORCHESTRATE_MCP_TOOLS.has(canonical)) return { allowed: true };
+	// Preserve coordination operations via the bound gateway, never direct
+	// names whose registrations may capture a different raw dispatch target.
+	if (isExactMcpName(name, ORCHESTRATE_MCP_TOOLS)) return directMcpVerdict(name);
 	if (name === "mcp") {
-		return classifyMcpRequest(input, "Orchestrate", (tool) => ORCHESTRATE_MCP_TOOLS.has(canonicalMcpToolName(tool)) || isDiscussionMcpRead(tool));
+		return classifyMcpRequest(input, "Orchestrate", (tool) => isExactMcpName(tool, ORCHESTRATE_MCP_TOOLS) || isDiscussionMcpRead(tool));
 	}
 
 	const base = classifyDiscussionTool(name, input);
 	if (base.allowed || ORCHESTRATE_TOOLS.has(name)) return { allowed: true };
+	if (isDiscussionMcpRead(name)) return base;
 	if (ORCHESTRATE_MCP_ALIASES[canonical]) return { allowed: false, reason: orchestrateMcpRefusal(canonical) };
 	return {
 		allowed: false,

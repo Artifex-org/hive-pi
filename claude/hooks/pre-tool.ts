@@ -18,8 +18,10 @@
  * through the MCP tools `bugfix_evidence` → `bugfix_root_cause` (claude/bugfix.ts),
  * with opmode's refusal; Bash stays open, as in pi.
  *
- * The decision is only ever DENY or nothing: printing "allow" would skip
- * Claude's own permission prompt, which is not this hook's call.
+ * The permission decision is only ever DENY or nothing: printing "allow"
+ * would skip Claude's own permission prompt, which is not this hook's call.
+ * Reviewed gateway calls may emit updatedInput to bind their dispatch identity
+ * without granting permission or bypassing Claude's own checks.
  */
 
 import { isAbsolute, resolve } from "node:path";
@@ -92,7 +94,10 @@ function readOnlyDecision(mode: ReadOnlyMode, claudeName: string, input: Record<
 	if (claudeName.startsWith(OWN_MCP_PREFIX) || claudeName.startsWith("mcp__")) {
 		const piName = claudeName.startsWith(OWN_MCP_PREFIX) ? claudeName.slice(OWN_MCP_PREFIX.length) : claudeName;
 		const verdict = readOnlyVerdict(mode, piName, input);
-		return verdict.allowed ? null : denyToolUse(verdict.reason);
+		if (!verdict.allowed) return denyToolUse(verdict.reason);
+		return verdict.updatedInput
+			? { hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: verdict.updatedInput } }
+			: null;
 	}
 	if (claudeReadOnly(claudeName)) return null;
 	return denyToolUse(
@@ -111,8 +116,8 @@ export function preToolDecision(input: HookInput, control: Control, rootCauseRec
 	const toolInput = input.tool_input ?? {};
 	const mode = control.opMode;
 	if (mode === "plan" || mode === "discuss" || mode === "orchestrate") {
-		const denied = readOnlyDecision(mode, claudeName, toolInput);
-		if (denied) return denied;
+		const decision = readOnlyDecision(mode, claudeName, toolInput);
+		if (decision) return decision;
 	}
 
 	const piName = CLAUDE_TO_PI_TOOL[claudeName];

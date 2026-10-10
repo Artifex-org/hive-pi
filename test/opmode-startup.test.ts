@@ -93,8 +93,8 @@ describe("Hive-launched plan startup", () => {
 		});
 		await boot(false, ["mcp", ...names]);
 		for (const name of names) {
-			expect(fake.activeTools, name).toContain(name);
-			expect(await isBlocked(name, {}), name).toBe(false);
+			expect(fake.activeTools, name).not.toContain(name);
+			expect(await isBlocked(name, {}), name).toBe(true);
 			expect(await isBlocked("mcp", { tool: name, args: {} }), name).toBe(false);
 		}
 		expect(fake.activeTools).toContain("mcp");
