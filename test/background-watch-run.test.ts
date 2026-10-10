@@ -10,6 +10,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	failedGateTask,
+	watchFailureScanner,
 	isRunNumber,
 	isRunUUID,
 	normalizeRunRef,
@@ -249,5 +251,48 @@ describe("what the run was doing when the watch gave up", () => {
 			},
 		};
 		expect(await runStateNote(UUID, throws)).toBe("");
+	});
+});
+
+describe("the first failed gate task in a watch stream", () => {
+	// The shapes hive's formatEvent prints: `%-22s %s` and `%-22s %s: %s`.
+	const line = (event: string, key: string, reason?: string) => `${event.padEnd(22)} ${key}${reason ? `: ${reason}` : ""}`;
+
+	it("reads a failed or timed-out test/lint task, and nothing else", () => {
+		expect(failedGateTask(line("task.failed", "test-2", "exit status 1"))).toEqual({ key: "test-2", event: "task.failed" });
+		expect(failedGateTask(line("task.timed_out", "lint"))).toEqual({ key: "lint", event: "task.timed_out" });
+		expect(failedGateTask(line("task.failed", "test-backend"))).toEqual({ key: "test-backend", event: "task.failed" });
+		expect(failedGateTask(line("task.failed", "lint-ts", "2 findings"))).toEqual({ key: "lint-ts", event: "task.failed" });
+		for (const other of [line("task.failed", "build"), line("task.failed", "testing-harness-image"), line("task.retrying", "test-2"),
+			line("task.succeeded", "test-2"), line("task.ready", "lint"), "run failed", "task.failed"]) expect(failedGateTask(other), other).toBeNull();
+	});
+
+	it("finds a line split across chunks (and a split UTF-8 sequence), and reports only the first failure", () => {
+		const scan = watchFailureScanner();
+		const stream = Buffer.from(`${line("task.started", "test-1")}\n${line("task.failed", "test-2", "exit — 1")}\n${line("task.failed", "test-3")}\n`);
+		const split = stream.indexOf(Buffer.from("—")) + 1; // inside the multi-byte dash
+		const results = [scan.feed(stream.subarray(0, 40)), scan.feed(stream.subarray(40, split)), scan.feed(stream.subarray(split))];
+		expect(results.filter(Boolean)).toEqual([{ key: "test-2", event: "task.failed", line: line("task.failed", "test-2", "exit — 1") }]);
+		expect(scan.feed(Buffer.from(`${line("task.failed", "lint")}\n`))).toBeNull();
+	});
+
+	it("waits for the newline before reading a line", () => {
+		const scan = watchFailureScanner();
+		expect(scan.feed(Buffer.from(line("task.failed", "test-2")))).toBeNull();
+		expect(scan.feed(Buffer.from("\n"))).toMatchObject({ key: "test-2" });
+	});
+
+	it("skips a failure the agent was already told about, and still reports a different one", () => {
+		const scan = watchFailureScanner((key) => key === "test-1");
+		expect(scan.feed(Buffer.from(`${line("task.failed", "test-1")}\n`))).toBeNull();
+		expect(scan.feed(Buffer.from(`${line("task.failed", "lint")}\n`))).toMatchObject({ key: "lint" });
+	});
+
+	it("knows when the stream printed the run's end", () => {
+		const scan = watchFailureScanner();
+		scan.feed(Buffer.from(`${line("task.failed", "test-2")}\n`));
+		expect(scan.ended).toBe(false);
+		scan.feed(Buffer.from("run failed\n"));
+		expect(scan.ended).toBe(true);
 	});
 });

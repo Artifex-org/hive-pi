@@ -18,12 +18,17 @@ import { ancestors, gateArgs, gateCandidates, render, selectorMatchedNothing, sp
 import { consume, emptyProgress, finish, type GateProgress, widgetEnvelope } from "./stream.ts";
 import { recoveryFor, renderReport, stepsFrom } from "./hivecheck.ts";
 import { dispatch, dispatchUnconfirmed, failedTaskLogs, follow, hivePipelineDir, resolveCheckAuth } from "./hiverun.ts";
+import { isGateTaskKey } from "../hive-common/gate-tasks.ts";
 import { GIT_NO_OPTIONAL_LOCKS, repoRoot } from "../hive-common/git.ts";
 
 /** What the gate needs from the harness running it. */
 export interface GateHost {
-	/** Start the host's existing watch job (and its single completion wake). */
-	watchRun?(run: string, cwd: string): Promise<{ text: string; isError?: boolean }>;
+	/**
+	 * Start the host's existing watch job: its completion wake, and on pi also an
+	 * early notice for the first failed test/lint task (background/watch-run.ts)
+	 * other than the `reported` ones this result already names.
+	 */
+	watchRun?(run: string, cwd: string, reported?: string[]): Promise<{ text: string; isError?: boolean }>;
 
 	/** Paint (or, with null, clear) the live progress section. Cosmetic: must not throw. */
 	publishDeck(progress: GateProgress | null): void;
@@ -522,21 +527,35 @@ async function runHiveCheck(
 	};
 
 	try {
-		const { progress, tasks, timedOut, stillQueued } = await follow(auth, run.ref, ranSteps, signal, emit);
-		if (signal?.aborted || timedOut) {
+		const { progress, tasks, timedOut, stillQueued, failedTask } = await follow(auth, run.ref, ranSteps, signal, emit);
+		if (signal?.aborted || timedOut || failedTask) {
+			// A red shard is what the agent acts on; the rest of the run is still
+			// going, and its verdict — which alone decides whether this failure
+			// counts — comes from the watch started below. Not on an abort: the
+			// caller is gone, so the watch's own notice is how it hears of this.
+			const failedFirst = failedTask && !signal?.aborted
+				? `TASK FAILED — \`${failedTask}\` failed while other tasks are still running. Diagnose it now; ` +
+					`the run's verdict follows from the watch below (a failure the trunk baseline masks does not fail the run).\n\n` +
+					`${renderReport(progress, { logs: await failedTaskLogs(auth, tasks) })}\n\n`
+				: "";
+			// Every failed test/lint task that report shows — allow_failure ones
+			// included — is not news to the watch; with no report, nothing is.
+			const reported = failedFirst
+				? tasks.filter((t) => (t.state === "failed" || t.state === "timed_out") && isGateTaskKey(t.key)).map((t) => t.key)
+				: [];
 			// Never cancel fleet work: even a queued snapshot can start between
 			// this read and a cancel request. Watching it preserves the verdict.
 			let watch: { text: string; isError?: boolean };
 			try {
 				watch = host.watchRun
-					? await host.watchRun(run.ref.id, cwd)
+					? await host.watchRun(run.ref.id, cwd, reported)
 					: { text: "This host has no background watcher.", isError: true };
 			} catch (error) {
 				watch = { text: `Background watch could not start: ${String(error)}`, isError: true };
 			}
 			const where = progress.url ?? run.ref.id;
 			const text_ = withNote(
-				`NO VERDICT YET — ${signal?.aborted ? "the call was aborted" : stillQueued ? "all unfinished tasks are waiting for admission" : "the bounded foreground follow ended"}. ` +
+				failedFirst + `NO VERDICT YET — ${signal?.aborted ? "the call was aborted" : failedFirst ? "the run continues until its last task ends" : stillQueued ? "all unfinished tasks are waiting for admission" : "the bounded foreground follow ended"}. ` +
 				`Run ${run.ref.id} is NOT cancelled: ${where}. Do not re-dispatch the gate.\n\n` + watch.text +
 				(watch.isError ? `\nNo background watch was started. Use hive_watch_run on ${run.ref.id} or check it with get_run.` : ""),
 			);

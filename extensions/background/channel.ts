@@ -58,3 +58,15 @@ export type BackgroundJobEvent = { sessionId: string; executionId: string } & (
 export interface BackgroundCancelEvent {
 	id: string;
 }
+
+/**
+ * quality_gate → registry: test/lint failures the gate's own result already
+ * reported for this run, just before it hands the run to a watch. The watch
+ * does not announce those again; a different failure is still news.
+ */
+export const WATCH_REPORTED_CHANNEL = "background.watch-reported";
+
+export interface WatchReportedEvent {
+	run: string;
+	keys: string[];
+}

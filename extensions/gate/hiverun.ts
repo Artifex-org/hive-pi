@@ -13,7 +13,7 @@ import { repoRoot } from "../hive-common/git.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { type HiveAuth, request, withTimeout } from "../hive-common/http.ts";
 import type { GateProgress } from "./stream.ts";
-import { fold, type HiveRun, type HiveSubstep, type HiveTask, hiveCheckArgs, isQueued, isTerminalRun, type RunRef, parseRunRef } from "./hivecheck.ts";
+import { failedWhileRunning, fold, type HiveRun, type HiveSubstep, type HiveTask, hiveCheckArgs, isQueued, isTerminalRun, type RunRef, parseRunRef } from "./hivecheck.ts";
 
 /** A poll pair per two seconds. The substep ingest itself runs at ~1 Hz, so
  *  faster would mostly re-read the same rows at twice the server cost. */
@@ -198,7 +198,7 @@ export async function follow(
 	steps: string[],
 	signal: AbortSignal | undefined,
 	onSnapshot: (p: GateProgress) => void,
-): Promise<{ progress: GateProgress; tasks: HiveTask[]; timedOut: boolean; stillQueued: boolean }> {
+): Promise<{ progress: GateProgress; tasks: HiveTask[]; timedOut: boolean; stillQueued: boolean; failedTask: string | null }> {
 	const startedAtMs = Date.now();
 	const deadline = startedAtMs + FOLLOW_TIMEOUT_MS;
 	let run: HiveRun = { state: "queued" };
@@ -224,15 +224,19 @@ export async function follow(
 				nowMs: Date.now(),
 			});
 			onSnapshot(progress);
-			if (isTerminalRun(run.state)) return { progress, tasks, timedOut, stillQueued };
+			if (isTerminalRun(run.state)) return { progress, tasks, timedOut, stillQueued, failedTask: null };
+			// The first red test/lint shard ends the FOREGROUND follow, never the
+			// run: the caller hands the rest to the watcher for the final verdict.
+			const failed = failedWhileRunning(tasks);
+			if (failed) return { progress, tasks, timedOut, stillQueued, failedTask: failed };
 		}
-		if (signal?.aborted) return { progress, tasks, timedOut, stillQueued };
+		if (signal?.aborted) return { progress, tasks, timedOut, stillQueued, failedTask: null };
 		// Both ceilings only end the foreground follow, never the fleet work.
 		const queuedTooLong = isQueued(progress) && Date.now() - startedAtMs >= QUEUED_TIMEOUT_MS;
 		if (queuedTooLong || Date.now() >= deadline) {
 			timedOut = true;
 			stillQueued = isQueued(progress);
-			return { progress, tasks, timedOut, stillQueued };
+			return { progress, tasks, timedOut, stillQueued, failedTask: null };
 		}
 		await sleep(POLL_INTERVAL_MS, signal);
 	}

@@ -35,6 +35,7 @@
  * these rows unchanged.
  */
 
+import { isGateTaskKey } from "../hive-common/gate-tasks.ts";
 import type { GateCheckProgress, GateProgress } from "./stream.ts";
 
 /** Step run when the caller named none. Lint is the fast, always-relevant one. */
@@ -52,6 +53,22 @@ export function tasksAwaitingAdmission(tasks: HiveTask[]): boolean {
 	const unfinished = tasks.filter((task) => !TERMINAL_TASK.has(task.state));
 	return unfinished.length > 0 && unfinished.every((task) =>
 		["queued", "pending", "ready", "waiting", "awaiting_template", "no_capacity", "waiting_for_faster_slot"].includes(task.state));
+}
+
+/**
+ * A test/lint task that has failed while others are still unfinished — worth
+ * reporting now rather than when the last shard ends. Null when nothing failed,
+ * or nothing else is left to wait for (the run's own verdict is then moments
+ * away).
+ *
+ * Not a verdict: the server alone knows a failure the trunk baseline masks. An
+ * `allow_failure` step never fails the run, and an `on_failure` step is about
+ * to be repaired by its fixer, so neither is reported early.
+ */
+export function failedWhileRunning(tasks: HiveTask[]): string | null {
+	const failed = tasks.find((task) => (task.state === "failed" || task.state === "timed_out") && isGateTaskKey(task.key) &&
+		!task.spec?.allow_failure && !task.spec?.on_failure);
+	return failed && tasks.some((task) => !TERMINAL_TASK.has(task.state)) ? failed.key : null;
 }
 
 export function isTerminalRun(state: string): boolean {
@@ -278,6 +295,8 @@ export interface HiveTask {
 	 * the wait it re-dispatches into (HIV-3167).
 	 */
 	defer_reason?: string | null;
+	/** The step's spec as the run endpoint returns it (hive store.Task `spec`). */
+	spec?: { allow_failure?: boolean; on_failure?: string } | null;
 }
 
 /** The subset of `GET /runs/{id}/substeps` this reads. */

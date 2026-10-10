@@ -24,6 +24,7 @@ import type { GateProgress } from "./stream.ts";
 import { deckLines, deckSummary } from "./hivecheck.ts";
 import { runQualityGate, type GateHost } from "./tool.ts";
 import { DECK_SECTION_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
+import { WATCH_REPORTED_CHANNEL, type WatchReportedEvent } from "../background/channel.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 
 // The gate itself lives in tool.ts (shared with the Claude adapter); re-exported
@@ -62,7 +63,9 @@ function publishDeck(pi: ExtensionAPI, progress: GateProgress | null): void {
 function piGateHost(pi: ExtensionAPI, ctx: ExtensionToolContext): GateHost {
 	return {
 		publishDeck: (progress) => publishDeck(pi, progress),
-		watchRun: async (run) => {
+		watchRun: async (run, _cwd, reported = []) => {
+			// Before the watch starts, so it never re-announces what this result says.
+			if (reported.length) pi.events.emit(WATCH_REPORTED_CHANNEL, { run, keys: reported } satisfies WatchReportedEvent);
 			const result = await ctx.executeTool("hive_watch_run", {
 				run, what: "waiting for the quality gate verdict", timeout_seconds: 14_400,
 			}, { signal: new AbortController().signal });
@@ -96,7 +99,7 @@ export default function (pi: ExtensionAPI) {
 			"check that did not run. " +
 			"In a repo that gates through Hive (hive, Aurora, Borealis-Ops) it runs `hive check` " +
 			"on the fleet against your uncommitted working tree instead — same report, same live " +
-			"progress. Slow runs hand off to hive_watch_run after at most two minutes; you get one completion wake. So reach for this rather than shelling out to `hive check` yourself.",
+			"progress. Slow runs hand off to hive_watch_run after at most two minutes, and so does a run whose first test/lint task fails while others still run (that failure is reported at once, nothing is cancelled); you get one completion wake with the verdict, plus an early notice naming the first failed test/lint task. So reach for this rather than shelling out to `hive check` yourself.",
 		parameters: Type.Object({
 			mode: Type.Optional(
 				StringEnum(["verify", "quick", "standard", "thorough"] as const, {
