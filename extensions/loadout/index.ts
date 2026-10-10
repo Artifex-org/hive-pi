@@ -59,6 +59,30 @@ export function loadoutPrompt(names: readonly string[]): string {
 	].join("\n");
 }
 
+/**
+ * How to call tools from a `codemode` script without guessing.
+ *
+ * MEASURED: in one long session 41 of 310 codemode calls failed inside the
+ * script — a guessed member (`tools.tool_search`), a guessed path, an edit
+ * whose old text matched more than once. pi's `tools` object is frozen in the
+ * script prelude (`@earendil-works/pi-codemode`) and an extension cannot add
+ * members to it, so `tools.exists()`/`tools.list()` would be one more guess;
+ * the prelude already answers both questions with `in` and `ALL_TOOLS`. The
+ * failed-read diagnosis is pretty-tools' `explainPathFailure`, which reaches a
+ * script because nested calls run through the same registered `read`.
+ */
+export const CODEMODE_SCRIPT_GUIDANCE = [
+	"## Codemode scripts",
+	"",
+	"- Check a tool name before calling it: `(\"<name>\" in tools)` is true only for a tool the script can call " +
+		"(reading a missing member throws), and `ALL_TOOLS.map((t) => t.name)` lists them all, MCP names with `-` as `_`. " +
+		"There is no `tools.exists`, `tools.list` or `tools.tool_search`.",
+	"- Do not guess paths: list the directory first (`tools.ls`, `tools.find`) or use a path a tool printed. " +
+		"A failed `tools.read` names what IS in the nearest existing directory — use that instead of guessing again.",
+	"- `tools.edit` replaces text that must match exactly once: read the file first and include enough surrounding lines to be unique.",
+	"- Calls made before a script fails have already run. Use `Promise.allSettled` for independent calls and inspect effects before retrying.",
+].join("\n");
+
 /** What `load_tools` does with a list of names: pure, for the tool and its test. */
 export function planLoad(
 	requested: readonly string[],
@@ -121,11 +145,14 @@ export default function loadout(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event) => {
+		const active = pi.getActiveTools();
 		// Only when the loader itself is declared: a role worker restricted by
 		// `--tools` has no way to load anything, and its grants are already active.
-		if (!pi.getActiveTools().includes(LOAD_TOOL)) return;
-		const prompt = loadoutPrompt(deferredToolNames(pi.getAllTools()));
-		if (!prompt) return;
-		return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
+		const sections = [
+			active.includes(LOAD_TOOL) ? loadoutPrompt(deferredToolNames(pi.getAllTools())) : "",
+			active.includes("codemode") ? CODEMODE_SCRIPT_GUIDANCE : "",
+		].filter(Boolean);
+		if (sections.length === 0) return;
+		return { systemPrompt: [event.systemPrompt, ...sections].join("\n\n") };
 	});
 }

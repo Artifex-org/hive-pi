@@ -9,7 +9,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import loadoutExtension, { deferredToolNames, LOAD_TOOL, loadoutPrompt, mcpHint, planLoad } from "../extensions/loadout/index.ts";
+import loadoutExtension, { CODEMODE_SCRIPT_GUIDANCE, deferredToolNames, LOAD_TOOL, loadoutPrompt, mcpHint, planLoad } from "../extensions/loadout/index.ts";
 import { exposureFor, GATED_TOOLS, restoredLoadout } from "../extensions/loadout/policy.ts";
 import opmodeExtension from "../extensions/opmode/index.ts";
 import planExtension from "../extensions/plan/index.ts";
@@ -91,6 +91,22 @@ describe("the on-demand index", () => {
 		pi.api.setActiveTools(["bash"]);
 		const results = await pi.emit({ type: "before_agent_start", prompt: "x", systemPrompt: "BASE" } as never);
 		expect((results as unknown[]).filter(Boolean)).toEqual([]);
+	});
+
+	it("adds the codemode script guidance exactly when codemode is active", async () => {
+		const pi = createFakePi();
+		loadoutExtension(pi.api);
+		const prompt = async () => {
+			const results = await pi.emit({ type: "before_agent_start", prompt: "x", systemPrompt: "BASE" } as never);
+			return (results as Array<{ systemPrompt?: string } | undefined>).find((r) => r?.systemPrompt)?.systemPrompt;
+		};
+		pi.api.setActiveTools(["bash", "codemode"]);
+		const withCodemode = await prompt();
+		expect(withCodemode).toBe(`BASE\n\n${CODEMODE_SCRIPT_GUIDANCE}`);
+		expect(withCodemode).toContain('("<name>" in tools)');
+		expect(withCodemode).toContain("ALL_TOOLS.map((t) => t.name)");
+		pi.api.setActiveTools(["bash"]);
+		expect(await prompt()).toBeUndefined();
 	});
 });
 
