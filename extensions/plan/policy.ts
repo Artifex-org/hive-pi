@@ -729,7 +729,9 @@ function envReadHint(blocked: string): string {
  * state is readable without touching the local repository.
  */
 function gitFetchHint(blocked: string): string {
-	return /(^|\s)git(\s+-\S+(\s+\S+)?)*\s+fetch\b/.test(blocked)
+	// An option's value never starts with `-`: if it could, `-a -b` would parse
+	// as one option-with-value OR two options, 2^n ways for n options.
+	return /(^|\s)git(\s+-\S+(\s+[^-\s]\S*)?)*\s+fetch\b/.test(blocked)
 		? "\ngit fetch writes refs shared by every worktree of this repository. Read the remote instead: " +
 				"`git ls-remote origin <ref>` for a sha, `gh api repos/<o>/<r>/contents/<path>?ref=<sha>` for a file."
 		: "";
