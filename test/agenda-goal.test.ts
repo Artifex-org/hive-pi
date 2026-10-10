@@ -303,6 +303,14 @@ describe("the fast judge and the confirmed met", () => {
 		expect(out.inject).toBeUndefined();
 	});
 
+	it("a cancelled run is not asked again", async () => {
+		runOneShot.mockResolvedValue(prose);
+		const controller = new AbortController();
+		controller.abort();
+		await policyFor(createGoal("g", "c", 1)).policy.decide({ ...context, signal: controller.signal })!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(1);
+	});
+
 	it("a timeout or a non-zero exit is not a format failure and is not asked again", async () => {
 		runOneShot.mockResolvedValueOnce(timedOut);
 		await policyFor(createGoal("g", "c", 1)).policy.decide(context)!.run();

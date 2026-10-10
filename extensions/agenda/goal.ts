@@ -288,7 +288,8 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 					const judge = async (thinking: string | undefined): Promise<OneShotResult> => {
 						const first = await ask(thinking, buildJudgePrompt(goal.condition, transcript));
 						const failure = parseFailureOf(first);
-						if (failure === null) return first;
+						// A cancelled run discards the verdict anyway; do not spawn a second call for it.
+						if (failure === null || context.signal?.aborted) return first;
 						const retry = await ask(thinking, buildJudgeRetryPrompt(goal.condition, transcript, failure));
 						return { ...retry, tokens: first.tokens + retry.tokens };
 					};

@@ -34,6 +34,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { branchEntries } from "../session-branch/branch.ts";
 
 /** A termination this far into a turn is the model running long, not a blip. */
 export const CUT_OFF_MIN_MS = 60_000;
@@ -47,6 +48,13 @@ export const CUT_OFF_THINKING = "low" as const;
 const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 const STATUS_KEY = "agenda-cutoff";
+
+/**
+ * The cap, persisted. pi records the capped level in the session itself, so a
+ * reload or resume restores "low"; without this entry the operator's level
+ * would be lost with the process that capped it.
+ */
+export const THINKING_CAP_ENTRY = "agenda-thinking-cap";
 
 /** Did the provider cut this turn off? Pure over the turn's message and duration. */
 export function isCutOff(message: unknown, elapsedMs: number, minMs = CUT_OFF_MIN_MS): boolean {
@@ -114,6 +122,19 @@ export function stoppedRecap(durationsMs: readonly number[]): string {
 	return `Needs operator: provider cut off ${durationsMs.length} turns in a row (${runs}); automatic retries stopped`;
 }
 
+/** The cap in force on this branch, or null — the newest cap entry wins. */
+export function rehydrateCap<Level extends string>(branch: readonly unknown[]): { from: Level; to: Level } | null {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i] as { customType?: string; data?: { from?: unknown; to?: unknown } } | undefined;
+		if (entry?.customType !== THINKING_CAP_ENTRY) continue;
+		const { from, to } = entry.data ?? {};
+		return THINKING_ORDER.includes(from as string) && THINKING_ORDER.includes(to as string)
+			? { from: from as Level, to: to as Level }
+			: null;
+	}
+	return null;
+}
+
 export interface CutOffGuard {
 	/** The recap to surface while retries are stopped and nobody has resumed the session, else null. */
 	stopped(): string | null;
@@ -131,8 +152,9 @@ export function installCutOffGuard(pi: ExtensionAPI, options: CutOffOptions = {}
 	let turnStartedAt: number | null = null;
 	let durations: number[] = [];
 	let stopped: string | null = null;
-	/** The operator's thinking level while a cap is in force. */
-	let cappedFrom: ReturnType<ExtensionAPI["getThinkingLevel"]> | null = null;
+	type Level = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+	/** The operator's level and the level pi actually set, while a cap is in force. */
+	let cap: { from: Level; to: Level } | null = null;
 
 	const setStatus = (ctx: ExtensionContext, text: string | undefined) => {
 		try {
@@ -149,23 +171,36 @@ export function installCutOffGuard(pi: ExtensionAPI, options: CutOffOptions = {}
 	};
 
 	const restoreThinking = () => {
-		if (cappedFrom === null) return;
+		if (cap === null) return;
 		// Only undo our own cap: a level the operator chose since then stands.
-		if (pi.getThinkingLevel() === CUT_OFF_THINKING) pi.setThinkingLevel(cappedFrom);
-		cappedFrom = null;
+		if (pi.getThinkingLevel() === cap.to) pi.setThinkingLevel(cap.from);
+		cap = null;
+		pi.appendEntry(THINKING_CAP_ENTRY, { released: true });
 	};
 
 	const capThinking = () => {
 		const level = pi.getThinkingLevel();
 		if (THINKING_ORDER.indexOf(level) <= THINKING_ORDER.indexOf(CUT_OFF_THINKING)) return;
-		cappedFrom ??= level;
 		pi.setThinkingLevel(CUT_OFF_THINKING);
+		// pi clamps to the levels the model offers, so read back what it set.
+		const to = pi.getThinkingLevel();
+		if (THINKING_ORDER.indexOf(to) >= THINKING_ORDER.indexOf(level)) {
+			if (to !== level) pi.setThinkingLevel(level);
+			return; // nothing lower to cap to
+		}
+		cap = { from: cap?.from ?? level, to };
+		pi.appendEntry(THINKING_CAP_ENTRY, cap);
 	};
 
 	pi.on("session_start", (_event, ctx) => {
 		reset(ctx);
 		turnStartedAt = null;
-		cappedFrom = null;
+		cap = null;
+		try {
+			cap = rehydrateCap(branchEntries(ctx));
+		} catch {
+			/* session replaced — nothing to rehydrate */
+		}
 	});
 
 	// A person typing has taken over; the streak is about the automatic retries.

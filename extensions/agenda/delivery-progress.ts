@@ -119,7 +119,6 @@ const committedHead = (cwd: string, sha: string): boolean => {
 /** The checkpoint request a commit may be answering (checkpoint.ts). */
 export interface CheckpointCommits {
 	outstanding(): boolean;
-	taken(): void;
 }
 
 export function registerDeliveryProgress(
@@ -151,10 +150,7 @@ export function registerDeliveryProgress(
 		if (!kind) return;
 		// A commit the conductor asked for as a checkpoint is not the end of
 		// execution; a PR opening always is.
-		if (kind === "commit" && checkpoint?.outstanding()) {
-			checkpoint.taken();
-			return;
-		}
+		if (kind === "commit" && checkpoint?.outstanding()) return;
 		seen = true;
 		pi.appendEntry(DELIVERY_PROGRESS_ENTRY, { reached: true });
 	});

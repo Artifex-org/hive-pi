@@ -10,7 +10,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type AssistantMessage, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
@@ -21,7 +21,8 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { decideCutOff, installCutOffGuard, isCutOff, MAX_CUT_OFFS, stoppedRecap } from "../extensions/agenda/cutoff.ts";
+import { decideCutOff, installCutOffGuard, isCutOff, MAX_CUT_OFFS, rehydrateCap, stoppedRecap, THINKING_CAP_ENTRY } from "../extensions/agenda/cutoff.ts";
+import { createFakePi } from "./fake-pi.ts";
 
 const terminated = (): AssistantMessage => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" });
 
@@ -236,4 +237,42 @@ describe("a cut-off turn against pi's real retry", () => {
 			await h.dispose();
 		}
 	}, 15_000);
+});
+
+describe("the thinking cap survives a reload", () => {
+	it("rehydrates the newest cap entry on the branch; a release clears it", () => {
+		const capped = { customType: THINKING_CAP_ENTRY, data: { from: "xhigh", to: "low" } };
+		expect(rehydrateCap([capped])).toEqual({ from: "xhigh", to: "low" });
+		expect(rehydrateCap([capped, { customType: THINKING_CAP_ENTRY, data: { released: true } }])).toBeNull();
+		expect(rehydrateCap([{ customType: THINKING_CAP_ENTRY, data: { from: "bogus", to: "low" } }])).toBeNull();
+		expect(rehydrateCap([])).toBeNull();
+	});
+
+	it("a resumed session restores the operator's level at its first completed turn", async () => {
+		const fake = createFakePi();
+		let level = "low";
+		const set = vi.fn((next: string) => { level = next; });
+		fake.api.getThinkingLevel = () => level as ReturnType<ExtensionAPI["getThinkingLevel"]>;
+		fake.api.setThinkingLevel = set;
+		installCutOffGuard(fake.api);
+		await fake.emit({ type: "session_start" }, { branch: [{ customType: THINKING_CAP_ENTRY, data: { from: "xhigh", to: "low" } }] });
+		await fake.emit({ type: "turn_start" });
+		await fake.emit({ type: "turn_end", outcome: "completed", message: fauxAssistantMessage("ok"), toolResults: [], entries: [] });
+		expect(set).toHaveBeenCalledWith("xhigh");
+		expect(fake.entries.at(-1)).toMatchObject({ customType: THINKING_CAP_ENTRY, data: { released: true } });
+	});
+
+	it("a model that offers nothing below the current level is left alone", async () => {
+		const fake = createFakePi();
+		let level = "high";
+		// pi clamps an unavailable level to the nearest the model offers.
+		fake.api.getThinkingLevel = () => level as ReturnType<ExtensionAPI["getThinkingLevel"]>;
+		fake.api.setThinkingLevel = (next) => { level = next === "low" ? "high" : next; };
+		installCutOffGuard(fake.api, { minMs: 0 });
+		await fake.emit({ type: "session_start" });
+		await fake.emit({ type: "turn_start" });
+		await fake.emit({ type: "turn_end", outcome: "error", message: terminated(), toolResults: [], entries: [] }, { pendingMessages: false });
+		expect(level).toBe("high");
+		expect(fake.entries.some((e) => e.customType === THINKING_CAP_ENTRY)).toBe(false);
+	});
 });

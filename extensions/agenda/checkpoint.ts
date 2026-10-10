@@ -26,9 +26,11 @@
  *
  * A checkpoint commit is NOT the delivery milestone. delivery-progress.ts reads
  * the first successful commit as execute→verify and spends the one final-review
- * reminder on it; a commit made while a checkpoint request is outstanding is
- * handed back here instead (`taken`), so asking for checkpoints never fakes the
- * end of execution.
+ * reminder on it. Every commit between a delivered checkpoint request and the
+ * end of that run is read as a checkpoint instead (`outstanding`), so asking
+ * for checkpoints never fakes the end of execution — a split commit or a hook
+ * fix-up included. A PR opening still marks delivery, so a real delivery commit
+ * in that window costs at most the advice arriving at the PR instead.
  */
 
 import { execFile } from "node:child_process";
@@ -129,7 +131,8 @@ export function checkpointInjection(due: CheckpointDue): string {
 		: `Conductor: ${paths} and no commit for ${Math.round(due.sinceMs / 60_000)} min in this execute phase.`;
 	return [
 		situation,
-		"Commit a checkpoint on your working branch now (the commit hook attests it, so a failing check surfaces now rather than at delivery).",
+		"Commit a checkpoint of this task's changes on your working branch now (the commit hook attests it, so a failing check surfaces now rather than at delivery);",
+		"leave changes that are not this task's uncommitted.",
 		"A checkpoint is not a push: do not push or open a PR for it, then carry on with the plan.",
 	].join(" ");
 }
@@ -147,8 +150,11 @@ export async function probeCheckpoint(cwd: string, signal?: AbortSignal): Promis
 		});
 		const seconds = Number(stdout.trim());
 		headAt = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
-	} catch {
-		// An unborn branch has no HEAD commit; the other clock terms still hold.
+	} catch (error) {
+		// An unborn branch has no HEAD commit, and the other clock terms still
+		// hold. Any other failure (a timeout, an abort) leaves the tree unknown.
+		const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+		if (!/does not have any commits yet|unknown revision|bad default revision/.test(stderr)) return null;
 	}
 	return { dirty, headAt };
 }
@@ -164,12 +170,27 @@ export interface CheckpointHooks {
 export interface Checkpoint {
 	/** The turn policy. */
 	policy: Policy;
-	/** A checkpoint was requested and no commit has answered it yet. */
+	/** Is the rule in force at all (interval > 0 and the conductor on)? */
+	active(): boolean;
+	/** A DELIVERED checkpoint request is open: commits in this run are checkpoints, not delivery. */
 	outstanding(): boolean;
-	/** A commit answered the request (delivery-progress calls this instead of stamping a milestone). */
-	taken(): void;
-	/** The run ended; a later commit is the agent's own, not an answer to this request. */
-	settled(): void;
+	/**
+	 * Reconcile a request with the session, at the next turn start or settle.
+	 * The driver applies a policy's ledger before its live may-inject check, so
+	 * a request can be dropped after `run()`; only its text on the branch proves
+	 * the agent was asked. A dropped request restores the clock, so the next
+	 * boundary asks again rather than an interval later.
+	 */
+	observe(branch: readonly unknown[]): void;
+	/** The run ended; a later commit is the agent's own again. */
+	settled(branch: readonly unknown[]): void;
+}
+
+function delivered(branch: readonly unknown[], text: string): boolean {
+	return branch.some((raw) => {
+		const entry = raw as { type?: string; customType?: string; content?: unknown };
+		return entry.type === "custom_message" && entry.customType === "agenda" && entry.content === text;
+	});
 }
 
 export function createCheckpoint(hooks: CheckpointHooks): Checkpoint {
@@ -177,30 +198,36 @@ export function createCheckpoint(hooks: CheckpointHooks): Checkpoint {
 	const probe = hooks.probe ?? probeCheckpoint;
 	const intervalMs = hooks.intervalMs ?? checkpointIntervalMs();
 	let clock: CheckpointClock | null = null;
+	/** A request run() produced, not yet seen on the branch, and the clock to restore if it never is. */
+	let requested: { text: string; before: CheckpointClock } | null = null;
 	let outstanding = false;
+	const active = () => intervalMs > 0 && hooks.enabled();
 
+	const skip = { metric: { outcome: "skip" as const, value: 0, name: "checkpoint" } };
 	const policy: Policy = {
 		name: "conductor-checkpoint",
 		decide(context: PolicyContext) {
-			if (intervalMs <= 0 || !hooks.enabled() || !isExecuting(hooks.stage(), context.signals?.plan)) {
+			if (!active() || !isExecuting(hooks.stage(), context.signals?.plan)) {
 				clock = null;
 				return null;
 			}
 			clock ??= startClock(now());
-			if (now() < clock.nextProbeAt) return null;
+			if (requested || now() < clock.nextProbeAt) return null;
 			return {
 				name: "conductor",
 				status: "",
 				run: async () => {
 					const observed = await probe(context.cwd, context.signal);
-					if (!clock) return { metric: { outcome: "skip" as const, value: 0, name: "checkpoint" } };
-					const folded = foldProbe(clock, observed, now(), intervalMs);
+					if (!clock) return skip;
+					const before = clock;
+					const folded = foldProbe(before, observed, now(), intervalMs);
 					clock = folded.clock;
-					if (!folded.due) return { metric: { outcome: "skip" as const, value: 0, name: "checkpoint" } };
-					outstanding = true;
+					if (!folded.due) return skip;
+					const text = checkpointInjection(folded.due);
+					requested = { text, before };
 					return {
 						metric: { outcome: "pass" as const, value: folded.due.dirty, name: "checkpoint" },
-						inject: checkpointInjection(folded.due),
+						inject: text,
 						ledger: (state) => record(state, CHECKPOINT_LEDGER_ID),
 					};
 				},
@@ -208,13 +235,20 @@ export function createCheckpoint(hooks: CheckpointHooks): Checkpoint {
 		},
 	};
 
+	const observe = (branch: readonly unknown[]) => {
+		if (!requested) return;
+		if (delivered(branch, requested.text)) outstanding = true;
+		else if (clock) clock = requested.before;
+		requested = null;
+	};
+
 	return {
 		policy,
+		active,
 		outstanding: () => outstanding,
-		taken: () => {
-			outstanding = false;
-		},
-		settled: () => {
+		observe,
+		settled: (branch) => {
+			observe(branch);
 			outstanding = false;
 		},
 	};

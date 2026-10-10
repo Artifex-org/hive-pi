@@ -140,12 +140,33 @@ describe("the checkpoint policy", () => {
 		};
 	}
 
+	const onBranch = (text: string) => [{ type: "custom_message", customType: "agenda", content: text }];
+
 	it("asks for a checkpoint on entering execute with a dirty tree, and charges its ledger", async () => {
 		const h = setup();
 		const outcome = await h.checkpoint.policy.decide(h.context)!.run();
-		expect(outcome.inject).toMatch(/^Conductor: execution starts with 4 uncommitted paths.*Commit a checkpoint on your working branch now.*not a push/);
+		expect(outcome.inject).toMatch(/^Conductor: execution starts with 4 uncommitted paths.*Commit a checkpoint of this task's changes.*leave changes that are not this task's uncommitted.*not a push/);
 		expect(outcome.ledger!(emptyLedger).iterations[CHECKPOINT_LEDGER_ID]).toBe(1);
+	});
+
+	it("a request is open only once it is seen delivered, and closes when the run settles", async () => {
+		const h = setup();
+		const text = (await h.checkpoint.policy.decide(h.context)!.run()).inject!;
+		expect(h.checkpoint.outstanding()).toBe(false);
+		h.checkpoint.observe(onBranch(text));
 		expect(h.checkpoint.outstanding()).toBe(true);
+		h.checkpoint.settled(onBranch(text));
+		expect(h.checkpoint.outstanding()).toBe(false);
+	});
+
+	it("a request the driver dropped is not open, and is asked again at the next boundary rather than an interval later", async () => {
+		const h = setup();
+		await h.checkpoint.policy.decide(h.context)!.run();
+		expect(h.checkpoint.policy.decide(h.context)).toBeNull(); // one request in flight at a time
+		h.checkpoint.observe([]);
+		expect(h.checkpoint.outstanding()).toBe(false);
+		const again = await h.checkpoint.policy.decide(h.context)!.run();
+		expect(again.inject).toMatch(/execution starts with 4 uncommitted paths/);
 	});
 
 	it("is quiet on a clean tree, and does not even probe again until the interval has passed", async () => {
@@ -173,6 +194,9 @@ describe("the checkpoint policy", () => {
 		expect(off.checkpoint.policy.decide(off.context)).toBeNull();
 		const disabled = setup({ intervalMs: 0 });
 		expect(disabled.checkpoint.policy.decide(disabled.context)).toBeNull();
+		expect(disabled.checkpoint.active()).toBe(false);
+		expect(off.checkpoint.active()).toBe(false);
+		expect(setup().checkpoint.active()).toBe(true);
 	});
 
 	it("runs at a completed turn boundary, so a run that never settles is still reached", async () => {
@@ -193,37 +217,35 @@ describe("the checkpoint policy", () => {
 describe("a checkpoint commit is not the delivery milestone", () => {
 	function observe(outstanding: boolean) {
 		const pi = createFakePi();
-		let taken = 0;
-		let pending = outstanding;
-		registerDeliveryProgress(pi.api, () => null, { outstanding: () => pending, taken: () => { taken++; pending = false; } });
+		let open = outstanding;
+		registerDeliveryProgress(pi.api, () => null, { outstanding: () => open });
 		const run = (command: string, text: string) => pi.emit({
 			type: "tool_result", toolName: "bash", toolCallId: command, input: { command }, content: [{ type: "text", text }], isError: false,
 		});
 		const stamped = () => pi.entries.filter((e) => e.customType === DELIVERY_PROGRESS_ENTRY).length;
-		return { run, stamped, taken: () => taken };
+		return { run, stamped, close: () => { open = false; } };
 	}
 
-	it("a commit answering an outstanding request is handed back, not stamped — and the NEXT commit is delivery again", async () => {
+	it("every commit while a request is open is a checkpoint — a split commit or a hook fix-up included", async () => {
 		const h = observe(true);
 		await h.run("git commit -m checkpoint", "[work abc1234] checkpoint");
+		await h.run("git commit -m 'fix lint'", "[work bcd2345] fix lint");
 		expect(h.stamped()).toBe(0);
-		expect(h.taken()).toBe(1);
+		h.close(); // the run settled
 		await h.run("git commit -m done", "[work def5678] done");
 		expect(h.stamped()).toBe(1);
 	});
 
-	it("with no request outstanding a commit is the milestone, as before", async () => {
+	it("with no request open a commit is the milestone, as before", async () => {
 		const h = observe(false);
 		await h.run("git commit -m change", "[work abc1234] change");
 		expect(h.stamped()).toBe(1);
-		expect(h.taken()).toBe(0);
 	});
 
-	it("a PR opening is always delivery, even while a checkpoint is outstanding", async () => {
+	it("a PR opening is always delivery, even while a checkpoint request is open", async () => {
 		const h = observe(true);
 		await h.run("gh pr create", "https://github.com/owner/repo/pull/123");
 		expect(h.stamped()).toBe(1);
-		expect(h.taken()).toBe(0);
 	});
 
 	it("a chain that commits AND opens a PR is a PR opening", () => {

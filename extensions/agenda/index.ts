@@ -333,7 +333,18 @@ export default function (pi: ExtensionAPI) {
 	// Checkpoint commits on long uncommitted stretches of execute (checkpoint.ts).
 	// A turn policy: a multi-hour execute phase may never settle.
 	const checkpoint = createCheckpoint({ enabled: () => conductorEnabled, stage: () => conductor?.stage ?? null });
-	pi.on("agent_settled", () => checkpoint.settled());
+	const readBranch = (ctx: ExtensionContext): readonly unknown[] | null => {
+		try {
+			return branchEntries(ctx);
+		} catch {
+			return null; // session replaced — nothing to reconcile against
+		}
+	};
+	pi.on("turn_start", (_event, ctx) => {
+		const branch = readBranch(ctx);
+		if (branch) checkpoint.observe(branch);
+	});
+	pi.on("agent_settled", (_event, ctx) => checkpoint.settled(readBranch(ctx) ?? []));
 
 	/**
 	 * Gate-retry stamps (HIV-1229): after a red gate, the gate is skipped until
@@ -855,7 +866,7 @@ export default function (pi: ExtensionAPI) {
 					"Fan out over ITEMS, never phases of one edit; finish wide waves with a barrier and one orchestration-reconciler pipeline stage."
 				: "Delegate one bounded step with `subagent`; use its parallel mode when several read-only questions are already independent.",
 			"Keep the workflow's worker children and supervise/resize/collect steps current. Verify reconciled findings before relying on them.",
-			CHECKPOINT_RULE,
+			...(checkpoint.active() ? [CHECKPOINT_RULE] : []),
 		].join("\n");
 		try {
 			pi.sendMessage(
