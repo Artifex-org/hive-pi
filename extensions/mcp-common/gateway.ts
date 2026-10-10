@@ -35,6 +35,7 @@ export interface GatewayContext {
 	signal?: AbortSignal;
 	providerToken?: (provider: string) => Promise<string | undefined>;
 	onBound?: (request: Record<string, unknown>) => void;
+	onProgress?: (progress: NativeMcp.ProgressNotification) => void;
 }
 
 /** The same effective policy drives egress checks and cancellation decisions. */
@@ -78,9 +79,11 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 	if (!("url" in entry.config)) throw new Error(`MCP server "${request.server}" uses stdio; this gateway does not spawn duplicate servers. Configure HTTP for gateway calls.`);
 	if (entry.config.auth?.provider && !context.providerToken) throw new Error("Provider-token MCP auth requires the native Pi session; use OAuth or a configured header in Claude.");
 	context.onBound?.({ tool: request.tool, server: request.server });
-	const signal = AbortSignal.any([AbortSignal.timeout(45_000), ...(context.signal ? [context.signal] : [])]);
+	const initializing = new AbortController();
+	const signal = AbortSignal.any([initializing.signal, ...(context.signal ? [context.signal] : [])]);
 	signal.throwIfAborted();
 	const transports = new Set<McpTransport>();
+	let dispatched = false;
 	const connection = new modules.runtime.McpServerConnection({
 		entry, cwd: context.cwd,
 		credentials: new modules.runtime.McpOAuthCredentialStore(new modules.auth.FileAuthStorageBackend(join(context.agentDir, "mcp-auth.json")), context.agentDir),
@@ -100,6 +103,7 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 				fetch: (url, init) => {
 					if (init?.method === "POST" && typeof init.body === "string" && JSON.parse(init.body).method === "tools/call") {
 						signal.throwIfAborted(); authorize(request);
+						dispatched = true;
 					}
 					return nativeFetch(url, init);
 				},
@@ -109,6 +113,7 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 		},
 		onTools: () => {},
 	});
+	if (!Number.isFinite(connection.timeoutMs) || connection.timeoutMs > 2_147_483_647) throw new Error("MCP timeout must be finite and fit a native timer.");
 	// Native close alone cannot interrupt initialization before it stores its
 	// client. Own the HTTP transports too, including reconnect attempts.
 	const close = async () => {
@@ -117,13 +122,21 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 	let abortClose: Promise<void> | undefined;
 	const abort = () => { abortClose = close(); void abortClose.catch(() => {}); };
 	signal.addEventListener("abort", abort, { once: true });
+	// Bound initialization as a whole; after that the native per-request
+	// budget (including progress resets) governs the actual tool call.
+	const initializationTimer = setTimeout(() => initializing.abort(new Error("MCP initialization timed out")), connection.timeoutMs);
 	try {
 		const client = await connection.getClient();
+		clearTimeout(initializationTimer);
 		signal.throwIfAborted();
 		authorize(request); // Recheck the actual pinned dispatch, not the mutable caller envelope.
 		if (!connection.tools.some(tool => tool.name === rawTool)) throw new Error(`MCP server "${request.server}" does not advertise exact raw tool "${rawTool}".`);
-		return await client.callTool(rawTool, (request.args ?? {}) as Record<string, unknown>, { signal, timeoutMs: connection.timeoutMs });
+		return await client.callTool(rawTool, (request.args ?? {}) as Record<string, unknown>, { signal, timeoutMs: connection.timeoutMs, onProgress: progress => context.onProgress?.(progress) });
+	} catch (error) {
+		if (dispatched) throw new Error(`MCP remote outcome unknown; inspect remote state before retrying. ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+		throw error;
 	} finally {
+		clearTimeout(initializationTimer);
 		signal.removeEventListener("abort", abort);
 		await (abortClose ?? close());
 	}

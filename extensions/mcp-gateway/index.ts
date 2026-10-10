@@ -14,7 +14,7 @@ export default function (pi: ExtensionAPI) {
 	const effectiveMode = () => planActive ? "plan" : mode;
 	const cancelDenied = () => {
 		for (const [controller, bound] of controllers) {
-			if (bound && !gatewayToolVerdict(effectiveMode(), bound).allowed) controller.abort(new Error("MCP posture changed; inspect remote state before retrying, since the request may already have reached the server."));
+			if (bound && !gatewayToolVerdict(effectiveMode(), bound).allowed) controller.abort(new Error("MCP posture changed"));
 		}
 	};
 	pi.events.on(OP_MODE_STATE_CHANNEL, payload => {
@@ -35,7 +35,7 @@ export default function (pi: ExtensionAPI) {
 		capability: { executes: true, writesExemptBecause: "Native authentication may run trusted configured credential helpers and update its OAuth store; HTTP RPC uses the exact mode policy, stdio servers are never spawned, and result spills are native temporary artifacts, not repository content." },
 		description: "Call one configured MCP tool by canonical or native spelling, with raw server/tool binding. Restricted modes allow only reviewed reads or fixed coordination. HTTP only; OAuth sign-in remains in Pi /mcp. Discovery/auth actions are unsupported.",
 		parameters: Type.Object({ tool: Type.String(), server: Type.Optional(Type.String()), args: Type.Optional(Type.Record(Type.String(), Type.Unknown())) }),
-		async execute(_id, input, signal, _onUpdate, ctx) {
+		async execute(_id, input, signal, onUpdate, ctx) {
 			const controller = new AbortController(); controllers.set(controller, undefined);
 			const task = (async () => {
 				try {
@@ -44,13 +44,15 @@ export default function (pi: ExtensionAPI) {
 						agentDir: agentDir(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), mode: planActive ? "plan" : mode,
 						currentMode: effectiveMode,
 						onBound: bound => { controllers.set(controller, bound); },
+						onProgress: progress => onUpdate?.({ content: [{ type: "text", text: progress.message ?? `Progress ${progress.progress}` }], details: undefined }),
 						signal: AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]),
 						providerToken: provider => ctx.modelRegistry.getApiKeyForProvider(provider),
 					}, modules);
 					const canonical = canonicalMcpToolName(input.tool);
 					return modules.tools.convertMcpResult(canonical.slice(0, canonical.indexOf("_")), canonical.slice(canonical.indexOf("_") + 1), result);
 				} catch (error) {
-					return { content: [{ type: "text" as const, text: controller.signal.aborted && controller.signal.reason instanceof Error ? controller.signal.reason.message : error instanceof Error ? error.message : String(error) }], details: undefined, isError: true };
+					const reason = controller.signal.aborted && controller.signal.reason instanceof Error ? `${controller.signal.reason.message} ` : "";
+					return { content: [{ type: "text" as const, text: reason + (error instanceof Error ? error.message : String(error)) }], details: undefined, isError: true };
 				}
 			})();
 			calls.add(task);

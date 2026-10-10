@@ -18,6 +18,7 @@ let dir: string, calls: string[], closed: number, pending: number, stall: string
 let headers: string[];
 let replyContent: CallToolResult["content"];
 let releaseResponse: (() => void) | undefined;
+let replyIsError: boolean;
 const piBin = fileURLToPath(new URL("cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 function config(server: Record<string, unknown> = { url: "https://hive.invalid/mcp", headers: { Authorization: "Bearer test-header" } }) {
 	writeFileSync(join(dir, "mcp.json"), JSON.stringify({ mcpServers: { hive: server, linear: { url: "https://linear.invalid/mcp" } } }));
@@ -29,7 +30,7 @@ function control(mode: string) {
 const env = () => ({ piBin, piAgentDir: dir, configDir: dir });
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "gateway-")); calls = []; closed = 0; pending = 0; headers = []; stall = undefined; releaseResponse = undefined;
-	replyContent = [{ type: "text", text: "live-read" }];
+	replyContent = [{ type: "text", text: "live-read" }]; replyIsError = false;
 	config(); control("plan"); vi.stubEnv("PI_CODING_AGENT_DIR", dir);
 	vi.stubGlobal("fetch", async (_url: unknown, init?: RequestInit) => {
 		if (init?.method === "DELETE") { closed++; return new Response(null, { status: 200 }); }
@@ -50,12 +51,12 @@ beforeEach(() => {
 		}
 		if (message.id === undefined) return new Response(null, { status: 202 });
 		const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
-			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "steer_agent", "trigger_run"].map(name => ({ name, inputSchema: { type: "object" } })) }
-			: { content: replyContent };
+			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "steer_agent", "trigger_run", "wait_for_run"].map(name => ({ name, inputSchema: { type: "object" } })) }
+			: { content: replyContent, isError: replyIsError };
 		return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers: { "Content-Type": "application/json", "Mcp-Session-Id": "fixture" } });
 	});
 });
-afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); });
 function piGateway(mode = "plan", trusted = false) {
 	const pi = createFakePi(); gateway(pi.api); pi.api.events.emit(OP_MODE_STATE_CHANNEL, { mode });
 	const ctx = { cwd: dir, isProjectTrusted: () => trusted, modelRegistry: { getApiKeyForProvider: async () => "provider-fixture" } } as unknown as ExtensionToolContext;
@@ -270,4 +271,55 @@ it.each([
 	releaseResponse!();
 	expect(await result).not.toHaveProperty("isError", true);
 	expect(calls).toEqual([tool.slice("hive_".length)]); expect(pending).toBe(0);
+});
+
+it.each(["Pi", "Claude"])("%s honors a configured wait longer than the old 45-second ceiling", async adapter => {
+	config({ url: "https://hive.invalid/mcp", timeout: 120, headers: { Authorization: "Bearer fixture" } }); control("discuss");
+	vi.useFakeTimers();
+	// AbortSignal.timeout uses Node's internal timer; make the old hard
+	// cutoff observable under this fake clock too (a regression detector).
+	vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => { const controller = new AbortController(); setTimeout(() => controller.abort(new Error("deadline")), ms); return controller.signal; });
+	stall = "tools/call";
+	const result = adapter === "Pi" ? piGateway("discuss").execute({ tool: "hive_wait_for_run" }) : dispatchNativeMcp(env(), dir, { tool: "hive_wait_for_run" }, new AbortController().signal);
+	await vi.waitFor(() => expect(pending).toBe(1));
+	await vi.advanceTimersByTimeAsync(60_000); expect(pending).toBe(1);
+	releaseResponse!(); expect(await result).not.toHaveProperty("isError", true);
+	expect(calls).toEqual(["wait_for_run"]);
+});
+it.each(["Pi", "Claude"])("%s reports an unknown remote outcome after a sent mutation times out", async adapter => {
+	config({ url: "https://hive.invalid/mcp", timeout: 2, headers: { Authorization: "Bearer fixture" } }); control("build");
+	vi.useFakeTimers(); stall = "tools/call";
+	const result = adapter === "Pi" ? piGateway("build").execute({ tool: "hive_trigger_run" }) : dispatchNativeMcp(env(), dir, { tool: "hive_trigger_run" }, new AbortController().signal);
+	await vi.waitFor(() => expect(pending).toBe(1)); expect(calls).toEqual(["trigger_run"]);
+	await vi.advanceTimersByTimeAsync(2_001);
+	const response = await result;
+	expect(response).toHaveProperty("isError", true);
+	expect(JSON.stringify(response)).toContain("remote outcome unknown"); expect(JSON.stringify(response)).toContain("before retrying"); expect(pending).toBe(0);
+});
+it("does not mislabel an explicit MCP error response as an unknown outcome", async () => {
+	replyContent = [{ type: "text", text: "Explicit remote refusal" }]; replyIsError = true;
+	const result = await dispatchNativeMcp(env(), dir, { tool: "hive_get_run" }, new AbortController().signal);
+	expect(result).toHaveProperty("isError", true); expect(result.text).toContain("Explicit remote refusal");
+	expect(result.text).not.toContain("outcome unknown");
+});
+it("native progress notifications reset the configured idle budget", async () => {
+	config({ url: "https://hive.invalid/mcp", timeout: 2, headers: { Authorization: "Bearer fixture" } });
+	vi.useFakeTimers();
+	const fetcher = globalThis.fetch;
+	let stream: ReadableStreamDefaultController<Uint8Array> | undefined, request: { id: number; params: { _meta: { progressToken: number | string } } } | undefined;
+	vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+		if (init?.method === "POST" && JSON.parse(String(init.body)).method === "tools/call") {
+			request = JSON.parse(String(init.body));
+			return new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } }), { headers: { "Content-Type": "text/event-stream" } });
+		}
+		return fetcher(url, init);
+	});
+	const result = piGateway().execute({ tool: "hive_get_run" });
+	await vi.waitFor(() => expect(stream).toBeDefined());
+	const send = (data: unknown) => stream!.enqueue(new TextEncoder().encode(`event: message\ndata: ${JSON.stringify(data)}\n\n`));
+	await vi.advanceTimersByTimeAsync(1_000);
+	send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: request!.params._meta.progressToken, progress: 1 } });
+	await vi.advanceTimersByTimeAsync(1_500);
+	send({ jsonrpc: "2.0", id: request!.id, result: { content: replyContent } }); stream!.close();
+	expect(await result).not.toHaveProperty("isError", true);
 });

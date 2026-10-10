@@ -87,7 +87,10 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   explicit configured header. Calls are bounded, cancellable and closed after
   each request. Native synchronous credential helpers and OAuth refresh retain
   Pi's own timeout/cancellation behavior; the gateway cannot interrupt a blocking
-  helper. This does not bypass Claude's permission checks. Any internal error (bad `control.json`,
+  helper. Initialization is bounded by the configured native timeout; tool calls
+  honor its per-request idle budget (seconds, reset by progress notifications).
+  Failures after a tool RPC is sent report an unknown remote outcome; inspect
+  remote state before retrying. This does not bypass Claude's permission checks. Any internal error (bad `control.json`,
   malformed input) is a `deny` with the cause, since Claude treats a failing
   PreToolUse hook as "proceed". **Bugfix**: Edit/Write/MultiEdit/NotebookEdit are denied with
   opmode's refusal until the episode records a root cause; Bash stays open,
