@@ -8,12 +8,20 @@ import { literalWords } from "../toolhints/contextual.ts";
 export const DELIVERY_PROGRESS_ENTRY = "agenda-delivery-progress";
 export const ADVICE_GIVEN_ENTRY = "agenda-advice-given";
 
+/** Which milestone a command reached: a commit, a PR opening, or none. A PR anywhere in the chain wins. */
+export type MilestoneKind = "commit" | "pr";
+
 export function deliveryMilestone(command: string, output: string, succeeded = true): boolean {
-	if (command.length > 8192) return false;
+	return milestoneKind(command, output, succeeded) !== null;
+}
+
+export function milestoneKind(command: string, output: string, succeeded = true): MilestoneKind | null {
+	if (command.length > 8192) return null;
+	let found: MilestoneKind | null = null;
 	let pipeline = false;
 	const parsed = command.replace(/\d*[<>]&\s*(?:\d+|-)/g, "");
 	const segments = splitCommands(parsed, true, () => { pipeline = true; }).filter(segment => segment.trim());
-	if (pipeline) return false; // the shell exit code may belong to cat, not the creator
+	if (pipeline) return null; // the shell exit code may belong to cat, not the creator
 	// In an all-success && chain, successful tool completion also establishes
 	// the earlier creator succeeded. Do not infer that across ; or || recovery.
 	const syntax = command.trim().replace(/'[^']*'|"[^"\\]*"/g, "");
@@ -27,7 +35,7 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 			while (words[i] === "-C" || words[i] === "-c") i += 2;
 			// Success evidence, not merely an attempted commit (a later command
 			// may fail or recover with ||). Git's commit summary carries its SHA.
-			if (words[i] === "commit" && allSuccessChain && /^\[[^\]\n]+ [0-9a-f]{7,40}\]/m.test(output)) return true;
+			if (words[i] === "commit" && allSuccessChain && /^\[[^\]\n]+ [0-9a-f]{7,40}\]/m.test(output)) found = "commit";
 		}
 		if ((words[0] === "gh" && words[1] === "pr" && words[2] === "create") ||
 			(words[0] === "hive" && words[1] === "ship")) {
@@ -49,10 +57,10 @@ export function deliveryMilestone(command: string, output: string, succeeded = t
 			const createdUrl = /^(?:PR:\s*)?https?:\/\/[^\s/]+\/[^\s/]+\/[^\s/]+\/pull\/\d+\/?\s*$/m.exec(output);
 			const partialSuccess = createdUrl && allSuccessChain && index < segments.length - 1 &&
 				!/(?:already exists|permission denied|fatal:|error:|HTTP [45]\d\d|GraphQL)/i.test(output.slice(0, createdUrl.index));
-			if (url && (succeeded && (index === segments.length - 1 || allSuccessChain) || partialSuccess)) return true;
+			if (url && (succeeded && (index === segments.length - 1 || allSuccessChain) || partialSuccess)) return "pr";
 		}
 	}
-	return false;
+	return found;
 }
 
 /** Literal commit checkout, for quiet commits whose stdout has no summary. */
@@ -108,7 +116,17 @@ const committedHead = (cwd: string, sha: string): boolean => {
 	} catch { return false; }
 };
 
-export function registerDeliveryProgress(pi: ExtensionAPI, head = readHead): (entries: readonly unknown[]) => void {
+/** The checkpoint request a commit may be answering (checkpoint.ts). */
+export interface CheckpointCommits {
+	outstanding(): boolean;
+	taken(): void;
+}
+
+export function registerDeliveryProgress(
+	pi: ExtensionAPI,
+	head = readHead,
+	checkpoint?: CheckpointCommits,
+): (entries: readonly unknown[]) => void {
 	let seen = false;
 	const pending = new Map<string, { cwd: string; head: string | null }>();
 	pi.on("tool_call", (event, ctx) => {
@@ -129,7 +147,14 @@ export function registerDeliveryProgress(pi: ExtensionAPI, head = readHead): (en
 		// concrete summary/URL, rather than the whole chain's exit, decides.
 		const after = before ? head(before.cwd) : null;
 		const commit = before && after && after !== before.head && (!event.isError || committedHead(before.cwd, after));
-		if (!deliveryMilestone(command, output, !event.isError) && !commit) return;
+		const kind = milestoneKind(command, output, !event.isError) ?? (commit ? "commit" : null);
+		if (!kind) return;
+		// A commit the conductor asked for as a checkpoint is not the end of
+		// execution; a PR opening always is.
+		if (kind === "commit" && checkpoint?.outstanding()) {
+			checkpoint.taken();
+			return;
+		}
 		seen = true;
 		pi.appendEntry(DELIVERY_PROGRESS_ENTRY, { reached: true });
 	});

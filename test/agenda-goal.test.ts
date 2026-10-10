@@ -64,6 +64,11 @@ describe("buildJudgePrompt", () => {
 		expect(buildJudgePrompt("c", "short")).not.toContain("truncated");
 	});
 
+	it("ends on the strict output contract, ruling out a self-description", () => {
+		const prompt = buildJudgePrompt("c", "t");
+		expect(prompt.split("\n").slice(-3).join(" ")).toMatch(/entire reply is that single JSON object.*never a description of yourself/);
+	});
+
 	it("marks an empty transcript rather than sending a bare fence", () => {
 		expect(buildJudgePrompt("c", "")).toContain("(empty)");
 	});
@@ -270,6 +275,52 @@ describe("the fast judge and the confirmed met", () => {
 		runOneShot.mockResolvedValueOnce(notMet);
 		await policyFor(createGoal("g", "c", 1)).policy.decide(context)!.run();
 		expect(runOneShot).toHaveBeenCalledTimes(1);
+	});
+
+	const prose = reply("我是一个评估器，负责判断条件是否满足。");
+	const timedOut = { text: "", tokens: 0, exitCode: 1, timedOut: true, stderr: "" };
+
+	it("a non-JSON answer is asked again ONCE, with the parse error in the prompt, and the retry's verdict stands", async () => {
+		runOneShot.mockResolvedValueOnce(prose).mockResolvedValueOnce(notMet);
+		const h = policyFor(createGoal("g", "c", 1));
+		const out = await h.policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(2);
+		const retryPrompt = runOneShot.mock.calls[1][0].prompt as string;
+		expect(retryPrompt).toContain("YOUR PREVIOUS REPLY WAS REJECTED: evaluator did not return a JSON object");
+		expect(runOneShot.mock.calls[1][0].thinking).toBe(FAST_JUDGE_THINKING);
+		expect(out.inject).toContain("the PR is not open yet");
+		expect(h.current.ledger.judgeErrors).toBe(0);
+		expect(h.current.ledger.tokens).toBe(20); // both calls bill
+	});
+
+	it("two non-JSON answers are ONE judge error — no third call, no iteration spent", async () => {
+		runOneShot.mockResolvedValue(prose);
+		const h = policyFor(createGoal("g", "c", 1));
+		const out = await h.policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(2);
+		expect(h.current.ledger.judgeErrors).toBe(1);
+		expect(h.current.ledger.iterations).toBe(0);
+		expect(out.inject).toBeUndefined();
+	});
+
+	it("a timeout or a non-zero exit is not a format failure and is not asked again", async () => {
+		runOneShot.mockResolvedValueOnce(timedOut);
+		await policyFor(createGoal("g", "c", 1)).policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(1);
+		runOneShot.mockReset();
+		runOneShot.mockResolvedValueOnce({ text: "{", tokens: 0, exitCode: 2, timedOut: false, stderr: "no such model" });
+		await policyFor(createGoal("g", "c", 1)).policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(1);
+	});
+
+	it("a malformed CONFIRMATION of a fast met is asked again at the confirming level — four calls at most", async () => {
+		runOneShot.mockResolvedValueOnce(prose).mockResolvedValueOnce(met).mockResolvedValueOnce(prose).mockResolvedValueOnce(met);
+		const h = policyFor(createGoal("g", "c", 1));
+		await h.policy.decide(context)!.run();
+		expect(runOneShot).toHaveBeenCalledTimes(4);
+		expect(runOneShot.mock.calls[3][0].thinking).toBeUndefined();
+		expect(runOneShot.mock.calls[3][0].prompt).toContain("YOUR PREVIOUS REPLY WAS REJECTED");
+		expect(h.current.state).toBe("achieved");
 	});
 
 	it("PI_AGENDA_JUDGE_THINKING overrides the fast level, and empty restores the inherited default", () => {

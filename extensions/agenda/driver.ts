@@ -33,7 +33,7 @@ import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { walkChain } from "./chain.ts";
 import { emptyLedger, record, count, type LedgerState } from "./ledger.ts";
 import { ADVISE_INJECTION, ADVISE_LEDGER_ID } from "./conductor.ts";
-import { ADVICE_GIVEN_ENTRY, registerDeliveryProgress } from "./delivery-progress.ts";
+import { ADVICE_GIVEN_ENTRY, type CheckpointCommits, registerDeliveryProgress } from "./delivery-progress.ts";
 import { recapTranscript } from "./recap.ts";
 import type { MetricOutcome, Policy } from "./policy.ts";
 import { classifyHandback, type Handback, handbackClass } from "../hive-common/handback.ts";
@@ -63,6 +63,8 @@ export interface DriverOptions {
 	turnPolicies?: Policy[];
 	/** True inside a spawned worker, where automatic re-entry is never wanted. */
 	isWorker?: boolean;
+	/** An outstanding checkpoint request, so its commit is not read as delivery. */
+	checkpoint?: CheckpointCommits;
 }
 
 export interface DriverHandle {
@@ -174,7 +176,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	let heldCtx: ExtensionContext | null = null;
 	const settleClaims = trackSettleClaims(pi);
 	const ownWork = trackOwnWork(pi);
-	const rehydrateDeliveryProgress = registerDeliveryProgress(pi);
+	const rehydrateDeliveryProgress = registerDeliveryProgress(pi, undefined, options.checkpoint);
 	const adviceMessage = (entries: readonly unknown[]) => entries.some(entry => {
 		const message = entry as { type?: string; customType?: string; content?: unknown };
 		return message.type === "custom_message" && message.customType === "agenda" && message.content === ADVISE_INJECTION;
