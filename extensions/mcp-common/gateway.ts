@@ -36,12 +36,27 @@ export interface GatewayContext {
 	providerToken?: (provider: string) => Promise<string | undefined>;
 }
 
-/** Exact fixed-inventory dispatch, not lookup by a lossy registered name. */
+/** Raw dispatch: fixed inventories in restricted modes, configured identities otherwise. */
 export async function callGateway(input: Record<string, unknown>, context: GatewayContext, modules: GatewayRuntime): Promise<CallToolResult> {
-	const authorize = () => {
+	const loaded = modules.config.loadMcpConfig({ agentDir: context.agentDir, cwd: context.cwd, projectTrusted: context.projectTrusted });
+	if (loaded.errors.length) throw new Error(`MCP configuration errors: ${loaded.errors.join("; ")}`);
+	const unrestrictedRequest = (): Record<string, unknown> => {
+		if (typeof input.tool !== "string" || input.action !== undefined) throw new Error("MCP gateway requires one tool call, not discovery or authentication actions.");
+		const tool = input.tool;
+		const candidates = loaded.servers.flatMap(server => {
+			if (input.server !== undefined && input.server !== server.name) return [];
+			const prefix = [`mcp__${server.name}__`, `${server.name}_`].find(prefix => tool.startsWith(prefix));
+			const raw = prefix ? tool.slice(prefix.length) : "";
+			return raw ? [{ server: server.name, tool: `${server.name}_${raw}` }] : [];
+		});
+		if (candidates.length !== 1) throw new Error("MCP gateway requires an unambiguous configured server/tool identity; specify server explicitly.");
+		return { ...input, ...candidates[0] };
+	};
+	const authorize = (bound?: Record<string, unknown>) => {
 		const mode = context.currentMode?.() ?? context.mode;
+		if (mode === "build" || mode === "bugfix") return { allowed: true, updatedInput: bound ?? unrestrictedRequest() };
 		const classify = mode === "plan" ? classifyTool : mode === "discuss" ? classifyDiscussionTool : classifyOrchestrateTool;
-		const verdict = classify("mcp", input);
+		const verdict = classify("mcp", bound ?? input);
 		if (!verdict.allowed) throw new Error(verdict.reason);
 		return verdict;
 	};
@@ -51,8 +66,6 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 	if (typeof request.tool !== "string" || typeof request.server !== "string") throw new Error("Missing reviewed MCP dispatch identity.");
 	if (request.args !== undefined && (!request.args || typeof request.args !== "object" || Array.isArray(request.args))) throw new Error("MCP args must be an object.");
 	const rawTool = request.tool.slice(request.server.length + 1);
-	const loaded = modules.config.loadMcpConfig({ agentDir: context.agentDir, cwd: context.cwd, projectTrusted: context.projectTrusted });
-	if (loaded.errors.length) throw new Error(`MCP configuration errors: ${loaded.errors.join("; ")}`);
 	const entry = loaded.servers.find(candidate => candidate.name === request.server);
 	if (!entry || entry.config.enabled === false) throw new Error(`MCP server "${request.server}" is not configured and enabled in the trusted store.`);
 	if (modules.config.getMcpToolExposure(entry.config, rawTool) === "hidden") throw new Error(`MCP tool "${request.server}/${rawTool}" is hidden in the trusted configuration.`);
@@ -79,7 +92,7 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 				// every 401 retry. Check immediately at the actual egress boundary.
 				fetch: (url, init) => {
 					if (init?.method === "POST" && typeof init.body === "string" && JSON.parse(init.body).method === "tools/call") {
-						signal.throwIfAborted(); authorize();
+						signal.throwIfAborted(); authorize(request);
 					}
 					return nativeFetch(url, init);
 				},
@@ -100,7 +113,7 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 	try {
 		const client = await connection.getClient();
 		signal.throwIfAborted();
-		authorize(); // A posture may tighten while initialization/authentication waits.
+		authorize(request); // Recheck the actual pinned dispatch, not the mutable caller envelope.
 		if (!connection.tools.some(tool => tool.name === rawTool)) throw new Error(`MCP server "${request.server}" does not advertise exact raw tool "${rawTool}".`);
 		return await client.callTool(rawTool, (request.args ?? {}) as Record<string, unknown>, { signal, timeoutMs: connection.timeoutMs });
 	} finally {

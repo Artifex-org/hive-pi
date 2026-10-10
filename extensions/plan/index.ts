@@ -757,9 +757,9 @@ export default function (pi: ExtensionAPI) {
 			// inactive — agenda's consent-gated `orchestrate` re-appeared on every
 			// plan-mode exit until this read the live set.
 			if (toolsBeforePlanMode === null) toolsBeforePlanMode = pi.getActiveTools();
-			// Classify availability with an empty discovery envelope for `mcp`;
-			// the deny hook still classifies each real request and its tool field.
-			const permitted = pi.getActiveTools().filter((name) => classifyTool(name, {}).allowed);
+			// Visibility is not call admission: the gateway needs a real tool
+			// envelope, which the deny hook and handler independently validate.
+			const permitted = pi.getActiveTools().filter((name) => name === "mcp" || classifyTool(name, {}).allowed);
 			pi.setActiveTools([...new Set([...permitted, ...PLAN_TOOLS])]);
 		} catch {
 			/* tool introspection unavailable; the deny hook still enforces */

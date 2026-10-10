@@ -42,7 +42,7 @@ beforeEach(() => {
 		}
 		if (message.id === undefined) return new Response(null, { status: 202 });
 		const result = message.method === "initialize" ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
-			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "steer_agent"].map(name => ({ name, inputSchema: { type: "object" } })) }
+			: message.method === "tools/list" ? { tools: ["get_run", "get-run", "get_issue", "steer_agent", "trigger_run"].map(name => ({ name, inputSchema: { type: "object" } })) }
 			: { content: [{ type: "text", text: "live-read" }] };
 		return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { headers: { "Content-Type": "application/json", "Mcp-Session-Id": "fixture" } });
 	});
@@ -136,8 +136,10 @@ it("Claude rechecks control state after asynchronous initialization", async () =
 		if (init?.method === "POST" && JSON.parse(String(init.body)).method === "initialize") await new Promise<void>(resolve => { release = resolve; });
 		return fetcher(url, init);
 	});
-	const result = dispatchNativeMcp(env(), dir, { tool: "hive_steer_agent" }, new AbortController().signal);
+	const input = { tool: "hive_steer_agent" };
+	const result = dispatchNativeMcp(env(), dir, input, new AbortController().signal);
 	await vi.waitFor(() => expect(release).toBeDefined());
+	input.tool = "hive_get_run"; // A safe-looking caller update cannot authorize the pinned coordination RPC.
 	control("plan"); release!();
 	expect(await result).toHaveProperty("isError", true); expect(calls).toEqual([]);
 });
@@ -201,4 +203,31 @@ it("real build-mode plan_ready cancels already queued coordination before approv
 	await Promise.resolve();
 	expect(await queued).toHaveProperty("isError", true); expect(calls).toEqual([]);
 	pi.api.events.emit(PLAN_CONTROL_CHANNEL, { action: "approve" }); await approval;
+});
+
+it.each(["build", "bugfix"])("preserves unrestricted %s MCP dispatch in both shipped gateways", async mode => {
+	control(mode);
+	expect(await piGateway(mode).execute({ tool: "hive_trigger_run" })).not.toHaveProperty("isError", true);
+	expect(await dispatchNativeMcp(env(), dir, { tool: "mcp__hive__trigger_run" }, new AbortController().signal)).not.toHaveProperty("isError", true);
+	expect(calls).toEqual(["trigger_run", "trigger_run"]);
+	control("plan");
+	expect(await dispatchNativeMcp(env(), dir, { tool: "hive_trigger_run" }, new AbortController().signal)).toHaveProperty("isError", true);
+	expect(calls).toHaveLength(2);
+});
+it("rejects unsupported discovery and UI envelopes through the shipped registration", async () => {
+	for (const input of [{ search: "hive", includeSchemas: true }, { action: "ui-messages" }, {}]) {
+		expect(await piGateway().execute(input)).toHaveProperty("isError", true);
+		expect(await dispatchNativeMcp(env(), dir, input, new AbortController().signal)).toHaveProperty("isError", true);
+	}
+	expect(calls).toEqual([]); expect(headers).toEqual([]);
+});
+it("requires an explicit server for ambiguous unrestricted raw boundaries", async () => {
+	const data = JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8"));
+	data.mcpServers.hive_get = { url: "https://collider.invalid/mcp" };
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify(data));
+	const { execute } = piGateway("build");
+	expect(await execute({ tool: "hive_get_run" })).toHaveProperty("isError", true);
+	expect(calls).toEqual([]);
+	expect(await execute({ tool: "hive_get_run", server: "hive" })).not.toHaveProperty("isError", true);
+	expect(calls).toEqual(["get_run"]);
 });

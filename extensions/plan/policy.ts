@@ -174,18 +174,6 @@ function directMcpVerdict(name: string): PlanToolVerdict {
 	};
 }
 
-const MCP_DISCOVERY_KEYS = new Set([
-	"connect",
-	"describe",
-	"instructions",
-	"search",
-	"regex",
-	"includeSchemas",
-	"limit",
-	"offset",
-	"server",
-]);
-
 export function classifyTool(name: string, input?: unknown): PlanToolVerdict {
 	if (name === "mcp") return classifyMcpRequest(input, "Plan", isReviewedMcpRead);
 	if (isReviewedMcpRead(name)) return directMcpVerdict(name);
@@ -204,7 +192,7 @@ export function classifyTool(name: string, input?: unknown): PlanToolVerdict {
 	};
 }
 
-/** Single-call MCP gateway, matching the adapter's dispatch order. */
+/** Single-call production MCP gateway; no discovery or authentication actions. */
 function classifyMcpRequest(input: unknown, posture: string, permits: (name: string) => boolean): PlanToolVerdict {
 	if (!input || typeof input !== "object" || Array.isArray(input)) {
 		return { allowed: false, reason: `${posture} mode requires a structured MCP request.` };
@@ -212,9 +200,7 @@ function classifyMcpRequest(input: unknown, posture: string, permits: (name: str
 	const params = input as { tool?: unknown; action?: unknown; server?: unknown };
 	// action wins over tool: an auth action must not smuggle past a safe name.
 	if (params.action !== undefined) {
-		return params.action === "ui-messages"
-			? { allowed: true }
-			: { allowed: false, reason: `${posture} mode permits MCP discovery and UI messages, not authentication actions.` };
+		return { allowed: false, reason: `${posture} mode permits only single MCP tool calls, not discovery, UI or authentication actions.` };
 	}
 	if (params.tool !== undefined) {
 		const tool = typeof params.tool === "string" ? params.tool : "";
@@ -237,9 +223,7 @@ function classifyMcpRequest(input: unknown, posture: string, permits: (name: str
 				`${posture} mode permits only reviewed read-only MCP tools; \`${String(params.tool)}\` is not one of them.`,
 		};
 	}
-	return Object.keys(params).every((key) => MCP_DISCOVERY_KEYS.has(key))
-		? { allowed: true }
-		: { allowed: false, reason: `${posture} mode permits only MCP discovery or reviewed tools.` };
+	return { allowed: false, reason: `${posture} mode requires a reviewed single MCP tool call.` };
 }
 
 function isDiscussionMcpRead(name: string): boolean {

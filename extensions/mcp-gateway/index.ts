@@ -28,7 +28,7 @@ export default function (pi: ExtensionAPI) {
 	registerGuardedTool(pi, {
 		name: "mcp", label: "MCP gateway",
 		capability: { executes: true, writesExemptBecause: "Native authentication may run trusted configured credential helpers and update its OAuth store; HTTP RPC uses the exact mode policy, stdio servers are never spawned, and result spills are native temporary artifacts, not repository content." },
-		description: "Call one reviewed Hive/Linear tool by canonical or native spelling, with raw server/tool binding. HTTP only; OAuth sign-in remains in /mcp. Direct MCP calls are denied in restricted modes.",
+		description: "Call one configured MCP tool by canonical or native spelling, with raw server/tool binding. Restricted modes allow only reviewed reads or fixed coordination. HTTP only; OAuth sign-in remains in Pi /mcp. Discovery/auth actions are unsupported.",
 		parameters: Type.Object({ tool: Type.String(), server: Type.Optional(Type.String()), args: Type.Optional(Type.Record(Type.String(), Type.Unknown())) }),
 		async execute(_id, input, signal, _onUpdate, ctx) {
 			const controller = new AbortController(); controllers.add(controller);

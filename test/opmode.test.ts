@@ -151,11 +151,11 @@ describe("the discuss gate", () => {
 		}
 	});
 
-	it("allows discovery but gates profile cards, MCP scripts and mutations", () => {
-		// Profile metadata does not grant calls. Discovery and local rendering remain available.
+	it("rejects unsupported discovery, profile cards, MCP scripts and mutations", () => {
+		// Profile metadata does not grant calls. Local rendering remains available.
 		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha__read_chart", "mcp__alpha__deploy_history"] });
 		try {
-			expect(classifyDiscussionTool("mcp", { search: "chart", server: "alpha" }).allowed).toBe(true);
+			expect(classifyDiscussionTool("mcp", { search: "chart", server: "alpha" }).allowed).toBe(false);
 			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_chart", server: "alpha", args: { hours: 24 } }).allowed).toBe(false);
 			expect(classifyDiscussionTool("mcp", { tool: "alpha_deploy_history", server: "alpha", args: { stack: "prod" } }).allowed).toBe(false);
 			expect(classifyDiscussionTool("render_chart", {}).allowed).toBe(true);
@@ -176,7 +176,7 @@ describe("the discuss gate", () => {
 		setHouseProfileForTest({});
 		try {
 			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_chart", args: {} }).allowed).toBe(false);
-			expect(classifyDiscussionTool("mcp", { search: "chart" }).allowed).toBe(true);
+			expect(classifyDiscussionTool("mcp", { search: "chart" }).allowed).toBe(false);
 		} finally {
 			setHouseProfileForTest(null);
 		}

@@ -91,8 +91,8 @@ describe("reviewed live research in read-only modes", () => {
 			for (const input of [undefined, null, [], "hive_get_run", { tool: 1 }, { tool: null }, { tools: ["hive_get_run"] }, { tool: "hive_get_run", action: "login" }, { tool: "hive_get_run", server: "hive_get" }, { tool: "hive_get_run", server: null }, { tool: "mcp__linear__get_issue", server: "hive" }]) {
 				expect(classify("mcp", input).allowed, JSON.stringify(input)).toBe(false);
 			}
-			expect(classify("mcp", { search: "hive", includeSchemas: true }).allowed).toBe(true);
-			expect(classify("mcp", { action: "ui-messages" }).allowed).toBe(true);
+			expect(classify("mcp", { search: "hive", includeSchemas: true }).allowed).toBe(false);
+			expect(classify("mcp", { action: "ui-messages" }).allowed).toBe(false);
 		}
 	});
 

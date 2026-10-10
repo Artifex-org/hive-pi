@@ -125,9 +125,9 @@ export default function (pi: ExtensionAPI) {
 			// resurrects tools other extensions keep deliberately inactive — the bug
 			// plan/index.ts hit with agenda's consent-gated `orchestrate`.
 			if (toolsBeforeMode === null) toolsBeforeMode = pi.getActiveTools();
-			// Empty MCP parameters mean a read-only status query and let the gateway
-			// remain visible; actual calls are classified again with their input.
-			const permitted = pi.getActiveTools().filter((name) => toolVerdict(name, {}).allowed);
+			// Keep the registered gateway visible without admitting an empty
+			// envelope. Real calls still pass both the hook and raw handler gate.
+			const permitted = pi.getActiveTools().filter((name) => name === "mcp" || toolVerdict(name, {}).allowed);
 			pi.setActiveTools([...new Set([...permitted, ...OP_MODE_TOOLS])]);
 		} catch {
 			/* tool introspection unavailable; the deny hook still enforces */
