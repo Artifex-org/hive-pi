@@ -140,7 +140,9 @@ export function ghAttachlessSegment(command: string | undefined): string | null 
  * `pr create` and a later `pr comment 5` are distinct shapes worth nudging.
  */
 export function commandShapeKey(segment: string): string {
-	const m = /gh(?:\s+--\S+(?:=\S+)?)*\s+(pr|issue)\s+(create|edit|comment)(?:\s+(\d+))?/.exec(segment);
+	// `--\S+` already covers `--flag=value`; a separate `(?:=\S+)?` would let
+	// every `--a=b` split two ways, 2^n for n flags.
+	const m = /gh(?:\s+--\S+)*\s+(pr|issue)\s+(create|edit|comment)(?:\s+(\d+))?/.exec(segment);
 	if (!m) return segment.trim();
 	return `gh ${m[1]} ${m[2]}${m[3] ? ` ${m[3]}` : ""}`;
 }

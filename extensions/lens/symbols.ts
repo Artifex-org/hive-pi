@@ -294,7 +294,9 @@ function pythonEnd(lines: string[], start: number): number {
 
 /** Net bracket depth of one line, strings and comments removed. */
 function bracketDepth(line: string): number {
-	const code = line.replace(/(["'])(?:\\.|(?!\1).)*\1/g, "").replace(/#.*$/, "");
+	// A backslash is only ever an escape: if `.` could also take it, a run of
+	// n backslashes in an unterminated string backtracks 2^(n/2) ways.
+	const code = line.replace(/(["'])(?:\\.|(?!\1)[^\\])*\1/g, "").replace(/#.*$/, "");
 	let depth = 0;
 	for (const ch of code) {
 		if (ch === "(" || ch === "[" || ch === "{") depth += 1;

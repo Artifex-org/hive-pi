@@ -38,7 +38,10 @@ export function deliveryTargets(command: string, cwd: string): (string | null)[]
 		if (!segment.trim()) continue;
 		// Strip assignment WORDS, including quoted values with spaces. Ordinary
 		// process settings do not change the reviewed repo; Git/gh selectors do.
-		const cleaned = segment.replace(/^\s*(?:[A-Za-z_]\w*=(?:[^\s'"\\]+|'[^']*'|"[^"\\]*")*\s+)*/, "");
+		// The unquoted branch takes ONE character: `(?:[^\s…]+|…)*` can split an
+		// N-character run 2^(N-1) ways, and a value not followed by whitespace
+		// (`src=/a/long/path; git …`) tries them all on the main thread.
+		const cleaned = segment.replace(/^\s*(?:[A-Za-z_]\w*=(?:[^\s'"\\]|'[^']*'|"[^"\\]*")*\s+)*/, "");
 		// An unquoted substitution with spaces cannot be stripped as literal
 		// assignment words. Recognize the delivery tail, but do not guess it.
 		if (/^\s*[A-Za-z_]\w*=/.test(segment) && !/^(?:git|gh|hive)\s/.test(cleaned) &&
