@@ -77,6 +77,34 @@ describe("delegate.ts schema requests", () => {
 		expect(launch.calls()[0].input).toContain("export const reviewedContent");
 		expect(outcome.results[0].reviewFingerprint).toBe(expected);
 	});
+	it("hands a review diff larger than one argv argument to the worker on stdin", async () => {
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: launch.root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		git("init", "-b", "main"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
+		git("add", "."); git("commit", "--allow-empty", "-m", "base"); git("update-ref", "refs/remotes/origin/main", "HEAD"); git("checkout", "-b", "work");
+		// ~4,700 staged lines, ~190 KiB of diff: over Linux's 128 KiB MAX_ARG_STRLEN,
+		// under the 256 KiB delivery-diff budget, so the whole diff is handed over.
+		const lines = Array.from({ length: 4_700 }, (_, i) => `export const reviewedLine${i} = "${"x".repeat(12)}";`);
+		writeFileSync(join(launch.root, "big.ts"), `${lines.join("\n")}\n`); git("add", "big.ts");
+		const diff = captureDeliveryDiff(launch.root)!;
+		expect(Buffer.byteLength(diff.text)).toBeGreaterThan(128 * 1024);
+		const h = host(); h.agents[0] = { ...h.agents[0], name: "code-reviewer" };
+		const outcome = await runSingleDelegation({ agent: "code-reviewer", task: "Review the change", model: "zai/glm-low" }, "off", h);
+		expect(outcome.isError, outcome.text).toBeUndefined();
+		const call = launch.calls()[0];
+		expect(call.stdin).toContain("Task: ");
+		expect(call.stdin).toContain(lines[0]);
+		expect(call.stdin).toContain(lines[lines.length - 1]);
+		expect(call.argv.join(" ")).not.toContain("reviewedLine");
+		expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(diff));
+	});
+	it("a worker that exits without reading its task fails through its exit, not an EPIPE crash", async () => {
+		const quitter = join(launch.root, "quitter.sh");
+		writeFileSync(quitter, "#!/bin/sh\nexit 3\n", { mode: 0o755 });
+		process.env.PI_HOUSE_PI_BIN = quitter;
+		const outcome = await runSingleDelegation({ agent: "research", task: `count things ${"y".repeat(512 * 1024)}`, model: "zai/glm-low" }, "off", host());
+		expect(outcome.isError).toBe(true);
+		expect(outcome.results[0].exitCode).toBe(3);
+	});
 	it("without a request, the worker sees no schema instruction", async () => {
 		const outcome = await runSingleDelegation({ agent: "research", task: "count things", model: "zai/glm-low" }, "off", host());
 		expect(outcome.results[0].structured).toBeUndefined();

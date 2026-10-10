@@ -669,7 +669,12 @@ export async function runSingleAgent(
 				effectiveTask += "\nComplete merge-base diff unavailable. Review the requested scope paths, but report delivery scope as unverified; do not invent a change inventory.";
 			}
 		}
-		args.push(`Task: ${effectiveTask}`);
+		// The task goes in on STDIN, never argv, as runOneShot's prompt does
+		// (agenda/spawn.ts). A review task carries the whole delivery diff, up to
+		// 256 KiB, and Linux refuses any single argument over 128 KiB
+		// (MAX_ARG_STRLEN): a ~4,700-line staged change failed `spawn E2BIG` and
+		// could not be reviewed at all. pi reads piped stdin as the message.
+		const prompt = `Task: ${effectiveTask}`;
 		let wasAborted = false;
 		emitUpdate();
 
@@ -684,7 +689,7 @@ export async function runSingleAgent(
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: executionCwd,
 				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 				// A subagent IS a worker: it must not run agenda policies, must not
 				// re-enter its own loop, and must not inherit the interactive
 				// session's context pack (~1,134 tokens it cannot use).
@@ -706,6 +711,13 @@ export async function runSingleAgent(
 				...tree,
 			});
 			trackTree(proc, tree.detached);
+			// A worker that dies before reading its task closes the pipe (EPIPE):
+			// that is the worker's failure, reported through its exit and stderr,
+			// not an unhandled error event here.
+			proc.stdin.on("error", (error) => {
+				currentResult.stderr += `[stdin] ${String(error)}\n`;
+			});
+			proc.stdin.end(prompt);
 			let buffer = "";
 			let closed = false;
 			let seenWorkerEvent = false;
