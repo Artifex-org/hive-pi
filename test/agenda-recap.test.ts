@@ -187,6 +187,31 @@ describe("the settle observer", () => {
 		expect((statusEntries(fake)[0].data as { taskState: string }).taskState).toBe("needs_input");
 	});
 
+	it("a session whose cut-off retries were stopped settles as needs_input, saying why", async () => {
+		vi.useFakeTimers();
+		try {
+			const fake = createFakePi();
+			agenda(fake.api);
+			let aborted = 0;
+			const cutOff = { message: { role: "assistant", stopReason: "error", errorMessage: "terminated", content: [] } };
+			for (let i = 0; i < 2; i++) {
+				await fake.emit({ type: "turn_start" });
+				vi.advanceTimersByTime(15 * 60_000);
+				await fake.emit(
+					{ type: "turn_end", outcome: "error", message: cutOff.message, toolResults: [], entries: [] },
+					{ onAbort: () => aborted++ },
+				);
+			}
+			expect(aborted).toBe(1);
+			await settle(fake, [{ message: { role: "user", content: "go" } }, cutOff]);
+			const status = statusEntries(fake).at(-1)!.data as { taskState: string; recap: string };
+			expect(status.taskState).toBe("needs_input");
+			expect(status.recap).toMatch(/^Needs operator: provider cut off 2 turns in a row \(15m, 15m\)/);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("revisions increment across settles", async () => {
 		const fake = createFakePi();
 		agenda(fake.api);

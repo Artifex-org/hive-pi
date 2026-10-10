@@ -21,6 +21,8 @@
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CHECKPOINT_RULE, createCheckpoint } from "./checkpoint.ts";
+import { installCutOffGuard } from "./cutoff.ts";
 import { installDriver } from "./driver.ts";
 import {
 	ADVISOR_WATCH_EVERY,
@@ -328,6 +330,21 @@ export default function (pi: ExtensionAPI) {
 	};
 	const conductorPolicy = createConductorPolicy(conductorHooks);
 	const conductorAdvicePolicy = createConductorAdvicePolicy(conductorHooks);
+	// Checkpoint commits on long uncommitted stretches of execute (checkpoint.ts).
+	// A turn policy: a multi-hour execute phase may never settle.
+	const checkpoint = createCheckpoint({ enabled: () => conductorEnabled, stage: () => conductor?.stage ?? null });
+	const readBranch = (ctx: ExtensionContext): readonly unknown[] | null => {
+		try {
+			return branchEntries(ctx);
+		} catch {
+			return null; // session replaced — nothing to reconcile against
+		}
+	};
+	pi.on("turn_start", (_event, ctx) => {
+		const branch = readBranch(ctx);
+		if (branch) checkpoint.observe(branch);
+	});
+	pi.on("agent_settled", (_event, ctx) => checkpoint.settled(readBranch(ctx) ?? []));
 
 	/**
 	 * Gate-retry stamps (HIV-1229): after a red gate, the gate is skipped until
@@ -403,8 +420,9 @@ export default function (pi: ExtensionAPI) {
 	// test/agenda-conductor.test.ts.
 	const driver = installDriver(pi, {
 		policies: [gatePolicy, askPolicy, driftPolicy, advisorWatchPolicy, conductorAdvicePolicy, goalPolicy, conductorPolicy, loopPolicy],
-		turnPolicies: [conductorAdvicePolicy],
+		turnPolicies: [conductorAdvicePolicy, checkpoint.policy],
 		isWorker: IS_WORKER,
+		checkpoint,
 	});
 
 	// Rehydrate from persisted entries. Counters are RESTORED, not zeroed: we
@@ -480,7 +498,11 @@ export default function (pi: ExtensionAPI) {
 	 * hive-remote reads the prose from the entries under its own consent.
 	 */
 	const recapWork = trackOwnWork(pi);
-	const liveRecap = (asksQuestion: boolean) => activeWorkRecap(
+	// A provider that cut off turn after turn until the retries were stopped
+	// (cutoff.ts) leaves a session that needs a person — said here, where Hive's
+	// attention reads `needs_input`, rather than as a recap of the dead turns.
+	const cutOff = IS_WORKER ? null : installCutOffGuard(pi);
+	const liveRecap = (asksQuestion: boolean) => cutOff?.stopped() ?? activeWorkRecap(
 		goal?.state === "active" ? goal.condition : null,
 		recapWork.descriptions?.() ?? [],
 		asksQuestion,
@@ -522,7 +544,7 @@ export default function (pi: ExtensionAPI) {
 			if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
 			const branch = ctx.sessionManager.getBranch() as readonly unknown[];
 			// Any hand-back to a person — not only a trailing `?` — is "needs input".
-			asksQuestion = classifyHandback(branch).kind === "human";
+			asksQuestion = classifyHandback(branch).kind === "human" || Boolean(cutOff?.stopped());
 			transcript = recapTranscript(branch);
 		} catch {
 			return; // ctx already stale — nothing to classify
@@ -844,6 +866,7 @@ export default function (pi: ExtensionAPI) {
 					"Fan out over ITEMS, never phases of one edit; finish wide waves with a barrier and one orchestration-reconciler pipeline stage."
 				: "Delegate one bounded step with `subagent`; use its parallel mode when several read-only questions are already independent.",
 			"Keep the workflow's worker children and supervise/resize/collect steps current. Verify reconciled findings before relying on them.",
+			...(checkpoint.active() ? [CHECKPOINT_RULE] : []),
 		].join("\n");
 		try {
 			pi.sendMessage(

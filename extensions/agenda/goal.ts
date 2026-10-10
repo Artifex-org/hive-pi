@@ -135,9 +135,51 @@ export function buildJudgePrompt(condition: string, transcript: string): string 
 		"Do not accept intent, partial progress, or a plausible final answer as proof of completion.",
 		"When ok is false, the reason is read by the worker as its next instruction, so",
 		"state the specific thing still outstanding.",
+		...JSON_ONLY_CONTRACT,
 	]
 		.filter((line) => line !== "")
 		.join("\n");
+}
+
+/**
+ * The output contract, stated last so it is the final thing the judge reads.
+ *
+ * Measured 2026-10-10 (session 8bbc4b22): a judge answered with a prose
+ * self-description of its role, in Chinese, instead of the object — a judge
+ * error that told us nothing about the goal. The earlier "ONE JSON object and
+ * nothing else" line did not rule out a preamble or a description of the task
+ * explicitly; this does.
+ */
+const JSON_ONLY_CONTRACT = [
+	"OUTPUT FORMAT — strict: your entire reply is that single JSON object. It starts with { and ends with }.",
+	"No text before or after it, no greeting, and never a description of yourself, your role or this task.",
+	"Prose is not an answer: a reply without the object is rejected and asked again.",
+];
+
+/**
+ * The prompt for the ONE retry after an answer that did not parse.
+ *
+ * The parse error rides along, because the most useful thing a judge that just
+ * answered in prose can be told is what was wrong with it. One retry only: a
+ * judge that fails the format twice is broken for this prompt, and the existing
+ * judge-error path (three pause the goal) is where that belongs. So a pass is
+ * at most two calls, and an evaluation (fast pass plus a confirming pass of a
+ * fast "met") at most four.
+ */
+export function buildJudgeRetryPrompt(condition: string, transcript: string, parseError: string): string {
+	return [
+		buildJudgePrompt(condition, transcript),
+		"",
+		`YOUR PREVIOUS REPLY WAS REJECTED: ${parseError}`,
+		'Answer again with ONLY the JSON object: {"ok": <boolean>, "reason": "<one sentence>", "pending": <boolean>, "blocked": <boolean>}.',
+	].join("\n");
+}
+
+/** Why a clean judge exit is still not a verdict, or null when it parsed (or never ran cleanly). */
+function parseFailureOf(result: OneShotResult): string | null {
+	if (result.timedOut || result.exitCode !== 0) return null;
+	const parsed = parseVerdict(result.text);
+	return parsed.kind === "error" ? parsed.message : null;
 }
 
 /** Injected text for an outcome, or null when nothing should be said. */
@@ -230,9 +272,9 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 				run: async () => {
 					const startedAt = Date.now();
 					const spawnJudge = hooks.oneShot ?? runOneShot;
-					const judge = (thinking: string | undefined) =>
+					const ask = (thinking: string | undefined, prompt: string) =>
 						spawnJudge({
-							prompt: buildJudgePrompt(goal.condition, transcript),
+							prompt,
 							model: hooks.evaluatorModel(),
 							cwd: process.cwd(),
 							timeoutMs: JUDGE_TIMEOUT_MS,
@@ -241,6 +283,16 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 							env: { PI_AGENDA_WORKER: "1" },
 							...(thinking ? { thinking } : {}),
 						});
+					// One pass of the judge: an answer that does not parse is asked
+					// again ONCE, with the parse error in the prompt. Both calls bill.
+					const judge = async (thinking: string | undefined): Promise<OneShotResult> => {
+						const first = await ask(thinking, buildJudgePrompt(goal.condition, transcript));
+						const failure = parseFailureOf(first);
+						// A cancelled run discards the verdict anyway; do not spawn a second call for it.
+						if (failure === null || context.signal?.aborted) return first;
+						const retry = await ask(thinking, buildJudgeRetryPrompt(goal.condition, transcript, failure));
+						return { ...retry, tokens: first.tokens + retry.tokens };
+					};
 
 					const fast = fastJudgeThinking();
 					let result = await judge(fast);
