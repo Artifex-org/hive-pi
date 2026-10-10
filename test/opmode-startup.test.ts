@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createFakePi, scopedExtensionApi, type FakePi } from "./fake-pi.ts";
 import { rehydratePlan } from "../extensions/plan/state.ts";
+import { READ_ONLY_MCP_TOOLS } from "../extensions/plan/policy.ts";
+import { nativeMcpToolName } from "../extensions/mcp-common/names.ts";
 import opmode from "../extensions/opmode/index.ts";
 import plan from "../extensions/plan/index.ts";
 import agenda from "../extensions/agenda/index.ts";
@@ -53,8 +55,8 @@ afterEach(async () => {
 	vi.useRealTimers();
 });
 
-async function boot(planFirst: boolean) {
-	for (const name of ["read", "write", "edit", "bash"]) fake.api.registerTool({
+async function boot(planFirst: boolean, extraTools: string[] = []) {
+	for (const name of ["read", "write", "edit", "bash", ...extraTools]) fake.api.registerTool({
 		name, label: name, description: name, parameters: {}, execute: async () => ({ content: [], details: {} }),
 	} as never);
 	// agenda/brief/hive-remote precede opmode/plan in normal directory discovery.
@@ -84,6 +86,55 @@ function execute(name: string, params: unknown) {
 }
 
 describe("Hive-launched plan startup", () => {
+	it("keeps live research visible at startup and gates direct and gateway calls", async () => {
+		const names = [...READ_ONLY_MCP_TOOLS].flatMap(name => {
+			const separator = name.indexOf("_");
+			return [name, nativeMcpToolName(name.slice(0, separator), name.slice(separator + 1))];
+		});
+		await boot(false, ["mcp", ...names]);
+		for (const name of names) {
+			expect(fake.activeTools, name).not.toContain(name);
+			expect(await isBlocked(name, {}), name).toBe(true);
+			expect(await isBlocked("mcp", { tool: name, args: {} }), name).toBe(false);
+		}
+		expect(fake.activeTools).toContain("mcp");
+		expect(await isBlocked("session_context", { goal: "Research", approach: "Read live state" })).toBe(false);
+		expect(await isBlocked("mcp", { tool: "hive_cancel_run" })).toBe(true);
+		expect(await isBlocked("mcp__hive__new_unknown_tool", {})).toBe(true);
+		expect(await isBlocked()).toBe(true);
+	});
+	it("session_context persists and syncs only this session's kickoff metadata in plan mode", async () => {
+		const requests: Array<{ path: string; method: string; body: Record<string, unknown> | undefined }> = [];
+		let identity = { title: "Research", description: "", description_provisional: false, identity_revision: 0 };
+		vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+			const path = String(url).replace(`${URL_BASE}/api/v1`, "");
+			const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+			requests.push({ path, method: init?.method ?? "GET", body });
+			if (path.endsWith("/identity")) identity = {
+				title: body.title ?? identity.title, description: body.description,
+				description_provisional: body.provisional, identity_revision: body.revision,
+			};
+			const response = path.includes("/by-run/") ? { id: "sess-1" }
+				: path.endsWith("/conversation") ? { ...identity, session_id: "sess-1", last_seq: 0, can_report_identity: true }
+				: path.endsWith("/identity") ? identity
+				: path.endsWith("/commands/claim") ? { items: [] } : {};
+			return new Response(JSON.stringify(response), { status: 200, headers: { "Content-Type": "application/json" } });
+		});
+		await boot(false);
+		const before = requests.length;
+		const entryCount = fake.entries.length;
+		expect(await isBlocked("session_context", { goal: "Research", approach: "Read live state" })).toBe(false);
+		await execute("session_context", { goal: "Research", approach: "Read live state" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(requests.slice(before).filter(r => r.method !== "GET")).toEqual([{
+			path: "/agent-sessions/sess-1/identity", method: "PUT",
+			body: { revision: 1, title: "Session", description: "Goal: Research. Approach: Read live state", provisional: false, source: "initial" },
+		}]);
+		expect(fake.entries.slice(entryCount).every(e => e.customType === "session-identity" || e.customType === "session-identity-sync")).toBe(true);
+		expect(identity.description).toBe("Goal: Research. Approach: Read live state");
+		expect(await isBlocked()).toBe(true);
+	});
+
 	it.each([false, true])("denies writes at first turn, survives brief/conductor, and reports plan first (planFirst=%s)", async planFirst => {
 		await boot(planFirst);
 		expect(await isBlocked()).toBe(true);

@@ -100,6 +100,12 @@ describe("a presented plan in a launched (build-mode) session", () => {
 		await Promise.resolve();
 
 		expect(await writeIsBlocked(fake)).toBe(true);
+		// Build mode is still guarded while approval is pending. Bind the same
+		// gateway identity here as in explicit plan mode, not just its name.
+		const input = { tool: "mcp__hive__get_run", args: {} };
+		const verdicts = await fake.emit({ type: "tool_call", toolName: "mcp", input });
+		expect(verdicts.some(verdict => (verdict as { block?: boolean } | undefined)?.block)).toBe(false);
+		expect(input).toEqual({ tool: "hive_get_run", server: "hive", args: {} });
 
 		fake.api.events.emit(PLAN_CONTROL_CHANNEL, { action: "approve" });
 		const result = await pending;

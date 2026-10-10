@@ -30,9 +30,10 @@ import { serve, type ToolDefinition, type ToolResult, type ToolServer } from "./
 import { BackgroundJobs, leasedModelEnv, runSubagentTool, subagentToolDefinition } from "./subagent-tool.ts";
 import { BROWSER_TOOLS, BrowserTools } from "./browser-tools.ts";
 import { BACKGROUND_CANCEL_TOOL, cancelBackgroundJob, startWatchRun, WATCH_RUN_TOOL } from "./watch-run-tool.ts";
+import { dispatchNativeMcp } from "./native-gateway.ts";
 
 const SERVER_VERSION = "0.1.0";
-const TOOL_NAMES = new Set(["subagent", "advisor", "goal_set", "goal_status", "goal_clear", "quality_gate", "bugfix_evidence", "bugfix_root_cause", "hive_watch_run", "background_cancel"]);
+const TOOL_NAMES = new Set(["mcp", "subagent", "advisor", "goal_set", "goal_status", "goal_clear", "quality_gate", "bugfix_evidence", "bugfix_root_cause", "hive_watch_run", "background_cancel"]);
 
 export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream, output: NodeJS.WritableStream, log: (line: string) => void): Promise<void> {
 	const dir = stateDir(env);
@@ -73,11 +74,12 @@ export async function runMcpServer(env: AdapterEnv, input: NodeJS.ReadableStream
 					log(`hive-pi mcp: cannot list subagent roles: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			}
-			return [subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL, ...BUGFIX_TOOLS, WATCH_RUN_TOOL, BACKGROUND_CANCEL_TOOL, ...BROWSER_TOOLS];
+			return [{ name: "mcp", description: "Call one tool on an enabled trusted MCP server. Restricted modes allow only reviewed reads or fixed coordination. Stdio is unsupported; manage OAuth with Pi /mcp in the leased store.", inputSchema: { type: "object", properties: { tool: { type: "string" }, server: { type: "string" }, args: { type: "object", additionalProperties: true } }, required: ["tool"] } }, subagentToolDefinition(roles), ADVISOR_TOOL, ...GOAL_TOOLS, QUALITY_GATE_TOOL, ...BUGFIX_TOOLS, WATCH_RUN_TOOL, BACKGROUND_CANCEL_TOOL, ...BROWSER_TOOLS];
 		},
 		async call(name, args, signal) {
 			if (browser.has(name)) return browser.call(name, args, signal);
 			const now = Date.now();
+			if (name === "mcp") return dispatchNativeMcp(env, cwd, args, signal);
 			switch (name) {
 				case "goal_set":
 					return dir ? goalSet(dir, args, now, unavailable) : noState();

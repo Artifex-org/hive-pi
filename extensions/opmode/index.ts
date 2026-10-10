@@ -125,9 +125,9 @@ export default function (pi: ExtensionAPI) {
 			// resurrects tools other extensions keep deliberately inactive — the bug
 			// plan/index.ts hit with agenda's consent-gated `orchestrate`.
 			if (toolsBeforeMode === null) toolsBeforeMode = pi.getActiveTools();
-			// Empty MCP parameters mean a read-only status query and let the gateway
-			// remain visible; actual calls are classified again with their input.
-			const permitted = pi.getActiveTools().filter((name) => toolVerdict(name, {}).allowed);
+			// Keep the registered gateway visible without admitting an empty
+			// envelope. Real calls still pass both the hook and raw handler gate.
+			const permitted = pi.getActiveTools().filter((name) => name === "mcp" || toolVerdict(name, {}).allowed);
 			pi.setActiveTools([...new Set([...permitted, ...OP_MODE_TOOLS])]);
 		} catch {
 			/* tool introspection unavailable; the deny hook still enforces */
@@ -171,13 +171,14 @@ export default function (pi: ExtensionAPI) {
 	 * extension, whose own `tool_call` hook is active whenever it is. Answering
 	 * here as well would be a second opinion about one mode.
 	 */
-	function toolVerdict(name: string, input?: unknown): { allowed: true } | { allowed: false; reason: string } {
+	function toolVerdict(name: string, input?: unknown) {
 		return opModeToolVerdict(mode, name, input, rootCause !== null);
 	}
 
 	pi.on("tool_call", async (event) => {
 		const verdict = toolVerdict(event.toolName, event.input);
 		if (!verdict.allowed) return { block: true, reason: verdict.reason };
+		if (verdict.updatedInput) Object.assign(event.input, verdict.updatedInput);
 
 		// Shell gating for the two fail-closed read-only postures. Bugfix
 		// deliberately leaves bash open — see BUGFIX_WITHHELD_TOOLS for why.

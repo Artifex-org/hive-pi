@@ -12,8 +12,9 @@
  * rename that misses one list fails CLOSED and SILENTLY: the mode simply
  * denies the coordination verb it exists to permit (session cb62a18c is that
  * failure on the old envelope). So lookups canonicalise instead: a native name
- * is mapped to the adapter form before any list is consulted, and both forms
- * are honoured for as long as either client can be running.
+ * is mapped to the adapter form before any list is consulted. Restricted
+ * execution gates require a bound gateway: both promoted and sanitized native
+ * names lose raw dispatch identity and cannot prove their server/tool pair.
  */
 
 const NATIVE = /^mcp__([A-Za-z0-9_-]+?)__(.+)$/;

@@ -733,11 +733,11 @@ export default function (pi: ExtensionAPI) {
 	 * posture here instead of running a second read-only gate, so it has no way
 	 * to know that a user typed `/plan exit` — and would go on telling the Hive
 	 * workspace the session is read-only while nothing denied its writes. Called
-	 * at every `active` transition; a boolean and nothing else.
+	 * at every `active` transition and when approval raises the effective gate.
 	 */
 	const announceMode = () => {
 		try {
-			pi.events.emit(PLAN_MODE_STATE_CHANNEL, { active } satisfies PlanModeStateEvent);
+			pi.events.emit(PLAN_MODE_STATE_CHANNEL, { active, readOnly: active || awaitingDecision } satisfies PlanModeStateEvent);
 		} catch {
 			/* no bus, or nothing listening */
 		}
@@ -757,7 +757,9 @@ export default function (pi: ExtensionAPI) {
 			// inactive — agenda's consent-gated `orchestrate` re-appeared on every
 			// plan-mode exit until this read the live set.
 			if (toolsBeforePlanMode === null) toolsBeforePlanMode = pi.getActiveTools();
-			const permitted = pi.getActiveTools().filter((name) => classifyTool(name).allowed);
+			// Visibility is not call admission: the gateway needs a real tool
+			// envelope, which the deny hook and handler independently validate.
+			const permitted = pi.getActiveTools().filter((name) => name === "mcp" || classifyTool(name, {}).allowed);
 			pi.setActiveTools([...new Set([...permitted, ...PLAN_TOOLS])]);
 		} catch {
 			/* tool introspection unavailable; the deny hook still enforces */
@@ -1332,6 +1334,7 @@ export default function (pi: ExtensionAPI) {
 
 		const verdict = planToolVerdict(event.toolName, event.input);
 		if (!verdict.allowed) return { block: true, reason: gateReason(verdict.reason) };
+		if (verdict.updatedInput) Object.assign(event.input, verdict.updatedInput);
 	});
 
 	pi.on("before_agent_start", (event) => {

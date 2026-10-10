@@ -69,11 +69,31 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   name, anything else denied. **Plugin matcher needed:**
   `Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__.*` covers the mutating set and
   all MCP tools; a built-in outside the matcher is not seen (use `.*` to deny
-  unknown built-ins too). Then the worktree guard (`decide`) on edited paths. Prints a `deny` or
-  nothing — never `allow`/`ask`; any internal error (bad `control.json`,
+  unknown built-ins too). Then the worktree guard (`decide`) on edited paths.
+  Permission decisions are `deny` or absent — never `allow`/`ask`. Reviewed
+  `mcp` gateway calls emit `updatedInput` to bind the reviewed server and
+  translate native spellings into the adapter's spelling. All direct MCP calls
+  (native and flattened aliases) are denied: native registration sanitizes raw
+  tool names, so neither spelling proves dispatch identity. Use the bound
+  gateway, which pins the reviewed raw server/tool pair instead. Organization-specific
+  `readOnlyMcpTools` profile grants are temporarily gated in all restricted modes:
+  flattened and sanitized native names cannot authenticate raw dispatch IDs.
+  Restoring those grants requires trusted registration metadata in a later change.
+  Fixed discussion cards/waits and orchestration coordination remain available
+  through the shipped gateway. It reuses pinned Pi MCP config, HTTP transport
+  and lease-scoped OAuth storage; stdio is refused to avoid duplicate processes.
+  Claude ignores project overrides and does not use machine-store credentials.
+  Provider-token auth is supported in native Pi; Claude requires OAuth or an
+  explicit configured header. Calls are bounded, cancellable and closed after
+  each request. Native synchronous credential helpers and OAuth refresh retain
+  Pi's own timeout/cancellation behavior; the gateway cannot interrupt a blocking
+  helper. Initialization is bounded by the configured native timeout; tool calls
+  honor its per-request idle budget (seconds, reset by progress notifications).
+  Failures after a tool RPC is sent report an unknown remote outcome; inspect
+  remote state before retrying. Tool POST redirects are refused; configure the
+  direct MCP endpoint. This does not bypass Claude's permission checks. Any internal error (bad `control.json`,
   malformed input) is a `deny` with the cause, since Claude treats a failing
-  PreToolUse hook as "proceed". Other Claude tools and MCP tools are not
-  classified. **Bugfix**: Edit/Write/MultiEdit/NotebookEdit are denied with
+  PreToolUse hook as "proceed". **Bugfix**: Edit/Write/MultiEdit/NotebookEdit are denied with
   opmode's refusal until the episode records a root cause; Bash stays open,
   as in pi (the investigation is the work).
 - **`hook post-tool`** — while a bugfix investigation is live, tags the
@@ -250,6 +270,13 @@ skip (with one stderr line) a corrupt one.
 
 ## Open gaps
 
+- **Gateway authentication limits.** `mcp({tool, server?, args?})` dispatches one raw server/tool
+  pair using pi's pinned native config, transport and OAuth credential store.
+  It reads only the leased `HIVE_PI_AGENT_DIR`; Claude never trusts project
+  MCP configuration. Disabled/missing servers and hidden tools fail closed. Stdio entries are
+  refused (no duplicate server process). Establish OAuth credentials through
+  Pi's native `/mcp` sign-in using the same leased agent store. Restricted
+  modes re-check the reviewed fixed inventory at dispatch, not just in hooks.
 - **MCP servers in pi children.** pi's built-in MCP connects every enabled
   server in `<agent dir>/mcp.json` when a child starts. Inside pi, one-shots
   and workers read a tmp mirror with no (or HTTP-only) servers; here the only

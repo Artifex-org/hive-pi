@@ -120,7 +120,8 @@ describe("hook pre-tool", () => {
 		expect(preToolDecision({ tool_name: "Edit", tool_input: { file_path: "/tmp/a" } }, control("bugfix"), true)).toBeNull();
 		expect(preToolDecision({ tool_name: "Bash", tool_input: { command: "rm -rf build" } }, control("bugfix"))).toBeNull();
 		expect(preToolDecision({ tool_name: "WebFetch", tool_input: { url: "https://x" } }, control("discuss"))).toBeNull();
-		expect(preToolDecision({ tool_name: "mcp__hive__get_run", tool_input: {} }, control("discuss"))).toBeNull();
+		expect(preToolDecision({ tool_name: "mcp__hive__get_run", tool_input: {} }, control("discuss"))).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
+		expect(preToolDecision({ tool_name: "mcp__hive-pi__mcp", tool_input: { tool: "hive_get_run" } }, control("discuss"))).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: { tool: "hive_get_run", server: "hive" } } });
 	});
 
 	it("classifies every tool in the read-only postures: MCP by pi's classifiers, Claude read-only built-ins by name, unknowns denied", () => {
@@ -138,8 +139,8 @@ describe("hook pre-tool", () => {
 		expect(deny("mcp__hive-pi__advisor", "plan")).toBe(false);
 		expect(deny("mcp__hive-pi__goal_set", "plan")).toBe(true);
 		expect(deny("mcp__hive-pi__quality_gate", "plan")).toBe(true);
-		// discuss admits pi's reviewed read-only Hive cards.
-		expect(deny("mcp__hive__get_run", "discuss")).toBe(false);
+		// discuss admits reviewed reads only through a bound gateway.
+		expect(deny("mcp__hive__get_run", "discuss")).toBe(true);
 		expect(deny("mcp__hive__trigger_run", "discuss")).toBe(true);
 		// build gates nothing of this.
 		expect(deny("mcp__github__create_issue", "build")).toBe(false);

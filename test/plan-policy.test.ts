@@ -13,6 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 import { setHouseProfileForTest } from "../extensions/profile-common/profile.ts";
+import { nativeMcpToolName } from "../extensions/mcp-common/names.ts";
 import {
 	classifyCommand,
 	classifyDiscussionTool,
@@ -41,14 +42,14 @@ describe("tool classification", () => {
 		expect(verdict.allowed === false && verdict.reason).toContain("read-only allowlist");
 	});
 
-	// An MCP tool is allowed only by EXACT name from the house profile, never by
-	// server prefix — the list asserts somebody read that tool's implementation,
-	// and a prefix would extend the claim to every tool the server grows later.
-	it("allows a profile-reviewed MCP tool by exact name, and nothing else on that server", () => {
-		setHouseProfileForTest({ readOnlyMcpTools: ["alpha_read_metrics"] });
+	// Stored profile metadata is not trusted raw identity provenance.
+	it("denies profile-listed MCP tools in every read-only mode", () => {
+		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__alpha__read_metrics"] });
 		try {
-			expect(classifyDiscussionTool("mcp", { tool: "alpha_read_metrics", args: {} }).allowed).toBe(true);
-			expect(classifyDiscussionTool("mcp", { tool: "alpha_start_trading", args: {} }).allowed).toBe(false);
+			for (const classify of [classifyTool, classifyDiscussionTool, classifyOrchestrateTool]) {
+				expect(classify("mcp__alpha__read_metrics", {}).allowed).toBe(false);
+				expect(classify("mcp", { tool: "mcp__alpha__read_metrics", args: {} }).allowed).toBe(false);
+			}
 		} finally {
 			setHouseProfileForTest(null);
 		}
@@ -83,6 +84,17 @@ describe("shell — plain read-only commands", () => {
 		expect(allowed("cat package.json")).toBe(true);
 		expect(allowed("rg --files-with-matches TODO")).toBe(true);
 		expect(allowed("wc -l extensions/plan/state.ts")).toBe(true);
+	});
+
+	it("allows case-insensitive grep with quoted escaped alternation, not writes after it", () => {
+		const command = String.raw`grep -n -i "spillover\|templa" docs/dsl.md`;
+		expect(allowed(command)).toBe(true);
+		expect(classifyOrchestrateCommand(command).allowed).toBe(true);
+		expect(allowed(String.raw`rg -i "spillover\|templa" docs/dsl.md`)).toBe(true);
+		for (const suffix of [" > out", " < input", " $(touch out)", " && touch out", " &"]) {
+			expect(allowed(command + suffix), suffix).toBe(false);
+		}
+		expect(allowed("sed -i 's/a/b/' docs/dsl.md")).toBe(false);
 	});
 
 	it("allows a pipeline of readers", () => {
@@ -266,7 +278,9 @@ describe("the blocked segment is named", () => {
 describe("orchestrate — reads the mode needs to supervise", () => {
 	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
 	const bothEnvelopes = (tool: string) =>
-		classifyOrchestrateTool(tool, {}).allowed && classifyOrchestrateTool("mcp", { tool }).allowed;
+		!classifyOrchestrateTool(tool, {}).allowed &&
+		!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
+		classifyOrchestrateTool("mcp", { tool }).allowed;
 
 	it("permits the read-only Hive queries under BOTH calling conventions", () => {
 		// Direct and wrapped are the same operation; #52 established the rule and
@@ -360,7 +374,9 @@ describe("orchestrate — reads the mode needs to supervise", () => {
 describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 	const orchestrated = (command: string) => classifyOrchestrateCommand(command).allowed;
 	const bothEnvelopes = (tool: string) =>
-		classifyOrchestrateTool(tool, {}).allowed && classifyOrchestrateTool("mcp", { tool }).allowed;
+		!classifyOrchestrateTool(tool, {}).allowed &&
+		!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
+		classifyOrchestrateTool("mcp", { tool }).allowed;
 
 	it("permits capacity reads, Hive bug reports and ticket comments", () => {
 		// hive_list_clusters: refused 3x while reading agent_lane capacity before
@@ -470,7 +486,9 @@ describe("orchestrate — fourth papercut pass (2026-09-28..10-04)", () => {
 
 describe("orchestrate — supervised transcript read (2026-10-04 papercut sweep)", () => {
 	const bothEnvelopes = (tool: string) =>
-		classifyOrchestrateTool(tool, {}).allowed && classifyOrchestrateTool("mcp", { tool }).allowed;
+		!classifyOrchestrateTool(tool, {}).allowed &&
+		!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
+		classifyOrchestrateTool("mcp", { tool }).allowed;
 
 	it("permits the reviewed read-only transcript operation under every envelope", () => {
 		// Root 1d6c9048 was refused `mcp__hive__read_agent_transcript` on its
@@ -485,7 +503,7 @@ describe("orchestrate — supervised transcript read (2026-10-04 papercut sweep)
 		// contract (_executeNestedToolCall → _beforeToolCall), not this
 		// policy's, and is covered by pi's own tests.
 		for (const tool of ["hive_read_agent_transcript", "mcp__hive__read_agent_transcript"]) {
-			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(true);
+			expect(classifyOrchestrateTool(tool, {}).allowed, tool).toBe(false);
 		}
 		expect(bothEnvelopes("hive_read_agent_transcript"), "mcp wrapper").toBe(true);
 	});
@@ -614,10 +632,13 @@ describe("native MCP names (HIV-3745)", () => {
 	// pi's built-in MCP names a server tool `mcp__<server>__<tool>`. Every list
 	// here is keyed by the adapter form; a rename that missed one would fail
 	// CLOSED and silently — the mode denying the verb it exists to permit.
-	it("orchestrate permits the native name of every reviewed coordination tool", () => {
-		expect(classifyOrchestrateTool("mcp__hive__message_teammate", {}).allowed).toBe(true);
-		expect(classifyOrchestrateTool("mcp__hive__wait_for_run", {}).allowed).toBe(true);
-		expect(classifyOrchestrateTool("mcp__linear__list_issues", {}).allowed).toBe(true);
+	it("orchestrate accepts native spelling only through bound gateways", () => {
+		expect(classifyOrchestrateTool("mcp__hive__message_teammate", {}).allowed).toBe(false);
+		expect(classifyOrchestrateTool("mcp", {tool: "mcp__hive__message_teammate"}).allowed).toBe(true);
+		expect(classifyOrchestrateTool("mcp__hive__wait_for_run", {}).allowed).toBe(false);
+		expect(classifyOrchestrateTool("mcp", {tool: "mcp__hive__wait_for_run"}).allowed).toBe(true);
+		expect(classifyOrchestrateTool("mcp__linear__list_issues", {}).allowed).toBe(false);
+		expect(classifyOrchestrateTool("mcp", {tool: "mcp__linear__list_issues"}).allowed).toBe(true);
 		// …and still denies what was never reviewed.
 		expect(classifyOrchestrateTool("mcp__hive__trigger_run", {}).allowed).toBe(false);
 		expect(classifyOrchestrateTool("mcp__linear__save_issue", {}).allowed).toBe(false);
@@ -629,23 +650,25 @@ describe("native MCP names (HIV-3745)", () => {
 		expect(verdict.allowed ? "" : verdict.reason).toContain("hive_steer_agent");
 	});
 
-	it("discussion permits its read-only cards under their native names", () => {
-		expect(classifyDiscussionTool("mcp__hive__get_run", {}).allowed).toBe(true);
+	it("discussion binds native card spellings in gateways, never directly", () => {
+		expect(classifyDiscussionTool("mcp__hive__get_run", {}).allowed).toBe(false);
+		expect(classifyDiscussionTool("mcp", {tool: "mcp__hive__get_run"}).allowed).toBe(true);
 		expect(classifyDiscussionTool("mcp__hive__cancel_run", {}).allowed).toBe(false);
 	});
 
-	it("discussion honours the house profile's reviewed tools under native names", () => {
-		setHouseProfileForTest({ readOnlyMcpTools: ["asfam_asfam_deploy_last"] });
+	it("discussion gates house profile grants even under native names", () => {
+		setHouseProfileForTest({ readOnlyMcpTools: ["mcp__asfam__asfam_deploy_last"] });
 		try {
-			expect(classifyDiscussionTool("mcp__asfam__asfam_deploy_last", {}).allowed).toBe(true);
+			expect(classifyDiscussionTool("mcp__asfam__asfam_deploy_last", {}).allowed).toBe(false);
 			expect(classifyDiscussionTool("mcp__asfam__asfam_strategy_stop", {}).allowed).toBe(false);
 		} finally {
 			setHouseProfileForTest(null);
 		}
 	});
 
-	it("plan mode never allows a native MCP tool by name — only the gateway", () => {
+	it("plan binds reviewed native spellings through gateways and gates nested calls", () => {
 		expect(classifyTool("mcp__hive__get_run").allowed).toBe(false);
+		expect(classifyTool("mcp", {tool: "mcp__hive__get_run"}).allowed).toBe(true);
 		// The gateway is allowed because each nested call it makes is classified
 		// by this same policy through the tool_call pipeline.
 		expect(classifyTool("codemode").allowed).toBe(true);
