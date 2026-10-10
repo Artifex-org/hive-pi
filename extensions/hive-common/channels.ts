@@ -135,6 +135,8 @@ export const PLAN_MODE_STATE_CHANNEL = "hive.plan.mode-state";
 
 export interface PlanModeStateEvent {
 	active: boolean;
+	/** Effective write gate, including a pending approval in build mode. */
+	readOnly?: boolean;
 }
 
 /**

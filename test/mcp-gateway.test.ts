@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +6,8 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import gateway from "../extensions/mcp-gateway/index.ts";
 import { createFakePi } from "./fake-pi.ts";
-import { OP_MODE_STATE_CHANNEL } from "../extensions/hive-common/channels.ts";
+import planExtension from "../extensions/plan/index.ts";
+import { OP_MODE_STATE_CHANNEL, PLAN_CONTROL_CHANNEL, QUESTION_REMOTE_CHANNEL } from "../extensions/hive-common/channels.ts";
 import { dispatchNativeMcp } from "../claude/mcp/native-gateway.ts";
 import { runMcpServer } from "../claude/mcp/server.ts";
 import { DEFAULT_CONTROL } from "../claude/state.ts";
@@ -151,4 +152,53 @@ it("Claude reads leased OAuth credentials, never the machine store", async () =>
 	expect(headers.length).toBeGreaterThan(0);
 	expect(headers.every(header => header === "Bearer lease-fixture")).toBe(true);
 	expect(calls).toEqual(["get_issue"]);
+});
+
+it("Claude forbids coordination retries after posture tightens during OAuth refresh", async () => {
+	control("orchestrate"); config({ url: "https://hive.invalid/mcp", oauth: { authServerMetadataUrl: "https://oauth.invalid/metadata" } });
+	const url = "https://hive.invalid/mcp";
+	writeFileSync(join(dir, "mcp-auth.json"), JSON.stringify({ [`mcp__hive|${url}`]: {
+		serverUrl: url, clientInformation: { client_id: "fixture" },
+		tokens: { access_token: "old", refresh_token: "refresh-fixture", token_type: "Bearer" }, tokensExpireAt: Date.now() + 3_600_000,
+	} }));
+	const fetcher = globalThis.fetch; let attempts = 0, release: (() => void) | undefined;
+	vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+		const address = String(url);
+		const json = (data: unknown) => new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } });
+		if (address === "https://oauth.invalid/token") {
+			await new Promise<void>(resolve => { release = resolve; });
+			return json({ access_token: "fresh-lease-token", refresh_token: "fresh-refresh", token_type: "Bearer", expires_in: 3600 });
+		}
+		if (address === "https://oauth.invalid/metadata") return json({ issuer: "https://oauth.invalid", authorization_endpoint: "https://oauth.invalid/auth", token_endpoint: "https://oauth.invalid/token", response_types_supported: ["code"], token_endpoint_auth_methods_supported: ["none"] });
+		if (address.includes(".well-known/oauth-protected-resource")) return json({ resource: "https://hive.invalid/mcp", authorization_servers: ["https://oauth.invalid"] });
+		if (init?.method === "POST" && JSON.parse(String(init.body)).method === "tools/call") {
+			attempts++; return new Response("expired", { status: 401 });
+		}
+		return fetcher(url, init);
+	});
+	const result = dispatchNativeMcp(env(), dir, { tool: "hive_steer_agent" }, new AbortController().signal);
+	await vi.waitFor(() => expect(release).toBeDefined());
+	control("plan"); release!();
+	expect(await result).toHaveProperty("isError", true);
+	expect(attempts).toBe(1); expect(calls).toEqual([]);
+	expect(readFileSync(join(dir, "mcp-auth.json"), "utf8")).toContain("fresh-lease-token");
+});
+it("real build-mode plan_ready cancels already queued coordination before approval", async () => {
+	vi.stubEnv("HIVE_LAUNCH_ID", "11111111-2222-3333-4444-555555555555");
+	const { pi, execute } = piGateway("build"); planExtension(pi.api);
+	await pi.emit({ type: "session_start", reason: "new" });
+	pi.api.events.emit(QUESTION_REMOTE_CHANNEL, { available: true });
+	const ctx = {
+		cwd: dir, hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
+		ui: { confirm: async () => true, select: async () => undefined, notify: () => {}, setWidget: () => {}, setStatus: () => {} },
+		sessionManager: { getEntries: () => [], getBranch: () => [] },
+	} as unknown as ExtensionToolContext;
+	const tool = (name: string) => pi.tools.find(tool => tool.name === name)!.definition as unknown as ToolDefinition;
+	await tool("plan_write").execute("write", { ops: [{ op: "header", title: "Queue", goal: "Approval is a hard gate" }, { op: "upsert", id: "steps", block: { type: "steps", steps: [{ title: "wire" }, { title: "test" }] } }] }, undefined, undefined, ctx);
+	stall = "initialize"; const queued = execute({ tool: "hive_steer_agent" });
+	await vi.waitFor(() => expect(pending).toBe(1));
+	const approval = tool("plan_ready").execute("ready", {}, undefined, undefined, ctx);
+	await Promise.resolve();
+	expect(await queued).toHaveProperty("isError", true); expect(calls).toEqual([]);
+	pi.api.events.emit(PLAN_CONTROL_CHANNEL, { action: "approve" }); await approval;
 });

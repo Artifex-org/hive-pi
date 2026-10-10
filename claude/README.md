@@ -270,7 +270,8 @@ skip (with one stderr line) a corrupt one.
   pair using pi's pinned native config, transport and OAuth credential store.
   It reads only the leased `HIVE_PI_AGENT_DIR`; Claude never trusts project
   MCP configuration. Disabled/missing servers and hidden tools fail closed. Stdio entries are
-  refused (no process spawn); manage OAuth sign-in with `/mcp`. Restricted
+  refused (no duplicate server process). Establish OAuth credentials through
+  Pi's native `/mcp` sign-in using the same leased agent store. Restricted
   modes re-check the reviewed fixed inventory at dispatch, not just in hooks.
 - **MCP servers in pi children.** pi's built-in MCP connects every enabled
   server in `<agent dir>/mcp.json` when a child starts. Inside pi, one-shots

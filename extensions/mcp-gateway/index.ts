@@ -17,7 +17,8 @@ export default function (pi: ExtensionAPI) {
 		if (isOpMode(state.mode) && state.mode !== mode) { mode = state.mode; cancel(); }
 	});
 	pi.events.on(PLAN_MODE_STATE_CHANNEL, payload => {
-		const active = (payload as PlanModeStateEvent).active;
+		const state = payload as PlanModeStateEvent;
+		const active = state.readOnly ?? state.active;
 		if (active !== planActive) { planActive = active; cancel(); }
 	});
 	pi.on("session_shutdown", async () => {

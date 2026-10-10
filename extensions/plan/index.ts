@@ -733,11 +733,11 @@ export default function (pi: ExtensionAPI) {
 	 * posture here instead of running a second read-only gate, so it has no way
 	 * to know that a user typed `/plan exit` — and would go on telling the Hive
 	 * workspace the session is read-only while nothing denied its writes. Called
-	 * at every `active` transition; a boolean and nothing else.
+	 * at every `active` transition and when approval raises the effective gate.
 	 */
 	const announceMode = () => {
 		try {
-			pi.events.emit(PLAN_MODE_STATE_CHANNEL, { active } satisfies PlanModeStateEvent);
+			pi.events.emit(PLAN_MODE_STATE_CHANNEL, { active, readOnly: active || awaitingDecision } satisfies PlanModeStateEvent);
 		} catch {
 			/* no bus, or nothing listening */
 		}

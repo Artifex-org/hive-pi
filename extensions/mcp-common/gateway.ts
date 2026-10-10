@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type * as NativeMcp from "@earendil-works/pi-mcp";
 import type { McpTransport, CallToolResult } from "@earendil-works/pi-mcp";
 import type * as NativeConfig from "../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/config.js";
 import type * as NativeRuntime from "../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js";
@@ -66,7 +67,23 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 		providerToken: context.providerToken,
 		createTransport: (server, cwd, auth) => {
 			signal.throwIfAborted();
-			const transport = modules.runtime.createDefaultTransport(server, cwd, auth);
+			if (!("url" in server.config)) throw new Error("Gateway requires HTTP transport.");
+			// The HTTP-only default factory supplies the pinned SDK class and
+			// native resolved options. Its constructor does not open a connection.
+			const configured = modules.runtime.createDefaultTransport(server, cwd, auth) as NativeMcp.StreamableHttpTransport;
+			const Transport = configured.constructor as typeof NativeMcp.StreamableHttpTransport;
+			const nativeFetch = configured.options.fetch ?? globalThis.fetch;
+			const transport = new Transport({
+				...configured.options,
+				// Native headers/OAuth are awaited before this callback, including
+				// every 401 retry. Check immediately at the actual egress boundary.
+				fetch: (url, init) => {
+					if (init?.method === "POST" && typeof init.body === "string" && JSON.parse(init.body).method === "tools/call") {
+						signal.throwIfAborted(); authorize();
+					}
+					return nativeFetch(url, init);
+				},
+			});
 			transports.add(transport);
 			return transport;
 		},
