@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { createCodemodeExtension, type ExtensionToolContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadoutPrompt } from "../extensions/loadout/index.ts";
+import { CODEMODE_SCRIPT_GUIDANCE, loadoutPrompt } from "../extensions/loadout/index.ts";
 import prettyTools from "../extensions/pretty-tools.ts";
 import { createFakePi } from "./fake-pi.ts";
 import { realBashAvailable } from "./require-tools.ts";
@@ -18,6 +18,8 @@ function bridge() {
 		return found.definition as unknown as ToolDefinition;
 	};
 	const bash = definition("bash");
+	const read = definition("read");
+	const byName = new Map([["bash", bash], ["read", read]]);
 	const codemode = definition("codemode");
 	let executions = 0;
 	// A narrow session seam: real codemode performs discovery and converts tool
@@ -26,7 +28,7 @@ function bridge() {
 		sessionManager: Pick<ExtensionToolContext["sessionManager"], "getBranch" | "getSessionId" | "getSessionFile">;
 	} = {
 		cwd: process.cwd(),
-		tools: [bash as unknown as AgentTool],
+		tools: [bash as unknown as AgentTool, read as unknown as AgentTool],
 		sessionManager: { getBranch: () => [], getSessionId: () => "synthetic-contract", getSessionFile: () => undefined },
 		async executeTool(name, args, options) {
 			executions++;
@@ -34,7 +36,9 @@ function bridge() {
 			// input is unknown, while the recorded tool call requires JsonObject.
 			const toolCall = { type: "toolCall" as const, id: `contract/${executions}`, name, arguments: args as JsonObject };
 			try {
-				const result = await bash.execute(toolCall.id, args, options?.signal, undefined, ctx as ExtensionToolContext);
+				const tool = byName.get(name);
+				if (!tool) throw new Error(`Tool ${name} not found`);
+				const result = await tool.execute(toolCall.id, args, options?.signal, undefined, ctx as ExtensionToolContext);
 				return { toolCall, result, isError: false };
 			} catch (error) {
 				return { toolCall, result: { content: [{ type: "text" as const, text: String(error) }], details: undefined }, isError: true };
@@ -83,6 +87,41 @@ describe.runIf(realBashAvailable())("codemode's tool boundary", () => {
 		expect(text).toContain("Promise<string>");
 		expect(text).toContain("string");
 		expect(harness.executions()).toBe(1);
+	});
+
+	it("the guidance's membership and listing idioms answer without calling any tool", async () => {
+		const harness = bridge();
+		const membership = /`\((".+?" in tools)\)`/.exec(CODEMODE_SCRIPT_GUIDANCE)?.[1];
+		const listing = /`(ALL_TOOLS\.map\(.+?\))`/.exec(CODEMODE_SCRIPT_GUIDANCE)?.[1];
+		expect(membership && listing).toBeTruthy();
+		const { result, text } = await harness.run(`
+			text([${["bash", "read", "tool_search", "exists", "list"].map((name) => membership?.replace("<name>", name)).join(", ")}]);
+			text(${listing});
+		`);
+		expect(result.isError, text).not.toBe(true);
+		expect(text).toContain("[true,true,false,false,false]");
+		expect(text).toContain('"bash"');
+		expect(text).toContain('"read"');
+		expect(harness.executions()).toBe(0);
+	});
+
+	it("a script's read of a guessed path is told what is actually there", async () => {
+		const harness = bridge();
+		const { result, text } = await harness.run(`
+			const settled = await Promise.allSettled([
+				tools.read({path: "extensions/lens/locat.ts"}),
+				tools.read({path: "extension/lens/locate.ts"}),
+			]);
+			text(settled.map(r => r.status === "rejected" ? String(r.reason) : "unexpectedly read"));
+		`);
+		expect(result.isError, text).not.toBe(true);
+		// The file is wrong: the directory's real entries, the near miss first.
+		expect(text).toContain("Its directory does");
+		expect(text).toContain("locate.ts");
+		// The path diverged higher up: where it stops being real, and what is there.
+		expect(text).toContain("The path stops being real at `extension`");
+		expect(text).toContain("extensions/");
+		expect(harness.executions()).toBe(2);
 	});
 
 	it("an explicit shell timeout remains rejected and its diagnostic survives stringification", async () => {
