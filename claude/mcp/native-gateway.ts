@@ -13,8 +13,8 @@ export async function dispatchNativeMcp(env: AdapterEnv, cwd: string, input: Rec
 		const currentMode = () => (dir ? readControl(dir) : DEFAULT_CONTROL).opMode;
 		const mode = currentMode();
 		const modules = await loadGatewayRuntime(pathToFileURL(join(piPackageRoot(env.piBin), "dist", "index.js")).href);
-		const result = await callGateway(input, { agentDir: env.piAgentDir, cwd, projectTrusted: false, mode, currentMode, signal }, modules);
-		const converted = await modules.tools.convertMcpResult(String(input.server ?? "MCP"), String(input.tool), result);
+		const { result, server, tool } = await callGateway(input, { agentDir: env.piAgentDir, cwd, projectTrusted: false, mode, currentMode, signal }, modules);
+		const converted = await modules.tools.convertMcpResult(server, tool, result);
 		return {
 			text: converted.content.filter(part => part.type === "text").map(part => part.text).join("\n"),
 			images: converted.content.filter(part => part.type === "image").map(part => ({ data: part.data, mimeType: part.mimeType })),

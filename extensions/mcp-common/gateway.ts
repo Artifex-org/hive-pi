@@ -45,8 +45,14 @@ export function gatewayToolVerdict(mode: OpMode, input: Record<string, unknown>)
 	return classify("mcp", input);
 }
 
+export interface GatewayReply {
+	server: string;
+	tool: string;
+	result: CallToolResult;
+}
+
 /** Raw dispatch: fixed inventories in restricted modes, configured identities otherwise. */
-export async function callGateway(input: Record<string, unknown>, context: GatewayContext, modules: GatewayRuntime): Promise<CallToolResult> {
+export async function callGateway(input: Record<string, unknown>, context: GatewayContext, modules: GatewayRuntime): Promise<GatewayReply> {
 	const loaded = modules.config.loadMcpConfig({ agentDir: context.agentDir, cwd: context.cwd, projectTrusted: context.projectTrusted });
 	if (loaded.errors.length) throw new Error(`MCP configuration errors: ${loaded.errors.join("; ")}`);
 	const unrestrictedRequest = (): Record<string, unknown> => {
@@ -134,9 +140,11 @@ export async function callGateway(input: Record<string, unknown>, context: Gatew
 		signal.throwIfAborted();
 		authorize(request); // Recheck the actual pinned dispatch, not the mutable caller envelope.
 		if (!connection.tools.some(tool => tool.name === rawTool)) throw new Error(`MCP server "${request.server}" does not advertise exact raw tool "${rawTool}".`);
-		return await client.callTool(rawTool, (request.args ?? {}) as Record<string, unknown>, { signal, timeoutMs: connection.timeoutMs, onProgress: progress => context.onProgress?.(progress) });
+		const result = await client.callTool(rawTool, (request.args ?? {}) as Record<string, unknown>, { signal, timeoutMs: connection.timeoutMs, onProgress: progress => context.onProgress?.(progress) });
+		return { server: request.server, tool: rawTool, result };
 	} catch (error) {
 		if (dispatched) throw new Error(`MCP remote outcome unknown; inspect remote state before retrying. ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+		if (initializing.signal.aborted) throw new Error("MCP initialization timed out", { cause: error });
 		throw error;
 	} finally {
 		clearTimeout(initializationTimer);

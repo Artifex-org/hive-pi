@@ -359,3 +359,43 @@ it("real HTTP tool redirects cannot resend coordination after Claude posture tig
 		server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 	}
 });
+
+it.each(["Pi", "Claude"])("%s bounds aggregate initialization across individually valid requests", async adapter => {
+	config({ url: "https://hive.invalid/mcp", timeout: 2, headers: { Authorization: "Bearer fixture" } });
+	vi.useFakeTimers();
+	const fetcher = globalThis.fetch; const stages: string[] = [];
+	vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+		if (init?.method === "POST") {
+			const method = JSON.parse(String(init.body)).method;
+			if (method === "initialize" || method === "tools/list") {
+				stages.push(method); pending++;
+				await new Promise<void>((resolve, reject) => {
+					const timer = setTimeout(() => { pending--; init.signal?.removeEventListener("abort", abort); resolve(); }, 1_500);
+					const abort = () => { clearTimeout(timer); pending--; reject(new DOMException("aborted", "AbortError")); };
+					init.signal?.addEventListener("abort", abort, { once: true });
+				});
+			}
+		}
+		return fetcher(url, init);
+	});
+	const result = adapter === "Pi" ? piGateway().execute({ tool: "hive_get_run" }) : dispatchNativeMcp(env(), dir, { tool: "hive_get_run" }, new AbortController().signal);
+	await vi.waitFor(() => expect(stages).toEqual(["initialize"]));
+	await vi.advanceTimersByTimeAsync(3_100);
+	const response = await result;
+	expect(stages).toEqual(["initialize", "tools/list"]);
+	expect(response).toHaveProperty("isError", true); expect(JSON.stringify(response)).toContain("initialization timed out");
+	expect(JSON.stringify(response)).not.toContain("outcome unknown"); expect(calls).toEqual([]); expect(pending).toBe(0); expect(closed).toBe(1);
+});
+
+it("both adapters preserve the actual raw result identity instead of splitting sanitized labels", async () => {
+	const data = JSON.parse(readFileSync(join(dir, "mcp.json"), "utf8"));
+	data.mcpServers.alpha_beta = { url: "https://alpha.invalid/mcp" };
+	writeFileSync(join(dir, "mcp.json"), JSON.stringify(data)); control("build");
+	const result = await piGateway("build").execute({ tool: "mcp__alpha_beta__get_run" });
+	expect(result).not.toHaveProperty("isError", true);
+	expect(result).toHaveProperty("details", { server: "alpha_beta", tool: "get_run" });
+	replyContent = []; replyIsError = true;
+	const error = await dispatchNativeMcp(env(), dir, { tool: "mcp__alpha_beta__get_run" }, new AbortController().signal);
+	expect(error.text).toContain("alpha_beta/get_run"); expect(error).toHaveProperty("isError", true);
+	expect(calls).toEqual(["get_run", "get_run"]);
+});

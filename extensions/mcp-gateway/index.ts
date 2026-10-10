@@ -2,7 +2,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { agentDir } from "../mcp-common/config.ts";
-import { canonicalMcpToolName } from "../mcp-common/names.ts";
 import { callGateway, loadGatewayRuntime, gatewayToolVerdict } from "../mcp-common/gateway.ts";
 import { OP_MODE_STATE_CHANNEL, PLAN_MODE_STATE_CHANNEL, type OpModeStateEvent, type PlanModeStateEvent } from "../hive-common/channels.ts";
 import { isOpMode, type OpMode } from "../opmode/modes.ts";
@@ -40,7 +39,7 @@ export default function (pi: ExtensionAPI) {
 			const task = (async () => {
 				try {
 					const modules = await loadGatewayRuntime(import.meta.resolve("@earendil-works/pi-coding-agent"));
-					const result = await callGateway(input, {
+					const { result, server, tool } = await callGateway(input, {
 						agentDir: agentDir(), cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted(), mode: planActive ? "plan" : mode,
 						currentMode: effectiveMode,
 						onBound: bound => { controllers.set(controller, bound); },
@@ -48,8 +47,7 @@ export default function (pi: ExtensionAPI) {
 						signal: AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]),
 						providerToken: provider => ctx.modelRegistry.getApiKeyForProvider(provider),
 					}, modules);
-					const canonical = canonicalMcpToolName(input.tool);
-					return modules.tools.convertMcpResult(canonical.slice(0, canonical.indexOf("_")), canonical.slice(canonical.indexOf("_") + 1), result);
+					return modules.tools.convertMcpResult(server, tool, result);
 				} catch (error) {
 					const reason = controller.signal.aborted && controller.signal.reason instanceof Error ? `${controller.signal.reason.message} ` : "";
 					return { content: [{ type: "text" as const, text: reason + (error instanceof Error ? error.message : String(error)) }], details: undefined, isError: true };
