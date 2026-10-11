@@ -233,6 +233,36 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
+describe("chart update wiring", () => {
+	it("ships coalesced chart snapshots 999ms apart through the actual handler", async () => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ streamDeltas: true })));
+		await attachAndSettle(fake);
+		const update = (toolCallId: string, toolName: string, value: number) => fake.emit({
+			type: "tool_execution_update", toolCallId, toolName,
+			partialResult: {
+				content: [{ type: "text", text: `progress ${value}` }],
+				...(toolName === "render_chart" ? { details: { type: "line", title: "Progress", chart_id: "jitter", series: [{ name: "v", points: [{ x: "a", y: value }] }] } } : {}),
+			},
+		});
+		try {
+			vi.setSystemTime(10_002);
+			await update("chart-call", "render_chart", 1);
+			await update("bash-call", "bash", 1);
+			await vi.advanceTimersByTimeAsync(0);
+			vi.setSystemTime(11_001);
+			await update("chart-call", "render_chart", 2);
+			await update("bash-call", "bash", 2);
+			await vi.advanceTimersByTimeAsync(0);
+			const sent = hive.calls.filter((call) => call.path.endsWith("/tool-updates"));
+			expect(sent.map((call) => [call.body?.tool_name, call.body?.update_seq])).toEqual([
+				["render_chart", 1], ["bash", 1], ["render_chart", 2],
+			]);
+			expect(JSON.parse(sent[2].body?.tool_details as string).series[0].points[0].y).toBe(2);
+		} finally { await fake.emit({ type: "session_shutdown" }); }
+	});
+});
+
 describe("send_attachment wiring", () => {
 	it("registers independently of steer and refuses publication after remote-off", async () => {
 		const hive = fakeHive({});
