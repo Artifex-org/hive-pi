@@ -67,6 +67,13 @@ const READ_ONLY_TOOLS = new Set([
 	// sessionIdentity.ts stores only this session's kickoff metadata (also
 	// synced to its own Hive identity by identitySync.ts), never work state.
 	"session_context",
+	// lens reads source files without edits; catalog tools GET metadata only.
+	"read_symbol",
+	"list_symbols",
+	"list_workspace_catalog",
+	"list_credential_catalog",
+	// Public-URL GET with redirect-by-redirect SSRF checks (web/index.ts).
+	"fetch_content",
 	"web_search",
 	"web_fetch",
 	"subagent", // read-only roles are enforced by the role, not here
@@ -122,6 +129,14 @@ export const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
 	"hive_get_occupancy",
 	"hive_list_communications",
 	"hive_get_communication",
+	// Agent reads: agentops.go, agentops_transcript.go, agentops_hosts.go and
+	// agentops_credentials.go. Owner/share boundaries remain server-enforced;
+	// catalog/verdict reads never resolve or consume a credential value.
+	"hive_list_agent_sessions",
+	"hive_read_agent_transcript",
+	"hive_list_host_catalog",
+	"hive_list_credential_catalog",
+	"hive_get_credential_request",
 	// Knowledge content/collection reads: knowledge.go (NOT knowledge_write.go).
 	"hive_knowledge_search",
 	"hive_knowledge_grep",

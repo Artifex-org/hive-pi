@@ -638,6 +638,8 @@ export interface WorkspaceCatalogEntry {
 export interface Decision<G = unknown> {
 	verdict: RequestVerdict | "timeout" | "error";
 	grant?: G;
+	/** Failed pre-delivery stage. Only these errors are safe to surface as request diagnostics. */
+	stage?: "request" | "poll";
 	/** Human-readable reason on `error`, or on an approved-but-unfetchable grant. */
 	error?: string;
 	/** HTTP status of a failed grant fetch, when there was one. */
@@ -695,7 +697,7 @@ export async function requestAndWait<G = unknown>(
 		client_call_id: clientCallID,
 	});
 	if (!created.ok || !created.body) {
-		return { verdict: "error", error: created.error ?? `request failed (HTTP ${created.status ?? "?"})`, status: created.status };
+		return { verdict: "error", stage: "request", error: created.error ?? `request failed (HTTP ${created.status ?? "?"})`, status: created.status };
 	}
 
 	let row = created.body;
@@ -717,7 +719,7 @@ export async function requestAndWait<G = unknown>(
 		// a deploy cycled pods mid-request). A transient failure just waits for the
 		// next poll; only a fresh row advances the loop, so a dropped poll is free.
 		if (polled.authFailed || (polled.permanent && polled.status !== 404)) {
-			return { verdict: "error", error: polled.error ?? `poll failed (HTTP ${polled.status ?? "?"})`, status: polled.status };
+			return { verdict: "error", stage: "poll", error: polled.error ?? `poll failed (HTTP ${polled.status ?? "?"})`, status: polled.status };
 		}
 		if (polled.ok && polled.body) row = polled.body;
 	}

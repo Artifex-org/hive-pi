@@ -49,6 +49,69 @@ describe("Hive remote credential receiver", () => {
 		expect(fetcher).not.toHaveBeenCalled();
 	});
 
+	it("shows database scope and network requirements without operator refs or values", async () => {
+		vi.stubGlobal("fetch", async () => response(200, { entries: [{
+			name: "audit-db-ro", env_var: "AUDIT_PGPASSWORD", description: "SELECT-only hive_audit_ro on Hive, NOT ASFAM",
+			requires_hosts: ["fixture-host"], op_ref: "private-operator-ref", value: "private-value", created_by: "private-owner",
+		}] }));
+		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "catalog-local", isCurrent: () => true, consumersReady: () => true });
+		receiver.bind(auth, "hive", 1);
+		const result = await receiver.list();
+		expect(result).toContain("NOT ASFAM"); expect(result).toContain("fixture-host"); expect(result).toContain("AUDIT_PGPASSWORD");
+		for (const secret of ["private-operator-ref", "private-value", "private-owner"]) expect(result).not.toContain(secret);
+	});
+
+	it.each([400, 403, 409, 503])("preserves request refusal at HTTP %s without claiming a consumed grant", async status => {
+		const fetcher = vi.fn(async () => response(status, { detail: "Launch did not declare this credential; relaunch with request_credentials." }));
+		vi.stubGlobal("fetch", fetcher);
+		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "refused-local", isCurrent: () => true, consumersReady: () => true });
+		receiver.bind(auth, "hive", 1);
+		const result = await receiver.request("nested-call/1", ["fixture"], "test");
+		expect(result).toContain(`Credential request failed (HTTP ${status})`);
+		expect(result).toContain("relaunch with request_credentials");
+		expect(result).toContain("client_call_id: nested-call/1");
+		expect(result).not.toContain("delivery failed"); expect(result).not.toContain("fresh call ID");
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(credentialChildEnv("refused-local", {}).FIXTURE_CREDENTIAL).toBeUndefined();
+	});
+
+	it("does not claim nothing installed when a lost POST races background delivery", async () => {
+		let rejectPost!: (error: Error) => void;
+		const pendingPost = new Promise<Response>((_resolve, reject) => { rejectPost = reject; });
+		const grant = { id: "racing-grant", verdict: "auto", credentials: ["fixture"], expires_at: new Date(Date.now() + 60_000).toISOString() };
+		vi.stubGlobal("fetch", async (raw: string, init?: RequestInit) => {
+			if (init?.method === "POST") return pendingPost;
+			if (raw.endsWith("/credential-grants")) return response(200, { items: [grant] });
+			if (raw.endsWith("/credential-catalog")) return response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }] });
+			if (raw.endsWith("/value")) return response(200, { env: { FIXTURE_CREDENTIAL: "race-value" }, resolved: ["fixture"] });
+			return response(404);
+		});
+		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "race-local", isCurrent: () => true, consumersReady: () => true });
+		receiver.bind(auth, "hive", 1);
+		const result = receiver.request("race-call", ["fixture"], "test");
+		await receiver.poll();
+		expect(credentialChildEnv("race-local", {}).FIXTURE_CREDENTIAL).toBe("race-value");
+		rejectPost(new Error("lost POST"));
+		const diagnostic = await result;
+		expect(diagnostic).toContain("installation is not confirmed by this call");
+		expect(diagnostic).not.toContain("nothing installed"); expect(diagnostic).not.toContain("race-value");
+	});
+
+	it("distinguishes a failed verdict poll from one-shot delivery", async () => {
+		vi.useFakeTimers();
+		try {
+			let calls = 0;
+			vi.stubGlobal("fetch", async () => ++calls === 1 ? response(200, { id: "pending", verdict: "pending" }) : response(403, { detail: "request access revoked" }));
+			const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "poll-local", isCurrent: () => true, consumersReady: () => true });
+			receiver.bind(auth, "hive", 1);
+			const pending = receiver.request("poll-call", ["fixture"], "test");
+			await vi.advanceTimersByTimeAsync(3000);
+			const result = await pending;
+			expect(result).toContain("Credential poll failed (HTTP 403)"); expect(result).toContain("request access revoked");
+			expect(result).not.toContain("delivery failed"); expect(calls).toBe(2);
+		} finally { vi.useRealTimers(); }
+	});
+
 	it("never exposes fetched values in result or notice and installs only on future children", async () => {
 		const release = registerCredentialConsumer("bash");
 		const notice: string[] = [];

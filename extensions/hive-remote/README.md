@@ -145,6 +145,17 @@ its project, and the transcript follows it live.
 
 ### Credential receipt
 
+The catalog exposes names, service/database descriptions, environment mappings
+and required hosts, never operator references or values. Check scope before
+requesting access: a read-only control-plane DB credential is not an application
+DB credential. Catalog reads work during planning; grants still require leaving
+the read-only posture and operator approval.
+
+Request and verdict-poll failures report their HTTP status and server explanation
+along with the exact `client_call_id` (including nested codemode suffixes). They
+are not one-shot delivery failures and do not imply that a value was consumed.
+Delivery failures retain the value-safe fresh-approval recovery message.
+
 `list_credential_catalog` and `request_credential` remain discoverable for safe
 diagnostics. `allowReceiveCredentials` defaults on when absent; explicit false
 or malformed values fail closed. Remote consent is independently opt-in. A
