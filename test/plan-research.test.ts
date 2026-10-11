@@ -11,6 +11,7 @@ import { makeLaunch, REPO, runCli } from "./claude-harness.ts";
 const hiveReads = [
 	"get_ticket", "search_tickets", "find_related_work", "get_work_context", "get_board", "my_tickets",
 	"get_occupancy", "list_communications", "get_communication",
+	"list_agent_sessions", "read_agent_transcript", "list_host_catalog", "list_credential_catalog", "get_credential_request",
 	"knowledge_search", "knowledge_grep", "knowledge_get", "knowledge_multi_get", "knowledge_collections",
 	"list_clusters", "fleet_status", "list_queues", "get_scheduler_settings", "get_topology", "get_constraint_cost", "get_queue_wait", "get_step_durations",
 	"list_runs", "get_run", "get_run_tests", "get_run_reports", "get_task_logs", "explain_failure",
@@ -23,6 +24,7 @@ const hiveWrites = [
 	"set_queue_concurrency", "set_cluster_labels", "knowledge_write", "create_communication",
 	// Names that look observational but mint a session, consume inbox state or subscribe.
 	"whoami", "read_inbox", "watch_ticket", "new_unknown_tool", "get_unknown_state",
+	"request_credential", "request_host", "end_agent_session",
 ];
 const readModes = { plan: planToolVerdict, discuss: classifyDiscussionTool, orchestrate: classifyOrchestrateTool };
 
@@ -192,12 +194,12 @@ describe("reviewed live research in read-only modes", () => {
 		expect(planToolVerdict("mcp", { tool: native }).allowed).toBe(false);
 	});
 
-	it("allows kickoff context and harness knowledge wrappers, never session pivots or content writes", () => {
-		for (const name of ["session_context", "knowledge_search", "knowledge_grep", "knowledge_get", "knowledge_multi_get", "knowledge_collections"]) {
+	it("allows kickoff context and reviewed native reads, never session pivots, grants or content writes", () => {
+		for (const name of ["session_context", "knowledge_search", "knowledge_grep", "knowledge_get", "knowledge_multi_get", "knowledge_collections", "read_symbol", "list_symbols", "fetch_content", "list_credential_catalog", "list_workspace_catalog"]) {
 			expect(planToolVerdict(name, {}).allowed, name).toBe(true);
 			expect(preToolDecision({ tool_name: `mcp__hive-pi__${name}`, tool_input: {} }, { ...DEFAULT_CONTROL, opMode: "plan" }), name).toBeNull();
 		}
-		for (const name of ["session_title", "knowledge_write"]) expect(planToolVerdict(name, {}).allowed, name).toBe(false);
+		for (const name of ["session_title", "knowledge_write", "rename_symbol", "request_credential", "request_workspace"]) expect(planToolVerdict(name, {}).allowed, name).toBe(false);
 	});
 
 	it("denies direct CLI reads, binds gateways without granting permission, and denies mutations", async () => {

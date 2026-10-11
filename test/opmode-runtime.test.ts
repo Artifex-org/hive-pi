@@ -1,5 +1,5 @@
 /** The actual pi loader/runner, reload and nested-tool paths; no network model requests. */
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -10,9 +10,13 @@ import { createMcpToolDefinition, createMcpToolName } from "../node_modules/@ear
 import opmode from "../extensions/opmode/index.ts";
 import plan from "../extensions/plan/index.ts";
 import gateway from "../extensions/mcp-gateway/index.ts";
+import lens from "../extensions/lens/index.ts";
 
 it.each(["plan", "discuss", "orchestrate"])("real codemode binds gateway dispatch and blocks write handlers in %s", async mode => {
 	const dir = await mkdtemp(join(tmpdir(), "plan-codemode-runtime-"));
+	const sourcePath = join(dir, "source.ts");
+	const source = "export const fixture = 17;\n";
+	await writeFile(sourcePath, source);
 	const provider = "plan-codemode-test";
 	await writeFile(join(dir, "auth.json"), JSON.stringify({ [provider]: { type: "api_key", key: "test-key" } }));
 	const runtime = await ModelRuntime.create({ authPath: join(dir, "auth.json"), modelsPath: null, refreshOnCreate: false });
@@ -64,6 +68,10 @@ it.each(["plan", "discuss", "orchestrate"])("real codemode binds gateway dispatc
 				content: first ? [{ type: "toolCall", id: "research", name: "codemode", arguments: { code: `
 					const [native] = await Promise.allSettled([tools.mcp__hive__get_run({})]);
 					text(native.status);
+					text(await tools.read_symbol({file: ${JSON.stringify(sourcePath)}, symbol: "fixture"}));
+					const [rename] = await Promise.allSettled([tools.rename_symbol({file: ${JSON.stringify(sourcePath)}, line: 1, offset: 14, newName: "mutated"})]);
+					text("rename-status=" + rename.status);
+					if (rename.status === "rejected") text("rename-denial=" + String(rename.reason));
 					text(await tools.mcp({tool: "hive_get_run", args: {}}));
 					text(await tools.mcp({tool: "mcp__hive__get_run", args: {}}));
 					const [write, promoted] = await Promise.allSettled([tools.mcp__hive__knowledge_write({}), tools.hive_get_run({})]);
@@ -89,7 +97,7 @@ it.each(["plan", "discuss", "orchestrate"])("real codemode binds gateway dispatc
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: dir, agentDir: dir, settingsManager, noExtensions: true, noSkills: true,
 		noPromptTemplates: true, noThemes: true, noContextFiles: true,
-		extensionFactories: [pi => { pi.on("tool_call", event => { if (event.parentToolCallId) nestedCalls.push(event.toolName); }); }, createCodemodeExtension({ models: false }), gateway, opmode, plan],
+		extensionFactories: [pi => { pi.on("tool_call", event => { if (event.parentToolCallId) nestedCalls.push(event.toolName); }); }, createCodemodeExtension({ models: false }), gateway, lens, opmode, plan],
 	});
 	await resourceLoader.reload();
 	const { session, extensionsResult } = await createAgentSession({
@@ -114,11 +122,17 @@ it.each(["plan", "discuss", "orchestrate"])("real codemode binds gateway dispatc
 		expect(writes).toBe(0);
 		expect(gatewayCalls).toBe(mode === "orchestrate" ? 3 : 2);
 		expect(coordinationCalls).toBe(mode === "orchestrate" ? 1 : 0);
-		expect(nestedCalls).toEqual(["mcp__hive__get_run", "mcp", "mcp", "mcp__hive__knowledge_write", "hive_get_run", "mcp", ...(mode === "orchestrate" ? ["mcp"] : [])]);
+		expect(nestedCalls).toEqual(["mcp__hive__get_run", "read_symbol", "rename_symbol", "mcp", "mcp", "mcp__hive__knowledge_write", "hive_get_run", "mcp", ...(mode === "orchestrate" ? ["mcp"] : [])]);
 		const result = session.messages.find(message => message.role === "toolResult");
 		expect(JSON.stringify(result)).toContain("live-read");
 		expect(JSON.stringify(result)).toContain("rejected");
 		expect(JSON.stringify(result)).toContain("gateway-live-read");
+		expect(JSON.stringify(result)).toContain("fixture = 17");
+		// A missing language server returns a fulfilled error result. Only the
+		// actual tool policy rejects; pin this call, not unrelated rejections.
+		expect(JSON.stringify(result)).toContain("rename-status=rejected");
+		expect(JSON.stringify(result)).toContain("rename-denial=Error: `rename_symbol`");
+		expect(await readFile(sourcePath, "utf8")).toBe(source);
 	} finally {
 		session.dispose();
 		vi.unstubAllGlobals(); vi.unstubAllEnvs();

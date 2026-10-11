@@ -1,3 +1,27 @@
+# Credential diagnostics and planning research — 2026-10-11
+
+Catalog reads now expose only service scope metadata, not operator references
+or values. Request/poll diagnostics retain bounded server explanations and
+nested call IDs; delivery failures retain secret-safe recovery guidance.
+Background-delivery races report an unconfirmed outcome, not false absence.
+
+Reviewed source, public-page and catalog reads work in planning. Grant requests,
+writes, session control and ambiguous direct MCP identities remain denied.
+Actual SDK regressions pin nested symbol reads and rename-specific policy denial.
+
+A separate chart commit fixes the shared Claude model-free module-loading gate:
+one plain JSON schema is shared with pi without importing typebox into Claude.
+
+Verification: npm run check passed types and 5,356 tests (20 existing skips).
+A final assertion-only change passed all five SDK mode-runtime tests.
+The generic quality_gate helper has no adapter here; npm run check is the repo
+command. Exact published-head GitHub checks are still required.
+
+No deployment, live credential grant, original-session recovery or machine
+configuration change is claimed. Chart repair is isolated in commit 35d6445.
+
+---
+
 # Durable ordering regression completion — 2026-10-07
 
 Factory now retains six permanent real-entrypoint/HTTP receiver regressions in
