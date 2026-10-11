@@ -98,10 +98,10 @@ describe("mcp protocol", () => {
 });
 
 describe("static chart tool", () => {
-	it("ships its eager schema dependency in production installs", () => {
+	it("does not require native schema peers in production MCP installs", () => {
 		const manifest = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
-		expect(manifest.dependencies.typebox).toBeDefined();
-		expect(manifest.peerDependenciesMeta.typebox?.optional).not.toBe(true);
+		expect(manifest.dependencies.typebox).toBeUndefined();
+		expect(manifest.peerDependenciesMeta.typebox.optional).toBe(true);
 	});
 	it("is model-free, returns final details, and rejects malformed or live-feed parameters", async () => {
 		const modelFreeEnv = { ...launch.env };

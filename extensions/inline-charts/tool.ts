@@ -7,6 +7,9 @@ import { watchChartSource } from "./source.ts";
 
 export const chartParameters = Type.Object({
 	...staticChartParameters.properties,
+	subtitle: Type.Optional(staticChartParameters.properties.subtitle),
+	unit: Type.Optional(staticChartParameters.properties.unit),
+	chart_id: Type.Optional(staticChartParameters.properties.chart_id),
 	source_file: Type.Optional(Type.String({ minLength: 1, description: "Existing regular JSONL feed produced by a separately guarded background job; resolved against execution cwd." })),
 	timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 300 })),
 	series: Type.Optional(staticChartParameters.properties.series),

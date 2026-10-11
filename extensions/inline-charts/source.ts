@@ -120,6 +120,7 @@ export async function watchChartSource(
 			if (current.size > offset) {
 				const bytes = Buffer.alloc(Math.min(READ_CHUNK, current.size - offset));
 				const { bytesRead } = await handle.read(bytes, 0, bytes.length, offset);
+				if (signal?.aborted) fail("source_file observation cancelled");
 				checkDeadline();
 				if (!bytesRead) continue;
 				consumed.update(bytes.subarray(0, bytesRead));

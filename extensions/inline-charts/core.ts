@@ -1,5 +1,3 @@
-import { Type } from "typebox";
-
 const MAX_SERIES = 8;
 const MAX_POINTS_PER_SERIES = 100;
 const MAX_TEXT_LENGTH = 80;
@@ -20,21 +18,24 @@ export interface ChartDetails {
 	chart_id?: string;
 }
 
-const pointSchema = Type.Object({ x: Type.String({ minLength: 1, maxLength: MAX_TEXT_LENGTH }), y: Type.Number() });
-const seriesSchema = Type.Object({
-	name: Type.String({ minLength: 1, maxLength: MAX_TEXT_LENGTH }),
-	points: Type.Array(pointSchema, { minItems: 1, maxItems: MAX_POINTS_PER_SERIES }),
-});
-
-/** Static data-only schema, also exposed by the Claude MCP adapter. */
-export const chartParameters = Type.Object({
-	type: Type.Union([Type.Literal("line"), Type.Literal("bar")], { description: "Line for trends over ordered observations; bar for category comparisons." }),
-	title: Type.String({ minLength: 1, maxLength: MAX_TEXT_LENGTH }),
-	subtitle: Type.Optional(Type.String({ maxLength: MAX_TEXT_LENGTH })),
-	unit: Type.Optional(Type.String({ maxLength: 24, description: "Optional unit shown beside summary values, for example %, USD, or ms." })),
-	chart_id: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
-	series: Type.Array(seriesSchema, { minItems: 1, maxItems: MAX_SERIES }),
-});
+/** Static data-only JSON Schema, also exposed by the Claude MCP adapter. */
+export const chartParameters = {
+	type: "object",
+	properties: {
+		type: { type: "string", enum: ["line", "bar"], description: "Line for trends over ordered observations; bar for category comparisons." },
+		title: { type: "string", minLength: 1, maxLength: MAX_TEXT_LENGTH },
+		subtitle: { type: "string", maxLength: MAX_TEXT_LENGTH },
+		unit: { type: "string", maxLength: 24, description: "Optional unit shown beside summary values, for example %, USD, or ms." },
+		chart_id: { type: "string", minLength: 1, maxLength: 120 },
+		series: { type: "array", minItems: 1, maxItems: MAX_SERIES, items: { type: "object", properties: {
+			name: { type: "string", minLength: 1, maxLength: MAX_TEXT_LENGTH },
+			points: { type: "array", minItems: 1, maxItems: MAX_POINTS_PER_SERIES, items: { type: "object", properties: {
+				x: { type: "string", minLength: 1, maxLength: MAX_TEXT_LENGTH }, y: { type: "number" },
+			}, required: ["x", "y"] } },
+		}, required: ["name", "points"] } },
+	},
+	required: ["type", "title", "series"],
+} as const;
 
 function fail(message: string): never { throw new Error(`render_chart: ${message}`); }
 

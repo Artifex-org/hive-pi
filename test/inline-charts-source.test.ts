@@ -4,12 +4,17 @@ import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 
 // Observe real FileHandle reads without replacing their implementation.
-const io = vi.hoisted(() => ({ firstRead: undefined as (() => Promise<number> | undefined) | undefined }));
+const io = vi.hoisted(() => ({ firstRead: undefined as (() => Promise<number> | undefined) | undefined, afterRead: undefined as (() => Promise<void>) | undefined }));
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs/promises")>();
 	return { ...actual, open: async (...args: Parameters<typeof actual.open>) => {
 		const handle = await actual.open(...args);
-		const read = vi.spyOn(handle, "read");
+		const originalRead = handle.read.bind(handle);
+		const read = vi.spyOn(handle, "read").mockImplementation(async (...args) => {
+			const value = await originalRead(...args);
+			await io.afterRead?.();
+			return value;
+		});
 		io.firstRead = () => {
 			const first = read.mock.results[0];
 			return first?.type === "return" ? first.value.then((value) => value.bytesRead) : undefined;
@@ -52,6 +57,26 @@ describe("live inline chart source", () => {
 			expect(result.details.chart_id).toBe("stable");
 			expect(updates.at(-1).details).toEqual(result.details);
 		} finally { await f.cleanup(); }
+	});
+
+	it("does not publish when cancellation happens during a source read", async () => {
+		const f = await fixture();
+		try {
+			await writeFile(f.file, `${snapshot(1)}\n{"done":true}\n`);
+			let readStarted: () => void = () => {};
+			const started = new Promise<void>((resolve) => { readStarted = resolve; });
+			let releaseRead: () => void = () => {};
+			const blocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+			io.afterRead = async () => { readStarted(); await blocked; };
+			const controller = new AbortController();
+			const update = vi.fn();
+			const pending = call(registeredTool(), f.file, f.dir, {}, controller.signal, update);
+			await started;
+			controller.abort();
+			releaseRead();
+			await expect(pending).rejects.toThrow(/cancelled/);
+			expect(update).not.toHaveBeenCalled();
+		} finally { io.afterRead = undefined; await f.cleanup(); }
 	});
 
 	it("rejects completion when awaited I/O crosses the observation deadline", async () => {
