@@ -112,6 +112,7 @@ import { collectPatch, collectWorktree, type WorktreePayload } from "./worktree.
 import { createDeltaQueue, type DeltaQueue } from "./deltaQueue.ts";
 import { openJournal, type Journal } from "./journal.ts";
 import { parseTeamMessage, renderTeamMessage, triggersTurn } from "./team.ts";
+import { registerCommunicationAide, type AideDeps } from "./communication-aide.ts";
 import { invalidateRemoteLifecycle, isCurrentRemoteLifecycle, type RemoteLifecycle } from "./lifecycle.ts";
 import { BrowserSurfacePublisher, TerminalSurfacePublisher } from "./surfaces.ts";
 import {
@@ -229,6 +230,7 @@ function createdPullURL(toolName: string, args: unknown, result: unknown, isErro
 }
 
 export interface RemoteDeps {
+	communicationAide?: AideDeps;
 	loadConfig?: () => RemoteConfig;
 	resolveAuth?: (fallbackUrl?: string) => ResolvedAuth | null;
 	/** Override the post-compact recap fetch (tests). Production uses fetchSessionRecap. */
@@ -371,6 +373,10 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	});
 	registerCredentialTools(pi, credentials);
 	const teamWaker = createWaker(pi, "team-message");
+	const communicationAide = registerCommunicationAide(pi, notice => {
+		if (overflowWedged(latestCtx)) pi.sendMessage(notice, { deliverAs: "followUp", triggerTurn: false });
+		else teamWaker.deliver(notice, "message");
+	}, deps.communicationAide);
 	const remember = (ctx: ExtensionContext) => {
 		latestCtx = ctx;
 		try { rememberedLocalSessionID = ctx.sessionManager.getSessionId(); } catch { rememberedLocalSessionID = null; }
@@ -1657,6 +1663,15 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 					return;
 				}
 				const rendered = renderTeamMessage(msg);
+				let triaged = false;
+				try { triaged = communicationAide.receive(cmd.id, msg); }
+				catch { latestCtx?.ui.notify("Communications aide could not archive this message; delivering the original.", "warning"); }
+				if (triaged) {
+					// Keep the workspace transcript complete, without adding routine
+					// chatter to the lead's model context or waking it.
+					foldNotice(transcript, rendered, Date.now(), "team");
+					kick(); return;
+				}
 				// A custom message rather than a user message (the agenda precedent):
 				// the transcript should show a teammate speaking, not the operator.
 				// Only a direct "message" wakes an idle agent; every other category
@@ -1679,7 +1694,8 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// structured hand-back (plan approval, pending grant) holds it
 				// (hive-common/waker.ts). Every other category stays non-waking.
 				const wedged = overflowWedged(latestCtx);
-				const notice = { customType: "team-message", content: rendered, display: true };
+				const notice = { customType: "team-message", content: rendered, display: true,
+					details: { communicationAideIds: [cmd.id] } };
 				if (!wedged && triggersTurn(msg.category)) teamWaker.deliver(notice, "message");
 				else pi.sendMessage(notice, { deliverAs: "followUp", triggerTurn: false });
 				foldNotice(transcript, rendered, Date.now(), "team");

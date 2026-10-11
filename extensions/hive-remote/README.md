@@ -38,6 +38,70 @@ this client: older backends do not support `/output-attachments`. Older clients
 still report text but cannot populate historical screenshot references; the
 update does not reconstruct attachments omitted by a previous client.
 
+## Orchestrator communications aide (native Pi)
+
+A lead can opt in with `/orchestrator on` (Hive catalog **low** tier) or
+`/orchestrator on medium`. The `orchestrator_mode` tool offers the same actions:
+`on`, `off`, `status`, `digest`, and `inbox`. The lead's model is unchanged.
+
+This is a **tool-less background conversation inside the existing session**,
+not another team member or controller. One serialized consumer coalesces direct
+worker messages for one second, retains routine PR/CI/progress updates in bounded
+rolling memory, and forwards blockers, questions, decisions and action requests
+with their original wording and sender attribution **when selected by the aide**.
+Selection is model-dependent, not a deterministic urgency guarantee. Escalations use the normal
+handback-safe waker; they never bypass plan approval or context-overflow holds.
+It cannot reply to workers, grant approvals, launch agents, or change code.
+Non-direct notifications and messages without a sender retain normal delivery.
+
+Native Pi mode is opt-in and leaves existing team handles and controller
+relationships unchanged: interception happens after normal message routing.
+
+Routine originals remain visible in Hive's transcript, but do **not** enter the
+lead's model context or wake it. `/orchestrator digest` brings the rolling status
+into context without waking; `inbox [offset]` pages the latest 40 originals,
+with a 32k-character output ceiling and a next-offset hint (the tool also accepts
+`offset`). All accepted originals are archived in custom session entries outside model context. This
+ledger is session-wide, not branch-scoped: navigating to an earlier editing
+branch cannot strand accepted messages. Notices already appended anywhere in
+the session log count as delivered and are not replayed merely because you
+navigate history. After a restart/tree change, unresolved messages are returned to the lead and
+mode is disabled rather than risking loss; completed summaries are restored.
+There is still an at-most-once server claim-to-local-archive gap, unchanged from
+normal team delivery. Native Pi buffers custom-only setup without a saved file:
+filtering therefore waits until its first real conversation creates the session
+log; earlier originals take normal delivery, never a fabricated bootstrap turn.
+Recovery can duplicate an escalation if delivery preceded
+its completion record; it does not pretend to offer exactly-once delivery.
+
+Limits: at most 32 queued messages / 64k queued characters, eight per batch, 24k input characters per
+batch plus 4k rolling memory, and 2048 output tokens. Oversized messages bypass
+triage. Each call has a 45-second deadline. The aide stops after 100 reported
+batches or $2 of reported usage (a final batch can cross the threshold); toggling
+mode does not reset those session totals. Usage is reported to Hive telemetry
+and `status`, including responses arriving after cancellation or timeout.
+Pi's read-only extension API cannot append to a replaced session: such late
+charges wait in memory until their originating session resumes (with a visible
+warning), and can remain unrecorded if the process exits first. They never
+inflate the replacement session's totals. Provider errors without reported
+usage cannot be priced; these are reported-usage thresholds, not billing caps.
+Telemetry is emitted only after the opted-in Hive telemetry subscriber signals
+readiness; it is queued in memory across startup/reload rather than lost before
+subscription. Local budget accounting does not depend on telemetry consent.
+Canceled requests retain their per-session serialization fence until the
+provider actually settles, including across reloads. If re-enabled sooner,
+incoming originals return to the lead instead of starting overlapping requests.
+Idle waiting makes **no** model calls. Missing low/medium credentials
+refuse activation; no fallback uses the lead model. Timeout, malformed output or
+provider failure disables filtering and returns pending originals. `off` does
+likewise, aborting the active request and fencing late results.
+
+The model's judgment is not a guarantee: use `digest`/`inbox` and durable team
+notes to supervise the roster. This feature is for persistent TUI/RPC Pi coding
+sessions, not the boss chat, Claude clients, one-shot subagents, or Factory's
+vendored extension bundle. Factory support needs a separate reviewed re-vendor.
+No workstation settings are changed by activation; the choice is session-local.
+
 ## Stable identity and kickoff context
 
 The opening task title is sanitized once. Later user inputs and completion do

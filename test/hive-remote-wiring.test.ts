@@ -1476,3 +1476,34 @@ describe("waking a session that cannot send a request", () => {
 		expect(fake.messages[0]?.options?.triggerTurn).toBe(true);
 	});
 });
+
+// Test the production command-poll → delivery seam, not just the queue class.
+describe("orchestrator aide team delivery", () => {
+	it.each([[false, false], [true, false], [true, true]])("routes worker chatter with enabled=%s and escalation=%s", async (enabled, escalate) => {
+		const hive = fakeHive({ commands: [{ id: "tm-aide", kind: "team_message", payload: JSON.stringify({
+			category: "message", from_session_id: "worker", from_title: "Worker", text: "PR #42 green",
+		}) }] });
+		const complete = vi.fn<NonNullable<RemoteDeps["communicationAide"]>["complete"]>(async () => ({
+			role: "assistant", provider: "test", model: "cheap", api: "anthropic-messages", timestamp: 0, stopReason: "stop",
+			content: [{ type: "text", text: JSON.stringify({ summary: "Worker: PR #42 green", escalate: escalate ? ["tm-aide"] : [] }) }],
+			usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+		}));
+		hiveRemote(fake.api, { ...deps(), communicationAide: { archiveReady: () => true, select: async () => "test/cheap", complete } });
+		await attachAndSettle(fake);
+		if (enabled) await fake.runCommand("orchestrator", "on");
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(complete).toHaveBeenCalledTimes(enabled ? 1 : 0);
+		expect(fake.messages.filter(m => m.customType === "team-message")).toHaveLength(!enabled || escalate ? 1 : 0);
+		if (!enabled || escalate) expect(fake.messages.find(m => m.customType === "team-message")?.details)
+			.toEqual({ communicationAideIds: ["tm-aide"] });
+		if (enabled && escalate) {
+			expect(fake.messages[0].content).toContain("Worker");
+			expect(fake.messages[0].content).toContain("PR #42 green");
+			expect(fake.messages[0].options?.triggerTurn).toBe(true);
+		}
+		// Original prose still appears in the workspace event rail.
+		expect(JSON.stringify(hive.calls.filter(c => c.path.endsWith("/events")))).toContain("PR #42 green");
+		await fake.emit({ type: "session_shutdown" });
+	});
+});

@@ -51,6 +51,15 @@ to the workspace, and is steerable from it.
 session behaves as plain pi. Running this package outside a Hive fleet is a
 supported, tested state, not an accident.
 
+## Orchestrator communications aide
+
+A coding-team lead can use `/orchestrator on [low|medium]` to keep a tool-less
+background communications aide inside its existing Pi session. Routine worker
+updates stay out of the lead's context; blockers and decisions are escalated
+with original sender/wording. No extra teammate or controller is created.
+`/orchestrator digest` reads rolling status; `inbox` reads originals; `off` returns
+pending messages and stops triage. [Limits and recovery](extensions/hive-remote/README.md#orchestrator-communications-aide-native-pi).
+
 ## You should know
 
 You Should Know runs by default in terminal sessions and attached Hive web
