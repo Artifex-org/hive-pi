@@ -143,6 +143,7 @@ import {
 	turnFailure,
 	type Transcript,
 } from "./transcript.ts";
+import { toolUpdateThrottled } from "./tool-update.ts";
 import {
 	readPathOf,
 	resolveSkillCommand,
@@ -2483,7 +2484,6 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		 * 1 Hz. bash's own onUpdate fires at 100ms, which is ten network round
 		 * trips a second for a readout nobody can read that fast.
 		 */
-		const TOOL_UPDATE_THROTTLE_MS = 1000;
 		/**
 		 * The TAIL, not the head: a running command's interesting output is at
 		 * the end. Comfortably under the server's 16 KiB post-redaction clamp.
@@ -2510,7 +2510,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 
 			const st = toolProgress.get(callID) ?? { seq: 0, lastText: "", lastAtMs: 0 };
 			const now = Date.now();
-			if (now - st.lastAtMs < TOOL_UPDATE_THROTTLE_MS) return;
+			if (toolUpdateThrottled(event.toolName, now, st.lastAtMs)) return;
 			// Unchanged text and no typed payload is nothing to report. Details are
 			// NOT compared: a gate advancing through its checks ships an identical
 			// tail with a changed spec, and skipping those would freeze the meter.

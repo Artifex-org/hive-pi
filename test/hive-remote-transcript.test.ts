@@ -127,9 +127,64 @@ describe("tool pairing", () => {
 
 	it("still emits an ungrouped event when the start was never seen", () => {
 		const t = createTranscript();
-		foldToolEnd(t, "orphan", "read", "contents", false);
+		foldToolEnd(t, "orphan", "read", { contents: "text" }, false);
 		expect(t.queue).toHaveLength(1);
 		expect(t.queue[0]).toMatchObject({ tool_name: "read", tool_batch_id: undefined });
+		expect(JSON.parse(t.queue[0].tool_result!)).toEqual({ contents: "text", hive_tool_call_id: "orphan" });
+	});
+
+	it("embeds authoritative identity in object results without mutating or trusting result metadata", () => {
+		const t = createTranscript();
+		const result = { value: 1, hive_tool_call_id: "spoofed" };
+		foldToolStart(t, "authoritative", "read");
+		foldToolEnd(t, "authoritative", "read", result, false);
+
+		expect(JSON.parse(t.queue[0].tool_result!)).toEqual({ value: 1, hive_tool_call_id: "authoritative" });
+		expect(result).toEqual({ value: 1, hive_tool_call_id: "spoofed" });
+	});
+
+	it("serializes stateful non-object JSON representations only once", () => {
+		const t = createTranscript();
+		const rows = [1, 2];
+		foldToolEnd(t, "custom", "read", { toJSON: () => rows.splice(0) }, false);
+		expect(JSON.parse(t.queue[0].tool_result!)).toEqual([1, 2]);
+		expect(rows).toEqual([]);
+		foldToolEnd(t, "date", "read", new Date("2026-01-01"), false);
+		expect(JSON.parse(t.queue[1].tool_result!)).toBe("2026-01-01T00:00:00.000Z");
+	});
+
+	it("preserves arrays and valid identity through oversized object budgeting", () => {
+		const t = createTranscript();
+		foldToolEnd(t, "array", "read", [1, 2], false);
+		expect(JSON.parse(t.queue[0].tool_result!)).toEqual([1, 2]);
+		foldToolEnd(t, "huge", "read", { content: [{ type: "text", text: "x".repeat(300_000) }], details: { y: 1 } }, false);
+		expect(JSON.parse(t.queue[1].tool_result!).hive_tool_call_id).toBe("huge");
+		expect(t.queue[1].tool_result!.length).toBeLessThanOrEqual(262144);
+	});
+
+	it("retains authoritative identity when an object exceeds HOPELESS_BYTES", () => {
+		const t = createTranscript();
+		const result = { content: "x".repeat(9 * 1024 * 1024), hive_tool_call_id: "spoofed" };
+		foldToolEnd(t, "hopeless", "read", result, false);
+
+		const rendered = JSON.parse(t.queue[0].tool_result!);
+		expect(rendered).toEqual({
+			hive_tool_call_id: "hopeless",
+			content: [{ type: "text", text: "[dropped: oversized tool result]" }],
+		});
+		expect(result.hive_tool_call_id).toBe("spoofed");
+	});
+
+	it("retains identity when many small fields compete for the object budget", () => {
+		const t = createTranscript();
+		foldToolEnd(t, "many-fields", "read", Object.fromEntries(Array.from({ length: 30_000 }, (_, i) => [`field-${i}`, i])), false);
+		expect(JSON.parse(t.queue[0].tool_result!).hive_tool_call_id).toBe("many-fields");
+	});
+
+	it("does not treat ordinary drop-marker words as a budget failure", () => {
+		const t = createTranscript();
+		foldToolEnd(t, "text", "read", { content: "too large to summarize", details: { value: 1 } }, false);
+		expect(JSON.parse(t.queue[0].tool_result!).details).toEqual({ value: 1 });
 	});
 
 	// An aborted tool may never emit its end event. Without a bound, `pending`
