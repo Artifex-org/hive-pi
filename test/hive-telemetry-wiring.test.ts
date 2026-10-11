@@ -20,18 +20,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 import type { ResolvedConfig } from "../extensions/hive-telemetry/types.ts";
+import { registerCommunicationAide } from "../extensions/hive-remote/communication-aide.ts";
+import { aideUsageMailbox, deliverAideUsage } from "../extensions/hive-remote/communication-usage.ts";
 
 const URL_BASE = "https://hive.test";
 
 let dir: string;
 let cfg: ResolvedConfig;
+let credentialsAvailable = true;
 
 vi.mock("../extensions/hive-telemetry/identity.ts", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../extensions/hive-telemetry/identity.ts")>()),
 	spoolDir: () => dir,
 	configPath: () => join(dir, "config.json"),
 	loadConfig: () => cfg,
-	resolveAuth: (c: ResolvedConfig) => (c.enabled ? { token: "t", url: URL_BASE, source: "test" } : null),
+	writeConfig: (patch: Partial<ResolvedConfig>) => { cfg = { ...cfg, ...patch }; },
+	clearCredentials: () => { credentialsAvailable = false; },
+	resolveAuth: (c: ResolvedConfig) => (c.enabled && credentialsAvailable ? { token: "t", url: URL_BASE, source: "test" } : null),
 }));
 
 const hiveTelemetry = (await import("../extensions/hive-telemetry/index.ts")).default;
@@ -107,11 +112,13 @@ beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "hive-telemetry-wiring-"));
 	cfg = config();
 	vi.useFakeTimers();
+	credentialsAvailable = true;
 	fake = createFakePi();
 });
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	const box = aideUsageMailbox(); box.pending.clear(); box.owners.clear(); box.metrics.clear(); box.requests.clear();
 	// There is no vitest config, so `restoreMocks` is off and a `vi.spyOn(Math,
 	// "random")` from one test would otherwise still be pinning the jitter for
 	// every test after it — the shape in which a test passes only because of the
@@ -119,6 +126,69 @@ afterEach(() => {
 	vi.restoreAllMocks();
 	vi.useRealTimers();
 	rmSync(dir, { recursive: true, force: true });
+});
+
+describe("communications-aide telemetry startup barrier", () => {
+	const charge = () => ({ provider: "test", model: "cheap", usage: {
+		input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+	} });
+	const registerAide = () => registerCommunicationAide(fake.api, () => {}, {
+		archiveReady: () => true, select: async () => "test/cheap", complete: async () => { throw new Error("No provider call expected"); },
+	});
+	it("activates the real subscriber on live consent without another session_start", async () => {
+		cfg = config({ enabled: false });
+		const hive = fakeHive(); registerAide(); hiveTelemetry(fake.api);
+		await fake.emit({ type: "session_start", reason: "new" });
+		deliverAideUsage("fake-session", charge());
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(hive.posts).toHaveLength(0);
+		expect(aideUsageMailbox().metrics.get("fake-session")).toHaveLength(1);
+		await fake.runCommand("hive-telemetry", "on"); await vi.advanceTimersByTimeAsync(2_000);
+		expect(hive.sessions()[0]?.body.models).toContainEqual(expect.objectContaining({ model: "cheap", cost_usd: 0.01 }));
+		expect(aideUsageMailbox().metrics.has("fake-session")).toBe(false);
+		await fake.emit({ type: "session_shutdown", reason: "exit" });
+	});
+	it.each(["off", "logout"])("revokes subscriber readiness on %s and preserves charges until re-enabled", async verb => {
+		const hive = fakeHive(); registerAide(); hiveTelemetry(fake.api);
+		await fake.emit({ type: "session_start", reason: "new" });
+		deliverAideUsage("fake-session", charge()); await vi.advanceTimersByTimeAsync(2_000);
+		await fake.runCommand("hive-telemetry", verb);
+		const posts = hive.sessions().length;
+		deliverAideUsage("fake-session", charge()); await vi.advanceTimersByTimeAsync(2_000);
+		expect(hive.sessions()).toHaveLength(posts);
+		expect(aideUsageMailbox().metrics.get("fake-session")).toHaveLength(1);
+		if (verb === "logout") {
+			await fake.runCommand("hive-telemetry", "on"); await vi.advanceTimersByTimeAsync(2_000);
+			expect(hive.sessions()).toHaveLength(posts);
+			expect(aideUsageMailbox().metrics.get("fake-session")).toHaveLength(1);
+			credentialsAvailable = true; // simulate explicit reauthentication, not an on-command credential grant
+		}
+		await fake.runCommand("hive-telemetry", "on"); await vi.advanceTimersByTimeAsync(2_000);
+		expect(hive.sessions().length).toBeGreaterThan(posts);
+		expect(hive.sessions().at(-1)?.body.models).toContainEqual(expect.objectContaining({ model: "cheap", cost_usd: 0.01 }));
+		expect(aideUsageMailbox().metrics.has("fake-session")).toBe(false);
+		await fake.emit({ type: "session_shutdown", reason: "exit" });
+	});
+	it.each(["aide-first", "telemetry-first"])("delivers restored usage to the real subscriber: %s", async order => {
+		const hive = fakeHive();
+		aideUsageMailbox().pending.set("native-aide-session", [{ provider: "test", model: "cheap", usage: {
+			input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+		} }]);
+		const aide = () => registerCommunicationAide(fake.api, () => {}, {
+			archiveReady: () => true, select: async () => "test/cheap", complete: async () => { throw new Error("No provider call expected"); },
+		});
+		if (order === "aide-first") { aide(); hiveTelemetry(fake.api); }
+		else { hiveTelemetry(fake.api); aide(); }
+		await fake.emit({ type: "session_start", reason: "resume" }, { sessionId: "native-aide-session" });
+		await vi.advanceTimersByTimeAsync(2_000);
+		const models = hive.sessions()[0]?.body.models as Array<Record<string, unknown>>;
+		expect(models).toContainEqual(expect.objectContaining({ provider: "test", model: "cheap", turns: 1,
+			input_tokens: 10, output_tokens: 10, cost_usd: 0.01 }));
+		expect(aideUsageMailbox().metrics.has("native-aide-session")).toBe(false);
+		await fake.emit({ type: "session_shutdown", reason: "exit" });
+	});
 });
 
 describe("the reported agent version", () => {

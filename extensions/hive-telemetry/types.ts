@@ -9,6 +9,8 @@
  */
 
 export const HIVE_METRIC_CHANNEL = "hive.metric";
+/** Internal startup barrier: the native-session accumulator is subscribed. */
+export const HIVE_METRIC_READY_CHANNEL = "hive.metric.ready";
 
 export interface NestedUsageMetric {
 	provider: string;

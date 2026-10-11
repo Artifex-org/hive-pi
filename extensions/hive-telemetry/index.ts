@@ -2,8 +2,8 @@
  * hive-telemetry — report this session's metrics to hive under the developer's
  * own API key, so local agent spend can be analysed alongside factory spend.
  *
- * OPT-IN. With no config this extension registers two commands and does nothing
- * else: no event handlers, no timers, no files, no network. A successful
+ * OPT-IN. With no config this extension registers commands and inert lifecycle
+ * handlers, but starts no timers, writes no files and makes no network calls. A successful
  * `/hive-login` is the single act of consent. Finding $HIVE_TOKEN in the
  * environment is a credential source, never a consent signal — that token
  * exists for the `hive` CLI.
@@ -73,7 +73,7 @@ import { piVersion } from "../hive-common/piVersion.ts";
 import { buildPayload } from "./payload.ts";
 import { clearSpool, drainSpool, spoolStats, writeSpool } from "./spool.ts";
 import { postUsage, validateToken, postHeartbeat } from "./transport.ts";
-import { HIVE_METRIC_CHANNEL, type HiveMetricEvent, type ResolvedConfig } from "./types.ts";
+import { HIVE_METRIC_CHANNEL, HIVE_METRIC_READY_CHANNEL, type HiveMetricEvent, type ResolvedConfig } from "./types.ts";
 
 /** Long enough for the deferred `git remote` probe to land in the first flush. */
 const PROJECT_RESOLVE_GRACE_MS = 1_500;
@@ -462,6 +462,7 @@ export default function (pi: ExtensionAPI) {
 				cfg = loadConfig();
 				if (verb === "off") {
 					stopTimers();
+					stopMetricSubscriber();
 					run = null; // stop collecting immediately, not at the next restart
 				} else {
 					try {
@@ -478,6 +479,8 @@ export default function (pi: ExtensionAPI) {
 				writeConfig({ enabled: false });
 				cfg = loadConfig();
 				stopTimers();
+				stopMetricSubscriber();
+				run = null;
 				notify("hive telemetry credentials cleared and reporting disabled");
 				return;
 			}
@@ -540,11 +543,13 @@ export default function (pi: ExtensionAPI) {
 	// rest of its life. Measured: a session at 7 turns / 18k tokens reported
 	// zero. A null check per event is a fine price for that not happening.
 
-	/**
-	 * startRun begins collecting for the current session. Called from
-	 * session_start and from /hive-login, so enabling takes effect immediately
-	 * rather than at the next restart.
-	 */
+	/** Collector consent and metric readiness share one lifecycle, whether
+	 * activated at session startup or through a live login/consent command. */
+	function stopMetricSubscriber(): void {
+		if (run) pi.events.emit(HIVE_METRIC_READY_CHANNEL, { sessionId: run.sessionId, ready: false });
+		unsubscribeMetrics?.();
+		unsubscribeMetrics = undefined;
+	}
 	function startRun(sessionId: string, cwd: string, forkedFrom: string): void {
 		if (!cfg.enabled || run) return;
 		if (!resolveAuth(cfg)) return; // enabled but no credential: stay inert
@@ -558,6 +563,18 @@ export default function (pi: ExtensionAPI) {
 		const runId = preMintedRunId ?? randomUUID();
 		preMintedRunId = null; // first run only — a reload or fork restarts at zero and needs a fresh id
 		run = createRun(runId, sessionId, forkedFrom, source, Date.now());
+		// Consent can activate a collector after session_start already ran.
+		// Subscribe at the actual activation boundary, before announcing ready.
+		unsubscribeMetrics?.();
+		unsubscribeMetrics = pi.events.on(HIVE_METRIC_CHANNEL, (data: unknown) => {
+			try {
+				const event = data as HiveMetricEvent;
+				if (!run || !event) return;
+				if (event.kind === "gate") foldGate(run, event);
+				if (event.kind === "nested_usage") foldNestedUsageModels(run, event.models);
+			} catch { /* fail open */ }
+		});
+		pi.events.emit(HIVE_METRIC_READY_CHANNEL, { sessionId, ready: true });
 		// Drop any stale timing slot: session_start can fire again on /reload
 		// without a shutdown, and a slot armed by the previous session must not be
 		// consumed by the next session's first message_end.
@@ -706,21 +723,6 @@ export default function (pi: ExtensionAPI) {
 		}
 		startRun(sessionId, cwd, event.reason === "fork" ? sessionId : "");
 
-		// pi.events outlives the session runtime, unlike pi.on handlers — so the
-		// unsubscribe must be held and called on shutdown or every /reload leaks
-		// another subscriber writing into a dead accumulator. Drop any previous
-		// one first: session_start can fire again (reload) without a shutdown.
-		unsubscribeMetrics?.();
-		unsubscribeMetrics = pi.events.on(HIVE_METRIC_CHANNEL, (data: unknown) => {
-			try {
-				const event = data as HiveMetricEvent;
-				if (!run || !event) return;
-				if (event.kind === "gate") foldGate(run, event);
-				if (event.kind === "nested_usage") foldNestedUsageModels(run, event.models);
-			} catch {
-				/* fail open */
-			}
-		});
 	});
 
 	// Generation-speed timing, option A (no pi-ai change). message_start fires on
@@ -887,8 +889,7 @@ export default function (pi: ExtensionAPI) {
 			const current = run;
 			markEnded(current, resolveEndOutcome(endReason, String(event.reason)), Date.now());
 			stopTimers();
-			unsubscribeMetrics?.();
-			unsubscribeMetrics = undefined;
+			stopMetricSubscriber();
 
 			// Synchronous, ~1ms: durability is guaranteed before anything else,
 			// whatever happens to the process next.
