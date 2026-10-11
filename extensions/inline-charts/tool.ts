@@ -2,14 +2,17 @@
 // Claude deliberately uses the static descriptor: its transport has no updates.
 import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
-import { buildDetails, chartParameters as staticChartParameters, chartResult, chartToolDefinition } from "./core.ts";
+import { buildDetails, chartParameters as staticChartParameters, chartResult, chartToolDefinition, type ChartInput } from "./core.ts";
 import { watchChartSource } from "./source.ts";
 
-export const chartParameters = Type.Object({
-	...staticChartParameters.properties,
-	source_file: Type.Optional(Type.String({ minLength: 1, description: "Existing regular JSONL feed produced by a separately guarded background job; resolved against execution cwd." })),
-	timeout_seconds: Type.Optional(Type.Number({ minimum: 1, maximum: 300 })),
-	series: Type.Optional(staticChartParameters.properties.series),
+export const chartParameters = Type.Unsafe<Omit<ChartInput, "series"> & { series?: ChartInput["series"]; source_file?: string; timeout_seconds?: number }>({
+	...staticChartParameters,
+	required: staticChartParameters.required.filter(name => name !== "series"),
+	properties: {
+		...staticChartParameters.properties,
+		source_file: { type: "string", minLength: 1, description: "Existing regular JSONL feed produced by a separately guarded background job; resolved against execution cwd." },
+		timeout_seconds: { type: "number", minimum: 1, maximum: 300 },
+	},
 });
 
 function fail(message: string): never { throw new Error(`render_chart: ${message}`); }
