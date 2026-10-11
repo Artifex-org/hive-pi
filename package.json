@@ -20,6 +20,9 @@
 		],
 		"themes": [
 			"./themes"
+		],
+		"skills": [
+			"./skills"
 		]
 	},
 	"engines": {

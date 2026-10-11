@@ -375,7 +375,7 @@ export function foldToolEnd(
 		kind: "tool_call",
 		tool_name: toolName,
 		tool_args: started?.args,
-		tool_result: stringify(result),
+		tool_result: stringifyToolResult(result, toolCallId),
 		tool_batch_id: batch?.id,
 		tool_batch_index: batch?.index,
 		tool_batch_size: batch?.size,
@@ -424,6 +424,27 @@ export function requeue(t: Transcript, events: WireEvent[]): void {
  * than throwing INSIDE an event handler, where a throw becomes an agent-loop
  * error.
  */
+// Serialize first: preserve arrays, primitives and custom JSON representations.
+// Identity is first in the budgeted envelope and cannot be supplied by a tool.
+function stringifyToolResult(result: unknown, call: string): string | undefined {
+	if (result === null || result === undefined) return stringify(result);
+	let raw: string | undefined;
+	try { raw = JSON.stringify(result, null, 2); }
+	catch { return stringify(result); }
+	if (raw === undefined || !raw.startsWith("{")) return stringify(result);
+
+	let parsed: Record<string, unknown>;
+	try { parsed = JSON.parse(raw) as Record<string, unknown>; }
+	catch { return stringify(result); }
+	delete parsed.hive_tool_call_id;
+	const envelope = { hive_tool_call_id: call, ...parsed };
+	const rendered = stringify(envelope);
+	if (!rendered || !rendered.startsWith("{")) {
+		return stringify({ hive_tool_call_id: call, content: [{ type: "text", text: "[dropped: oversized tool result]" }] });
+	}
+	return rendered;
+}
+
 function stringify(v: unknown, budget = RESULT_BUDGET): string | undefined {
 	return budgeted(v, budget);
 }

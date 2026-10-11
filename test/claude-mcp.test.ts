@@ -77,6 +77,7 @@ describe("mcp protocol", () => {
 			"mcp",
 			"quality_gate",
 			"record_playwright_flow",
+			"render_chart",
 			"report_dev_server",
 			"run_playwright_flow_source",
 			"run_saved_agent_flow",
@@ -93,6 +94,34 @@ describe("mcp protocol", () => {
 	it("exits when its input closes", async () => {
 		const c = await connect();
 		expect(await c.close()).toBe(0);
+	});
+});
+
+describe("static chart tool", () => {
+	it("is model-free, returns final details, and rejects malformed or live-feed parameters", async () => {
+		const modelFreeEnv = { ...launch.env };
+		delete modelFreeEnv.ANTHROPIC_API_KEY;
+		delete modelFreeEnv.OPENAI_API_KEY;
+		delete modelFreeEnv.HIVE_PI_AGENT_DIR;
+		delete modelFreeEnv.HIVE_PI_BIN;
+		const c = await connect(modelFreeEnv, REPO);
+		const tools = (await c.request("tools/list")).result?.tools as { name: string; inputSchema: { properties: Record<string, unknown> } }[];
+		const chart = tools.find((tool) => tool.name === "render_chart");
+		expect(chart).toBeDefined();
+		const unavailableModel = await c.call("advisor", {});
+		expect(unavailableModel.isError).toBe(true);
+		expect(unavailableModel.text).toContain("outside-model credential");
+		expect(chart!.inputSchema.properties).toHaveProperty("series");
+		expect(chart!.inputSchema.properties).not.toHaveProperty("source_file");
+		expect(chart!.inputSchema.properties).not.toHaveProperty("timeout_seconds");
+		const args = { type: "line", title: "Revenue", series: [{ name: "sales", points: [{ x: "Jan", y: 3 }] }] };
+		const rendered = await c.call("render_chart", args);
+		expect(rendered.isError).toBe(false);
+		expect(JSON.parse(rendered.text)).toMatchObject({ content: [{ type: "text" }], details: { title: "Revenue", min: 3, max: 3 } });
+		expect((await c.call("render_chart", { ...args, series: [] })).isError).toBe(true);
+		const refused = await c.call("render_chart", { ...args, source_file: "/etc/passwd" });
+		expect(refused.isError).toBe(true);
+		expect(refused.text).toContain("source_file and timeout_seconds are unavailable");
 	});
 });
 
