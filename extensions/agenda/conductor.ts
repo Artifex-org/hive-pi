@@ -178,6 +178,17 @@ function itemFor(hooks: ConductorHooks, now: number): ConductorItem {
 	return hooks.current() ?? createConductor(`conductor-${now.toString(36)}`, now);
 }
 
+/**
+ * A todo list with something still open — the only list `execute` can finish
+ * on. A fully closed one belongs to work that is already over: entered into
+ * execute, `allTasksDone` completes it at the very next settle, so a lifecycle
+ * reopened for a new instruction (attendance.ts) would walk the OLD list
+ * straight back through verify and consolidate to done.
+ */
+function openTasks(signals: SessionSignals): boolean {
+	return signals.tasks.total > 0 && !allTasksDone(signals);
+}
+
 /** Every step of every task list done, and at least one task exists. */
 function allTasksDone(signals: SessionSignals): boolean {
 	return signals.tasks.total >= 1 && signals.tasks.completed === signals.tasks.total;
@@ -229,7 +240,7 @@ function decideIdle(hooks: ConductorHooks, context: PolicyContext, signals: Sess
 	// item closes — without the retroactive plan mode. Without one there is
 	// nothing for execute to finish on, so stay idle for the next prompt.
 	if (signals.toolCallsSinceUser > EARLY_TOOL_CALLS) {
-		if (signals.tasks.total > 0) return silentAdvance(hooks, "execute", "complex");
+		if (openTasks(signals)) return silentAdvance(hooks, "execute", "complex");
 		return null;
 	}
 
@@ -281,7 +292,7 @@ function planTransition(hooks: ConductorHooks, context: PolicyContext, signals: 
 	// leaves the lifecycle free for the next prompt rather than parked forever.
 	const late = signals.toolCallsSinceInjection > EARLY_TOOL_CALLS || signals.toolCallsSinceUser > EARLY_TOOL_CALLS * 3;
 	if (late || (hooks.toolReachable && !hooks.toolReachable("plan_write"))) {
-		return silentAdvance(hooks, signals.tasks.total > 0 ? "execute" : "idle");
+		return silentAdvance(hooks, openTasks(signals) ? "execute" : "idle");
 	}
 	return {
 		name: "conductor",

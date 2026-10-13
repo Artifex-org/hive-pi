@@ -620,4 +620,25 @@ describe("conductor policy — kicks only before the work is under way", () => {
 		expect(rang()).toBe(0);
 		expect(item()?.stage).toBe("execute");
 	});
+
+	// A lifecycle reopened for a new instruction (attendance.ts) still sees the
+	// PREVIOUS task's todo list, every item closed. Executing against it would
+	// complete at the next settle and walk the new work to done unexamined.
+	it("does not execute against a todo list that is already fully closed", () => {
+		const { hooks, item } = makeHooks();
+		const closed = { total: 4, pending: 0, inProgress: 0, completed: 4 };
+		const late = createConductorPolicy(hooks).decide(contextWith(emptyLedger, signalsWith({ toolCallsSinceUser: 40, tasks: closed })));
+		expect(late).toBeNull();
+		expect(item()).toBeNull();
+	});
+
+	it("leaves a late re-plan idle rather than executing a closed list", async () => {
+		const { hooks, item } = makeHooks(withStage(createConductor("c1", 1), "frame", 2));
+		const ledger = record(emptyLedger, FRAME_LEDGER_ID);
+		const work = createConductorPolicy(hooks).decide(
+			contextWith(ledger, signalsWith({ tasks: { total: 2, pending: 0, inProgress: 0, completed: 2 }, toolCallsSinceInjection: 30, toolCallsSinceUser: 33 })),
+		);
+		await work?.run();
+		expect(item()?.stage).toBe("idle");
+	});
 });

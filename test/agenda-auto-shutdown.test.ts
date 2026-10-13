@@ -3,6 +3,10 @@ import agenda from "../extensions/agenda/index.ts";
 import { shouldAutoShutdown } from "../extensions/agenda/auto-shutdown.ts";
 import { resolveEndOutcome } from "../extensions/hive-telemetry/accumulator.ts";
 import { OPERATOR_INPUT_CHANNEL } from "../extensions/hive-common/channels.ts";
+import { operatorInputDigest } from "../extensions/hive-common/operator-input.ts";
+
+/** The launch prompt, already consumed: what makes a later message NOT the opening one. */
+const opened = { message: { role: "user", content: "run the research" } };
 import { createFakePi } from "./fake-pi.ts";
 
 const originalOptIn = process.env.PI_AGENDA_AUTO_SHUTDOWN;
@@ -144,8 +148,8 @@ describe("graceful auto-shutdown observer", () => {
 		process.env.HIVE_LAUNCH_ID = "launch-1";
 		const fake = createFakePi();
 		agenda(fake.api);
-		await fake.emit({ type: "session_start", reason: "resume" }, { mode: "tui", branch: [doneConductor()] });
-		fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source: "operator" });
+		await fake.emit({ type: "session_start", reason: "resume" }, { mode: "tui", branch: [opened, doneConductor()] });
+		fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source: "operator", digest: operatorInputDigest("continue") });
 		await fake.emit({ type: "agent_settled" }, { mode: "tui", branch: [{ message: { role: "assistant", content: "done" } }] });
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -158,12 +162,31 @@ describe("graceful auto-shutdown observer", () => {
 		process.env.HIVE_LAUNCH_ID = "launch-1";
 		const fake = createFakePi();
 		agenda(fake.api);
-		await fake.emit({ type: "session_start", reason: "resume" }, { mode: "tui", branch: [doneConductor()] });
+		await fake.emit({ type: "session_start", reason: "resume" }, { mode: "tui", branch: [opened, doneConductor()] });
 		await fake.emit({ type: "agent_settled" }, { mode: "tui", branch: [{ message: { role: "assistant", content: "done" } }] });
-		fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source: "driver" });
+		fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source: "driver", digest: operatorInputDigest("continue") });
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		expect(fake.shutdowns).toBe(0);
+	});
+
+	// A launch with attachments delivers its TASK as one remote operator
+	// command. That is the opening prompt, not a person steering: an unsteered
+	// launch must still close when it is done.
+	it("does not count the opening prompt as attendance, even when an operator sent it through Hive", async () => {
+		process.env.PI_AGENDA_AUTO_SHUTDOWN = "1";
+		process.env.HIVE_LAUNCH_ID = "launch-1";
+		const fake = createFakePi();
+		agenda(fake.api);
+		await fake.emit({ type: "session_start", reason: "startup" }, { mode: "tui", branch: [] });
+		fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source: "operator", digest: operatorInputDigest("run the research") });
+		await fake.emit({ type: "message_end", message: { role: "user", content: "run the research" } });
+		await fake.emit({ type: "session_start", reason: "resume" }, { mode: "tui", branch: [opened, doneConductor()] });
+		await fake.emit({ type: "agent_settled" }, { mode: "tui", branch: [opened, { message: { role: "assistant", content: "done" } }] });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(fake.entries.filter((e) => e.customType === "agenda-attended")).toHaveLength(0);
+		expect(fake.shutdowns).toBe(1);
 	});
 
 	it("stays attended across a resume — the flag is persisted, not process memory", async () => {

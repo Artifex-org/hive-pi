@@ -245,7 +245,8 @@ export interface ConductorStageEvent {
  *
  * Emitted BEFORE the message is handed to pi, so a subscriber watching for
  * the user message itself (`message_end`) always sees the event first. The
- * source enum only: the message text never crosses the bus.
+ * source enum and a digest only (hive-common/operator-input.ts): the message
+ * text never crosses the bus.
  */
 export const OPERATOR_INPUT_CHANNEL = "hive.operator.input";
 
@@ -254,6 +255,8 @@ export type OperatorInputSource = "operator" | "driver" | "collaborator";
 
 export interface OperatorInputEvent {
 	source: OperatorInputSource;
+	/** operatorInputDigest of the text handed to pi — names the message, carries none of it. */
+	digest: string;
 }
 
 /**

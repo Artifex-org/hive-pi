@@ -8,6 +8,7 @@ import agenda from "../extensions/agenda/index.ts";
 import { announceOwnWork } from "../extensions/hive-common/own-work.ts";
 import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL, OPERATOR_INPUT_CHANNEL } from "../extensions/hive-common/channels.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
+import { operatorInputDigest } from "../extensions/hive-common/operator-input.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
 import { CredentialReceiver } from "../extensions/hive-remote/credentials.ts";
 import { registerCredentialConsumer } from "../extensions/hive-remote/credential-runtime.ts";
@@ -1130,7 +1131,10 @@ describe("attach", () => {
 
 		expect(fake.userMessages).toHaveLength(5);
 		expect(fake.busEvents.filter((e) => e.name === OPERATOR_INPUT_CHANNEL).map((e) => e.payload))
-			.toEqual([{ source: "operator" }, { source: "driver" }]);
+			.toEqual([
+				{ source: "operator", digest: operatorInputDigest("continue") },
+				{ source: "driver", digest: operatorInputDigest("from a colleague") },
+			]);
 		// "continue" was message 1 and "from a colleague" message 4: each announced first.
 		expect(deliveredAtAnnouncement).toEqual([0, 3]);
 	});

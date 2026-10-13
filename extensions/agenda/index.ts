@@ -119,6 +119,7 @@ import {
 	recapTranscript,
 } from "./recap.ts";
 import { ATTENDED_ENTRY_TYPE, type AttendedEntry, rehydrateAttended, reopenForInstruction } from "./attendance.ts";
+import { operatorInputDigest } from "../hive-common/operator-input.ts";
 import { classifyHandback } from "../hive-common/handback.ts";
 import { announceOwnWork, trackOwnWork } from "../hive-common/own-work.ts";
 import { createWaker } from "../hive-common/waker.ts";
@@ -191,6 +192,9 @@ function firstPage(runId: string, result: DurableRunResult, limit: number): stri
 		"(a fanout/pipeline element as <id>#<n>)."
 	);
 }
+
+/** Announced operator messages remembered while waiting for their user message; a lost one ages out. */
+const MAX_PENDING_OPERATOR_MESSAGES = 16;
 
 /** Above this, a run asks before it starts. */
 const CONFIRM_ABOVE_AGENTS = 25;
@@ -451,7 +455,8 @@ export default function (pi: ExtensionAPI) {
 		pendingRecap = null;
 		lastRecapTail = "";
 		autoShutdownScheduled = false;
-		pendingOperatorMessages = 0;
+		pendingOperatorDigests.length = 0;
+		heardUserMessage = false;
 		heldCtx = ctx;
 		// Ephemeral per-session state — unlike goals, deliberately NOT persisted:
 		// a gate stamp or verify note from another session describes checks that
@@ -485,6 +490,7 @@ export default function (pi: ExtensionAPI) {
 			loop = rehydrateLoop(entries);
 			conductor = rehydrateConductor(entries);
 			attended = rehydrateAttended(entries);
+			heardUserMessage = entries.some((raw) => (raw as { message?: { role?: string } } | undefined)?.message?.role === "user");
 		} catch {
 			goal = null;
 			loop = null;
@@ -532,8 +538,10 @@ export default function (pi: ExtensionAPI) {
 	let autoShutdownScheduled = false;
 	/** A person has steered this session through Hive (attendance.ts). Rehydrated on session_start. */
 	let attended = false;
-	/** Person-sent messages announced on the bus whose user message has not arrived yet. */
-	let pendingOperatorMessages = 0;
+	/** Digests of person-sent messages announced on the bus whose user message has not arrived yet. */
+	const pendingOperatorDigests: string[] = [];
+	/** Has this session seen any user message — i.e. is the next one NOT its opening prompt? */
+	let heardUserMessage = false;
 
 	/** Append one agent-status entry and ring the doorbell. The revision bump also voids an in-flight recap. */
 	const writeStatus = (taskState: TaskState, recap: string) => {
@@ -667,12 +675,19 @@ export default function (pi: ExtensionAPI) {
 	 * arrives (`message_end` below), because a settle already in progress may
 	 * still commit the old task's `done` between the two — on f2ead622 the
 	 * operator's "continue" landed in the same second the conductor closed.
+	 *
+	 * The session's OPENING prompt is not attendance even when a person sent it
+	 * through Hive (a launch with attachments delivers its task as one remote
+	 * operator command): that is the task, and an unsteered launch must still
+	 * close when it is done.
 	 */
 	pi.events.on(OPERATOR_INPUT_CHANNEL, (payload: unknown) => {
 		if (IS_WORKER) return;
 		const event = payload as OperatorInputEvent | undefined;
-		if (typeof event?.source !== "string") return;
-		pendingOperatorMessages++;
+		if (typeof event?.source !== "string" || typeof event.digest !== "string") return;
+		if (!heardUserMessage) return;
+		pendingOperatorDigests.push(event.digest);
+		if (pendingOperatorDigests.length > MAX_PENDING_OPERATOR_MESSAGES) pendingOperatorDigests.shift();
 		if (attended) return;
 		attended = true;
 		try {
@@ -683,10 +698,18 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", (event: unknown) => {
-		if (IS_WORKER || pendingOperatorMessages === 0) return;
+		if (IS_WORKER) return;
 		const message = (event as { message?: { role?: string; content?: unknown } } | undefined)?.message;
 		if (message?.role !== "user") return;
-		pendingOperatorMessages--;
+		heardUserMessage = true;
+		if (pendingOperatorDigests.length === 0) return;
+		// Paired by digest, not by count: a Hive notice consumed from the other
+		// queue in between must neither reopen the lifecycle nor be quoted as
+		// the operator's instruction.
+		const text = contentText(message.content);
+		const at = pendingOperatorDigests.indexOf(operatorInputDigest(text));
+		if (at < 0) return;
+		pendingOperatorDigests.splice(at, 1);
 		const reopened = reopenForInstruction(conductor, goal, Date.now());
 		if (!reopened.conductor && !reopened.goal) return;
 		if (reopened.goal) persist(reopened.goal);
@@ -704,7 +727,7 @@ export default function (pi: ExtensionAPI) {
 				goalBlocked: goal?.state === "blocked_user",
 				conductorDone: conductor?.stage === "done",
 			}),
-			instructionRecap(contentText(message.content)),
+			instructionRecap(text),
 		);
 	});
 

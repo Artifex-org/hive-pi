@@ -84,6 +84,7 @@ import { createWaker } from "../hive-common/waker.ts";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
+import { operatorInputDigest } from "../hive-common/operator-input.ts";
 import { attach, buildCatalog, claimCommands, fetchCommandAttachment, getSessionIdentity, putSessionIdentity, pinSessionTitle, postActivity, postDelta, postPlan, postEvents, postPull, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
 import { announceRemoteOpeningInput, SESSION_IDENTITY_CHANNEL, SESSION_MANUAL_TITLE_CHANNEL, type SessionIdentityUpdate } from "./sessionIdentityBus.ts";
 import { ARGS_BUDGET, budgeted } from "./budget.ts";
@@ -1389,7 +1390,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				const human = humanCommandSource(cmd.source);
 				if (human) {
 					try {
-						pi.events.emit(OPERATOR_INPUT_CHANNEL, { source: human } satisfies OperatorInputEvent);
+						pi.events.emit(OPERATOR_INPUT_CHANNEL, { source: human, digest: operatorInputDigest(text) } satisfies OperatorInputEvent);
 					} catch {
 						/* no bus — the steer itself still lands */
 					}

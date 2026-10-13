@@ -16,6 +16,7 @@ import { type ConductorItem, createConductor, withStage } from "../extensions/ag
 import { createGoal, type GoalItem, withState } from "../extensions/agenda/goal-state.ts";
 import { completedRecap, instructionRecap } from "../extensions/agenda/recap.ts";
 import { OPERATOR_INPUT_CHANNEL } from "../extensions/hive-common/channels.ts";
+import { operatorInputDigest } from "../extensions/hive-common/operator-input.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 
 function conductorAt(stage: ConductorItem["stage"]): ConductorItem {
@@ -27,6 +28,8 @@ function goalIn(state: GoalItem["state"], condition = "Report and register exist
 }
 
 const asEntry = (data: unknown) => ({ customType: "agenda", data });
+/** The launch prompt, already consumed: a later message is not the opening one. */
+const opened = { message: { role: "user", content: "run the portfolio research" } };
 
 function latest<T>(fake: FakePi, kind: string): T | undefined {
 	return fake.entries
@@ -41,9 +44,17 @@ function statuses(fake: FakePi) {
 		.map((e) => e.data as { taskState: string; recap: string });
 }
 
-async function operatorSays(fake: FakePi, text: string, source = "operator") {
-	fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source });
+function announce(fake: FakePi, text: string, source = "operator") {
+	fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source, digest: operatorInputDigest(text) });
+}
+
+async function userMessage(fake: FakePi, text: string) {
 	await fake.emit({ type: "message_end", message: { role: "user", content: [{ type: "text", text }] } });
+}
+
+async function operatorSays(fake: FakePi, text: string, source = "operator") {
+	announce(fake, text, source);
+	await userMessage(fake, text);
 }
 
 describe("reopenForInstruction", () => {
@@ -101,7 +112,7 @@ describe("a person's new instruction reopens a finished lifecycle", () => {
 		const fake = createFakePi();
 		agenda(fake.api);
 		await fake.emit({ type: "session_start", reason: "resume" }, {
-			branch: [asEntry(goalIn("achieved")), asEntry(conductorAt("done"))],
+			branch: [opened, asEntry(goalIn("achieved")), asEntry(conductorAt("done"))],
 		});
 
 		await operatorSays(fake, "i want you to do a proepr multi hour deep research run");
@@ -118,7 +129,7 @@ describe("a person's new instruction reopens a finished lifecycle", () => {
 		const fake = createFakePi();
 		agenda(fake.api);
 		await fake.emit({ type: "session_start", reason: "resume" }, {
-			branch: [asEntry(goalIn("achieved")), asEntry(conductorAt("consolidate"))],
+			branch: [opened, asEntry(goalIn("achieved")), asEntry(conductorAt("consolidate"))],
 		});
 
 		await operatorSays(fake, "continue", "collaborator");
@@ -133,9 +144,9 @@ describe("a person's new instruction reopens a finished lifecycle", () => {
 		const fake = createFakePi();
 		agenda(fake.api);
 		await fake.emit({ type: "session_start", reason: "resume" }, {
-			branch: [asEntry(goalIn("achieved")), asEntry(conductorAt("consolidate"))],
+			branch: [opened, asEntry(goalIn("achieved")), asEntry(conductorAt("consolidate"))],
 		});
-		fake.api.events.emit(OPERATOR_INPUT_CHANNEL, { source: "operator" });
+		announce(fake, "continue");
 		const conductorEntries = () => fake.entries.filter((e) => (e.data as { kind?: string }).kind === "conductor");
 		expect(conductorEntries()).toHaveLength(0);
 
@@ -148,7 +159,7 @@ describe("a person's new instruction reopens a finished lifecycle", () => {
 		const fake = createFakePi();
 		agenda(fake.api);
 		await fake.emit({ type: "session_start", reason: "resume" }, {
-			branch: [asEntry(goalIn("achieved")), asEntry(conductorAt("done"))],
+			branch: [opened, asEntry(goalIn("achieved")), asEntry(conductorAt("done"))],
 		});
 		const before = fake.entries.length;
 
@@ -157,11 +168,29 @@ describe("a person's new instruction reopens a finished lifecycle", () => {
 		expect(fake.entries.length).toBe(before);
 	});
 
+	// pi keeps separate steer and follow-up queues: a Hive notice can be consumed
+	// between the operator's announcement and their own message.
+	it("pairs the reopen with the operator's message, not a Hive notice consumed in between", async () => {
+		const fake = createFakePi();
+		agenda(fake.api);
+		await fake.emit({ type: "session_start", reason: "resume" }, {
+			branch: [opened, asEntry(goalIn("achieved")), asEntry(conductorAt("done"))],
+		});
+		announce(fake, "dig into the funding attribution next");
+
+		await userMessage(fake, "Hive: you reported this session complete. Tidy up.");
+		expect(latest<ConductorItem>(fake, "conductor")).toBeUndefined();
+
+		await userMessage(fake, "dig into the funding attribution next");
+		expect(latest<ConductorItem>(fake, "conductor")?.stage).toBe("idle");
+		expect(statuses(fake).at(-1)?.recap).toBe("New instruction: dig into the funding attribution next");
+	});
+
 	it("leaves an in-progress lifecycle alone when the operator steers it", async () => {
 		const fake = createFakePi();
 		agenda(fake.api);
 		await fake.emit({ type: "session_start", reason: "resume" }, {
-			branch: [asEntry(goalIn("active")), asEntry(conductorAt("execute"))],
+			branch: [opened, asEntry(goalIn("active")), asEntry(conductorAt("execute"))],
 		});
 
 		await operatorSays(fake, "also cover the edge case");
