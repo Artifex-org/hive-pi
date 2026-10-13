@@ -17,9 +17,9 @@ type CredentialDecision = Decision<CredentialReceipt>;
 /**
  * Where an approved delivery stopped. Each stage answers the two questions an
  * agent must not guess: was the one-shot value consumed, and will a fresh
- * request help? `value` is the only stage at which the server consumes it.
+ * request help? The server consumes the value only once `value-fetch` is reached.
  */
-export type DeliveryStage =
+type DeliveryStage =
 	| "grant-names" | "grant-shape" | "grant-expired" | "catalog-fetch" | "catalog-match" | "env-mapping"
 	| "session-changed" | "value-fetch" | "value-shape" | "value-scope" | "value-mapping" | "install";
 interface ReceiverDeps {
@@ -204,7 +204,7 @@ export class CredentialReceiver {
 	private describe(decision: CredentialDecision): string {
 		if (decision.grant) {
 			const unresolved = decision.grant.unresolved?.length
-				? ` Not installed, because the server could not resolve them: ${decision.grant.unresolved.join(", ")} (operator-side catalog reference or secret-store access; a fresh request fails the same way).`
+				? ` Not installed, because the server could not resolve them: ${decision.grant.unresolved.join(", ")} (operator-side catalog reference or secret-store access; a fresh request is likely to fail the same way until the operator fixes it).`
 				: "";
 			return `Installed for future session-bound shell children only: ${decision.grant.installed.join(", ")}.${unresolved} Existing provider/MCP processes are unchanged; request expiry removes overrides. Literal shell output is redacted, not arbitrary secret containment.`;
 		}
@@ -232,7 +232,7 @@ const FRESH = "Request again with a fresh call ID.";
  * stage, the HTTP status when the stage was a call, whether the one-shot value
  * was consumed, and what to do next. No server text and no value reaches it.
  */
-export function describeDeliveryFailure(delivery: { stage: string; status?: number | null; names?: string[] }): string {
+function describeDeliveryFailure(delivery: { stage: string; status?: number | null; names?: string[] }): string {
 	const names = delivery.names?.length ? ` (${delivery.names.join(", ")})` : "";
 	const status = delivery.status === null ? "network error" : delivery.status === undefined ? "" : `HTTP ${delivery.status}`;
 	const head = `Credential delivery failed at stage ${delivery.stage}${status ? ` (${status})` : ""}; nothing installed.`;
@@ -259,7 +259,6 @@ function valueFetchFailure(status: number | null | undefined, names: string): st
 		case 410: return `The server reports the one-shot grant already fetched, denied or expired. If another receiver fetched it, check receiver notices; otherwise request again with a fresh call ID.`;
 		case 404: return `The server has no such grant for this session; nothing was consumed. ${FRESH}`;
 		case 401: case 403: return "The server refused this receiver's Hive token for the owner-only value fetch; nothing was consumed. Check /hive-remote-status; the session's token must belong to the session owner.";
-		case 409: return "The server no longer sees a credential-capable conversation for this session. Check /hive-remote-status, then request again with a fresh call ID.";
 		case 503: return "Credential brokering is not configured on the server; nothing was consumed. Ask the operator.";
 		case null: case undefined: return `The value fetch did not complete (network error or timeout); the server may have consumed the grant. ${FRESH}`;
 		default: return `The value fetch failed; the server may have consumed the grant. ${FRESH}`;
