@@ -9,7 +9,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import loadoutExtension, { CODEMODE_SCRIPT_GUIDANCE, deferredToolNames, LOAD_TOOL, loadoutPrompt, mcpHint, planLoad } from "../extensions/loadout/index.ts";
+import loadoutExtension, { CODEMODE_SCRIPT_GUIDANCE, codemodeDiscoveryMisuse, deferredToolNames, LOAD_TOOL, loadoutPrompt, mcpHint, planLoad } from "../extensions/loadout/index.ts";
 import { exposureFor, GATED_TOOLS, restoredLoadout } from "../extensions/loadout/policy.ts";
 import opmodeExtension from "../extensions/opmode/index.ts";
 import planExtension from "../extensions/plan/index.ts";
@@ -76,7 +76,7 @@ describe("the on-demand index", () => {
 		const prompt = loadoutPrompt(["session_grep"]);
 		expect(prompt).toContain('await searchTools("<words>")');
 		expect(prompt).toContain('await describeTool("<exact name>")');
-		expect(prompt).toContain("never `tools.tool_search` (it is model-only)");
+		expect(prompt).toContain("never `tools.tool_search` or `tools.describeTool`");
 		expect(prompt).toContain("they do not need `load_tools` first");
 	});
 
@@ -277,5 +277,49 @@ describe("mode tools", () => {
 		await pi.runCommand("mode", "build");
 		expect(active(pi).has("bugfix_evidence")).toBe(false);
 		expect(active(pi).has("edit")).toBe(true);
+	});
+});
+
+describe("codemode discovery preflight", () => {
+	it("rejects tools.tool_search and tools.describeTool before the script runs, naming the globals", async () => {
+		const pi = createFakePi();
+		loadoutExtension(pi.api);
+		const call = async (code: string) =>
+			(await pi.emit({ type: "tool_call", toolName: "codemode", toolCallId: "c", input: { code } } as never) as Array<{ block?: boolean; reason?: string } | undefined>).find((r) => r?.block);
+		const blocked = await call('await tools.bash({command:"ls"}); await tools.tool_search({query:"x"})');
+		expect(blocked?.reason).toContain("tools.tool_search");
+		expect(blocked?.reason).toContain("await searchTools(");
+		expect((await call('await tools["describeTool"]("x")'))?.reason).toContain("tools.describeTool");
+		expect(await call('await searchTools("x"); await describeTool("mcp__hive__get_run"); await tools.bash({command:"ls"})')).toBeUndefined();
+	});
+
+	it("ignores other tools", async () => {
+		const pi = createFakePi();
+		loadoutExtension(pi.api);
+		const results = await pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "c", input: { code: "tools.tool_search()" } } as never) as unknown[];
+		expect(results.filter(Boolean)).toEqual([]);
+	});
+
+	it("matches only the member forms", () => {
+		expect(codemodeDiscoveryMisuse("const tool_search = 1; searchTools('a')")).toBeNull();
+		expect(codemodeDiscoveryMisuse("tools.tool_search ({})")).toContain("tools.tool_search");
+	});
+});
+
+describe("exact-name loading guidance", () => {
+	it("teaches load_tools with a full mcp name and forbids limit:1, in the prompt and the hint", () => {
+		for (const text of [loadoutPrompt(["session_grep"]), mcpHint({ getAllTools: () => [{ name: "tool_search" }] } as never)]) {
+			expect(text).toContain("`mcp__<server>__<tool>`");
+			expect(text).toContain("never with `limit: 1`");
+		}
+	});
+
+	it("load_tools accepts an exact deferred mcp__server__tool name", () => {
+		const tools = [{ name: "mcp__hive__list_communications", exposure: "deferred" }];
+		expect(planLoad(["mcp__hive__list_communications"], tools, ["bash"]).load).toEqual(["mcp__hive__list_communications"]);
+	});
+
+	it("warns that store() writes vanish when the script throws", () => {
+		expect(CODEMODE_SCRIPT_GUIDANCE).toContain("`store()` writes are discarded when the script throws");
 	});
 });
