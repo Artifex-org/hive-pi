@@ -341,6 +341,17 @@ describe("tail", () => {
 		expect(out).not.toContain("ok 20\n");
 	});
 
+	it("keeps lowercase tool failure forms from the dropped region", () => {
+		const lines = Array.from({ length: 60 }, (_, i) => `ok ${i}`);
+		lines[1] = "src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.";
+		lines[2] = "E   assert 1 == 2";
+		lines[3] = "--- FAIL: TestThing (0.00s)";
+		const out = tail(lines.join("\n"), 10);
+		expect(out).toContain("error TS2322");
+		expect(out).toContain("E   assert 1 == 2");
+		expect(out).toContain("--- FAIL: TestThing");
+	});
+
 	it("leaves short output alone", () => {
 		expect(tail("a\nb", 10)).toBe("a\nb");
 	});

@@ -87,8 +87,12 @@ export function stripAnsi(s: string): string {
 	return s.replace(/\[[0-9;]*[A-Za-z]/g, "");
 }
 
-/** Lines of the dropped region that read as a failure, kept alongside the tail. */
-const FAILURE_LINE = /\b(FAIL(ED|URE)?|ERROR|AssertionError|panic)\b|^\s*[✗✖×]|\bError:/;
+/**
+ * Lines of the dropped region that read as a failure, kept alongside the tail.
+ * Covers tsc/ruff/eslint (`error TS2322`), pytest (`E   assert`) and go
+ * (`--- FAIL`), not only the uppercase forms.
+ */
+const FAILURE_LINE = /\b(FAIL(ED|URE)?|ERROR|AssertionError|panic)\b|^\s*[✗✖×]|^E\s|\b[Ee]rror\b/;
 /** The most failure lines rescued from the dropped region. */
 const MAX_KEPT_FAILURES = 40;
 
