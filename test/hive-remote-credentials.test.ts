@@ -199,22 +199,87 @@ describe("Hive remote credential receiver", () => {
 		expect(credentialChildEnv("bad-local", {}).FIXTURE_CREDENTIAL).toBeUndefined();
 	});
 
-	it("offers fresh-call guidance after catalog/value failures without leaking response bodies", async () => {
-		for (const failureStatus of [502, 410]) {
-			const release = registerCredentialConsumer("bash");
-			const calls: string[] = [];
-			vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
-				const url = String(input); calls.push(url);
-				if (url.endsWith("/credential-requests")) return response(200, { id: "grant-id", verdict: "approve", credentials: ["fixture"], expires_at: new Date(Date.now() + 60_000).toISOString() });
-				if (url.endsWith("/credential-catalog")) return response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }] });
-				return response(failureStatus, { detail: "synthetic-safe-value" });
-			}));
-			const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "local", isCurrent: () => true, consumersReady: () => true });
-			receiver.bind(auth, "hive", 1);
-			const result = await receiver.request("call", ["fixture"], "test");
-			expect(result).toContain("fresh call ID"); expect(result).not.toContain("synthetic-safe-value");
-			expect(calls.filter(url => url.endsWith("/value"))).toHaveLength(1);
-			release(); vi.unstubAllGlobals();
-		}
+	it.each([
+		{ status: 502, expect: ["stage value-fetch (HTTP 502)", "resolved none of the granted credentials (fixture)", "fails the same way", "credbroker: bundle entry skipped"], absent: ["fresh call ID"] },
+		{ status: 410, expect: ["stage value-fetch (HTTP 410)", "already fetched", "fresh call ID"], absent: [] },
+		{ status: 404, expect: ["stage value-fetch (HTTP 404)", "no such grant for this session"], absent: [] },
+		{ status: 403, expect: ["stage value-fetch (HTTP 403)", "refused this receiver's Hive token"], absent: [] },
+		{ status: 503, expect: ["stage value-fetch (HTTP 503)", "brokering is not configured"], absent: ["fresh call ID"] },
+	])("names the value-fetch status $status with its own guidance and never the server body", async ({ status, expect: wanted, absent }) => {
+		const release = registerCredentialConsumer("bash");
+		const calls: string[] = [];
+		vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+			const url = String(input); calls.push(url);
+			if (url.endsWith("/credential-requests")) return response(200, { id: "grant-id", verdict: "approve", credentials: ["fixture"], expires_at: new Date(Date.now() + 60_000).toISOString() });
+			if (url.endsWith("/credential-catalog")) return response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }] });
+			return response(status, { detail: "synthetic-safe-value" });
+		}));
+		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => `status-${status}`, isCurrent: () => true, consumersReady: () => true });
+		receiver.bind(auth, "hive", 1);
+		const result = await receiver.request("call", ["fixture"], "test");
+		for (const text of wanted) expect(result).toContain(text);
+		for (const text of absent) expect(result).not.toContain(text);
+		expect(result).toContain("nothing installed"); expect(result).not.toContain("synthetic-safe-value");
+		expect(calls.filter(url => url.endsWith("/value"))).toHaveLength(1);
+		release();
+	});
+
+	it("reports a value fetch that never completed as possibly consumed", async () => {
+		vi.stubGlobal("fetch", async (input: unknown) => {
+			const url = String(input);
+			if (url.endsWith("/credential-requests")) return response(200, { id: "net", verdict: "auto", credentials: ["fixture"], expires_at: new Date(Date.now() + 60_000).toISOString() });
+			if (url.endsWith("/credential-catalog")) return response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }] });
+			throw new TypeError("connection reset with https://fixture.invalid/?token=leak");
+		});
+		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "net-local", isCurrent: () => true, consumersReady: () => true });
+		receiver.bind(auth, "hive", 1);
+		const result = await receiver.request("call", ["fixture"], "test");
+		expect(result).toContain("stage value-fetch (network error)"); expect(result).toContain("may have consumed the grant");
+		expect(result).not.toContain("leak");
+	});
+
+	const future = () => new Date(Date.now() + 60_000).toISOString();
+	it.each([
+		{ name: "an expired grant", row: { expires_at: new Date(Date.now() - 1_000).toISOString() }, stage: "grant-expired", text: "expired before delivery", valueFetched: false },
+		{ name: "an unreadable catalog", catalog: response(503), stage: "catalog-fetch (HTTP 503)", text: "grant is still deliverable", valueFetched: false },
+		{ name: "a grant missing from the catalog", catalog: response(200, { entries: [] }), stage: "catalog-match", text: "missing from, or ambiguous in", valueFetched: false },
+		{ name: "a reserved environment mapping", catalog: response(200, { entries: [{ name: "fixture", env_var: "PATH" }] }), stage: "env-mapping", text: "change the catalog env_var", valueFetched: false },
+		{ name: "a malformed value body", value: { resolved: ["fixture"] }, stage: "value-shape", text: "malformed", valueFetched: true },
+		{ name: "values outside the grant", value: { env: { FIXTURE_CREDENTIAL: "v" }, resolved: ["other"] }, stage: "value-scope", text: "outside this grant (other)", valueFetched: true },
+		{ name: "values that miss the mapping", value: { env: { WRONG: "v" }, resolved: ["fixture"] }, stage: "value-mapping", text: "do not match the catalog mapping (fixture)", valueFetched: true },
+		{ name: "a value the session refuses", value: { env: { FIXTURE_CREDENTIAL: "bad\u0000value" }, resolved: ["fixture"] }, stage: "install", text: "refused to install them (fixture)", valueFetched: true },
+	])("names the failing stage for $name", async ({ row, catalog, value, stage, text, valueFetched }) => {
+		let valueCalls = 0;
+		vi.stubGlobal("fetch", async (input: unknown) => {
+			const url = String(input);
+			if (url.endsWith("/credential-requests")) return response(200, { id: "staged", verdict: "approve", credentials: ["fixture"], expires_at: future(), ...row });
+			if (url.endsWith("/credential-catalog")) return catalog?.clone() ?? response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }] });
+			if (url.endsWith("/value")) { valueCalls++; return response(200, value ?? {}); }
+			return response(404);
+		});
+		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "staged-local", isCurrent: () => true, consumersReady: () => true });
+		receiver.bind(auth, "hive", 1);
+		const result = await receiver.request("call", ["fixture"], "test");
+		expect(result).toContain(`Credential delivery failed at stage ${stage}`);
+		expect(result).toContain(text); expect(result).toContain("nothing installed");
+		expect(valueCalls).toBe(valueFetched ? 1 : 0);
+		expect(credentialChildEnv("staged-local", {}).FIXTURE_CREDENTIAL).toBeUndefined();
+	});
+
+	it("installs a partially resolved grant and names what the server could not resolve", async () => {
+		vi.stubGlobal("fetch", async (input: unknown) => {
+			const url = String(input);
+			if (url.endsWith("/credential-requests")) return response(200, { id: "partial", verdict: "auto", credentials: ["fixture", "fixture-url"], expires_at: future() });
+			if (url.endsWith("/credential-catalog")) return response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }, { name: "fixture-url", env_var: "FIXTURE_URL" }] });
+			if (url.endsWith("/value")) return response(200, { env: { FIXTURE_CREDENTIAL: "partial-value" }, resolved: ["fixture"], skipped: ["fixture-url"] });
+			return response(404);
+		});
+		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "partial-local", isCurrent: () => true, consumersReady: () => true });
+		receiver.bind(auth, "hive", 1);
+		const result = await receiver.request("call", ["fixture", "fixture-url"], "test");
+		expect(result).toContain("Installed for future session-bound shell children only: fixture.");
+		expect(result).toContain("could not resolve them: fixture-url"); expect(result).not.toContain("partial-value");
+		expect(credentialChildEnv("partial-local", {}).FIXTURE_CREDENTIAL).toBe("partial-value");
+		expect(credentialChildEnv("partial-local", {}).FIXTURE_URL).toBeUndefined();
 	});
 });

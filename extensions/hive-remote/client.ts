@@ -640,6 +640,12 @@ export interface Decision<G = unknown> {
 	grant?: G;
 	/** Failed pre-delivery stage. Only these errors are safe to surface as request diagnostics. */
 	stage?: "request" | "poll";
+	/**
+	 * A receiver-side failure AFTER a positive verdict: which delivery stage
+	 * failed, the HTTP status when that stage was a call, and the catalog names
+	 * involved. It never carries server text, so a receiver may render it.
+	 */
+	delivery?: { stage: string; status?: number | null; names?: string[] };
 	/** Human-readable reason on `error`, or on an approved-but-unfetchable grant. */
 	error?: string;
 	/** HTTP status of a failed grant fetch, when there was one. */
