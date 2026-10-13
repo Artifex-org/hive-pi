@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import { refusalWithCandidates, type ObservedResult } from "../extensions/opmode/index.ts";
+import { applyEvidence, type EvidenceMachine } from "../extensions/opmode/bugfix.ts";
 
 function mapOf(entries: [string, ObservedResult][]): Map<string, ObservedResult> {
 	return new Map(entries);
@@ -91,5 +92,30 @@ describe("refusalWithCandidates", () => {
 		const row = out.split("\n").find((l) => l.includes("call_a"));
 		expect(row).toBeDefined();
 		expect(row).toContain("line one line two");
+	});
+});
+
+/**
+ * Observed results are keyed "call_X|fc_Y" but agents see and pass one half.
+ * An exact miss on a visible half was refused as "not observed" (17 sessions).
+ */
+describe("applyEvidence tool_call_id resolution", () => {
+	const failed: ObservedResult = { name: "bash", family: "shell", verdict: "failed", text: "AssertionError" };
+	const start = { phase: "reproduce", reproduction: null } as unknown as EvidenceMachine;
+
+	it("accepts either unique half of a combined call|fc id", () => {
+		for (const half of ["call_a", "fc_b"]) {
+			const out = applyEvidence(start, new Map([["call_a|fc_b", failed]]), { phase: "reproduce", tool_call_id: half, reproduction_key: "t" });
+			expect(out.stage, half).toBe("hypothesize");
+			expect(out.machine.reproduction?.failingCallID).toBe("call_a|fc_b");
+		}
+	});
+
+	it("prefers an exact match and refuses an ambiguous half", () => {
+		const exact = applyEvidence(start, new Map([["call_a", failed], ["call_a|fc_b", failed]]), { phase: "reproduce", tool_call_id: "call_a", reproduction_key: "t" });
+		expect(exact.machine.reproduction?.failingCallID).toBe("call_a");
+		const ambiguous = applyEvidence(start, new Map([["call_a|fc_1", failed], ["call_a|fc_2", failed]]), { phase: "reproduce", tool_call_id: "call_a", reproduction_key: "t" });
+		expect(ambiguous.stage).toBeNull();
+		expect(ambiguous.text).toContain("was not observed");
 	});
 });

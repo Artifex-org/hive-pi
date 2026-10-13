@@ -403,6 +403,18 @@ export interface EvidenceMachine {
 
 export const INITIAL_EVIDENCE: EvidenceMachine = { phase: "reproduce", reproduction: null };
 
+/**
+ * Resolve a caller-supplied tool_call_id to the key stored in `results`: exact
+ * match first, then either half of a combined "call|fc" key when exactly one
+ * stored key has that half. Ambiguous or unknown ids stay unresolved.
+ */
+export function resolveToolCallID(results: ReadonlyMap<string, ObservedResult>, requested: string | undefined): string | undefined {
+	if (!requested) return undefined;
+	if (results.has(requested)) return requested;
+	const matches = [...results.keys()].filter((key) => key.includes("|") && key.split("|").includes(requested));
+	return matches.length === 1 ? matches[0] : undefined;
+}
+
 export interface EvidenceParams {
 	phase?: string;
 	tool_call_id?: string;
@@ -418,10 +430,14 @@ export interface EvidenceParams {
 export function applyEvidence(
 	machine: EvidenceMachine,
 	results: ReadonlyMap<string, ObservedResult>,
-	p: EvidenceParams,
+	params: EvidenceParams,
 	names: BugfixToolNames = PI_BUGFIX_TOOLS,
 ): { machine: EvidenceMachine; stage: ProtocolState | null; text: string } {
 	const { phase, reproduction } = machine;
+	// Agents see only one half of a combined "call_X|fc_Y" id; resolve it to the
+	// stored key so every later comparison runs on the canonical id.
+	const resolvedID = resolveToolCallID(results, params.tool_call_id);
+	const p: EvidenceParams = resolvedID ? { ...params, tool_call_id: resolvedID } : params;
 	const moved = (next: ProtocolState, text: string, bound: Reproduction | null = reproduction) => ({ machine: { phase: next, reproduction: bound }, stage: next, text });
 	const refused = (text: string) => ({ machine, stage: null, text });
 	if (p.phase === "blocked") return moved("blocked", "Investigation stopped honestly; no edits were unlocked.");
