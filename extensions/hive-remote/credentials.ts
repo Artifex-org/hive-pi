@@ -11,7 +11,17 @@ import {
 } from "./credential-runtime.ts";
 
 interface CatalogEntry { name: string; env_var: string; description?: string; requires_hosts?: string[] }
-export interface CredentialReceipt { installed: string[] }
+/** `unresolved` names the granted credentials the server could not resolve; only the rest were installed. */
+export interface CredentialReceipt { installed: string[]; unresolved?: string[] }
+type CredentialDecision = Decision<CredentialReceipt>;
+/**
+ * Where an approved delivery stopped. Each stage answers the two questions an
+ * agent must not guess: was the one-shot value consumed, and will a fresh
+ * request help? The server consumes the value only once `value-fetch` is reached.
+ */
+type DeliveryStage =
+	| "grant-names" | "grant-shape" | "grant-expired" | "catalog-fetch" | "catalog-match" | "env-mapping" | "env-collision"
+	| "session-changed" | "value-fetch" | "value-shape" | "value-scope" | "value-mapping" | "install";
 interface ReceiverDeps {
 	enabled: boolean;
 	localSessionID: () => string | null;
@@ -28,7 +38,7 @@ const safeResult = (text: string) => ({ content: [{ type: "text" as const, text 
 export class CredentialReceiver {
 	private binding?: CredentialBinding;
 	private auth?: HiveAuth;
-	private readonly deliveries = new Map<string, Promise<Decision<CredentialReceipt>>>();
+	private readonly deliveries = new Map<string, Promise<CredentialDecision>>();
 	private polling = false;
 	private recovering = false;
 	private bindingVersion = 0;
@@ -77,15 +87,15 @@ export class CredentialReceiver {
 	ready(): boolean { return !!this.binding && this.current(this.binding); }
 	/** Monotonic within this receiver, including same-lifecycle detach/rebind. */
 	revision(): number { return this.bindingVersion; }
-	private async catalog(auth: HiveAuth, binding: CredentialBinding): Promise<CatalogEntry[] | null> {
+	private async catalog(auth: HiveAuth, binding: CredentialBinding): Promise<{ entries: CatalogEntry[] | null; status?: number | null }> {
 		const res = await request<{ entries?: CatalogEntry[] }>(auth, "GET", `/agent-sessions/${encodeURIComponent(binding.hiveSessionID)}/credential-catalog`);
-		if (!this.current(binding) || !res.ok || !Array.isArray(res.body?.entries)) return null;
-		return res.body.entries;
+		if (!this.current(binding) || !res.ok || !Array.isArray(res.body?.entries)) return { entries: null, status: res.status };
+		return { entries: res.body.entries };
 	}
 	async list(): Promise<string> {
 		const binding = this.binding, auth = this.auth;
 		if (!binding || !auth || !this.current(binding)) return this.unavailable();
-		const entries = await this.catalog(auth, binding);
+		const { entries } = await this.catalog(auth, binding);
 		if (!entries) return "Credential catalog unavailable; no credentials were installed.";
 		const names = entries.filter(e => typeof e?.name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(e.name));
 		if (!names.length) return "No credentials are configured.";
@@ -108,7 +118,7 @@ export class CredentialReceiver {
 			pollMs: 3000, timeoutMs: 10 * 60_000, signal,
 			isCurrent: () => this.current(binding), deliver: row => {
 				if (!Array.isArray(row.credentials) || row.credentials.length !== credentials.length || row.credentials.some(name => !credentials.includes(name))) {
-					return Promise.resolve({ verdict: "error", error: "grant names do not match the request" });
+					return Promise.resolve(failed("grant-names", { names: credentials }));
 				}
 				return this.deliver(row, binding, auth);
 			},
@@ -136,8 +146,8 @@ export class CredentialReceiver {
 			}
 		} finally { this.polling = false; }
 	}
-	private deliver(row: RequestRow, binding: CredentialBinding, auth: HiveAuth): Promise<Decision<CredentialReceipt>> {
-		if (!this.current(binding)) return Promise.resolve({ verdict: "error", error: "session changed" });
+	private deliver(row: RequestRow, binding: CredentialBinding, auth: HiveAuth): Promise<CredentialDecision> {
+		if (!this.current(binding)) return Promise.resolve(failed("session-changed"));
 		const prior = this.deliveries.get(row.id);
 		if (prior) return prior;
 		if (this.deliveries.size >= 512) return Promise.resolve({ verdict: "error", error: "receiver request limit reached" });
@@ -148,39 +158,59 @@ export class CredentialReceiver {
 		this.deliveries.set(row.id, delivery);
 		return delivery;
 	}
-	private async fetchAndInstall(row: RequestRow, binding: CredentialBinding, auth: HiveAuth, retry: () => void): Promise<Decision<CredentialReceipt>> {
-		const failure = (): Decision<CredentialReceipt> => ({ verdict: "error", error: RECOVERY });
+	private async fetchAndInstall(row: RequestRow, binding: CredentialBinding, auth: HiveAuth, retry: () => void): Promise<CredentialDecision> {
 		if ((row.verdict !== "approve" && row.verdict !== "auto") || typeof row.id !== "string" ||
 			!Array.isArray(row.credentials) || !row.credentials.length || row.credentials.length > 32 ||
-			new Set(row.credentials).size !== row.credentials.length || typeof row.expires_at !== "string") return failure();
+			new Set(row.credentials).size !== row.credentials.length || typeof row.expires_at !== "string") return failed("grant-shape");
+		const granted = row.credentials;
 		const expiry = Date.parse(row.expires_at);
-		if (!Number.isFinite(expiry) || expiry <= Date.now()) return failure();
+		if (!Number.isFinite(expiry) || expiry <= Date.now()) return failed("grant-expired", { names: granted });
 		const catalog = await this.catalog(auth, binding);
-		if (!catalog) { retry(); return failure(); }
-		const entries = row.credentials.map(name => catalog.filter(entry => entry?.name === name));
-		if (entries.some(matches => matches.length !== 1)) return failure();
+		if (!catalog.entries) { retry(); return failed(this.current(binding) ? "catalog-fetch" : "session-changed", { status: catalog.status }); }
+		const entries = granted.map(name => catalog.entries!.filter(entry => entry?.name === name));
+		const unmatched = granted.filter((_, i) => entries[i].length !== 1);
+		if (unmatched.length) return failed("catalog-match", { names: unmatched });
 		// Validate mappings before consuming. Never allow a catalog entry to alter
 		// provider authentication, process identity, shell startup or runtime config.
 		const mapped = entries.map(matches => matches[0]);
-		if (!validCredentialSet(mapped.map(entry => ({ ...entry, value: "validation-only" })))) return failure();
-		if (!this.current(binding)) return failure();
+		const refused = mapped.filter(entry => !validCredentialSet([{ ...entry, value: "validation-only" }])).map(entry => entry.name);
+		if (refused.length || !validCredentialSet(mapped.map(entry => ({ ...entry, value: "validation-only" })))) {
+			return failed(refused.length ? "env-mapping" : "env-collision", { names: refused.length ? refused : granted });
+		}
+		if (!this.current(binding)) return failed("session-changed");
 		const res = await request<{ env?: Record<string, unknown>; resolved?: unknown[] }>(auth, "GET", `/agent-sessions/${encodeURIComponent(binding.hiveSessionID)}/credential-grants/${encodeURIComponent(row.id)}/value`);
-		if (!this.current(binding) || !res.ok || !res.body?.env || typeof res.body.env !== "object" || Array.isArray(res.body.env) || !Array.isArray(res.body.resolved)) return failure();
+		if (!this.current(binding)) return failed("session-changed");
+		// The server body is deliberately not read on failure: the status names the stage.
+		if (!res.ok) return failed("value-fetch", { status: res.status, names: granted });
+		if (!res.body?.env || typeof res.body.env !== "object" || Array.isArray(res.body.env) || !Array.isArray(res.body.resolved)) return failed("value-shape");
 		const resolved = res.body.resolved;
-		if (!resolved.length || new Set(resolved).size !== resolved.length || resolved.some(name => !row.credentials!.includes(String(name)))) return failure();
+		if (!resolved.length || new Set(resolved).size !== resolved.length) return failed("value-shape");
+		const outside = resolved.map(String).filter(name => !granted.includes(name));
+		if (outside.length) {
+			const printable = outside.filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name));
+			return failed("value-scope", { names: printable.length === outside.length ? printable : [...printable, `${outside.length - printable.length} unprintable`] });
+		}
 		const items: ReceivedCredential[] = [];
 		for (const name of resolved) {
 			const entry = mapped.find(entry => entry.name === name);
-			if (!entry) return failure();
+			if (!entry) return failed("value-scope");
 			const value = res.body.env[entry.env_var];
-			if (typeof value !== "string") return failure();
+			if (typeof value !== "string") return failed("value-mapping", { names: [entry.name] });
 			items.push({ name: entry.name, env_var: entry.env_var, value });
 		}
-		if (Object.keys(res.body.env).length !== items.length || !installCredentialGrant(binding, row.id, expiry, items)) return failure();
-		return { verdict: row.verdict, grant: { installed: items.map(item => item.name) } };
+		if (Object.keys(res.body.env).length !== items.length) return failed("value-mapping");
+		if (!installCredentialGrant(binding, row.id, expiry, items)) return failed("install", { names: items.map(item => item.name) });
+		const installed = items.map(item => item.name);
+		const unresolved = granted.filter(name => !installed.includes(name));
+		return { verdict: row.verdict, grant: { installed, ...(unresolved.length ? { unresolved } : {}) } };
 	}
-	private describe(decision: Decision<CredentialReceipt>): string {
-		if (decision.grant) return `Installed for future session-bound shell children only: ${decision.grant.installed.join(", ")}. Existing provider/MCP processes are unchanged; request expiry removes overrides. Literal shell output is redacted, not arbitrary secret containment.`;
+	private describe(decision: CredentialDecision): string {
+		if (decision.grant) {
+			const unresolved = decision.grant.unresolved?.length
+				? ` Not installed, because the server could not resolve them: ${decision.grant.unresolved.join(", ")} (operator-side catalog reference or secret-store access; a fresh request is likely to fail the same way until the operator fixes it).`
+				: "";
+			return `Installed for future session-bound shell children only: ${decision.grant.installed.join(", ")}.${unresolved} Existing provider/MCP processes are unchanged; request expiry removes overrides. Literal shell output is redacted, not arbitrary secret containment.`;
+		}
 		if (decision.verdict === "deny" || decision.verdict === "expired" || decision.verdict === "timeout") return `Credential request ${decision.verdict}; nothing installed.`;
 		if (decision.stage) {
 			const status = decision.status === null || decision.status === undefined ? "network error" : `HTTP ${decision.status}`;
@@ -189,7 +219,53 @@ export class CredentialReceiver {
 			return `Credential ${decision.stage} failed (${status}); installation is not confirmed by this call. ${decision.error ?? "No server explanation."} Background delivery may still complete; check receiver notices before requesting again.`;
 		}
 		if (decision.error === "receiver request limit reached") return "Credential receiver session limit reached; nothing installed. Ask the operator to restart a supported session before a fresh approved request.";
+		if (decision.delivery) return describeDeliveryFailure(decision.delivery);
 		return `Credential delivery failed; nothing installed. ${RECOVERY}`;
+	}
+}
+
+function failed(stage: DeliveryStage, detail: { status?: number | null; names?: string[] } = {}): CredentialDecision {
+	return { verdict: "error", delivery: { stage, ...detail } };
+}
+
+const FRESH = "Request again with a fresh call ID.";
+
+/**
+ * describeDeliveryFailure renders one stage as receiver-authored text: the
+ * stage, the HTTP status when the stage was a call, whether the one-shot value
+ * was consumed, and what to do next. No server text and no value reaches it.
+ */
+function describeDeliveryFailure(delivery: { stage: string; status?: number | null; names?: string[] }): string {
+	const names = delivery.names?.length ? ` (${delivery.names.join(", ")})` : "";
+	const status = delivery.status === null ? "network error" : delivery.status === undefined ? "" : `HTTP ${delivery.status}`;
+	const head = `Credential delivery failed at stage ${delivery.stage}${status ? ` (${status})` : ""}; nothing installed.`;
+	switch (delivery.stage) {
+		case "grant-names": return `${head} The approved grant names differ from this request${names}; the value was not fetched. ${FRESH}`;
+		case "grant-shape": return `${head} The server returned a grant row this receiver cannot accept; the value was not fetched. Report it as a Hive client/server mismatch.`;
+		case "grant-expired": return `${head} The grant${names} expired before delivery; the value was not fetched. ${FRESH}`;
+		case "catalog-fetch": return `${head} The session catalog could not be read, so the value was not fetched and the grant is still deliverable; the receiver retries on its next poll. Check receiver notices before requesting again.`;
+		case "catalog-match": return `${head} The granted name${names} is missing from, or ambiguous in, this session's catalog; the value was not fetched. Ask the operator to check the catalog entry.`;
+		case "env-mapping": return `${head} The catalog maps${names} to an environment variable this receiver refuses (reserved or invalid name); the value was not fetched. Ask the operator to change the catalog env_var; do not request again until then.`;
+		case "env-collision": return `${head} Two or more granted catalog entries${names} map to the same environment variable; the value was not fetched. Ask the operator to give each catalog entry its own env_var; do not request again until then.`;
+		case "session-changed": return `${head} The session was replaced or detached during delivery; nothing reached this session. ${FRESH}`;
+		case "value-fetch": return `${head} ${valueFetchFailure(delivery.status, names)}`;
+		case "value-shape": return `${head} The server consumed the grant but its value response was malformed; nothing was kept. Report it as a Hive client/server mismatch; a fresh request is likely to fail the same way.`;
+		case "value-scope": return `${head} The server resolved credentials outside this grant${names}; everything was refused. Report it; do not request again.`;
+		case "value-mapping": return `${head} The server's values do not match the catalog mapping${names}; nothing was kept. Report it as a Hive client/server mismatch.`;
+		case "install": return `${head} The values were fetched but this session refused to install them${names}: the session holds too many credentials, the grant expired, or a value is empty, binary or over 16 KiB. Restart the session before a fresh request if it holds many grants.`;
+		default: return `${head} ${RECOVERY}`;
+	}
+}
+
+function valueFetchFailure(status: number | null | undefined, names: string): string {
+	switch (status) {
+		case 502: return `Hive answers 502 here when it consumed the grant but resolved none of the granted credentials${names} from its secret store: the catalog reference is unreadable with the owner's stored secret-store access, or wrong. A fresh request then consumes another grant and fails the same way. Ask the operator to check the hive-server log for "credbroker: bundle entry skipped" and fix the catalog reference or that access. (A 502 from a proxy while hive-server was unreachable is the other cause; the grant is then unconsumed.)`;
+		case 410: return `The server reports the one-shot grant already fetched, denied or expired. If another receiver fetched it, check receiver notices; otherwise request again with a fresh call ID.`;
+		case 404: return `The server has no such grant for this session; nothing was consumed. ${FRESH}`;
+		case 401: case 403: return "The server refused this receiver's Hive token for the owner-only value fetch; nothing was consumed. Check /hive-remote-status; the session's token must belong to the session owner.";
+		case 503: return "Credential brokering is not configured on the server; nothing was consumed. Ask the operator.";
+		case null: case undefined: return `The value fetch did not complete (network error or timeout); the server may have consumed the grant. ${FRESH}`;
+		default: return `The value fetch failed; the server may have consumed the grant. ${FRESH}`;
 	}
 }
 
