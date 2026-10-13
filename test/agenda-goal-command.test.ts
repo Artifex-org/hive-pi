@@ -14,7 +14,8 @@ import {
 	parseHours,
 	parseTokenCount,
 } from "../extensions/agenda/goal-command.ts";
-import { MAX_CONDITION_CHARS } from "../extensions/agenda/goal-state.ts";
+import { goalSetDecision } from "../extensions/agenda/goal-tool.ts";
+import { createGoal, MAX_CONDITION_CHARS } from "../extensions/agenda/goal-state.ts";
 
 describe("parseGoalCommand — subcommands", () => {
 	it("bare /goal is a status request", () => {
@@ -142,7 +143,7 @@ describe("parseHours", () => {
 	});
 });
 
-describe("looksUnverifiable — advisory only", () => {
+describe("looksUnverifiable", () => {
 	it.each([
 		"pytest -q exits 0",
 		"the build is green",
@@ -163,14 +164,34 @@ describe("looksUnverifiable — advisory only", () => {
 		"no more than 4 issues",
 		"no failing tests",
 		"zero errors",
+		// Refused 2026-10-09..11: bare git commands, PR URL, SHA, origin ref.
+		"git diff --quiet and git rev-parse HEAD equals git rev-parse origin/tes-14976-x",
+		"https://github.com/Artifex-org/hive-pi/pull/137 is open",
+		"HEAD is 9293442ab",
+		"local branch equals origin/main",
 	])("recognises a checkable condition: %s", (condition) => {
 		expect(looksUnverifiable(condition)).toBe(false);
 	});
 
-	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely", "the page no longer runs slowly", "users report no confusing issues", "no more manual steps for onboarding", "no issues", "the users have no issues"])(
+	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely", "the page no longer runs slowly", "users report no confusing issues", "no more manual steps for onboarding", "no issues", "the users have no issues", "the deadbeef feeling", "a decade of defaced"])(
 		"flags an ungradeable one: %s",
 		(condition) => {
 			expect(looksUnverifiable(condition)).toBe(true);
 		},
 	);
+});
+
+describe("goalSetDecision ordering", () => {
+	const active = createGoal("g1", "old condition `npm test`", 0);
+	it("reports an unverifiable replacement before demanding replace:true", () => {
+		const d = goalSetDecision(active, { condition: "make it better" }, 1, () => "g2");
+		expect(d.ok).toBe(false);
+		expect(d.text).toContain("machine-checkable");
+		expect(d.text).not.toContain("replace: true");
+	});
+	it("still asks for replace:true when the condition is checkable", () => {
+		const d = goalSetDecision(active, { condition: "`npm test` exits 0" }, 1, () => "g2");
+		expect(d.ok).toBe(false);
+		expect(d.text).toContain("replace: true");
+	});
 });
