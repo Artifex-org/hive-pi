@@ -12,6 +12,7 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { mkScratchDir } from "./scratch.ts";
 import { terminalSurfaceConfig, terminalSurfaceID } from "../extensions/hive-common/terminalSurface.ts";
 import {
 	TerminalSurfaceBridge,
@@ -24,10 +25,7 @@ import {
  * real FIFOs, so the fixture builds one. Cleaned up per test.
  */
 function makeSurfaceDir(): { dir: string; env: NodeJS.ProcessEnv; cleanup: () => void } {
-	const scratch = path.join(os.homedir(), ".hive", "scratch");
-	fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
-	const dir = fs.mkdtempSync(path.join(scratch, "pty-surface-test-"));
-	fs.chmodSync(dir, 0o700);
+	const dir = mkScratchDir("pty-surface-test-");
 	for (const name of ["frames.fifo", "control.fifo"]) {
 		execFileSync("mkfifo", ["-m", "600", path.join(dir, name)]);
 	}

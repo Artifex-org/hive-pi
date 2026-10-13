@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Page } from "playwright-core";
 import { SessionBrowser } from "../extensions/browser/core.ts";
 import { AGENT_PAUSED_MESSAGE } from "../extensions/browser/surface.ts";
+import { mkScratchDir } from "./scratch.ts";
 
 // Real-browser integration for the live-view bridge (hive's
 // docs/agent-live-browser.md §1–4), driven through the session browser the
@@ -144,12 +144,7 @@ describe.skipIf(!enabled)("browser surface FIFO integration", () => {
 	}
 
 	beforeAll(async () => {
-		const scratch = path.join(os.homedir(), ".hive", "scratch");
-		const relative = path.relative(scratch, process.cwd());
-		const first = relative.split(path.sep)[0];
-		const writable = first && first !== ".." ? path.join(scratch, first) : scratch;
-		fs.mkdirSync(writable, { recursive: true, mode: 0o700 });
-		root = fs.mkdtempSync(path.join(writable, "browser-surface-it-"));
+		root = mkScratchDir("browser-surface-it-");
 		dir = path.join(root, "browser-surface");
 		fs.mkdirSync(dir, { mode: 0o700 });
 		for (const name of ["frames.fifo", "relay-frames.fifo", "control.fifo"]) {
