@@ -103,11 +103,12 @@ export function parseGoalCommand(args: string): GoalCommand {
 /**
  * Does this condition name anything a judge could actually check?
  *
- * Advisory only — warn, never refuse. A condition with no checkable token
- * ("make the code better") is graded purely on the model's self-report, which
- * is how a goal runs to its cap without ever converging. Saying so once at set
- * time costs nothing and is the difference between a user who knows that and
- * one who thinks the harness is broken.
+ * A condition with no checkable token ("make the code better") is graded
+ * purely on the model's self-report, which is how a goal runs to its cap
+ * without ever converging. The user-typed `/goal` path only WARNS (the user
+ * owns the goal); the agent-facing `goal_set` tool REFUSES (see
+ * `goalSetDecision`), because a tool error changes model behaviour where prose
+ * does not.
  */
 export function looksUnverifiable(condition: string): boolean {
 	const signals = [
@@ -123,6 +124,13 @@ export function looksUnverifiable(condition: string): boolean {
 		/\b(PR|pull request) (exists|is open|opened|created)\b/i,
 		/\b[\w-]+\/(ci|checks?|build)\b/i, // a status-check name, e.g. hive/ci
 		/`[^`]+`/, // a quoted command
+		// A git/gh command written without backticks, a PR URL, a commit SHA (needs
+		// a digit AND a letter so a plain word never counts) or an origin ref are
+		// all things a judge can run or compare — refused 2026-10-09..12.
+		/\b(git|gh) (diff|log|status|rev-parse|show|merge-base|pr|run|api)\b/i,
+		/\bgithub\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/i,
+		/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/,
+		/\borigin\/[\w./-]+/,
 		/\b[\w./-]+\.(ts|tsx|js|py|go|rs|json|md|yaml|yml)\b/i, // a path
 		/\b\d+\s*(tests?|errors?|warnings?)\b/i,
 		// A COUNT of a countable CI outcome — "exactly 2 failed steps", "at most

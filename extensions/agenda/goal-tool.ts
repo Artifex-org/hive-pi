@@ -56,6 +56,17 @@ export function goalSetDecision(
 ): GoalSetDecision {
 	const condition = params.condition.trim();
 	if (!condition) return { ok: false, text: "goal_set needs a condition." };
+	// Verifiability first: a rewrite of an active goal then gets every complaint in
+	// one round instead of 'use replace:true' and, next call, 'not checkable'.
+	if (looksUnverifiable(condition)) {
+		return {
+			ok: false,
+			text:
+				"This condition names nothing machine-checkable, so the judge could only grade your own " +
+				"self-report. Restate it with a command, a path, or a count — e.g. " +
+				'"PR created and `gh pr checks` exits 0" or "0 errors from the repo gate".',
+		};
+	}
 	if (current && !isTerminal(current.state) && !params.replace) {
 		return {
 			ok: false,
@@ -64,15 +75,6 @@ export function goalSetDecision(
 				`condition has simply moved on — a new sha, a renamed check — call goal_set again with ` +
 				`\`replace: true\`: the old condition is recorded and the budget keeps counting. ` +
 				`If it is different work, finish this one or ask the user for \`${wording.clear}\`.`,
-		};
-	}
-	if (looksUnverifiable(condition)) {
-		return {
-			ok: false,
-			text:
-				"This condition names nothing machine-checkable, so the judge could only grade your own " +
-				"self-report. Restate it with a command, a path, or a count — e.g. " +
-				'"PR created and `gh pr checks` exits 0" or "0 errors from the repo gate".',
 		};
 	}
 	// A REVISION, not a new goal: same id, same ledger, one more entry in the
