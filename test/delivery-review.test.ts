@@ -442,9 +442,9 @@ describe("delivery review", () => {
 		writeFileSync(join(cwd, "other.ts"), "x\n");
 		expect(captureDeliveryDiff(cwd)!.untracked).toEqual(["other.ts"]);
 	});
-	it("returns a bounded truncated diff naming omitted files instead of null when the patch exceeds the budget", async () => {
+	it("returns bounded incomplete evidence when the patch exceeds the 16MiB capture budget", async () => {
 		const { cwd, git } = repo();
-		const big = Array.from({ length: 20000 }, (_, i) => `export const v${i} = ${i};`).join("\n") + "\n";
+		const big = `//${"x".repeat(17 * 1024 * 1024)}\n`;
 		writeFileSync(join(cwd, "huge.ts"), big); writeFileSync(join(cwd, "small.ts"), substantive); git("add", "."); git("commit", "-m", "big");
 		const change = captureDeliveryDiff(cwd);
 		expect(change).not.toBeNull();
