@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 /**
  * gate — running the house quality gate from inside the agent loop.
  *
@@ -82,6 +87,29 @@ export function stripAnsi(s: string): string {
 	return s.replace(/\[[0-9;]*[A-Za-z]/g, "");
 }
 
+/** Lines of the dropped region that read as a failure, kept alongside the tail. */
+const FAILURE_LINE = /\b(FAIL(ED|URE)?|ERROR|AssertionError|panic)\b|^\s*[✗✖×]|\bError:/;
+/** The most failure lines rescued from the dropped region. */
+const MAX_KEPT_FAILURES = 40;
+
+/**
+ * Persist the complete output so a truncated report can name where the rest is.
+ * The name is the content hash, so the same output is one file however many
+ * renders see it. Returns null when it cannot be written, and the marker then
+ * says so rather than inventing a path.
+ */
+export function saveFullOutput(s: string): string | null {
+	try {
+		const dir = join(tmpdir(), "hive-pi-gate");
+		mkdirSync(dir, { recursive: true });
+		const file = join(dir, `gate-${createHash("sha256").update(s).digest("hex").slice(0, 16)}.log`);
+		writeFileSync(file, s);
+		return file;
+	} catch {
+		return null;
+	}
+}
+
 /**
  * tail keeps the END of the diagnostics when they are too long.
  *
@@ -89,12 +117,27 @@ export function stripAnsi(s: string): string {
  * failure is the one it stopped on, and a head-truncation drops exactly the
  * finding the agent is looking for. Truncation is announced — silently showing
  * part of a report is how an agent concludes a file is clean.
+ *
+ * Two things keep the cut from hiding the answer. Failure lines in the dropped
+ * region are kept (a gate that fails early and then prints a long passing tail
+ * would otherwise lose the only finding), and the complete output is written to
+ * a file whose path the marker names — there is no "verbose" option to re-run
+ * with.
  */
 export function tail(s: string, maxLines: number): string {
 	const lines = s.split("\n");
 	if (lines.length <= maxLines) return s;
 	const dropped = lines.length - maxLines;
-	return [`[… ${dropped} earlier line(s) omitted — re-run with verbose for all …]`, ...lines.slice(dropped)].join("\n");
+	const kept = lines.slice(0, dropped).filter((l) => FAILURE_LINE.test(l));
+	const shown = kept.slice(0, MAX_KEPT_FAILURES);
+	const file = saveFullOutput(s);
+	const where = file ? `full output: ${file}` : "full output could not be saved";
+	const out = [`[… ${dropped} earlier line(s) omitted — ${where} …]`];
+	if (shown.length) {
+		const more = kept.length - shown.length;
+		out.push(`[… ${shown.length} failure line(s) from the omitted part${more ? ` (${more} more in the file)` : ""}:]`, ...shown, "[… end of kept failure lines …]");
+	}
+	return [...out, ...lines.slice(dropped)].join("\n");
 }
 
 export interface RenderOptions {

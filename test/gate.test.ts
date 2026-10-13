@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ancestors, gateArgs, gateCandidates, render, splitReport, stripAnsi, tail } from "../extensions/gate/gate.ts";
 
@@ -320,6 +321,24 @@ describe("tail", () => {
 		expect(out).toContain("line49");
 		expect(out).not.toContain("line10\n");
 		expect(out).toContain("40 earlier line(s) omitted");
+	});
+
+	it("names a file that holds the complete output, never a nonexistent option", () => {
+		const full = Array.from({ length: 50 }, (_, i) => `line${i}`).join("\n");
+		const out = tail(full, 10);
+		expect(out).not.toContain("verbose");
+		const path = /full output: (\S+\.log)/.exec(out)?.[1];
+		expect(path).toBeDefined();
+		expect(readFileSync(path as string, "utf8")).toBe(full);
+	});
+
+	it("keeps failure lines from the dropped region", () => {
+		const lines = Array.from({ length: 60 }, (_, i) => `ok ${i}`);
+		lines[2] = "FAILED tests/test_x.py::test_y - assert 1 == 2";
+		const out = tail(lines.join("\n"), 10);
+		expect(out).toContain("FAILED tests/test_x.py::test_y - assert 1 == 2");
+		expect(out).toContain("ok 59");
+		expect(out).not.toContain("ok 20\n");
 	});
 
 	it("leaves short output alone", () => {
