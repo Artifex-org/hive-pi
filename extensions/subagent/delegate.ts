@@ -52,8 +52,9 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
-import { captureDeliveryDiff, captureReviewDiff, withReviewCallers, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewFingerprint, reviewScopeFiles, reviewTaskWithDiff, stampableReview } from "./reviewdiff.ts";
+import { captureDeliveryDiff, captureReviewDiff, withReviewCallers, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewFingerprint, reviewScopeFiles, reviewTaskWithDiff, stampableReview, reviewDeclaresIncomplete, DELIVERY_INLINE_BYTES } from "./reviewdiff.ts";
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
+import { ReviewArtifactReads, reviewArtifactText } from "./review-artifact.ts";
 
 /**
  * A schema the caller wants the final answer validated against, WITH the
@@ -232,9 +233,8 @@ export function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
-			}
+			const text = msg.content.filter(part => part.type === "text");
+			if (text.length > 0) return text.map(part => part.text).join("\n");
 		}
 	}
 	return "";
@@ -413,8 +413,13 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
 	// A fresh mkdtemp directory nobody else can name, so there is nothing to
 	// serialise against: pi's per-file mutation queue is not needed here.
-	await fs.promises.writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
-	return { dir: tmpDir, filePath };
+	try {
+		await fs.promises.writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
+		return { dir: tmpDir, filePath };
+	} catch (error) {
+		await fs.promises.rm(tmpDir, { recursive: true, force: true });
+		throw error;
+	}
 }
 
 let cachedSubagentDefaultModel: string | undefined | null = null;
@@ -607,6 +612,8 @@ export async function runSingleAgent(
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let tmpReviewPatch: { dir: string; filePath: string } | null = null;
+	let artifactReads: ReviewArtifactReads | null = null;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -662,7 +669,14 @@ export async function runSingleAgent(
 			const captured = agent.name === "code-reviewer" ? captureDeliveryDiff(executionCwd, task) : captureReviewDiff(executionCwd, task);
 			const diff = captured ? withReviewCallers(captured) : null;
 			if (diff) {
-				effectiveTask = reviewTaskWithDiff(task, diff, neutralize);
+				if (Buffer.byteLength(diff.text) > DELIVERY_INLINE_BYTES) {
+					const artifact = reviewArtifactText(diff.text);
+					tmpReviewPatch = await writePromptToTempFile("review-diff", artifact.text);
+					artifactReads = new ReviewArtifactReads(tmpReviewPatch.filePath, artifact.text, executionCwd);
+					effectiveTask = reviewTaskWithDiff(task, diff, neutralize, tmpReviewPatch.filePath, artifact.text);
+					if (artifact.chunked) effectiveTask += "\nThe patch artifact is a JSON array of string chunks because raw diff lines exceeded read's byte cap. " +
+						"Read every encoded page; concatenating the decoded array entries reproduces the exact complete patch. Array row numbers are transport positions, not source line numbers.";
+				} else effectiveTask = reviewTaskWithDiff(task, diff, neutralize);
 				currentResult.reviewFiles = reviewScopeFiles(diff);
 				if (agent.name === "code-reviewer" && stampableReview(diff)) currentResult.reviewFingerprint = reviewFingerprint(diff);
 			} else if (agent.name === "code-reviewer") {
@@ -670,8 +684,8 @@ export async function runSingleAgent(
 			}
 		}
 		// The task goes in on STDIN, never argv, as runOneShot's prompt does
-		// (agenda/spawn.ts). A review task carries the whole delivery diff, up to
-		// 256 KiB, and Linux refuses any single argument over 128 KiB
+		// (agenda/spawn.ts). A review task carries up to 256 KiB inline (larger
+		// patches use a private artifact), and Linux refuses an argument over 128 KiB
 		// (MAX_ARG_STRLEN): a ~4,700-line staged change failed `spawn E2BIG` and
 		// could not be reviewed at all. pi reads piped stdin as the message.
 		const prompt = `Task: ${effectiveTask}`;
@@ -741,6 +755,7 @@ export async function runSingleAgent(
 					return;
 				}
 
+				artifactReads?.observe(event);
 				const activity = describeLifecycleEvent(event);
 				if (activity) {
 					seenWorkerEvent = true;
@@ -769,10 +784,13 @@ export async function runSingleAgent(
 				emitUpdate();
 			};
 
-			proc.stdout.on("data", (data) => {
+			// Decode across buffer boundaries before framing JSON; an artifact page
+			// can split a multibyte character between stdout writes.
+			proc.stdout.setEncoding("utf8");
+			proc.stdout.on("data", (data: string) => {
 				// Shared framing: a JSON object routinely straddles two chunks, and
 				// dropping the straddler reads as "worker produced no output".
-				const framed = frame(buffer, data.toString());
+				const framed = frame(buffer, data);
 				buffer = framed.rest;
 				for (const line of framed.lines) processLine(line);
 			});
@@ -849,12 +867,21 @@ export async function runSingleAgent(
 		if (!isFailedResult(currentResult) && stoppedMidWork(getFinalOutput(currentResult.messages))) {
 			currentResult.midWork = true;
 		}
+		const declaredIncomplete = reviewDeclaresIncomplete(getFinalOutput(currentResult.messages));
+		if ((artifactReads && !artifactReads.complete()) || (isReviewRole(agent.name) && declaredIncomplete)) {
+			delete currentResult.reviewFingerprint;
+			if (!isFailedResult(currentResult)) {
+				currentResult.stopReason = "error";
+				currentResult.errorMessage ??= "Delivery review incomplete: the reviewer did not complete the supplied evidence review.";
+			}
+		}
 		if (currentResult.reviewFiles && !isFailedResult(currentResult)) {
 			const outside = citedOutsideDiff(getFinalOutput(currentResult.messages), currentResult.reviewFiles);
 			if (outside.length > 0) currentResult.outsideDiff = outside;
 		}
 		return currentResult;
 	} finally {
+		if (tmpReviewPatch) fs.rmSync(tmpReviewPatch.dir, { recursive: true, force: true });
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);

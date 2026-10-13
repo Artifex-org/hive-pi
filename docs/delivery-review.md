@@ -10,15 +10,36 @@ later edits, staging or commits invalidate it. Review the final commit before
 pushing. Committed, staged and unstaged evidence is kept separate so a dirty
 revert cannot hide delivered code. Review
 results with errors and background launch receipts never satisfy the checkpoint.
-The worker returns the fingerprint of the evidence supplied in its prompt; the
-checkpoint compares it to current evidence before recording a stamp, never to a
-separate pre-launch snapshot.
+The worker returns the fingerprint of the complete evidence supplied inline or
+in a readable patch artifact; the checkpoint compares it to current evidence
+before recording a stamp, never to a separate pre-launch snapshot. Patches over
+256KiB use a private, mode-0600 temporary artifact and a bounded inline preview.
+Patches with oversized raw lines (for example, minified JSON) are encoded as a
+lossless JSON array of string chunks with bounded rows. Concatenating the decoded
+entries reconstructs the exact raw patch; fingerprints still cover that raw
+patch, not its transport encoding.
+The reviewer must read every artifact page before concluding. The harness checks
+that successful read results cover the artifact's exact captured bytes, including
+pages limited by the read tool's line/byte cap. Unread or partially read artifacts
+receive no stamp, even if the worker reports success. A reviewer that cannot
+complete the review emits a plain, unquoted final-response line beginning with
+`DELIVERY_REVIEW_INCOMPLETE` (optionally followed by a colon and reason). This
+explicit refusal also prevents stamping inline patches, including declarations
+in later text blocks. Inline quotations and fenced or indented code examples
+with surrounding review prose are not declarations. A response consisting only
+of fenced or indented code containing a marker line is ambiguous and fails
+closed as incomplete; a genuine refusal must use the plain-line contract. The
+artifact exists throughout worker execution and is removed afterward, including
+on failure. Its temporary path is not part of the fingerprint.
 The command's `cd` / `git -C` checkout is checked, not the launch's checkout.
 Newline-separated commands count too; quoted body text does not.
 
 Docs-only changes and one tracked file with at most five changed lines are
-exempt. Lock-free Git capture is bounded to 256KiB and a 2s total deadline. Missing
-base refs, over-budget diffs, untracked content and binary changes are never
+exempt. Lock-free Git capture is bounded to 16MiB and a 2s total deadline, separate
+from the 256KiB inline prompt limit. All three layer inventories are collected
+before patch reads, so a patch failure retains complete scope and is explicitly
+marked incomplete. Missing base refs, over-budget diffs, untracked content and
+binary changes are never
 stamped as reviewed. An explicit override is available after reviewing such a
 change: set `PI_DELIVERY_REVIEW=0` for the session or prefix the delivery command
 with it. The checkpoint says when it cannot verify; it never silently blesses
