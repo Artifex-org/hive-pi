@@ -21,13 +21,14 @@
 
 import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
-import type { ExtensionAPI, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { isThinkingLevel, splitModelSpec } from "../hive-remote/status.ts";
 import { loadAdvisorConfig } from "./config.ts";
 import { advisorFailureMessage, fetchAgentModeOutcome, pickConfiguredAdvisor, type ConfiguredAdvisorPick } from "./modes.ts";
 import { buildAdvisorPrompt, capTranscript } from "./prompt.ts";
+import { advisorMessages } from "./transcript.ts";
 import { exposureFor } from "../loadout/policy.ts";
 
 /** Answer budget. Advice is prose, not code — 16k tokens is a long memo. */
@@ -60,10 +61,7 @@ export default function (pi: ExtensionAPI) {
 			const currentSpec = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(no model selected)";
 			const entries = ctx.sessionManager.buildContextEntries();
 
-			const messages = entries
-				.filter((e): e is SessionMessageEntry => e.type === "message")
-				.map((e) => e.message);
-			const serialized = serializeConversation(convertToLlm(messages));
+			const serialized = serializeConversation(convertToLlm(advisorMessages(entries)));
 			const { text: transcript, capped } = capTranscript(serialized, cfg.maxChars);
 
 			const isConfigured = (spec: string): boolean => {

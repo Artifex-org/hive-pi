@@ -43,3 +43,35 @@ describe("advisor completion", () => {
 		expect(complete).not.toHaveBeenCalled();
 	});
 });
+
+describe("advisor transcript", () => {
+	it("forwards team-message, handback and agenda custom messages, labelled", async () => {
+		vi.spyOn(config, "loadAdvisorConfig").mockReturnValue({ disabled: false, modelOverride: "openai-codex/reviewer", timeoutMs: 1000, maxChars: 100_000 });
+		const registerTool = vi.fn();
+		advisor({ registerTool } as unknown as ExtensionAPI);
+		const tool = registerTool.mock.calls[0][0] as ToolDefinition;
+		const response = { content: [{ type: "text", text: "reviewed" }], usage: { input: 1, output: 1 } };
+		const streamSimple = vi.fn().mockReturnValue({ result: async () => response });
+		const model = { provider: "openai-codex", id: "reviewer" };
+		const at = "2026-10-12T10:00:00.000Z";
+		const entries = [
+			{ type: "message", message: { role: "user", content: "do the task", timestamp: 1 } },
+			{ type: "custom_message", customType: "team-message", content: "RESUME bounded READ-ONLY review", display: true, timestamp: at },
+			{ type: "custom_message", customType: "handback", content: [{ type: "text", text: "handback pending" }], display: true, timestamp: at },
+			{ type: "custom_message", customType: "agenda", content: "Conductor: stay on scope", display: true, timestamp: at },
+			{ type: "custom", customType: "state-only", data: {} },
+		];
+		const ctx = {
+			model: { ...model, id: "caller" },
+			sessionManager: { buildContextEntries: () => entries },
+			modelRegistry: { find: () => model, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "t" }), streamSimple },
+		} as unknown as ExtensionToolContext;
+		await tool.execute("call", {}, undefined, undefined, ctx);
+		const sent = JSON.stringify(streamSimple.mock.calls[0][1]);
+		expect(sent).toContain("[team-message message delivered to the session]");
+		expect(sent).toContain("RESUME bounded READ-ONLY review");
+		expect(sent).toContain("handback pending");
+		expect(sent).toContain("Conductor: stay on scope");
+		expect(sent).not.toContain("state-only");
+	});
+});
