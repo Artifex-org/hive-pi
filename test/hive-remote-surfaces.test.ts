@@ -1,8 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkScratchDir } from "./scratch.ts";
 import { BrowserSurfacePublisher, readWebSnapshot } from "../extensions/hive-remote/surfaces.ts";
 import { browserSurfaceConfig } from "../extensions/hive-common/browserSurface.ts";
 
@@ -14,12 +14,7 @@ afterEach(() => {
 });
 
 function fixture(): { env: NodeJS.ProcessEnv; updatedAt: number } {
-	const scratch = path.join(os.homedir(), ".hive", "scratch");
-	const relative = path.relative(scratch, process.cwd());
-	const first = relative.split(path.sep)[0];
-	const writable = first && first !== ".." ? path.join(scratch, first) : scratch;
-	fs.mkdirSync(writable, { recursive: true, mode: 0o700 });
-	const root = fs.mkdtempSync(path.join(writable, "remote-surface-test-"));
+	const root = mkScratchDir("remote-surface-test-");
 	roots.push(root);
 	const dir = path.join(root, "browser-surface");
 	fs.mkdirSync(dir, { mode: 0o700 });

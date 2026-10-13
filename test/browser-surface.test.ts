@@ -1,5 +1,4 @@
-import fs, { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
+import fs, { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +10,7 @@ import {
 	surfaceConfig,
 	validateSurfaceCommand,
 } from "../extensions/browser/surface.ts";
+import { mkScratchDir } from "./scratch.ts";
 
 const roots: string[] = [];
 
@@ -19,14 +19,7 @@ afterEach(() => {
 });
 
 function bridgeEnv(): NodeJS.ProcessEnv {
-	const scratch = path.join(os.homedir(), ".hive", "scratch");
-	const relative = path.relative(scratch, process.cwd());
-	const first = relative.split(path.sep)[0];
-	// A launched test may write only inside its own scratch child, not the
-	// shared parent; an ordinary checkout uses the parent directly.
-	const writable = first && first !== ".." ? path.join(scratch, first) : scratch;
-	mkdirSync(writable, { recursive: true, mode: 0o700 });
-	const root = mkdtempSync(path.join(writable, "browser-surface-test-"));
+	const root = mkScratchDir("browser-surface-test-");
 	roots.push(root);
 	const dir = path.join(root, "browser-surface");
 	mkdirSync(dir, { mode: 0o700 });
