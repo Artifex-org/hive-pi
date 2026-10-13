@@ -16,6 +16,7 @@ const hiveReads = [
 	"list_clusters", "fleet_status", "list_queues", "get_scheduler_settings", "get_topology", "get_constraint_cost", "get_queue_wait", "get_step_durations",
 	"list_runs", "get_run", "get_run_tests", "get_run_reports", "get_task_logs", "explain_failure",
 	"get_test_pg_health", "get_deploy_status", "get_readiness", "list_projects", "get_pull", "list_pulls",
+	"list_run_artifacts", "get_databases", "get_pipeline_graph", "list_cases", "list_resources", "list_team_projects",
 ];
 const linearReads = ["get_issue", "list_issues", "list_comments"];
 const reads = [...hiveReads.map((tool) => ["hive", tool]), ...linearReads.map((tool) => ["linear", tool])];
@@ -25,6 +26,8 @@ const hiveWrites = [
 	// Names that look observational but mint a session, consume inbox state or subscribe.
 	"whoami", "read_inbox", "watch_ticket", "new_unknown_tool", "get_unknown_state",
 	"request_credential", "request_host", "end_agent_session",
+	// pin_run and hold_autofix change fleet state; request_team_project files a consent request.
+	"pin_run", "hold_autofix", "request_team_project", "request_resource",
 ];
 const readModes = { plan: planToolVerdict, discuss: classifyDiscussionTool, orchestrate: classifyOrchestrateTool };
 

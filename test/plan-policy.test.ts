@@ -34,6 +34,52 @@ const gatewayOnly = (tool: string) =>
 	!classifyOrchestrateTool(nativeMcpToolName(tool.slice(0, tool.indexOf("_")), tool.slice(tool.indexOf("_") + 1)), {}).allowed &&
 	classifyOrchestrateTool("mcp", { tool }).allowed;
 
+describe("plan, discussion and orchestrate: reads verified against their hive handlers", () => {
+	const READS = [
+		"hive_list_run_artifacts",
+		"hive_get_databases",
+		"hive_get_pipeline_graph",
+		"hive_list_cases",
+		"hive_list_resources",
+		"hive_list_team_projects",
+	];
+	// Mutating or consent-filing siblings stay refused in every mode.
+	const NOT_READS = ["hive_pin_run", "hive_hold_autofix", "hive_request_team_project", "hive_request_resource"];
+
+	it("admits each read through the bound gateway in plan, discussion and orchestrate", () => {
+		for (const tool of READS) {
+			for (const classify of [classifyTool, classifyDiscussionTool, classifyOrchestrateTool]) {
+				expect(classify("mcp", { tool }).allowed, `${classify.name} ${tool}`).toBe(true);
+			}
+		}
+	});
+
+	it("still refuses the mutating siblings through the gateway in every mode", () => {
+		for (const tool of NOT_READS) {
+			for (const classify of [classifyTool, classifyDiscussionTool, classifyOrchestrateTool]) {
+				expect(classify("mcp", { tool }).allowed, `${classify.name} ${tool}`).toBe(false);
+			}
+		}
+	});
+
+	it("lets orchestrate cancel a session-owned background job, but not plan or discussion", () => {
+		expect(classifyOrchestrateTool("background_cancel", { id: "bg-1" }).allowed).toBe(true);
+		expect(classifyTool("background_cancel", { id: "bg-1" }).allowed).toBe(false);
+		expect(classifyDiscussionTool("background_cancel", { id: "bg-1" }).allowed).toBe(false);
+	});
+
+	it("names the host's own gateway tool when a direct call is refused", () => {
+		const reasonOf = (verdict: ReturnType<typeof classifyTool>) => (verdict.allowed ? "" : verdict.reason);
+		const direct = "mcp__hive__get_ticket";
+		expect(reasonOf(classifyTool(direct, {}))).toContain('mcp({tool: "hive_get_ticket"})');
+		const claude = reasonOf(classifyTool(direct, {}, "claude-code"));
+		expect(claude).toContain('mcp__hive-pi__mcp {tool: "hive_get_ticket"}');
+		expect(claude).not.toContain("mcp({tool");
+		expect(reasonOf(classifyDiscussionTool(direct, {}, "claude-code"))).toContain("mcp__hive-pi__mcp");
+		expect(reasonOf(classifyOrchestrateTool("mcp__hive__list_teammates", {}, "claude-code"))).toContain("mcp__hive-pi__mcp");
+	});
+});
+
 describe("tool classification", () => {
 	it("allows read-only builtins and denies writers", () => {
 		expect(classifyTool("read").allowed).toBe(true);
