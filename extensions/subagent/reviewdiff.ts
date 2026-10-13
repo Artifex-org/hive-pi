@@ -54,6 +54,8 @@ export interface ReviewDiff {
 	/** What was diffed, for the sentence the worker reads. */
 	scope: "working tree vs HEAD" | "branch vs its base" | "branch and working tree vs merge-base";
 	truncatedBytes: number;
+	/** Tracked files whose patch is absent or cut short because the diff exceeded the capture budget. */
+	omitted?: string[];
 }
 
 /** Enough for a real change; beyond it the worker reads files itself, which it can, given the list. */
@@ -208,8 +210,40 @@ function splitLines(out: string): string[] {
 		.filter(Boolean);
 }
 
+/** Agent scratch notes: never part of what a delivery review covers or can be stamped against. */
+export function isEphemeralNote(path: string): boolean {
+	return path.startsWith(".hive/notes/");
+}
+
+/**
+ * Why pushing from this repo cannot be reviewed as "HEAD against origin", from
+ * `git config --null --list`; null when the push configuration is the plain one.
+ * Shared by the capture (which refuses) and the explanation (which names the key).
+ */
+export function deliveryConfigProblem(config: string): string | null {
+	let pushDefault = "simple";
+	for (const entry of config.split("\0")) {
+		const separator = entry.indexOf("\n");
+		const key = separator < 0 ? entry : entry.slice(0, separator);
+		const value = separator < 0 ? "" : entry.slice(separator + 1);
+		if (/^remote\..*\.(?:push|mirror|pushurl)$/.test(key) || ["push.followtags", "push.recursesubmodules"].includes(key)) return `git config \`${key}\` changes what a push sends`;
+		if ((key === "remote.pushdefault" || /^branch\..*\.(?:pushremote|remote)$/.test(key)) && value !== "origin") return `git config \`${key}=${value}\` sends to a remote other than origin`;
+		if (key === "push.default") pushDefault = value;
+	}
+	return ["simple", "current", "upstream"].includes(pushDefault) ? null : `git config \`push.default=${pushDefault}\` may push branches other than HEAD`;
+}
+
+const DELIVERY_DIFF_BUDGET = 256 * 1024;
+const DELIVERY_FILE_BUDGET = 16 * 1024;
+const DELIVERY_STAT_CAP = 32 * 1024;
+
 /** Keep committed, staged and unstaged evidence separate: a dirty revert must
- * never cancel a commit (or staged content) that the delivery will send. */
+ * never cancel a commit (or staged content) that the delivery will send.
+ *
+ * When the repo and merge-base resolve but the complete patch does not fit the
+ * budget (or a git call fails), the result is still returned: file list, stat
+ * and as many per-file patches as fit, marked truncated (never stampable) with
+ * the files that lack a full patch in `omitted`. */
 export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = deliveryGit): ReviewDiff | null {
 	const started = Date.now(), runner = git;
 	git = (args, dir) => {
@@ -221,17 +255,7 @@ export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = del
 	// Default pushes must send this branch's HEAD, not matching/all configured
 	// refspecs from other branches. Configuration bytes never enter the prompt.
 	const config = git(["config", "--null", "--list"], repo);
-	if (config === null) return null;
-	let pushDefault = "simple";
-	for (const entry of config.split("\0")) {
-		const separator = entry.indexOf("\n");
-		const key = separator < 0 ? entry : entry.slice(0, separator);
-		const value = separator < 0 ? "" : entry.slice(separator + 1);
-		if (/^remote\..*\.(?:push|mirror|pushurl)$/.test(key) || ["push.followtags", "push.recursesubmodules"].includes(key)) return null;
-		if ((key === "remote.pushdefault" || /^branch\..*\.(?:pushremote|remote)$/.test(key)) && value !== "origin") return null;
-		if (key === "push.default") pushDefault = value;
-	}
-	if (!["simple", "current", "upstream"].includes(pushDefault)) return null;
+	if (config === null || deliveryConfigProblem(config)) return null;
 	const head = baseRef(repo, git);
 	if (!head) return null;
 	const base = git(["merge-base", "HEAD", head], repo)?.trim();
@@ -240,22 +264,67 @@ export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = del
 	if (status === null) return null;
 	let text = "";
 	const changed = new Set<string>();
+	const omitted = new Set<string>();
+	let truncatedBytes = 0;
+	const diffArgs = ["--no-color", "--no-ext-diff"];
 	for (const [label, args] of [[`Committed (${head} merge-base)`, [base, "HEAD"]], ["Staged vs HEAD", ["--cached", "HEAD"]], ["Unstaged vs index", []]] as const) {
-		const patch = git(["diff", "--no-color", "--no-ext-diff", "-p", ...args], repo);
 		const names = git(["diff", "--name-only", "-z", ...args], repo);
-		if (patch === null || names === null) return null;
-		for (const path of names.split("\0").filter(Boolean)) changed.add(path);
-		if (patch) text += `${label}:\n${patch}\n`;
-		if (Buffer.byteLength(text) > 256 * 1024) return null;
+		if (names === null) return null;
+		const paths = names.split("\0").filter(Boolean).sort();
+		for (const path of paths) changed.add(path);
+		const patch = git(["diff", ...diffArgs, "-p", ...args], repo);
+		if (patch !== null && Buffer.byteLength(text) + Buffer.byteLength(patch) <= DELIVERY_DIFF_BUDGET) {
+			if (patch) text += `${label}:\n${patch}\n`;
+			continue;
+		}
+		const stat = git(["diff", ...diffArgs, "--stat=160,120", ...args], repo) ?? "";
+		text += `${label} (over the capture budget: stat, then the patches that fit):\n${stat.slice(0, DELIVERY_STAT_CAP)}\n`;
+		truncatedBytes += patch === null ? 1 : Buffer.byteLength(patch);
+		for (const path of paths) {
+			const room = DELIVERY_DIFF_BUDGET - Buffer.byteLength(text);
+			const filePatch = room > 0 ? git(["diff", ...diffArgs, "-p", ...args, "--", path], repo) : null;
+			if (filePatch === null) { omitted.add(path); continue; }
+			const shown = filePatch.slice(0, Math.min(DELIVERY_FILE_BUDGET, room));
+			if (shown.length < filePatch.length) omitted.add(path);
+			text += `${shown}\n`;
+			truncatedBytes -= Buffer.byteLength(shown);
+		}
+		truncatedBytes = Math.max(1, truncatedBytes);
 	}
 	const files = [...changed].sort();
-	const untracked = parseStatusZ(status).untracked;
+	const untracked = parseStatusZ(status).untracked.filter((path) => !isEphemeralNote(path));
 	const callerNamed = citedPaths(task).filter((p) => ![...files, ...untracked].some((f) => samePath(f, p)));
-	return { repo, files, untracked, callerNamed, text, scope: "branch and working tree vs merge-base", truncatedBytes: 0 };
+	const result: ReviewDiff = { repo, files, untracked, callerNamed, text, scope: "branch and working tree vs merge-base", truncatedBytes };
+	if (omitted.size > 0) result.omitted = [...omitted].sort();
+	return result;
 }
 
-// Rare delivery boundary: lock-free commands, each <=1s / 256KiB. If the
-// complete diff is unavailable the checkpoint requires an explicit override.
+/**
+ * Why `captureDeliveryDiff` returned null, named for the agent: the first
+ * condition that fails, checked in the order the capture checks it. Run only
+ * after a null capture, so it may spend a few more git calls.
+ */
+export function explainDeliveryDiffFailure(cwd: string, git: GitRunner = deliveryGit): string {
+	const repo = reviewRepoFor(cwd, "", git);
+	if (!repo) return `${cwd} is not inside a git repository`;
+	const config = git(["config", "--null", "--list"], repo);
+	if (config === null) return "git config could not be read (git failed or timed out)";
+	const problem = deliveryConfigProblem(config);
+	if (problem) return problem;
+	const head = baseRef(repo, git);
+	if (!head) return "no remote base ref: origin/HEAD is unset and there is no origin FETCH_HEAD for main/master";
+	if (!git(["merge-base", "HEAD", head], repo)?.trim()) return `no merge-base between HEAD and ${head}`;
+	return "git status/diff failed or exceeded the 2 s scan budget";
+}
+
+/** The commit HEAD points at, short; null when git cannot say. */
+export function headCommit(repo: string, git: GitRunner = deliveryGit): string | null {
+	return git(["rev-parse", "--short", "HEAD"], repo)?.trim() || null;
+}
+
+// Rare delivery boundary: lock-free commands, each <=1s / 256KiB. A diff that
+// does not fit is handed over truncated; the checkpoint then requires an
+// explicit override because a truncated review is never stamped.
 const deliveryGit: GitRunner = (args, cwd, timeoutMs = 1000) => {
 	try { return execFileSync("git", [LOCK_FREE, ...args], { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: 256 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
 	catch { return null; }
@@ -279,7 +348,8 @@ export const NEUTRAL_REVIEW_TASK = "Review the change independently. Find concre
 
 /** Code review carries evidence and scope paths, never the author's design conclusions. */
 export function reviewTaskWithDiff(task: string, diff: ReviewDiff, neutral = false): string {
-	const note = diff.truncatedBytes > 0 ? `\n[diff truncated: ${diff.truncatedBytes} bytes omitted — read the listed files for the rest]` : "";
+	const omittedFiles = diff.omitted?.length ? ` Files with no or only a partial patch above: ${diff.omitted.join(", ")}.` : "";
+	const note = diff.truncatedBytes > 0 ? `\n[diff truncated: ${diff.truncatedBytes} bytes omitted — read the listed files for the rest.${omittedFiles}]` : "";
 	const shownUntracked = diff.untracked.slice(0, UNTRACKED_LIST_CAP);
 	const hiddenUntracked = diff.untracked.length - shownUntracked.length;
 	const changed = diff.files.length + diff.untracked.length;

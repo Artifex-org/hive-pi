@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deliveryCommand, deliveryTargets, needsDeliveryReview, registerDeliveryReview, reviewFingerprint } from "../extensions/subagent/delivery.ts";
+import { deliveryCommand, deliveryTargets, scanDeliveryTargets, needsDeliveryReview, registerDeliveryReview, reviewFingerprint } from "../extensions/subagent/delivery.ts";
 import { BASE_REF_SCAN, fetchedBaseRef, knownBaseRef } from "../extensions/guards-common/git-base.ts";
-import { captureDeliveryDiff, neutralReviewTask, reviewTaskWithDiff, type ReviewDiff } from "../extensions/subagent/reviewdiff.ts";
+import { captureDeliveryDiff, explainDeliveryDiffFailure, neutralReviewTask, reviewTaskWithDiff, stampableReview, type ReviewDiff } from "../extensions/subagent/reviewdiff.ts";
 import { createFakePi } from "./fake-pi.ts";
 const diff: ReviewDiff = { repo: "/repo", files: ["a.ts", "b.ts"], untracked: [], callerNamed: [], text: "diff --git a/a.ts b/a.ts\n+code\n-code", scope: "working tree vs HEAD", truncatedBytes: 0 };
 const repos: string[] = [];
@@ -353,6 +353,113 @@ describe("delivery review", () => {
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push" } }))[0]).toBeUndefined();
 		vi.stubEnv("PI_DELIVERY_REVIEW", "1");
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "PI_DELIVERY_REVIEW=0 git push" } }))[0]).toBeUndefined();
+		expect(pi.entries).toHaveLength(0);
+	});
+	describe("block reasons name the cause and the standalone command", () => {
+		const reason = async (pi: ReturnType<typeof createFakePi>, command: string, cwd?: string) =>
+			((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0] as { reason: string }).reason;
+		it.each([
+			["git status > out.txt; git push origin HEAD", "git status > out.txt"],
+			["git checkout work && git push origin HEAD", "git checkout work"],
+		])("names the preceding mutation leg in %s", async (command, mutation) => {
+			const { cwd } = repo(); const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);
+			const text = await reason(pi, command, cwd);
+			expect(text).toContain(`earlier leg (\`${mutation}\`)`);
+			expect(text).toContain("git push origin HEAD");
+		});
+		it.each([
+			["git push other HEAD", "remote `other` is not `origin`"],
+			["git push origin feature-branch", "refspec `feature-branch`"],
+			["git push --all", "`--all` pushes more than the current HEAD"],
+			["gh pr create --base main", "`--base`"],
+			["gh pr create --repo a/b", "`--repo`"],
+			["GIT_DIR=/x git push", "GIT_DIR=/x"],
+			["hive ship --force", "argument `--force`"],
+			['git -C "$REPO" push', "dynamic"],
+		])("names the offending token of %s", async (command, cause) => {
+			const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);
+			const text = await reason(pi, command);
+			expect(text).toContain("Unsupported command shape");
+			expect(text).toContain(cause);
+			expect(text).toContain(`\`${command.slice(0, 20)}`);
+		});
+		it("scanDeliveryTargets keeps the target list identical to deliveryTargets", () => {
+			for (const c of ["git -C /first push && cd /last && gh pr create", "git push other HEAD && gh pr create", "git status && git push"]) {
+				expect(scanDeliveryTargets(c, "/repo").map((scan) => scan.target)).toEqual(deliveryTargets(c, "/repo"));
+			}
+		});
+		it("names the hook-bearing commit leg of a chain", async () => {
+			const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+			const hook = join(cwd, ".git", "hooks", "pre-commit"); writeFileSync(hook, "#!/bin/sh\nexit 0\n"); chmodSync(hook, 0o755);
+			const pi = createFakePi(); registerDeliveryReview(pi.api);
+			const text = await reason(pi, "git commit -m code && git push origin HEAD", cwd);
+			expect(text).toContain("`git commit -m code`"); expect(text).toContain("executable hooks (pre-commit)"); expect(text).toContain("as its own command");
+		});
+		it("says no review has run for this fingerprint, naming it", async () => {
+			vi.stubEnv("PI_DELIVERY_REVIEW", "1"); const pi = createFakePi(); registerDeliveryReview(pi.api, () => diff);
+			const text = await reason(pi, "git push", "/repo");
+			expect(text).toContain("No code review has run for this diff fingerprint " + reviewFingerprint(diff).slice(0, 8));
+			expect(text).not.toContain("background"); expect(text).not.toContain("stale");
+		});
+		it("says a review ran in the background and does not count", async () => {
+			vi.stubEnv("PI_DELIVERY_REVIEW", "1"); const pi = createFakePi(); registerDeliveryReview(pi.api, () => diff);
+			await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", background: true, cwd: "/repo" } });
+			const text = await reason(pi, "git push", "/repo");
+			expect(text).toContain("ran in the background"); expect(text).toContain("only a foreground review counts");
+		});
+		it("says a review went stale after a commit, with both fingerprints", async () => {
+			const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+			const pi = createFakePi(); registerDeliveryReview(pi.api);
+			const before = captureDeliveryDiff(cwd)!;
+			await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+			await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(before) }] } });
+			const reviewedHead = git("rev-parse", "--short", "HEAD").trim();
+			git("commit", "-m", "code"); writeFileSync(join(cwd, "code.ts"), substantive + "export const later = 1;\n"); git("add", ".");
+			const text = await reason(pi, "git push", cwd);
+			expect(text).toContain(`A review exists for diff ${reviewFingerprint(before).slice(0, 8)}`);
+			expect(text).toContain(`is now ${reviewFingerprint(captureDeliveryDiff(cwd)!).slice(0, 8)}`);
+			expect(text).toContain(`HEAD ${reviewedHead} then`); expect(text).toContain("went stale after commit");
+		});
+		it("names the untracked file that makes the diff unstampable", async () => {
+			const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); writeFileSync(join(cwd, "new-file.ts"), "x\n");
+			const pi = createFakePi(); registerDeliveryReview(pi.api);
+			const text = await reason(pi, "git push", cwd);
+			expect(text).toContain("not stampable"); expect(text).toContain("`new-file.ts`");
+		});
+		it("names why the diff is unavailable", () => {
+			const { cwd, git } = repo(); git("config", "remote.pushDefault", "release");
+			expect(explainDeliveryDiffFailure(cwd)).toContain("remote.pushdefault=release");
+			git("config", "--unset", "remote.pushDefault"); git("update-ref", "-d", "refs/remotes/origin/main");
+			expect(explainDeliveryDiffFailure(cwd)).toContain("no remote base ref");
+			expect(explainDeliveryDiffFailure(tmpdir())).toContain("not inside a git repository");
+		});
+	});
+	it("does not let untracked .hive/notes make a delivery diff unstampable", () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		mkdirSync(join(cwd, ".hive", "notes"), { recursive: true }); writeFileSync(join(cwd, ".hive", "notes", "scratch.md"), "note\n");
+		const change = captureDeliveryDiff(cwd)!;
+		expect(change.untracked).toEqual([]); expect(stampableReview(change)).toBe(true);
+		writeFileSync(join(cwd, "other.ts"), "x\n");
+		expect(captureDeliveryDiff(cwd)!.untracked).toEqual(["other.ts"]);
+	});
+	it("returns a bounded truncated diff naming omitted files instead of null when the patch exceeds the budget", async () => {
+		const { cwd, git } = repo();
+		const big = Array.from({ length: 20000 }, (_, i) => `export const v${i} = ${i};`).join("\n") + "\n";
+		writeFileSync(join(cwd, "huge.ts"), big); writeFileSync(join(cwd, "small.ts"), substantive); git("add", "."); git("commit", "-m", "big");
+		const change = captureDeliveryDiff(cwd);
+		expect(change).not.toBeNull();
+		expect(change!.files).toEqual(["huge.ts", "small.ts"]);
+		expect(change!.truncatedBytes).toBeGreaterThan(0); expect(stampableReview(change!)).toBe(false);
+		expect(change!.omitted).toContain("huge.ts"); expect(change!.omitted).not.toContain("small.ts");
+		expect(change!.text).toContain("small.ts | "); expect(change!.text).toContain("export const n11");
+		expect(Buffer.byteLength(change!.text)).toBeLessThanOrEqual(260 * 1024);
+		expect(reviewTaskWithDiff("Review", change!)).toContain("Files with no or only a partial patch above: huge.ts");
+		expect(needsDeliveryReview(change!)).toBe(true);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		const text = ((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD", cwd } }))[0] as { reason: string }).reason;
+		expect(text).toContain("exceeds the capture budget"); expect(text).toContain("huge.ts"); expect(text).toContain("PI_DELIVERY_REVIEW=0");
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(change!) }] } });
 		expect(pi.entries).toHaveLength(0);
 	});
 });
