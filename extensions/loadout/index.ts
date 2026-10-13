@@ -49,8 +49,9 @@ export function deferredToolNames(tools: readonly ToolLike[]): string[] {
  * straight to `load_tools`, which takes names and cannot pick a neighbour.
  */
 export const EXACT_NAME_LOADING =
-	"If you know the exact MCP tool name (`mcp__<server>__<tool>`), pass it to `load_tools`; use `tool_search` only to " +
-	"discover names, and never with `limit: 1` (the top hit is often a different tool).";
+	"For a deferred MCP tool whose exact name (`mcp__<server>__<tool>`) you know, pass it to `load_tools`; use " +
+	"`tool_search` only to discover names, and never with `limit: 1` (the top hit is often a different tool). " +
+	"A tool exposed to codemode needs no loading: call it as `tools.mcp__<server>__<tool>(...)` inside a script.";
 
 /**
  * A codemode script that calls `tools.tool_search` / `tools.describeTool` fails
@@ -60,13 +61,15 @@ export const EXACT_NAME_LOADING =
  */
 export function codemodeDiscoveryMisuse(code: string): string | null {
 	const used = new Set<string>();
-	for (const m of code.matchAll(/\btools\s*(?:\.\s*|\[\s*["'`])(tool_search|describeTool)\b/g)) used.add(m[1]!);
+	for (const m of code.matchAll(/\btools\s*(?:\.\s*|\[\s*["'`])(tool_search|describeTool)["'`]?\s*\]?\s*\(/g)) used.add(m[1]!);
 	if (used.size === 0) return null;
 	const names = [...used].map((n) => `tools.${n}`).join(" and ");
 	return (
 		`Not run: ${names} does not exist inside codemode, and calls made before it would fail have already run. ` +
 		"Use the globals instead: `await searchTools(\"<words>\")` and `await describeTool(\"<exact name>\")` " +
-		"(both async; `tool_search` is model-only). " + EXACT_NAME_LOADING
+		"(both async; `tool_search` is model-only). " +
+		"If the text is only a string or comment (for example a search pattern), run it with the bash or edit tool directly. " +
+		EXACT_NAME_LOADING
 	);
 }
 

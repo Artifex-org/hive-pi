@@ -304,6 +304,12 @@ describe("codemode discovery preflight", () => {
 		expect(codemodeDiscoveryMisuse("const tool_search = 1; searchTools('a')")).toBeNull();
 		expect(codemodeDiscoveryMisuse("tools.tool_search ({})")).toContain("tools.tool_search");
 	});
+
+	it("does not reject text that merely mentions the names, and says how to run such a script", () => {
+		expect(codemodeDiscoveryMisuse('await tools.bash({command:"rg \'tools.tool_search\' extensions"})')).toBeNull();
+		expect(codemodeDiscoveryMisuse("// tools.describeTool is not a member\nawait searchTools('a')")).toBeNull();
+		expect(codemodeDiscoveryMisuse("tools.describeTool('x')")).toContain("bash or edit tool directly");
+	});
 });
 
 describe("exact-name loading guidance", () => {
@@ -311,6 +317,8 @@ describe("exact-name loading guidance", () => {
 		for (const text of [loadoutPrompt(["session_grep"]), mcpHint({ getAllTools: () => [{ name: "tool_search" }] } as never)]) {
 			expect(text).toContain("`mcp__<server>__<tool>`");
 			expect(text).toContain("never with `limit: 1`");
+			expect(text).toContain("For a deferred MCP tool");
+			expect(text).toContain("`tools.mcp__<server>__<tool>(...)`");
 		}
 	});
 
