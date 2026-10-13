@@ -161,6 +161,25 @@ describe("the automatic path", () => {
 		expect(runBriefer).toHaveBeenCalledTimes(1);
 	});
 
+	// d6ffd0b2 (2026-10-13): Hive resumed f2ead622's portfolio research with its
+	// fixed resume sentence; the brief, seeing only that, found a stale committed
+	// ASF-4053 PROGRESS.md, named it the goal, and the agent did the wrong task.
+	it("does not brief a resumed session — the restored conversation is the task", async () => {
+		brieferReturns({ draft: { goal: "Resume the ASF-4053 CSQ replay-fidelity task", facts: [], startHere: [], refs: [], unknowns: [], nextMoves: [], history: [] } });
+		brief(pi.api);
+
+		const results = await pi.emit(
+			{ type: "before_agent_start", prompt: "Resume the prior task now. Review the restored context, continue the unfinished work, and report progress." },
+			{ branch: [
+				{ message: { role: "user", content: "i want you to do a proper multi hour deep research run" } },
+				{ message: { role: "assistant", content: "Consolidation committed." } },
+			] },
+		);
+
+		expect(runBriefer).not.toHaveBeenCalled();
+		expect(results.filter(Boolean)).toEqual([]);
+	});
+
 	it("stays out of the way of a prompt that is not task-like", async () => {
 		brief(pi.api);
 		await pi.emit({ type: "before_agent_start", prompt: "thanks, that all makes sense to me now" });

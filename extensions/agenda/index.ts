@@ -81,7 +81,11 @@ import {
 	describeConductor,
 	lifecycleEnvelope,
 	renderConductorLines,
+	FRAME_LEDGER_ID,
+	PLAN_LEDGER_ID,
+	VERIFY_LEDGER_ID,
 } from "./conductor.ts";
+import { CONSOLIDATE_LEDGER_ID } from "./consolidate.ts";
 import {
 	AGENT_STATUS_CHANNEL,
 	HIVE_HANDOFF_CHANNEL,
@@ -91,24 +95,31 @@ import {
 	PLAN_CONTROL_CHANNEL,
 	PLAN_GRILL_CHANNEL,
 	QUESTION_REMOTE_CHANNEL,
+	OPERATOR_INPUT_CHANNEL,
 	type AgentStatusEvent,
 	type ConductorStageEvent,
 	type PlanApprovedEvent,
 	type PlanControlEvent,
 	type PlanGrillEvent,
 	type QuestionRemoteEvent,
+	type OperatorInputEvent,
 } from "../hive-common/channels.ts";
 import { buildGrillKick } from "../plan/prompt.ts";
 import {
 	AGENT_STATUS_ENTRY_TYPE,
 	buildRecapPrompt,
 	activeWorkRecap,
+	completedRecap,
+	instructionRecap,
 	mechanicalTaskState,
 	MIN_TRANSCRIPT_CHARS,
 	sanitizeRecap,
 	type AgentStatusItem,
+	type TaskState,
 	recapTranscript,
 } from "./recap.ts";
+import { ATTENDED_ENTRY_TYPE, type AttendedEntry, rehydrateAttended, reopenForInstruction } from "./attendance.ts";
+import { operatorInputDigest } from "../hive-common/operator-input.ts";
 import { classifyHandback } from "../hive-common/handback.ts";
 import { announceOwnWork, trackOwnWork } from "../hive-common/own-work.ts";
 import { createWaker } from "../hive-common/waker.ts";
@@ -117,7 +128,7 @@ import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "
 import { PlanSchema, type Plan, resolveCaps, validatePlan } from "./plan-schema.ts";
 import { discoverAgents } from "../harness/roles.ts";
 import { diffStamp } from "../harness/verify.ts";
-import { type ContextSignal, type SessionSignals, contextSignalOf, deriveSignals, emptySignals } from "./signals.ts";
+import { type ContextSignal, type SessionSignals, contentText, contextSignalOf, deriveSignals, emptySignals } from "./signals.ts";
 import { shouldAutoShutdown } from "./auto-shutdown.ts";
 import { compactInstructions, fetchRecapPayload, handoffRecapSections } from "./session-recap.ts";
 import { rehydratePlan } from "../plan/state.ts";
@@ -181,6 +192,9 @@ function firstPage(runId: string, result: DurableRunResult, limit: number): stri
 		"(a fanout/pipeline element as <id>#<n>)."
 	);
 }
+
+/** Announced operator messages remembered while waiting for their user message; a lost one ages out. */
+const MAX_PENDING_OPERATOR_MESSAGES = 16;
 
 /** Above this, a run asks before it starts. */
 const CONFIRM_ABOVE_AGENTS = 25;
@@ -441,6 +455,8 @@ export default function (pi: ExtensionAPI) {
 		pendingRecap = null;
 		lastRecapTail = "";
 		autoShutdownScheduled = false;
+		pendingOperatorDigests.length = 0;
+		heardUserMessage = false;
 		heldCtx = ctx;
 		// Ephemeral per-session state — unlike goals, deliberately NOT persisted:
 		// a gate stamp or verify note from another session describes checks that
@@ -456,6 +472,7 @@ export default function (pi: ExtensionAPI) {
 			goal = null;
 			loop = null;
 			conductor = null;
+			attended = false;
 			ultracodeOn = hiveLaunched;
 			syncWakeTool();
 			syncOrchestrateTool();
@@ -472,10 +489,13 @@ export default function (pi: ExtensionAPI) {
 			goal = rehydrateGoal(entries);
 			loop = rehydrateLoop(entries);
 			conductor = rehydrateConductor(entries);
+			attended = rehydrateAttended(entries);
+			heardUserMessage = entries.some((raw) => (raw as { message?: { role?: string } } | undefined)?.message?.role === "user");
 		} catch {
 			goal = null;
 			loop = null;
 			conductor = null;
+			attended = false;
 		}
 		// pi force-activates every registered extension tool at session build and
 		// again on /reload, so the wake tool has to be removed AFTER the registry
@@ -516,6 +536,34 @@ export default function (pi: ExtensionAPI) {
 	const autoShutdownEnabled = process.env.PI_AGENDA_AUTO_SHUTDOWN === "1";
 	const unattendedHiveLaunch = isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID);
 	let autoShutdownScheduled = false;
+	/** A person has steered this session through Hive (attendance.ts). Rehydrated on session_start. */
+	let attended = false;
+	/** Digests of person-sent messages announced on the bus whose user message has not arrived yet. */
+	const pendingOperatorDigests: string[] = [];
+	/** Has this session seen any user message — i.e. is the next one NOT its opening prompt? */
+	let heardUserMessage = false;
+
+	/** Append one agent-status entry and ring the doorbell. The revision bump also voids an in-flight recap. */
+	const writeStatus = (taskState: TaskState, recap: string) => {
+		statusRevision++;
+		const item: AgentStatusItem = {
+			kind: "agent-status",
+			revision: statusRevision,
+			taskState,
+			recap,
+			at: Date.now(),
+		};
+		try {
+			pi.appendEntry(AGENT_STATUS_ENTRY_TYPE, item);
+		} catch {
+			return; // session gone — a status for it helps nobody
+		}
+		try {
+			pi.events.emit(AGENT_STATUS_CHANNEL, { revision: statusRevision } satisfies AgentStatusEvent);
+		} catch {
+			/* no bus, or nothing listening */
+		}
+	};
 	// Context pressure for the lifecycle widget. Its own handler rather than a
 	// branch inside the recap one below, because that handler returns early for
 	// non-interactive modes and for a stale ctx — and this reading is cheap,
@@ -567,30 +615,17 @@ export default function (pi: ExtensionAPI) {
 		const wantRecap = !activeRecap && !recapInFlight && changedTranscript;
 
 		const persistStatus = (recap: string) => {
-			statusRevision++;
 			const live = liveRecap(asksQuestion);
 			// Empty prose is preserved downstream. Explicitly replace a finished
 			// live-work line rather than leaving a stale job in Hive.
 			const next = live ?? (hadLiveRecap && !recap ? "No active goal or background work" : recap);
 			hadLiveRecap = live !== null;
-			const item: AgentStatusItem = {
-				kind: "agent-status",
-				revision: statusRevision,
-				taskState,
-				recap: next,
-				at: Date.now(),
-			};
-			try {
-				pi.appendEntry(AGENT_STATUS_ENTRY_TYPE, item);
-			} catch {
-				return; // session gone — a status for it helps nobody
-			}
-			try {
-				pi.events.emit(AGENT_STATUS_CHANNEL, { revision: statusRevision } satisfies AgentStatusEvent);
-			} catch {
-				/* no bus, or nothing listening */
-			}
+			writeStatus(taskState, next);
 		};
+		// The summarizer ran and produced nothing. At completion the preserved
+		// previous line describes an earlier state, so say the mechanical fact.
+		const unsummarized = () =>
+			taskState === "completed" ? completedRecap(goal?.state === "achieved" ? goal.condition : null) : "";
 
 		if (!wantRecap) {
 			// The state is still news (needs_input drives the workspace triage);
@@ -617,9 +652,9 @@ export default function (pi: ExtensionAPI) {
 			})
 				.then((result) => {
 					const recap = result.exitCode === 0 && !result.timedOut ? sanitizeRecap(result.text) : "";
-					if (recapRevision === statusRevision && recapGeneration === sessionGeneration) persistStatus(recap);
+					if (recapRevision === statusRevision && recapGeneration === sessionGeneration) persistStatus(recap || unsummarized());
 				})
-				.catch(() => { if (recapRevision === statusRevision && recapGeneration === sessionGeneration) persistStatus(""); })
+				.catch(() => { if (recapRevision === statusRevision && recapGeneration === sessionGeneration) persistStatus(unsummarized()); })
 				.finally(() => {
 					if (recapGeneration !== sessionGeneration) return;
 					recapInFlight = false;
@@ -635,6 +670,68 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", observeSettled);
 
 	/**
+	 * A person spoke to this session through Hive (attendance.ts). Attendance
+	 * is recorded at once; the lifecycle reopens when the message itself
+	 * arrives (`message_end` below), because a settle already in progress may
+	 * still commit the old task's `done` between the two — on f2ead622 the
+	 * operator's "continue" landed in the same second the conductor closed.
+	 *
+	 * The session's OPENING prompt is not attendance even when a person sent it
+	 * through Hive (a launch with attachments delivers its task as one remote
+	 * operator command): that is the task, and an unsteered launch must still
+	 * close when it is done.
+	 */
+	pi.events.on(OPERATOR_INPUT_CHANNEL, (payload: unknown) => {
+		if (IS_WORKER) return;
+		const event = payload as OperatorInputEvent | undefined;
+		if (typeof event?.source !== "string" || typeof event.digest !== "string") return;
+		if (!heardUserMessage) return;
+		pendingOperatorDigests.push(event.digest);
+		if (pendingOperatorDigests.length > MAX_PENDING_OPERATOR_MESSAGES) pendingOperatorDigests.shift();
+		if (attended) return;
+		attended = true;
+		try {
+			pi.appendEntry(ATTENDED_ENTRY_TYPE, { kind: "agenda-attended", at: Date.now(), source: event.source } satisfies AttendedEntry);
+		} catch {
+			/* session went away; the in-memory flag still holds for this process */
+		}
+	});
+
+	pi.on("message_end", (event: unknown) => {
+		if (IS_WORKER) return;
+		const message = (event as { message?: { role?: string; content?: unknown } } | undefined)?.message;
+		if (message?.role !== "user") return;
+		heardUserMessage = true;
+		if (pendingOperatorDigests.length === 0) return;
+		// Paired by digest, not by count: a Hive notice consumed from the other
+		// queue in between must neither reopen the lifecycle nor be quoted as
+		// the operator's instruction.
+		const text = contentText(message.content);
+		const at = pendingOperatorDigests.indexOf(operatorInputDigest(text));
+		if (at < 0) return;
+		pendingOperatorDigests.splice(at, 1);
+		const reopened = reopenForInstruction(conductor, goal, Date.now());
+		if (!reopened.conductor && !reopened.goal) return;
+		if (reopened.goal) persist(reopened.goal);
+		if (reopened.conductor) {
+			// The new task gets the lifecycle's per-stage budget, as a first
+			// prompt does; the advice reminder stays session-wide.
+			driver.clearItems([FRAME_LEDGER_ID, PLAN_LEDGER_ID, VERIFY_LEDGER_ID, CONSOLIDATE_LEDGER_ID]);
+			persistConductor(reopened.conductor);
+		}
+		hadLiveRecap = false;
+		writeStatus(
+			mechanicalTaskState({
+				asksQuestion: false,
+				goalAchieved: goal?.state === "achieved",
+				goalBlocked: goal?.state === "blocked_user",
+				conductorDone: conductor?.stage === "done",
+			}),
+			instructionRecap(text),
+		);
+	});
+
+	/**
 	 * Close only a finished, unattended session. The final conductor transition
 	 * is committed by the settle observer; defer one turn of the event loop so
 	 * all settle subscribers (especially telemetry) have returned first. The
@@ -648,6 +745,7 @@ export default function (pi: ExtensionAPI) {
 				enabled: autoShutdownEnabled,
 				mode: ctx.mode,
 				unattendedHiveLaunch,
+				attended,
 				conductorDone: conductor?.stage === "done",
 				asksQuestion: asksQuestion,
 			})
@@ -665,6 +763,7 @@ export default function (pi: ExtensionAPI) {
 						enabled: autoShutdownEnabled,
 						mode: ctx.mode,
 						unattendedHiveLaunch,
+						attended,
 						conductorDone: conductor?.stage === "done",
 						asksQuestion: false,
 					}) ||
@@ -760,6 +859,16 @@ export default function (pi: ExtensionAPI) {
 	// (agent-session.js:1085) and never emit `before_agent_start`, so in an
 	// unattended run that flag would be set and never consumed — the condition
 	// would silently stop being in front of the model.
+	//
+	// Delivered into history NOW (`triggerTurn: false`: appended when idle,
+	// queued to the turn boundary when streaming), never `deliverAs: "nextTurn"`.
+	// pi drains its nextTurn queue only on an idle user prompt — the same path
+	// as `before_agent_start` — so a session kept running by continuations and
+	// steers held every compaction's restore and replayed them together: on
+	// f2ead622 one "continue" delivered two goals, two "consolidate" stages and
+	// three recaps from compactions an hour apart, while the conductor was
+	// already `done` and the goal they named had been superseded. Built from
+	// the state at THIS compaction, delivered with it, so it cannot go stale.
 	pi.on("session_compact", () => {
 		if (IS_WORKER) return;
 		if (goal && goal.state === "active") {
@@ -770,7 +879,7 @@ export default function (pi: ExtensionAPI) {
 						content: `Active goal (restored after compaction): ${goal.condition}`,
 						display: false,
 					},
-					{ deliverAs: "nextTurn" },
+					{ triggerTurn: false },
 				);
 			} catch {
 				/* nothing to re-arm into */
@@ -784,7 +893,7 @@ export default function (pi: ExtensionAPI) {
 						content: `Conductor (restored after compaction): this session is in the "${conductor.stage}" stage of the task lifecycle.`,
 						display: false,
 					},
-					{ deliverAs: "nextTurn" },
+					{ triggerTurn: false },
 				);
 			} catch {
 				/* nothing to re-arm into */

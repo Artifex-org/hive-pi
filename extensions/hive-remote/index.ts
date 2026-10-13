@@ -43,6 +43,7 @@ import {
 	FAST_STATE_CHANNEL,
 	OP_MODE_CONTROL_CHANNEL,
 	OP_MODE_STATE_CHANNEL,
+	OPERATOR_INPUT_CHANNEL,
 	PLAN_CONTROL_CHANNEL,
 	PLAN_GRILL_CHANNEL,
 	QUESTION_ANSWER_CHANNEL,
@@ -60,6 +61,8 @@ import {
 	type FastStateEvent,
 	type OpModeControlEvent,
 	type OpModeStateEvent,
+	type OperatorInputEvent,
+	type OperatorInputSource,
 	type PlanGrillEvent,
 	type PlanControlEvent,
 	type QuestionAnswerEvent,
@@ -81,6 +84,7 @@ import { createWaker } from "../hive-common/waker.ts";
 import type { HiveAuth } from "../hive-common/http.ts";
 import { validateToken } from "../hive-common/http.ts";
 import { fetchSessionRecap } from "../agenda/session-recap.ts";
+import { operatorInputDigest } from "../hive-common/operator-input.ts";
 import { attach, buildCatalog, claimCommands, fetchCommandAttachment, getSessionIdentity, putSessionIdentity, pinSessionTitle, postActivity, postDelta, postPlan, postEvents, postPull, postStatus, postToolStart, postToolUpdate, postWorktree, postWorktreePatch, resolveSession, type RemoteCommand } from "./client.ts";
 import { announceRemoteOpeningInput, SESSION_IDENTITY_CHANNEL, SESSION_MANUAL_TITLE_CHANNEL, type SessionIdentityUpdate } from "./sessionIdentityBus.ts";
 import { ARGS_BUDGET, budgeted } from "./budget.ts";
@@ -1380,6 +1384,17 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				if (cmd.source === "operator" && !pi.getSessionName()) {
 					announceRemoteOpeningInput(pi, text);
 				}
+				// A person is steering this session (agenda: attended launch, and a
+				// finished lifecycle reopens for the new instruction). Before the
+				// send, so the event always precedes the user message it announces.
+				const human = humanCommandSource(cmd.source);
+				if (human) {
+					try {
+						pi.events.emit(OPERATOR_INPUT_CHANNEL, { source: human, digest: operatorInputDigest(text) } satisfies OperatorInputEvent);
+					} catch {
+						/* no bus — the steer itself still lands */
+					}
+				}
 				if (imageBlocks.length === 0) {
 					pi.sendUserMessage(text, { deliverAs, expandPromptTemplates: expand });
 				} else {
@@ -2371,6 +2386,12 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 		// handler: resolveAuth / fetch are blocking I/O and must not run inside
 		// pi's serial await. The generation stamp drops a late reply after a
 		// session replacement.
+		//
+		// Delivered into history NOW (`triggerTurn: false`), never `nextTurn`:
+		// pi drains its nextTurn queue only on an idle prompt, so a session kept
+		// running by continuations, wakes and mid-run steers held every
+		// compaction's recap and replayed them together an hour later — three
+		// recaps at once, each describing a state that no longer held.
 		pi.on("session_compact", () => {
 			if (!cfg.enabled) return;
 			const generation = lifecycle.generation;
@@ -2383,7 +2404,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 					try {
 						pi.sendMessage(
 							{ customType: "agenda", content: recap, display: false },
-							{ deliverAs: "nextTurn" },
+							{ triggerTurn: false },
 						);
 					} catch {
 						/* session replaced while the fetch was in flight */
@@ -2894,3 +2915,13 @@ function toolCallIDsOf(msg: AssistantMessage): string[] {
 	});
 }
 
+
+/**
+ * The person-typed command sources, or null. `agent` (steer_agent,
+ * message_teammate) and `hive` (server notices: the tidy-up prompt, idle wakes,
+ * quota failover) are not a person attending the session; an absent source is
+ * a server that predates HIV-1215 and proves nothing either way.
+ */
+export function humanCommandSource(source: string | undefined): OperatorInputSource | null {
+	return source === "operator" || source === "driver" || source === "collaborator" ? source : null;
+}

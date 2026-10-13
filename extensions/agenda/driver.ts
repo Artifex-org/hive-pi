@@ -31,7 +31,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-common/channels.ts";
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { walkChain } from "./chain.ts";
-import { emptyLedger, record, count, type LedgerState } from "./ledger.ts";
+import { clear, emptyLedger, record, count, type LedgerState } from "./ledger.ts";
 import { ADVISE_INJECTION, ADVISE_LEDGER_ID } from "./conductor.ts";
 import { ADVICE_GIVEN_ENTRY, type CheckpointCommits, registerDeliveryProgress } from "./delivery-progress.ts";
 import { recapTranscript } from "./recap.ts";
@@ -72,6 +72,11 @@ export interface DriverHandle {
 	ledger(): LedgerState;
 	/** Wipe per-session state. Called on `session_start` and by `/agenda stop`. */
 	reset(): void;
+	/**
+	 * Zero these items only — a new task gets its own per-stage budget while
+	 * every other policy's spend (the gate's, the advice reminder) stands.
+	 */
+	clearItems(ids: readonly string[]): void;
 	/** Terminal state set by the hand-back guard, surfaced in `/agenda`. */
 	blockedOnUser(): boolean;
 	/**
@@ -445,6 +450,9 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			// Stop/re-enable resets retry budgets, not the session-wide reminder.
 			ledger = ledger.iterations[ADVISE_LEDGER_ID] ? record(emptyLedger, ADVISE_LEDGER_ID) : emptyLedger;
 			blockedOnUser = false;
+		},
+		clearItems: (ids) => {
+			for (const id of ids) ledger = clear(ledger, id);
 		},
 		blockedOnUser: () => blockedOnUser,
 	};

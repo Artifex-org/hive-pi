@@ -152,7 +152,31 @@ export interface SuppressionInput {
 	minPromptChars: number;
 	alreadyBriefed: boolean;
 	env: NodeJS.ProcessEnv;
+	/**
+	 * The session already holds a conversation — it was resumed, forked or
+	 * reloaded, and this prompt is not its opening one. Optional because only
+	 * a caller that can see the session can know; absent means a fresh start.
+	 */
+	priorConversation?: boolean;
 }
+
+/**
+ * A resumed session is never briefed.
+ *
+ * The brief compiles a session's OPENING prompt, and a resumed session's
+ * opening prompt is not where its task lives: the restored conversation is.
+ * Hive resumes with a fixed sentence ("Resume the prior task now. Review the
+ * restored context…") that names no subject, so a retrieval pass can only guess
+ * one from whatever the checkout surfaces — and the brief then states that
+ * guess under "## Goal", ahead of the transcript. Measured on d6ffd0b2
+ * (2026-10-13, a resume of f2ead622's portfolio research): the repo lane found
+ * a COMMITTED, month-old ASF-4053 PROGRESS.md that every ASFAM worktree
+ * carries, the brief named ASF-4053 as the goal, and the agent noticed the
+ * mismatch, followed the brief anyway, committed ASF-4053 work and closed.
+ * Nothing in the working tree was written for a session the brief has not
+ * seen, and the conversation it has not seen is the authority.
+ */
+export const RESUMED_CONVERSATION = "session resumes a prior conversation";
 
 /**
  * Why this prompt should NOT be auto-enriched, or null to proceed.
@@ -164,6 +188,7 @@ export interface SuppressionInput {
 export function suppressionReason(input: SuppressionInput): string | null {
 	if (isWorkerProcess(input.env)) return "running inside a worker";
 	if (input.alreadyBriefed) return ALREADY_BRIEFED;
+	if (input.priorConversation) return RESUMED_CONVERSATION;
 	if (input.prompt.includes(BRIEF_MARKER)) return "prompt is already a compiled brief";
 
 	const { task } = splitTeamProtocol(input.prompt);

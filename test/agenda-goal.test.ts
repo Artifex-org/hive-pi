@@ -429,7 +429,25 @@ describe("/goal command", () => {
 		expect(pi.messages).toHaveLength(before + 1);
 		expect(pi.messages.at(-1)?.content).toContain("tests pass");
 		expect(pi.messages.at(-1)?.display).toBe(false);
-		expect(pi.messages.at(-1)?.options).toEqual({ deliverAs: "nextTurn" });
+		// Into history now, never pi's nextTurn queue: that queue drains only on
+		// an idle user prompt, so a session kept running by continuations held
+		// every compaction's restore and replayed them together, stale (f2ead622).
+		expect(pi.messages.at(-1)?.options).toEqual({ triggerTurn: false });
+	});
+
+	it("restores only the state current at each compaction", async () => {
+		agenda(pi.api);
+		const conductor = (stage: string) => ({
+			customType: "agenda",
+			data: { schemaVersion: 1, kind: "conductor", id: "c1", stage, complexity: "complex", createdAt: 1, updatedAt: 2 },
+		});
+		await pi.emit({ type: "session_start", reason: "resume" }, { branch: [conductor("consolidate")] });
+		await pi.emit({ type: "session_compact" });
+		await pi.emit({ type: "session_start", reason: "resume" }, { branch: [conductor("consolidate"), conductor("done")] });
+		await pi.emit({ type: "session_compact" });
+
+		const restores = pi.messages.filter((m) => String(m.content).startsWith("Conductor (restored after compaction)"));
+		expect(restores.map((m) => m.options)).toEqual([{ triggerTurn: false }]);
 	});
 
 	it("does not re-arm a cleared goal after compaction", async () => {
