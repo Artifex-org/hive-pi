@@ -125,6 +125,21 @@ export const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
 	"hive_get_work_context",
 	"hive_get_board",
 	"hive_my_tickets",
+	// Run, CI-wiring, remediation and resource reads, each checked against its
+	// handler in internal/mcp/ (hive main, 2026-10-13): list_run_artifacts
+	// (reads.go: ListRunArtifacts), get_databases (breadth.go: template-DB
+	// listing, operator-only), get_pipeline_graph (breadth.go: ListPipelines),
+	// list_cases (remediation.go: case listing), list_resources
+	// (agentops_resources.go: session/team resource state; its sibling
+	// request_resource starts processes and stays out) and list_team_projects
+	// (agentops_team_projects.go: scope and grant requests; request_team_project
+	// files a consent request and stays out).
+	"hive_list_run_artifacts",
+	"hive_get_databases",
+	"hive_get_pipeline_graph",
+	"hive_list_cases",
+	"hive_list_resources",
+	"hive_list_team_projects",
 	// Coordination snapshots: occupancy.go, communications_tools.go.
 	"hive_get_occupancy",
 	"hive_list_communications",
@@ -221,17 +236,26 @@ function isExactMcpName(name: string, names: ReadonlySet<string>): boolean {
 
 const isReviewedMcpRead = (name: string) => isExactMcpName(name, READ_ONLY_MCP_TOOLS);
 
-function directMcpVerdict(name: string): PlanToolVerdict {
+/** Which harness is asking: it decides what the gateway tool is called. */
+export type PolicyHost = "pi" | "claude-code";
+
+function gatewayCall(canonical: string, host: PolicyHost): string {
+	// Claude Code has no `mcp` tool; the adapter's MCP server exposes it as
+	// `mcp__hive-pi__mcp`.
+	return host === "claude-code" ? `mcp__hive-pi__mcp {tool: "${canonical}"}` : `mcp({tool: "${canonical}"})`;
+}
+
+function directMcpVerdict(name: string, host: PolicyHost = "pi"): PlanToolVerdict {
 	const canonical = canonicalMcpToolName(name);
 	return {
 		allowed: false,
-		reason: `Direct MCP call \`${name}\` has no trusted raw server/tool identity. Use the bound gateway \`mcp({tool: "${canonical}"})\` instead.`,
+		reason: `Direct MCP call \`${name}\` has no trusted raw server/tool identity. Use the bound gateway \`${gatewayCall(canonical, host)}\` instead.`,
 	};
 }
 
-export function classifyTool(name: string, input?: unknown): PlanToolVerdict {
+export function classifyTool(name: string, input?: unknown, host: PolicyHost = "pi"): PlanToolVerdict {
 	if (name === "mcp") return classifyMcpRequest(input, "Plan", isReviewedMcpRead);
-	if (isReviewedMcpRead(name)) return directMcpVerdict(name);
+	if (isReviewedMcpRead(name)) return directMcpVerdict(name, host);
 	if (MUTATING_BUILTINS.has(name)) {
 		return { allowed: false, reason: `\`${name}\` writes to disk. Plan mode is read-only.` };
 	}
@@ -305,11 +329,11 @@ function isDiscussionMcpRead(name: string): boolean {
 }
 
 /** Discussion adds fixed cards, supervision waits and profile grants, all via the gateway. */
-export function classifyDiscussionTool(name: string, input: unknown): PlanToolVerdict {
+export function classifyDiscussionTool(name: string, input: unknown, host: PolicyHost = "pi"): PlanToolVerdict {
 	if (name === "mcp") return classifyMcpRequest(input, "Discussion", isDiscussionMcpRead, true);
-	const base = classifyTool(name, input);
+	const base = classifyTool(name, input, host);
 	if (base.allowed || name === "render_chart") return { allowed: true };
-	return isDiscussionMcpRead(name) || isProfileGrant(name) ? directMcpVerdict(name) : base;
+	return isDiscussionMcpRead(name) || isProfileGrant(name) ? directMcpVerdict(name, host) : base;
 }
 
 /** Direct tools whose whole contract is coordination or verification. */
@@ -317,6 +341,10 @@ const ORCHESTRATE_TOOLS = new Set([
 	"TaskCreate",
 	"TaskUpdate",
 	"goal_set",
+	// Stops a job this session started (background_bash, subagent); it cannot
+	// reach another session's work. Without it a lead that must never
+	// implement also cannot end the runaway job it was told to supervise.
+	"background_cancel",
 	"hive_watch_run",
 	"knowledge_collections",
 	"knowledge_get",
@@ -521,7 +549,7 @@ const ORCHESTRATE_MCP_TOOLS = new Set([
  * generic MCP script, generic run trigger and child-agent tools are absent on
  * purpose: each can perform implementation outside the reviewed team topology.
  */
-export function classifyOrchestrateTool(name: string, input: unknown): PlanToolVerdict {
+export function classifyOrchestrateTool(name: string, input: unknown, host: PolicyHost = "pi"): PlanToolVerdict {
 	const canonical = canonicalMcpToolName(name);
 	if (["background_bash", "mcpScript", "orchestrate", "orchestrate_result", "subagent", "worker_send"].includes(name)) {
 		return {
@@ -531,12 +559,12 @@ export function classifyOrchestrateTool(name: string, input: unknown): PlanToolV
 	}
 	// Preserve coordination operations via the bound gateway, never direct
 	// names whose registrations may capture a different raw dispatch target.
-	if (isExactMcpName(name, ORCHESTRATE_MCP_TOOLS)) return directMcpVerdict(name);
+	if (isExactMcpName(name, ORCHESTRATE_MCP_TOOLS)) return directMcpVerdict(name, host);
 	if (name === "mcp") {
 		return classifyMcpRequest(input, "Orchestrate", (tool) => isExactMcpName(tool, ORCHESTRATE_MCP_TOOLS) || isDiscussionMcpRead(tool), true);
 	}
 
-	const base = classifyDiscussionTool(name, input);
+	const base = classifyDiscussionTool(name, input, host);
 	if (base.allowed || ORCHESTRATE_TOOLS.has(name)) return { allowed: true };
 	if (isDiscussionMcpRead(name) || isProfileGrant(name)) return base;
 	if (ORCHESTRATE_MCP_ALIASES[canonical]) return { allowed: false, reason: orchestrateMcpRefusal(canonical) };
@@ -826,8 +854,8 @@ export function classifyCommand(command: string, posture = "Plan"): PlanToolVerd
  * The plan extension's `tool_call` hook and the Claude adapter's PreToolUse
  * hook both answer from this, so the composition exists once.
  */
-export function planToolVerdict(name: string, input: unknown): PlanToolVerdict {
-	const verdict = classifyTool(name, input);
+export function planToolVerdict(name: string, input: unknown, host: PolicyHost = "pi"): PlanToolVerdict {
+	const verdict = classifyTool(name, input, host);
 	if (!verdict.allowed || name !== "bash") return verdict;
 	const command = (input as { command?: unknown } | undefined)?.command;
 	return classifyCommand(typeof command === "string" ? command : "");

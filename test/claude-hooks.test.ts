@@ -182,6 +182,13 @@ describe("hook pre-tool", () => {
 		expect(preToolDecision({ tool_name: "mcp__hive-pi__mcp", tool_input: { tool: "hive_get_run" } }, control("discuss"))).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: { tool: "hive_get_run", server: "hive" } } });
 	});
 
+	it("tells Claude Code to call mcp__hive-pi__mcp, not pi's mcp(), when a direct hive read is refused", () => {
+		for (const mode of ["plan", "discuss", "orchestrate"] as const) {
+			const out = preToolDecision({ tool_name: "mcp__hive__get_ticket", tool_input: {} }, control(mode)) as { hookSpecificOutput: { permissionDecisionReason: string } };
+			expect(out.hookSpecificOutput.permissionDecisionReason, mode).toContain('mcp__hive-pi__mcp {tool: "hive_get_ticket"}');
+		}
+	});
+
 	it("classifies every tool in the read-only postures: MCP by pi's classifiers, Claude read-only built-ins by name, unknowns denied", () => {
 		const deny = (name: string, mode: Control["opMode"], input: Record<string, unknown> = {}) =>
 			(preToolDecision({ tool_name: name, tool_input: input }, control(mode)) as { hookSpecificOutput?: { permissionDecision?: string } } | null)?.hookSpecificOutput?.permissionDecision === "deny";

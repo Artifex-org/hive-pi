@@ -105,8 +105,8 @@ type ReadOnlyMode = "plan" | "discuss" | "orchestrate";
 
 /** pi's verdict for one tool, by pi's name, in a read-only posture. */
 function readOnlyVerdict(mode: ReadOnlyMode, piName: string, input: Record<string, unknown>) {
-	if (mode === "plan") return planToolVerdict(piName, input);
-	const tool = opModeToolVerdict(mode, piName, input, false);
+	if (mode === "plan") return planToolVerdict(piName, input, "claude-code");
+	const tool = opModeToolVerdict(mode, piName, input, false, undefined, "claude-code");
 	if (!tool.allowed || piName !== "bash") return tool;
 	const command = typeof input.command === "string" ? input.command : "";
 	return opModeShellVerdict(mode, command);

@@ -17,6 +17,7 @@ import {
 	classifyOrchestrateCommand,
 	classifyOrchestrateTool,
 	type PlanToolVerdict,
+	type PolicyHost,
 } from "../plan/policy.ts";
 import { phaseOrder, PI_BUGFIX_TOOLS, type BugfixToolNames } from "./bugfix.ts";
 import { BUGFIX_WITHHELD_TOOLS, type OpMode } from "./modes.ts";
@@ -34,10 +35,11 @@ export function opModeToolVerdict(
 	input: unknown,
 	rootCauseRecorded: boolean,
 	names: BugfixToolNames = PI_BUGFIX_TOOLS,
+	host: PolicyHost = "pi",
 ): PlanToolVerdict {
 	switch (mode) {
 		case "discuss":
-			return classifyDiscussionTool(name, input);
+			return classifyDiscussionTool(name, input, host);
 		case "bugfix":
 			if (rootCauseRecorded || !BUGFIX_WITHHELD_TOOLS.has(name)) return { allowed: true };
 			// This is the FIRST thing an agent in bugfix mode reads, and it used
@@ -53,7 +55,7 @@ export function opModeToolVerdict(
 					`${phaseOrder(names)}. Once "confirm" is recorded, ${names.rootCause} accepts the mechanism and unlocks edits.`,
 			};
 		case "orchestrate":
-			return classifyOrchestrateTool(name, input);
+			return classifyOrchestrateTool(name, input, host);
 		case "build":
 		case "plan":
 			return { allowed: true };
