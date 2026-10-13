@@ -433,6 +433,8 @@ describe("consolidate stage", () => {
 		expect(CONSOLIDATE_INJECTION).toContain("memory/<domain>/<slug>.md");
 		expect(CONSOLIDATE_INJECTION).toContain("session");
 		expect(CONSOLIDATE_INJECTION).toContain("zero writes is a fine outcome");
+		expect(CONSOLIDATE_INJECTION).toContain("check_similar: true");
+		expect(CONSOLIDATE_INJECTION).toContain("<untrusted_memories>");
 	});
 
 	it("a consolidate-stage item round-trips validate/rehydrate", () => {
