@@ -161,6 +161,15 @@ describe("suppressionReason", () => {
 		);
 	});
 
+	// d6ffd0b2 (2026-10-13): a resume's fixed prompt is task-like ("Review…"),
+	// so only knowing the session already holds a conversation stops the brief
+	// guessing the task from a stale checkpoint file in the tree.
+	it("refuses a resumed conversation, whatever its prompt", () => {
+		const prompt = "Resume the prior task now. Review the restored context, continue the unfinished work, and report progress.";
+		expect(suppressionReason({ ...base, prompt })).toBeNull();
+		expect(suppressionReason({ ...base, prompt, priorConversation: true })).toBe("session resumes a prior conversation");
+	});
+
 	it("refuses a prompt that is protocol and nothing else", () => {
 		expect(suppressionReason({ ...base, prompt: TEAM_PROTOCOL })).toBe("prompt is protocol only");
 	});

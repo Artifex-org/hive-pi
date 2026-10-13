@@ -147,7 +147,9 @@ describe("Hive-launched plan startup", () => {
 		expect((await execute("plan_ready", {})).content[0].text).toBe("The plan is empty. Build it with plan_write before presenting it.");
 
 		const branch = [{ message: { role: "user", content: TASK } }, { message: { role: "assistant", content: "I will inspect the heading." } }];
-		const result = await fake.emit({ type: "before_agent_start", prompt: TASK, systemPrompt: "base" }, { branch });
+		// pi emits before_agent_start BEFORE it appends the opening prompt, so the
+		// first turn's branch is empty; the conversation below exists only after.
+		const result = await fake.emit({ type: "before_agent_start", prompt: TASK, systemPrompt: "base" }, { branch: [] });
 		expect(runBriefer).toHaveBeenCalled();
 		expect(result.some(r => (r as { message?: { customType?: string } } | undefined)?.message?.customType === "brief")).toBe(true);
 		await fake.emit({ type: "agent_before_settle" }, { branch });

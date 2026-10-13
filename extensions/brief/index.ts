@@ -132,6 +132,7 @@ export default function (pi: ExtensionAPI) {
 			minPromptChars: cfg.minPromptChars,
 			alreadyBriefed: briefed,
 			env: process.env,
+			priorConversation: holdsConversation(ctx),
 		});
 		if (skip) {
 			// `suppressionReason` returns a STRING rather than a boolean precisely so
@@ -269,6 +270,21 @@ export default function (pi: ExtensionAPI) {
 			progress(pi, "end");
 		}
 	});
+}
+
+/**
+ * Does the session already carry a conversation? `before_agent_start` fires
+ * before the current prompt is appended, so any user or assistant message on
+ * the branch is from an earlier run — a resume, fork or reload. An unreadable
+ * branch (stale ctx) answers false: the brief then behaves as it always has.
+ */
+function holdsConversation(ctx: ExtensionContext): boolean {
+	try {
+		const branch = ctx.sessionManager.getBranch() as readonly { message?: { role?: string } }[];
+		return branch.some((entry) => entry?.message?.role === "user" || entry?.message?.role === "assistant");
+	} catch {
+		return false;
+	}
 }
 
 /** Compile and hand the result back through the editor. */
