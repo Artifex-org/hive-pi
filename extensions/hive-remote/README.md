@@ -155,7 +155,7 @@ Request and verdict-poll failures report their HTTP status and server explanatio
 along with the exact `client_call_id` (including nested codemode suffixes). They
 are not one-shot delivery failures and do not imply that a value was consumed.
 Delivery failures name the stage that failed (`grant-expired`, `catalog-fetch`,
-`catalog-match`, `env-mapping`, `session-changed`, `value-fetch` with its HTTP
+`catalog-match`, `env-mapping`, `env-collision`, `session-changed`, `value-fetch` with its HTTP
 status, `value-shape`, `value-scope`, `value-mapping`, `install`), the catalog
 names involved, whether the one-shot value was consumed, and whether a fresh
 request can help. A `value-fetch` 502 means the server consumed the grant but

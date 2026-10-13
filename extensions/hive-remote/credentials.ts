@@ -20,7 +20,7 @@ type CredentialDecision = Decision<CredentialReceipt>;
  * request help? The server consumes the value only once `value-fetch` is reached.
  */
 type DeliveryStage =
-	| "grant-names" | "grant-shape" | "grant-expired" | "catalog-fetch" | "catalog-match" | "env-mapping"
+	| "grant-names" | "grant-shape" | "grant-expired" | "catalog-fetch" | "catalog-match" | "env-mapping" | "env-collision"
 	| "session-changed" | "value-fetch" | "value-shape" | "value-scope" | "value-mapping" | "install";
 interface ReceiverDeps {
 	enabled: boolean;
@@ -175,7 +175,7 @@ export class CredentialReceiver {
 		const mapped = entries.map(matches => matches[0]);
 		const refused = mapped.filter(entry => !validCredentialSet([{ ...entry, value: "validation-only" }])).map(entry => entry.name);
 		if (refused.length || !validCredentialSet(mapped.map(entry => ({ ...entry, value: "validation-only" })))) {
-			return failed("env-mapping", { names: refused.length ? refused : granted });
+			return failed(refused.length ? "env-mapping" : "env-collision", { names: refused.length ? refused : granted });
 		}
 		if (!this.current(binding)) return failed("session-changed");
 		const res = await request<{ env?: Record<string, unknown>; resolved?: unknown[] }>(auth, "GET", `/agent-sessions/${encodeURIComponent(binding.hiveSessionID)}/credential-grants/${encodeURIComponent(row.id)}/value`);
@@ -186,7 +186,10 @@ export class CredentialReceiver {
 		const resolved = res.body.resolved;
 		if (!resolved.length || new Set(resolved).size !== resolved.length) return failed("value-shape");
 		const outside = resolved.map(String).filter(name => !granted.includes(name));
-		if (outside.length) return failed("value-scope", { names: outside.filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) });
+		if (outside.length) {
+			const printable = outside.filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name));
+			return failed("value-scope", { names: printable.length === outside.length ? printable : [...printable, `${outside.length - printable.length} unprintable`] });
+		}
 		const items: ReceivedCredential[] = [];
 		for (const name of resolved) {
 			const entry = mapped.find(entry => entry.name === name);
@@ -243,6 +246,7 @@ function describeDeliveryFailure(delivery: { stage: string; status?: number | nu
 		case "catalog-fetch": return `${head} The session catalog could not be read, so the value was not fetched and the grant is still deliverable; the receiver retries on its next poll. Check receiver notices before requesting again.`;
 		case "catalog-match": return `${head} The granted name${names} is missing from, or ambiguous in, this session's catalog; the value was not fetched. Ask the operator to check the catalog entry.`;
 		case "env-mapping": return `${head} The catalog maps${names} to an environment variable this receiver refuses (reserved or invalid name); the value was not fetched. Ask the operator to change the catalog env_var; do not request again until then.`;
+		case "env-collision": return `${head} Two or more granted catalog entries${names} map to the same environment variable; the value was not fetched. Ask the operator to give each catalog entry its own env_var; do not request again until then.`;
 		case "session-changed": return `${head} The session was replaced or detached during delivery; nothing reached this session. ${FRESH}`;
 		case "value-fetch": return `${head} ${valueFetchFailure(delivery.status, names)}`;
 		case "value-shape": return `${head} The server consumed the grant but its value response was malformed; nothing was kept. Report it as a Hive client/server mismatch; a fresh request is likely to fail the same way.`;
@@ -255,7 +259,7 @@ function describeDeliveryFailure(delivery: { stage: string; status?: number | nu
 
 function valueFetchFailure(status: number | null | undefined, names: string): string {
 	switch (status) {
-		case 502: return `The server consumed the grant but resolved none of the granted credentials${names} from its secret store: the catalog reference is unreadable with the owner's stored secret-store access, or wrong. A fresh request consumes another grant and fails the same way. Ask the operator to fix the catalog reference or that access (server log: "credbroker: bundle entry skipped").`;
+		case 502: return `Hive answers 502 here when it consumed the grant but resolved none of the granted credentials${names} from its secret store: the catalog reference is unreadable with the owner's stored secret-store access, or wrong. A fresh request then consumes another grant and fails the same way. Ask the operator to check the hive-server log for "credbroker: bundle entry skipped" and fix the catalog reference or that access. (A 502 from a proxy while hive-server was unreachable is the other cause; the grant is then unconsumed.)`;
 		case 410: return `The server reports the one-shot grant already fetched, denied or expired. If another receiver fetched it, check receiver notices; otherwise request again with a fresh call ID.`;
 		case 404: return `The server has no such grant for this session; nothing was consumed. ${FRESH}`;
 		case 401: case 403: return "The server refused this receiver's Hive token for the owner-only value fetch; nothing was consumed. Check /hive-remote-status; the session's token must belong to the session owner.";

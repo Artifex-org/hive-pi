@@ -245,21 +245,23 @@ describe("Hive remote credential receiver", () => {
 		{ name: "a grant missing from the catalog", catalog: response(200, { entries: [] }), stage: "catalog-match", text: "missing from, or ambiguous in", valueFetched: false },
 		{ name: "a reserved environment mapping", catalog: response(200, { entries: [{ name: "fixture", env_var: "PATH" }] }), stage: "env-mapping", text: "change the catalog env_var", valueFetched: false },
 		{ name: "a malformed value body", value: { resolved: ["fixture"] }, stage: "value-shape", text: "malformed", valueFetched: true },
+		{ name: "colliding environment mappings", request: ["fixture", "fixture-url"], catalog: response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }, { name: "fixture-url", env_var: "FIXTURE_CREDENTIAL" }] }), stage: "env-collision", text: "map to the same environment variable", valueFetched: false },
+		{ name: "unprintable names outside the grant", value: { env: { FIXTURE_CREDENTIAL: "v" }, resolved: ["bad name!"] }, stage: "value-scope", text: "outside this grant (1 unprintable)", valueFetched: true },
 		{ name: "values outside the grant", value: { env: { FIXTURE_CREDENTIAL: "v" }, resolved: ["other"] }, stage: "value-scope", text: "outside this grant (other)", valueFetched: true },
 		{ name: "values that miss the mapping", value: { env: { WRONG: "v" }, resolved: ["fixture"] }, stage: "value-mapping", text: "do not match the catalog mapping (fixture)", valueFetched: true },
 		{ name: "a value the session refuses", value: { env: { FIXTURE_CREDENTIAL: "bad\u0000value" }, resolved: ["fixture"] }, stage: "install", text: "refused to install them (fixture)", valueFetched: true },
-	])("names the failing stage for $name", async ({ row, catalog, value, stage, text, valueFetched }) => {
+	])("names the failing stage for $name", async ({ row, catalog, value, stage, text, valueFetched, request = ["fixture"] }) => {
 		let valueCalls = 0;
 		vi.stubGlobal("fetch", async (input: unknown) => {
 			const url = String(input);
-			if (url.endsWith("/credential-requests")) return response(200, { id: "staged", verdict: "approve", credentials: ["fixture"], expires_at: future(), ...row });
+			if (url.endsWith("/credential-requests")) return response(200, { id: "staged", verdict: "approve", credentials: request, expires_at: future(), ...row });
 			if (url.endsWith("/credential-catalog")) return catalog?.clone() ?? response(200, { entries: [{ name: "fixture", env_var: "FIXTURE_CREDENTIAL" }] });
 			if (url.endsWith("/value")) { valueCalls++; return response(200, value ?? {}); }
 			return response(404);
 		});
 		const receiver = new CredentialReceiver({ enabled: true, localSessionID: () => "staged-local", isCurrent: () => true, consumersReady: () => true });
 		receiver.bind(auth, "hive", 1);
-		const result = await receiver.request("call", ["fixture"], "test");
+		const result = await receiver.request("call", request, "test");
 		expect(result).toContain(`Credential delivery failed at stage ${stage}`);
 		expect(result).toContain(text); expect(result).toContain("nothing installed");
 		expect(valueCalls).toBe(valueFetched ? 1 : 0);
