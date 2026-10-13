@@ -34,7 +34,12 @@ export const CONSOLIDATE_INJECTION = [
 	"from the repo). For each: first search existing memories (knowledge_search, a few terms from",
 	"the fact), then knowledge_write to the `knowledge-base` collection — APPEND a dated observation",
 	"to the matching memory/<domain>/<slug>.md if one exists, otherwise CREATE it (one fact per",
-	"file, domain = repo or topic, e.g. memory/aurora/celery-retry-backoff.md). Always pass your",
+	"file, domain = repo or topic, e.g. memory/aurora/celery-retry-backoff.md). On a CREATE pass",
+	"`check_similar: true`: if close memories already exist nothing is written and `similar_memories`",
+	"lists them — append to the one that states your fact, and retry without the flag only if yours is",
+	"genuinely new. Do not re-extract the memories your session-start brief listed (its",
+	"<untrusted_memories> block) as new learnings: if you confirmed or corrected one, append that",
+	"evidence to its path. Always pass your",
 	"session id as `session` so the observation counts toward the memory's strength.",
 	"If nothing durable was learned, say so and finish — zero writes is a fine outcome.",
 ].join(" ");
