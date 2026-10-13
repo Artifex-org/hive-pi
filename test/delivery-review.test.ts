@@ -418,7 +418,7 @@ describe("delivery review", () => {
 			const text = await reason(pi, "git push", cwd);
 			expect(text).toContain(`A review exists for diff ${reviewFingerprint(before).slice(0, 8)}`);
 			expect(text).toContain(`is now ${reviewFingerprint(captureDeliveryDiff(cwd)!).slice(0, 8)}`);
-			expect(text).toContain(`HEAD ${reviewedHead} then`); expect(text).toContain("went stale after commit");
+			expect(text).toContain(`HEAD ${reviewedHead} then`); expect(text).toContain("HEAD moved from");
 		});
 		it("names the untracked file that makes the diff unstampable", async () => {
 			const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); writeFileSync(join(cwd, "new-file.ts"), "x\n");

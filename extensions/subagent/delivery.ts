@@ -273,7 +273,7 @@ function blockCause(diff: ReviewDiff | null, target: string, lastReview: Map<str
 	const last = lastReview.get(diff.repo);
 	const head = headCommit(diff.repo);
 	const lines: string[] = [];
-	if (last) lines.push(`A review exists for diff ${short(last.fingerprint)}${last.head ? ` (HEAD ${last.head} then)` : ""} but the diff is now ${short(reviewFingerprint(diff))}${head ? ` (HEAD ${head} now)` : ""}: it went stale after ${last.head && head && last.head !== head ? `commit ${head}` : "a later edit or amend"}.`);
+	if (last) lines.push(`A review exists for diff ${short(last.fingerprint)}${last.head ? ` (HEAD ${last.head} then)` : ""} but the diff is now ${short(reviewFingerprint(diff))}${head ? ` (HEAD ${head} now)` : ""}: it went stale: ${last.head && head && last.head !== head ? `HEAD moved from ${last.head} to ${head} since the review` : "a later edit or amend"}.`);
 	if (backgroundReview.has(target) || backgroundReview.has(diff.repo)) lines.push("A code-reviewer ran in the background for this repo; only a foreground review counts.");
 	if (lines.length === 0) lines.push("No code review has run for this diff fingerprint " + short(reviewFingerprint(diff)) + ".");
 	return `Delivery diff has no matching completed foreground review. ${lines.join(" ")} `;
