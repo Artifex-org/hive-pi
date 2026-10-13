@@ -92,6 +92,35 @@ export function activeWorkRecap(goal: string | null, jobs: readonly string[], as
 	].filter(Boolean).join("; "));
 }
 
+/**
+ * The status line when a person gives a finished session a new instruction.
+ *
+ * Written at once, not at the next settle: a long run may not settle for an
+ * hour, and until something replaces it the server keeps showing the previous
+ * task's last recap — on f2ead622 that was a resolved "blocked on hive-attest"
+ * line, restored after every later compaction as if it were current.
+ */
+export function instructionRecap(instruction: string): string {
+	const text = redactEvidence(instruction).replace(/\s+/g, " ").trim().slice(0, 120);
+	return sanitizeRecap(text ? `New instruction: ${text}` : "Working on a new instruction");
+}
+
+/**
+ * The status line for a completed settle whose summarizer produced nothing
+ * (timed out, failed, or answered empty).
+ *
+ * An empty recap is PRESERVED downstream — that is right for a skipped call,
+ * where the previous line still describes the same transcript, and wrong at
+ * completion, where the previous line describes some earlier state (f2ead622:
+ * both completion recaps timed out at the 60s cap and the server went on
+ * showing a blocker that later passing gates had resolved). Completion is a
+ * mechanical fact the session already holds, so state that instead.
+ */
+export function completedRecap(goal: string | null): string {
+	const text = goal ? redactEvidence(goal).replace(/\s+/g, " ").trim().slice(0, 120) : "";
+	return sanitizeRecap(text ? `Completed: ${text}` : "Completed the task");
+}
+
 /** One line, bounded — whatever shape the model actually returned. */
 export function sanitizeRecap(text: string): string {
 	const line = text.trim().split("\n")[0]?.trim() ?? "";

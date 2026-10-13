@@ -118,7 +118,7 @@ function toolCallCount(content: unknown): number {
 }
 
 /** Plain text of a message's content, whatever shape it uses. */
-function contentText(content: unknown): string {
+export function contentText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
 	return content

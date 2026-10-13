@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import agenda from "../extensions/agenda/index.ts";
 import { announceOwnWork } from "../extensions/hive-common/own-work.ts";
-import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL } from "../extensions/hive-common/channels.ts";
+import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL, OPERATOR_INPUT_CHANNEL } from "../extensions/hive-common/channels.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
 import { CredentialReceiver } from "../extensions/hive-remote/credentials.ts";
@@ -845,7 +845,8 @@ describe("attach", () => {
 		const recapMsg = fake.messages.find((m) => String(m.content).includes("Session recap (restored after compaction)"));
 		expect(seen).toEqual([SESSION_ID]);
 		expect(recapMsg?.display).toBe(false);
-		expect(recapMsg?.options).toEqual({ deliverAs: "nextTurn" });
+		// Into history now: a nextTurn recap waits for an idle prompt and piles up (f2ead622).
+		expect(recapMsg?.options).toEqual({ triggerTurn: false });
 		expect(String(recapMsg?.content)).toContain("feature/x");
 	});
 
@@ -1108,6 +1109,30 @@ describe("attach", () => {
 		await fake.emit({ type: "turn_start" }, { idle: false });
 		await vi.advanceTimersByTimeAsync(2200);
 		expect(fake.userMessages.map((m) => m.content)).toEqual(["continue"]);
+	});
+
+	// The agenda keeps an operator-steered launch open and reopens a finished
+	// lifecycle on this event, so it must name people only — Hive's own tidy-up
+	// notice and another agent's steer_agent are not someone attending.
+	it("announces person-sent steers, before delivering them, and nothing else", async () => {
+		fakeHive({ commands: [
+			{ id: "op", kind: "steer", payload: "continue", source: "operator" },
+			{ id: "hive", kind: "follow_up", payload: "Hive: tidy up", source: "hive" },
+			{ id: "agent", kind: "steer", payload: "from a teammate", source: "agent" },
+			{ id: "share", kind: "follow_up", payload: "from a colleague", source: "driver" },
+			{ id: "legacy", kind: "steer", payload: "no source stamped" },
+		] });
+		const deliveredAtAnnouncement: number[] = [];
+		fake.api.events.on(OPERATOR_INPUT_CHANNEL, () => { deliveredAtAnnouncement.push(fake.userMessages.length); });
+		hiveRemote(fake.api, deps());
+		await attachAndSettle(fake);
+		await vi.advanceTimersByTimeAsync(2_200);
+
+		expect(fake.userMessages).toHaveLength(5);
+		expect(fake.busEvents.filter((e) => e.name === OPERATOR_INPUT_CHANNEL).map((e) => e.payload))
+			.toEqual([{ source: "operator" }, { source: "driver" }]);
+		// "continue" was message 1 and "from a colleague" message 4: each announced first.
+		expect(deliveredAtAnnouncement).toEqual([0, 3]);
 	});
 
 	it("echoes attachment-only incoming steer IDs into the transcript", async () => {

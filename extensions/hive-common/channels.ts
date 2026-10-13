@@ -232,6 +232,31 @@ export interface ConductorStageEvent {
 }
 
 /**
+ * A PERSON just sent this session a message through Hive.
+ *
+ * hive-remote is the only extension that can tell: every remote steer arrives
+ * through `sendUserMessage`, so on pi's own `input` event the launch prompt,
+ * Hive's server notices ("you reported this session complete…"), another
+ * agent's `steer_agent` and the operator typing in the browser all look the
+ * same. The server stamps each command's source (HIV-1215); this channel
+ * carries that fact, for the human sources only, to the agenda — which uses it
+ * to keep an operator-steered launch open at completion and to reopen a
+ * finished lifecycle for the new instruction.
+ *
+ * Emitted BEFORE the message is handed to pi, so a subscriber watching for
+ * the user message itself (`message_end`) always sees the event first. The
+ * source enum only: the message text never crosses the bus.
+ */
+export const OPERATOR_INPUT_CHANNEL = "hive.operator.input";
+
+/** The human command sources hive-server stamps (store.CommandSource*). */
+export type OperatorInputSource = "operator" | "driver" | "collaborator";
+
+export interface OperatorInputEvent {
+	source: OperatorInputSource;
+}
+
+/**
  * Announces WHY this session is ending, when pi's own shutdown event cannot say.
  *
  * `SessionShutdownEvent.reason` is a closed set — "quit" | "reload" | "new" |
