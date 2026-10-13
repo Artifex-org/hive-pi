@@ -147,11 +147,11 @@ describe("subagent worker invocation", () => {
 		expect(source, "a worker provider module must not add tools").not.toMatch(/\bregisterTool\(/);
 	});
 
-	it("loads the loadout module, whose only hook appends the on-demand tool index", () => {
+	it("loads the loadout module, whose hooks append the on-demand tool index and reject a codemode script that calls a nonexistent discovery member", () => {
 		const loadout = workerExtensionPaths().find((path) => path.endsWith("/extensions/loadout/index.ts"));
 		expect(loadout, "worker must load the loadout module").toBeDefined();
 		const source = readFileSync(loadout as string, "utf8");
-		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map((m) => m[1])).toEqual(["before_agent_start"]);
+		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map((m) => m[1])).toEqual(["tool_call", "before_agent_start"]);
 	});
 
 	it("only reviewed protocol extensions register worker event hooks", () => {

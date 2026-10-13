@@ -43,6 +43,36 @@ export function deferredToolNames(tools: readonly ToolLike[]): string[] {
 		.sort();
 }
 
+/**
+ * `tool_search` ranks with BM25, so an exact name can come back behind an
+ * unrelated tool, and `limit: 1` then loads the wrong one. A known name goes
+ * straight to `load_tools`, which takes names and cannot pick a neighbour.
+ */
+export const EXACT_NAME_LOADING =
+	"For a deferred MCP tool whose exact name (`mcp__<server>__<tool>`) you know, pass it to `load_tools`; use " +
+	"`tool_search` only to discover names, and never with `limit: 1` (the top hit is often a different tool). " +
+	"A tool exposed to codemode needs no loading: call it as `tools.mcp__<server>__<tool>(...)` inside a script.";
+
+/**
+ * A codemode script that calls `tools.tool_search` / `tools.describeTool` fails
+ * only after its earlier calls have run. Neither is a member of `tools`; the
+ * prelude exposes `searchTools` / `describeTool` as globals. Returns the
+ * rejection reason, or null when the script does not use them.
+ */
+export function codemodeDiscoveryMisuse(code: string): string | null {
+	const used = new Set<string>();
+	for (const m of code.matchAll(/\btools\s*(?:\.\s*|\[\s*["'`])(tool_search|describeTool)["'`]?\s*\]?\s*\(/g)) used.add(m[1]!);
+	if (used.size === 0) return null;
+	const names = [...used].map((n) => `tools.${n}`).join(" and ");
+	return (
+		`Not run: ${names} does not exist inside codemode, and calls made before it would fail have already run. ` +
+		"Use the globals instead: `await searchTools(\"<words>\")` and `await describeTool(\"<exact name>\")` " +
+		"(both async; `tool_search` is model-only). " +
+		"If the text is only a string or comment (for example a search pattern), run it with the bash or edit tool directly. " +
+		EXACT_NAME_LOADING
+	);
+}
+
 export function loadoutPrompt(names: readonly string[]): string {
 	if (names.length === 0) return "";
 	return [
@@ -52,8 +82,9 @@ export function loadoutPrompt(names: readonly string[]): string {
 			`(e.g. \`{"names": ["browser_navigate", "browser_snapshot"]}\`); they are callable from your next turn. ` +
 			"For MCP discovery outside scripts, use `tool_search` when declared. " +
 			"Inside `codemode`, use `await searchTools(\"<words>\")` and `await describeTool(\"<exact name>\")`; " +
-			"never `tools.tool_search` (it is model-only). Deferred harness tools are already callable as " +
-			"`tools.<name>(args)` inside scripts; they do not need `load_tools` first.",
+			"never `tools.tool_search` or `tools.describeTool` (they do not exist; a script that uses them is rejected). " +
+			"Deferred harness tools are already callable as `tools.<name>(args)` inside scripts; they do not need " +
+			"`load_tools` first. " + EXACT_NAME_LOADING,
 		"",
 		names.join(", "),
 	].join("\n");
@@ -80,6 +111,8 @@ export const CODEMODE_SCRIPT_GUIDANCE = [
 	"- Do not guess paths: list the directory first (`tools.ls`, `tools.find`) or use a path a tool printed. " +
 		"A failed `tools.read` names what IS in the nearest existing directory — use that instead of guessing again.",
 	"- `tools.edit` replaces text that must match exactly once: read the file first and include enough surrounding lines to be unique.",
+	"- `store()` writes are discarded when the script throws, although the tool calls it made have already run: " +
+		"catch or `allSettled` fallible calls (`bash` rejects on a nonzero exit) before `store()`.",
 	"- Calls made before a script fails have already run. Use `Promise.allSettled` for independent calls and inspect effects before retrying.",
 ].join("\n");
 
@@ -112,7 +145,7 @@ export function planLoad(
  */
 export function mcpHint(pi: Pick<ExtensionAPI, "getAllTools">): string {
 	return pi.getAllTools().some((tool) => tool.name === "tool_search")
-		? "MCP tools load with tool_search outside codemode; inside scripts use await searchTools(query)."
+		? `MCP tools load with tool_search outside codemode; inside scripts use await searchTools(query). ${EXACT_NAME_LOADING}`
 		: "this session has no MCP servers configured (no ~/.pi/agent/mcp.json), so there are no MCP tools to load.";
 }
 
@@ -142,6 +175,13 @@ export default function loadout(pi: ExtensionAPI) {
 				isError: load.length === 0 && already.length === 0,
 			};
 		},
+	});
+
+	pi.on("tool_call", (event) => {
+		if (event.toolName !== "codemode") return;
+		const code = (event.input as { code?: unknown } | undefined)?.code;
+		const reason = typeof code === "string" ? codemodeDiscoveryMisuse(code) : null;
+		return reason ? { block: true, reason } : undefined;
 	});
 
 	pi.on("before_agent_start", (event) => {
