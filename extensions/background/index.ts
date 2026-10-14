@@ -58,7 +58,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
-import { killTree as signalChildTree, trackTree } from "../hive-common/child-tree.ts";
+import { killTree as signalChildTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
 import { announceOwnWork } from "../hive-common/own-work.ts";
 import { createdPullURL } from "../hive-common/pull-delivery.ts";
@@ -551,6 +551,7 @@ export default function background(pi: ExtensionAPI) {
 		let localSessionID: string | undefined;
 		try { localSessionID = latestCtx?.sessionManager.getSessionId(); } catch { /* stale context receives no credentials */ }
 		const credentialChild = credentialChildState(localSessionID, process.env);
+		const tree = treeSpawnOptions(credentialChild.env);
 		let proc: ChildProcess;
 		try {
 			// `-c`, never `-lc`, exactly as pi's own bash tool runs a command. A
@@ -563,7 +564,7 @@ export default function background(pi: ExtensionAPI) {
 			// carries the session's environment, which is all a job needs.
 			proc = spawn("bash", ["-c", spec.command], {
 				cwd: spec.cwd,
-				env: credentialChild.env,
+				...tree,
 				// Its own process group, so killTree can take the whole tree.
 				detached: true,
 				stdio: ["ignore", "pipe", "pipe"],
@@ -575,7 +576,7 @@ export default function background(pi: ExtensionAPI) {
 			return textResult(`Could not start background job: ${(err as Error).message}`, true);
 		}
 
-		trackTree(proc, true);
+		trackTree(proc, true, tree.env[TREE_TOKEN]);
 		procs.set(id, proc);
 
 		const appendSafe = (chunk: Buffer): void => {

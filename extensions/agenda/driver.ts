@@ -28,6 +28,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 import { AGENDA_INJECTION_CHANNEL, type AgendaInjectionEvent } from "../hive-common/channels.ts";
 import { trackSettleClaims } from "../hive-common/settle-claim.ts";
 import { walkChain } from "./chain.ts";
@@ -173,6 +174,7 @@ function lastAssistantText(ctx: ExtensionContext): string | undefined {
 export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverHandle {
 	let ledger: LedgerState = emptyLedger;
 	let advicePending = false;
+	let pendingDeliveries: { text: string; id: string; delivered: () => Promise<void> }[] = [];
 	let inSettle = false;
 	let generation = 0;
 	let blockedOnUser = false;
@@ -201,9 +203,26 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		}
 		advicePending = false;
 	};
-	pi.on("turn_start", (_event, ctx) => reconcileAdvice(ctx));
-	pi.on("agent_start", (_event, ctx) => reconcileAdvice(ctx));
-	pi.on("agent_end", (_event, ctx) => reconcileAdvice(ctx));
+	// Boundary drafts and sendMessage queues are not committed session entries.
+	// Only a subsequent notification can confirm that the host accepted them.
+	const reconcileDelivery = async (ctx: ExtensionContext, settled = false) => {
+		if (!pendingDeliveries.length) return;
+		let branch: readonly unknown[];
+		try { branch = ctx.sessionManager.getBranch(); } catch { return; }
+		const accepted = new Set(branch.flatMap(entry => {
+			const message = entry as { type?: string; customType?: string; details?: { agendaNotice?: string } };
+			return message.type === "custom_message" && message.customType === "agenda" && message.details?.agendaNotice ? [message.details.agendaNotice] : [];
+		}));
+		const pending = pendingDeliveries;
+		// Early notifications may precede a queued message. Retain unmatched
+		// tracking until final settlement (no continuation can still commit it).
+		pendingDeliveries = settled ? [] : pending.filter(delivery => !accepted.has(delivery.id));
+		for (const delivery of pending) if (accepted.has(delivery.id)) await delivery.delivered();
+	};
+	const reconcile = async (_event: unknown, ctx: ExtensionContext) => { reconcileAdvice(ctx); await reconcileDelivery(ctx); };
+	pi.on("turn_start", reconcile);
+	pi.on("agent_start", reconcile);
+	pi.on("agent_end", reconcile);
 
 	// Registered UNCONDITIONALLY. The extension factory runs once at startup, so
 	// a registration gated on state can never be un-gated by a later command —
@@ -211,6 +230,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	// and recorded nothing for the rest of the session's life.
 	pi.on("session_start", (_event, ctx) => {
 		generation++;
+		pendingDeliveries = [];
 		inSettle = false;
 		blockedOnUser = false;
 		heldCtx = ctx;
@@ -225,7 +245,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		if (given && !adviceStamp(entries)) pi.appendEntry(ADVICE_GIVEN_ENTRY, { given: true });
 	});
 
-	async function runChain(ctx: ExtensionContext, boundary: "settle" | "turn" | null = null, policies = options.policies): Promise<string | undefined> {
+	async function runChain(ctx: ExtensionContext, boundary: "settle" | "turn" | null = null, policies = options.policies): Promise<{ content: string; details?: { agendaNotice: string } } | undefined> {
 		if (options.isWorker) return;
 		if (inSettle) return; // our own injected turn settling — never recurse
 
@@ -366,7 +386,15 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					},
 				},
 			);
-			if (!injection) return;
+			if (!injection || gen !== generation || !isIdle() || settleClaims.claimedBy()) return;
+			// Do not queue a pending notice twice before a notification confirms
+			// its commit or reports a discarded continuation.
+			if (pendingDeliveries.some(delivery => delivery.text === injection.text)) return;
+			const noticeId = injection.delivered ? randomUUID() : undefined;
+			const draft = { content: injection.text, ...(noticeId ? { details: { agendaNotice: noticeId } } : {}) };
+			const expectDelivery = () => {
+				if (injection.delivered && noticeId) pendingDeliveries.push({ text: injection.text, id: noticeId, delivered: injection.delivered });
+			};
 
 			if (boundary) {
 				try {
@@ -375,19 +403,21 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 					// agent_start). Its advice must not hold a later settle hostage.
 					if (boundary === "settle") settleClaims.claim("agenda");
 					acceptInjection();
-					return injection.text;
+					expectDelivery();
+					return draft;
 				} catch {
 					return; // session went away mid-check
 				}
 			}
 			try {
 				pi.sendMessage(
-					{ customType: "agenda", content: injection.text, display: true },
+					{ customType: "agenda", ...draft, display: true },
 					{ deliverAs: "followUp", triggerTurn: true },
 				);
 				acceptInjection();
 				pi.events.emit(AGENDA_INJECTION_CHANNEL, { policy: injection.policy } satisfies AgendaInjectionEvent);
 				settleClaims.claim("agenda");
+				expectDelivery();
 			} catch {
 				/* session went away mid-check — nothing to inject into */
 			}
@@ -414,7 +444,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		if (!options.turnPolicies?.length || event.continue || event.outcome !== "completed") return;
 		const injection = await runChain(ctx, "turn", options.turnPolicies);
 		return injection ? {
-			entries: [...event.entries, { type: "custom_message", customType: "agenda", content: injection, display: true }],
+			entries: [...event.entries, { type: "custom_message", customType: "agenda", ...injection, display: true }],
 			continue: true,
 		} : undefined;
 	});
@@ -428,13 +458,14 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		if (event.continue) return; // another boundary handler already requested a turn
 		const injection = await runChain(ctx, "settle");
 		return injection ? {
-			entries: [...event.entries, { type: "custom_message", customType: "agenda", content: injection, display: true }],
+			entries: [...event.entries, { type: "custom_message", customType: "agenda", ...injection, display: true }],
 			continue: true,
 		} : undefined;
 	});
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("agent_settled", async (_event, ctx) => {
 		heldCtx = ctx; // final observation only; no policy work or continuation
 		reconcileAdvice(ctx);
+		await reconcileDelivery(ctx, true);
 	});
 
 	return {

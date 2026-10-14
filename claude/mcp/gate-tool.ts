@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { writeJsonAtomic } from "../state.ts";
 import { spawn } from "node:child_process";
-import { killTree, trackTree, treeSpawnOptions } from "../../extensions/hive-common/child-tree.ts";
+import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../../extensions/hive-common/child-tree.ts";
 import { runQualityGate, type GateHost, type QualityGateParams } from "../../extensions/gate/tool.ts";
 import type { ToolDefinition, ToolResult } from "./protocol.ts";
 
@@ -53,9 +53,9 @@ export const nodeGateHost: GateHost = {
 	publishDeck: () => {},
 	exec: (command, args, options) =>
 		new Promise((resolve) => {
-			const tree = treeSpawnOptions();
+			const tree = { ...treeSpawnOptions(), detached: process.platform !== "win32" };
 			const child = spawn(command, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"], ...tree });
-			trackTree(child, tree.detached);
+			trackTree(child, tree.detached, tree.env[TREE_TOKEN]);
 			let stdout = "";
 			let stderr = "";
 			let killed = false;
@@ -68,6 +68,10 @@ export const nodeGateHost: GateHost = {
 				clearTimeout(timer);
 				if (escalation) clearTimeout(escalation);
 				if (drain) clearTimeout(drain);
+				// `exit`/closed pipes do not prove escaped descendants exited.
+				killTree(child, "SIGKILL", tree.detached);
+				child.stdout.destroy();
+				child.stderr.destroy();
 				options.signal?.removeEventListener("abort", stop);
 				resolve({ stdout, stderr: stderr + extraErr, code, killed });
 			};

@@ -75,6 +75,16 @@ describe("claude/cli.ts runtime contract", () => {
 		expect(refused).toContain("bare import @earendil-works/");
 	});
 
+	it("EXECUTES automatic admission with checkout bare imports refused, using the pinned host dependency", () => {
+		launch = makeLaunch();
+		const module = pathToFileURL(join(REPO, "extensions", "agenda", "gate-lease.ts")).href;
+		const script = `const {acquireGateLease} = await import(${JSON.stringify(module)});
+			const lease = await acquireGateLease(${JSON.stringify(launch.root)}, () => Date.now() + 2000, undefined, {directory:${JSON.stringify(join(launch.root, "leases"))}});
+			if (!lease) throw new Error("no lease"); await lease.release(); console.log("leased");`;
+		const out = execFileSync(process.execPath, ["--import", blockerFile(launch.root), "--input-type=module", "-e", script], { cwd: REPO, env: launch.env, encoding: "utf8" });
+		expect(out.trim()).toBe("leased");
+	});
+
 	it("exits 2 with usage when no command is given", async () => {
 		launch = makeLaunch();
 		const result = await runCli([], launch.env);

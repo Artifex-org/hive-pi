@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { addUsage, budgetTokens, emptyUsage, type Usage, type WireUsage } from "../harness/usage.ts";
-import { isClaudeHelper, killTree, trackTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
+import { isClaudeHelper, killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 import { oneShotMcpEnv } from "../mcp-common/config.ts";
 import { nativeToolGrants, workerExtensionPaths, workerMcpEnv } from "../subagent/worker.ts";
 
@@ -166,17 +166,16 @@ export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
 		const invocation = getPiInvocation(args);
 		// A Claude helper spawns each child as a process group, so a kill
 		// reaches the child's own children too (hive-common/child-tree.ts).
-		const tree = treeSpawnOptions();
+		const tree = treeSpawnOptions({ ...process.env, ...oneShotMcpEnv(), ...options.env });
 		const child = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
 			stdio: ["pipe", "pipe", "pipe"],
 			// One-shots load the full extension set, built-in MCP included; the
 			// no-server mirror keeps a --no-tools helper from connecting anything.
-			env: { ...process.env, ...oneShotMcpEnv(), ...options.env },
 			...tree,
 		});
-		trackTree(child, tree.detached);
+		trackTree(child, tree.detached, tree.env[TREE_TOKEN]);
 
 		const texts: string[] = [];
 		let usage = emptyUsage();
@@ -316,15 +315,14 @@ export function runRoleAgent(options: RoleAgentOptions): Promise<RoleAgentResult
 
 	return new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
-		const tree = treeSpawnOptions();
+		const tree = treeSpawnOptions({ ...process.env, ...roleEnv, ...options.env });
 		const child = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, ...roleEnv, ...options.env },
 			...tree,
 		});
-		trackTree(child, tree.detached);
+		trackTree(child, tree.detached, tree.env[TREE_TOKEN]);
 
 		const texts: string[] = [];
 		let usage = emptyUsage();

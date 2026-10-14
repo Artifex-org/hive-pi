@@ -17,7 +17,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -80,6 +80,10 @@ export function makeLaunch(options: { providers?: string[] } = {}): LaunchEnv {
 	const pkg = join(root, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
 	mkdirSync(join(pkg, "bin"), { recursive: true });
 	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", exports: { ".": { import: "./index.mjs" } } }));
+	// The real pinned pi declares proper-lockfile as a direct dependency. Hooks
+	// resolve it from this host install, never from checkout-local node_modules.
+	mkdirSync(join(pkg, "node_modules"), { recursive: true });
+	symlinkSync(join(REPO, "node_modules", "proper-lockfile"), join(pkg, "node_modules", "proper-lockfile"), "dir");
 	const realEntry = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js");
 	writeFileSync(join(pkg, "index.mjs"), `export * from ${JSON.stringify(pathToFileURL(realEntry).href)};\n`);
 	const piLog = join(root, "pi-calls.jsonl");

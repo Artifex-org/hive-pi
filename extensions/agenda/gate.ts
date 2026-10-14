@@ -1,16 +1,11 @@
 /**
  * The repo-gate policy — `verification-loop.ts`, absorbed.
  *
- * Behaviour is deliberately unchanged: the injected text, the cap wording, the
- * silence conditions and the `hive.metric` payload are all pinned by
- * `test/verification-loop.test.ts`, whose assertions this refactor is not
- * allowed to touch. That suite was written in HIV-1095 precisely so this move
- * could be proved rather than eyeballed.
- *
- * One deliberate CHANGE, carried from the HIV-1095 verification pass: an
- * exhausted budget now reports `outcome:"skip"` instead of returning in
- * silence. Before, a spent loop emitted nothing and was indistinguishable
- * downstream from a loop that never armed — the "success-shaped nothing" class.
+ * Legacy failure wording, caps and metrics are pinned by verification-loop.test.
+ * Automatic attempts now share worktree/host admission and input receipts:
+ * unchanged attempts do not re-spawn, and host/admission cutoffs are incomplete
+ * rather than repo timeouts or successful verification. Explicit checks remain
+ * available; an attempt receipt is never reusable green evidence.
  *
  * Opt-in BY PRESENCE of `.pi/harness.json` at the repo root:
  *
@@ -20,10 +15,12 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { treeStamp } from "../harness/verify.ts";
-import { killTree, trackTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
+import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
+import { acquireGateLease, type GateLeaseOptions } from "./gate-lease.ts";
 import { repoRoot } from "../hive-common/git.ts";
 import { atCap, clear, record, remaining } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
@@ -71,6 +68,7 @@ interface CheckResult {
 	ok: boolean;
 	output: string;
 	timedOut: boolean;
+	cancelled?: boolean;
 }
 
 /**
@@ -97,34 +95,47 @@ function bashAvailable(): boolean {
 		.some((dir) => dir && existsSync(join(dir, "bash")));
 }
 
-export function runCheck(command: string, cwd: string, timeoutMs: number): Promise<CheckResult> {
+export function runCheck(command: string, cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<CheckResult> {
+	if (signal?.aborted) return Promise.resolve({ ok: false, output: "Check cancelled before starting.", timedOut: false, cancelled: true });
 	return new Promise((resolve) => {
-		// `-c`, not `-lc`: a login shell on Debian resets PATH from /etc/profile,
-		// so the gate would run without the tools the session itself has
-		// (see the background extension's spawn for the measurement).
+		// Every gate owns its group, including interactive pi (not only Claude
+		// helpers). `-c` preserves the session PATH; a login shell resets it.
+		const grouped = process.platform !== "win32";
 		const tree = treeSpawnOptions();
-		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], ...tree });
-		trackTree(child, tree.detached);
+		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], ...tree, detached: grouped });
+		trackTree(child, grouped, tree.env[TREE_TOKEN]);
 		let out = "";
 		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			killTree(child, "SIGKILL", tree.detached);
-		}, timeoutMs);
+		let cancelled = false;
+		let settled = false;
+		let drain: ReturnType<typeof setTimeout> | undefined;
+		const finish = (code: number | null, error?: string) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			clearTimeout(drain);
+			signal?.removeEventListener("abort", abort);
+			child.stdout.destroy();
+			child.stderr.destroy();
+			resolve({ ok: code === 0 && !timedOut && !cancelled, output: error ?? out.slice(-OUTPUT_TAIL_CHARS), timedOut, ...(cancelled ? { cancelled: true } : {}) });
+		};
+		const stop = () => {
+			killTree(child, "SIGKILL", grouped);
+			// A descendant retaining a pipe must not extend the caller's deadline.
+			drain ??= setTimeout(() => finish(null), 250);
+		};
+		const abort = () => { cancelled = true; stop(); };
+		const timer = setTimeout(() => { timedOut = true; stop(); }, Math.max(0, timeoutMs));
+		signal?.addEventListener("abort", abort, { once: true });
+		if (signal?.aborted) abort();
 		const collect = (d: Buffer) => {
 			out += d.toString();
 			if (out.length > OUTPUT_TAIL_CHARS * 4) out = out.slice(-OUTPUT_TAIL_CHARS * 2);
 		};
 		child.stdout.on("data", collect);
 		child.stderr.on("data", collect);
-		child.on("close", (code) => {
-			clearTimeout(timer);
-			resolve({ ok: code === 0 && !timedOut, output: out.slice(-OUTPUT_TAIL_CHARS), timedOut });
-		});
-		child.on("error", (err) => {
-			clearTimeout(timer);
-			resolve({ ok: false, output: String(err), timedOut: false });
-		});
+		child.on("close", (code) => finish(code));
+		child.on("error", (err) => finish(null, String(err)));
 	});
 }
 
@@ -139,11 +150,9 @@ export function gateItemId(root: string): string {
 export { bashAvailable };
 
 /**
- * Failure stamps for gate-retry throttling, owned by the caller (session
- * scoped, cleared on session_start). Optional: without a store the gate
- * behaves exactly as it always has — which is what keeps the pinned
- * `verification-loop` suite byte-identical through the plain `gatePolicy`
- * export below.
+ * Attempt stamps owned by the caller. An unchanged input is not automatically
+ * retried, even after success or cancellation. Durable, cross-session receipts
+ * live under the gate lease as well; these stamps preserve session diagnostics.
  */
 export interface GateStampStore {
 	get(id: string): string | undefined;
@@ -155,10 +164,19 @@ export interface GatePolicyOptions {
 	 * A ceiling on the check's timeout, read when the check starts. A host
 	 * whose settle has a hard wall clock (the Claude adapter's Stop hook)
 	 * passes what is left of it; absent, the repo's own `checkTimeoutMs` (or
-	 * the default) stands, which is pi's behaviour. A check the cap cuts short
-	 * reports `skip` — never "TIMED OUT", which would blame the repo.
+	 * the default) stands. A host-cutoff is incomplete, not a repo failure or
+	 * green verification. It is reported once and is NOT restarted unchanged.
 	 */
 	timeoutCapMs?: () => number;
+	/** Isolated lock directory/slot count for integration tests. */
+	leaseOptions?: GateLeaseOptions;
+}
+
+/** Input identity includes HEAD (via treeStamp), gate command/budget and runtime. */
+export async function gateInputStamp(root: string, command: string, timeoutMs: number): Promise<string | null> {
+	const stamp = await treeStamp(root, "commit");
+	if (stamp === null) return null;
+	return createHash("sha256").update(JSON.stringify([stamp, command, timeoutMs, process.version, process.execPath, process.env.PATH])).digest("hex");
 }
 
 export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOptions = {}): Policy {
@@ -168,7 +186,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 	// never under a question or a decision put to a person.
 	proceedsDespite: ["machine"],
 
-	decide({ cwd, ledger }: PolicyContext): PolicyWork | null {
+	decide({ cwd, ledger, signal }: PolicyContext): PolicyWork | null {
 		const loaded = loadConfig(cwd);
 		if (!loaded) return null; // no .pi/harness.json → feature is off for this repo
 
@@ -178,9 +196,10 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 		const max = loaded.config.maxInjections ?? DEFAULT_MAX_INJECTIONS;
 		const timeoutMs = loaded.config.checkTimeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-		// Budget spent: report it once and do no work. Reporting rather than
-		// returning silently is the one behavioural change in this move.
-		if (atCap(ledger, id, max)) {
+		// Explicitly disabled items do nothing. A spent execution budget must
+		// still recover warnings from its final, potentially undelivered attempt.
+		const capped = atCap(ledger, id, max);
+		if (max <= 0) {
 			return {
 				name: "verification-loop",
 				status: "",
@@ -200,51 +219,76 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 
 		return {
 			name: "verification-loop",
-			status: `running: ${command}`,
+			status: capped ? "" : `running: ${command}`,
 			run: async () => {
-				// Retry throttling (prime-agent's gate-skip): after a failure, do not
-				// re-run the gate until the tree actually changed — a settle where the
-				// model only talked has not earned another (possibly minutes-long)
-				// check. Content-aware stamp (see harness/verify.ts treeStamp); a null
-				// stamp on either side disables the skip. The skip is silent — no
-				// injection, no ledger charge — so the pinned three-failures-three-
-				// injections contract holds whenever the model edits between settles.
-				if (stamps) {
-					const failedStamp = stamps.get(id);
-					if (failedStamp !== undefined) {
-						const current = await treeStamp(root);
-						if (current !== null && current === failedStamp) {
-							return { metric: { outcome: "skip", value: 0 } };
-						}
-					}
-				}
-
+				const skipped = () => ({ metric: { outcome: "skip" as const, value: 0 } });
+				let input = await gateInputStamp(root, command, timeoutMs);
+				if (input !== null && stamps?.get(id) === input) return skipped();
 				const startedAt = Date.now();
-				const cap = options.timeoutCapMs?.();
-				const effectiveTimeoutMs = cap === undefined ? timeoutMs : Math.max(0, Math.min(timeoutMs, cap));
-				const result = await runCheck(command, root, effectiveTimeoutMs);
-				const elapsed = Date.now() - startedAt;
-
-				// Cut short by the HOST's wall clock, not the repo's own timeout: the
-				// check never reached a verdict, so this is a gate that could not
-				// run — reported as a skip, with no injection, no charge and no
-				// failure stamp (the same tree must be checked again next settle).
-				if (result.timedOut && effectiveTimeoutMs < timeoutMs) {
-					return { metric: { outcome: "skip", value: elapsed } };
-				}
-
-				if (result.ok) {
-					stamps?.set(id, undefined);
-					return {
-						metric: { outcome: "pass", value: elapsed },
-						ledger: (state) => clear(state, id),
-					};
-				}
-				stamps?.set(id, (await treeStamp(root)) ?? undefined);
-
-				const header = result.timedOut
-					? `The project gate \`${command}\` TIMED OUT.`
-					: `The project gate \`${command}\` FAILED.`;
+				// Admission wait spends the SAME budget as execution, not another
+				// timeout in front of the hook's already-short wall clock.
+				const admissionDeadline = startedAt + Math.max(0, Math.min(timeoutMs, options.timeoutCapMs?.() ?? timeoutMs));
+				const deadline = () => Math.min(admissionDeadline, Date.now() + Math.max(0, options.timeoutCapMs?.() ?? timeoutMs));
+				// Admission is mandatory even when Git cannot fingerprint the input
+				// (e.g. an unborn HEAD). Only receipt reuse is optional.
+				const leaseOptions = { ...options.leaseOptions, deferSlot: true };
+				const lease = await acquireGateLease(root, deadline, signal, leaseOptions);
+				if (!lease) return skipped();
+				// The lease is released before the host delivers a notice. Acknowledge
+				// under a NEW root-only lease, and never overwrite a different input.
+				const acknowledge = (fingerprint: string, notice: string) => async () => {
+					stamps?.set(id, fingerprint);
+					try {
+						const ackDeadline = Date.now() + 1_000;
+						const ack = await acquireGateLease(root, () => ackDeadline, undefined, leaseOptions);
+						if (!ack) return; // conservative replay is safer than losing a warning
+						try {
+							const current = await ack.read();
+							if (current?.input === fingerprint && current.notice === notice) {
+								await ack.write({ input: fingerprint, outcome: current.outcome });
+							}
+						} finally { await ack.release(); }
+					} catch (error) {
+						// The host already delivered the warning: an acknowledgement error
+						// must not turn a printed block into a failed/open Stop hook.
+						console.error("hive-pi: gate warning delivered but acknowledgement failed; it may replay:", String(error));
+					}
+				};
+				try {
+					// Deduplicate before waiting for execution capacity.
+					input = await gateInputStamp(root, command, timeoutMs);
+					const previous = await lease.read();
+					if (input !== null && previous?.input === input) {
+						let notice = previous.notice;
+						if (previous.outcome === "running") {
+							notice = `The previous automatic project gate \`${command}\` was interrupted. This input is NOT verified. Run quality_gate or a bounded background check to obtain a verdict; the Stop hook will not repeatedly restart this unchanged input.`;
+							await lease.write({ input, outcome: "incomplete", notice });
+						}
+						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice) };
+						stamps?.set(id, input);
+						return skipped(); // an acknowledged attempt, never cached green evidence
+					}
+					if (capped || !await lease.admit()) return skipped();
+					input = await gateInputStamp(root, command, timeoutMs);
+					const cap = options.timeoutCapMs?.();
+					const effectiveTimeoutMs = Math.max(0, Math.min(timeoutMs, deadline() - Date.now(), cap ?? timeoutMs));
+					if (effectiveTimeoutMs <= 0 || signal?.aborted) return skipped();
+					// Publish BEFORE spawn. An external kill must not reset eligibility.
+					if (input !== null) await lease.write({ input, outcome: "running" });
+					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal);
+					const elapsed = Date.now() - startedAt;
+					const incomplete = result.cancelled || (result.timedOut && (lease.waitedForSlot || (cap !== undefined && cap < timeoutMs)));
+					// Cancellation leaves a running receipt for recovery. It is never green.
+					if (result.cancelled) return skipped();
+					if (result.ok) {
+						if (input !== null) { await lease.write({ input, outcome: "pass" }); stamps?.set(id, input); }
+						return { metric: { outcome: "pass", value: elapsed }, ledger: (state) => clear(state, id) };
+					}
+					const header = incomplete
+						? `The automatic project gate \`${command}\` is INCOMPLETE: the host/admission budget ended before a verdict. This is NOT successful verification. Run quality_gate or a bounded background check with enough time; the Stop hook will not restart unchanged input.`
+						: result.timedOut
+							? `The project gate \`${command}\` TIMED OUT.`
+							: `The project gate \`${command}\` FAILED.`;
 
 				// Charge the injection first so the "attempts left" count reflects
 				// THIS injection, matching the original's `injections++` placement.
@@ -255,11 +299,15 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						? `Fix the cause and the gate will re-run when you settle again (${left} attempt(s) left before this stops and hands back to the user).`
 						: `This was the final automatic attempt — stop, summarize what is still failing, and hand back to the user.`;
 
+				const notice = `${header}\n\nOutput (tail):\n\`\`\`\n${result.output.trim()}\n\`\`\`\n\n${footer}`;
+				if (input !== null) await lease.write({ input, outcome: incomplete ? "incomplete" : result.timedOut ? "timeout" : "fail", notice });
 				return {
-					metric: { outcome: result.timedOut ? "timeout" : "fail", value: elapsed },
-					inject: `${header}\n\nOutput (tail):\n\`\`\`\n${result.output.trim()}\n\`\`\`\n\n${footer}`,
+					metric: { outcome: incomplete ? "skip" : result.timedOut ? "timeout" : "fail", value: elapsed },
+					inject: notice,
+					...(input !== null ? { delivered: acknowledge(input, notice) } : {}),
 					ledger: (state) => record(state, id),
 				};
+				} finally { await lease.release(); }
 			},
 		};
 	},
@@ -267,8 +315,8 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 }
 
 /**
- * The storeless instance — behaviour identical to the pre-factory policy, and
- * the one `test/verification-loop.test.ts` pins. The live extension passes a
- * session-scoped store instead (agenda/index.ts).
+ * The storeless instance still shares cross-process admission and receipts.
+ * A repo without a usable input stamp cannot reuse receipts. The live
+ * extension additionally keeps session diagnostics (agenda/index.ts).
  */
 export const gatePolicy: Policy = createGatePolicy();

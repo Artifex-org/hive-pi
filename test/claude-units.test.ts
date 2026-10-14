@@ -179,9 +179,9 @@ describe("cheap lane on a leased store", () => {
 
 describe("process-group kill for a Claude helper's children", () => {
 	it("spawns detached only for a Claude helper", () => {
-		expect(treeSpawnOptions({ HIVE_PI_HELPER_CHILD: "1" })).toEqual({ detached: true });
+		expect(treeSpawnOptions({ HIVE_PI_HELPER_CHILD: "1" }).detached).toBe(true);
 		// The lease variable alone is inherited by every process in the launch.
-		expect(treeSpawnOptions({ HIVE_PI_AGENT_DIR: "/lease" })).toEqual({ detached: false });
+		expect(treeSpawnOptions({ HIVE_PI_AGENT_DIR: "/lease" }).detached).toBe(false);
 	});
 
 	it("kills the grandchild too", async () => {
@@ -206,33 +206,37 @@ describe("process-group kill for a Claude helper's children", () => {
 	});
 
 	it.runIf(process.platform === "linux")("kills a TERM-resistant GNU-timeout descendant outside the original group", async () => {
-		const marker = join(tmp(), "escaped.pid");
+		const dir = tmp(), marker = join(dir, "escaped.pid"), outerMarker = join(dir, "outer.pid");
 		const abort = new AbortController();
-		const command = `timeout 20s setsid sh -c 'trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done'`;
+		const command = `echo $$ > ${outerMarker}; timeout 20s setsid sh -c 'trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done' & wait`;
 		const result = nodeGateHost.exec("bash", ["-c", command], { cwd: process.cwd(), timeout: 5_000, signal: abort.signal });
-		const deadline = Date.now() + 5_000;
 		let pid = 0;
-		while (Date.now() < deadline) {
-			try { pid = Number(readFileSync(marker, "utf8").trim()); if (pid) break; } catch { /* awaiting child startup */ }
-			await new Promise((r) => setTimeout(r, 20));
+		const running = () => {
+			try { const raw = readFileSync(`/proc/${pid}/stat`, "utf8"); return !["Z", "X"].includes(raw.slice(raw.lastIndexOf(")") + 2).split(" ")[0]); }
+			catch { return false; }
+		};
+		try {
+			const deadline = Date.now() + 5_000;
+			while (Date.now() < deadline) {
+				try { pid = Number(readFileSync(marker, "utf8").trim()); if (pid) break; } catch { /* awaiting startup */ }
+				await new Promise((r) => setTimeout(r, 20));
+			}
+			expect(pid).toBeGreaterThan(1);
+			const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).trim());
+			expect(pgid).not.toBe(Number(readFileSync(outerMarker, "utf8").trim()));
+			abort.abort(); await result;
+			const goneBy = Date.now() + 1_000;
+			while (running() && Date.now() < goneBy) await new Promise((r) => setTimeout(r, 20));
+			expect(running()).toBe(false);
+		} finally {
+			abort.abort(); await result;
+			if (pid > 1 && running()) { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } }
 		}
-		const pgid = pid ? Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).trim()) : 0;
-		abort.abort();
-		await result;
-		expect(pid).toBeGreaterThan(0);
-		expect(pgid).not.toBe(process.pid);
-		const goneBy = Date.now() + 1_000;
-		while (pid && Date.now() < goneBy) {
-			try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); if (stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] === "Z") break; }
-			catch { break; }
-			await new Promise((r) => setTimeout(r, 20));
-		}
-		expect(() => process.kill(pid, 0)).toThrow();
 	}, 10_000);
 });
 
 describe("the repo gate under a host's wall clock", () => {
-	it("reports a check the CAP cut short as a skip — no injection, no charge, no failure stamp", async () => {
+	it("reports a host-cutoff as incomplete, never green or a repo timeout, and charges the notice", async () => {
 		const repo = join(tmp(), "repo");
 		mkdirSync(join(repo, ".pi"), { recursive: true });
 		execFileSync("git", ["init", "-q", repo]);
@@ -240,12 +244,15 @@ describe("the repo gate under a host's wall clock", () => {
 		const stamps = new Map<string, string>();
 		const policy = createGatePolicy(
 			{ get: (id) => stamps.get(id), set: (id, stamp) => (stamp === undefined ? stamps.delete(id) : stamps.set(id, stamp)) },
-			{ timeoutCapMs: () => 200 },
+			{ timeoutCapMs: () => 200, leaseOptions: { directory: tmp() } },
 		);
 		const work = policy.decide({ cwd: repo, ledger: emptyLedger, lastAssistantText: undefined, transcript: "" });
 		const outcome = await work?.run();
-		expect(outcome).toEqual({ metric: { outcome: "skip", value: expect.any(Number) } });
-		expect(stamps.size).toBe(0);
+		expect(outcome?.metric).toEqual({ outcome: "skip", value: expect.any(Number) });
+		expect(outcome?.inject).toContain("INCOMPLETE");
+		expect(outcome?.inject).not.toContain("TIMED OUT");
+		expect(outcome?.ledger!(emptyLedger).iterations[`gate:${repo}`]).toBe(1);
+		expect(stamps.size).toBe(0); // no committed HEAD: cannot fingerprint this fixture
 	});
 
 	it("still reports the repo's OWN timeout as a timeout", async () => {
@@ -253,7 +260,7 @@ describe("the repo gate under a host's wall clock", () => {
 		mkdirSync(join(repo, ".pi"), { recursive: true });
 		execFileSync("git", ["init", "-q", repo]);
 		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: "sleep 5", checkTimeoutMs: 200 }));
-		const policy = createGatePolicy(undefined, { timeoutCapMs: () => 60_000 });
+		const policy = createGatePolicy(undefined, { timeoutCapMs: () => 60_000, leaseOptions: { directory: tmp() } });
 		const outcome = await policy.decide({ cwd: repo, ledger: emptyLedger, lastAssistantText: undefined, transcript: "" })?.run();
 		expect(outcome?.metric.outcome).toBe("timeout");
 		expect(outcome?.inject).toContain("TIMED OUT");

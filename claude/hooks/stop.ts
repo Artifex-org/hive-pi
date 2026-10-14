@@ -83,7 +83,7 @@ function readEntries(input: HookInput, deps: StopDeps): PiEntry[] {
 	return withFinalAssistant(readClaudeTranscript(path), input.last_assistant_message);
 }
 
-export async function stopDecision(input: HookInput, deps: StopDeps): Promise<HookOutput> {
+export async function stopDecision(input: HookInput, deps: StopDeps): Promise<(NonNullable<HookOutput> & { delivered?: () => Promise<void> }) | null> {
 	const now = deps.now ?? Date.now;
 	const deadline = now() + (deps.budgetMs ?? STOP_BUDGET_MS);
 	const left = () => deadline - now();
@@ -115,14 +115,15 @@ export async function stopDecision(input: HookInput, deps: StopDeps): Promise<Ho
 				else agenda.gateStamps[id] = stamp;
 			},
 		},
-		// A check the cap cuts short reports skip (gate.ts), never "TIMED OUT".
+		// A host-cutoff reports incomplete once (gate.ts), never repo timeout
+		// or green verification; the attempt receipt prevents unchanged retries.
 		{ timeoutCapMs: gateTime },
 	);
 	const policies: Policy[] = [
 		{
 			...gate,
 			// Not started at all without real time to run: a check killed at once
-			// tells nothing, and the next settle runs it.
+			// tells nothing. No attempt receipt is written until it actually starts.
 			decide: (context) => (gateTime() < GATE_MIN_REMAINING_MS ? null : gate.decide(context)),
 		},
 	];
@@ -208,5 +209,5 @@ export async function stopDecision(input: HookInput, deps: StopDeps): Promise<Ho
 	);
 	// Persist every charge BEFORE the block reaches Claude.
 	writeAgendaState(deps.stateDir, agenda);
-	return injection ? blockStop(injection.text) : null;
+	return injection ? { ...blockStop(injection.text), ...(injection.delivered ? { delivered: injection.delivered } : {}) } : null;
 }

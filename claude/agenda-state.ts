@@ -35,7 +35,7 @@ export interface AgendaState {
 	ledger: LedgerState;
 	/** Drift's cadence counter (settles since the last probe). */
 	driftSettles: number;
-	/** Gate-retry stamps by gate id: the tree a red gate last ran on. */
+	/** Attempt fingerprints by gate id, including interrupted/green attempts. Not verification receipts. */
 	gateStamps: Record<string, string>;
 }
 

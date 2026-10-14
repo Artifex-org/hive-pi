@@ -98,6 +98,8 @@ export interface RecordedCommand {
 export interface SessionEntryLike {
 	type?: string;
 	customType?: string;
+	content?: unknown;
+	details?: unknown;
 	data?: unknown;
 	message?: {
 		role?: string;
@@ -455,7 +457,15 @@ export function createFakePi(): FakePi {
 		api: api as unknown as ExtensionAPI,
 
 		async emit(event, ctxOptions = {}) {
-			const { ctx, stale } = makeCtx(ctxOptions, {
+			const committed: SessionEntryLike[] = [];
+			// Preserve LIVE array/getter reads: appendEntry may update the supplied
+			// session during an awaited handler. SDK commits drafts before starts.
+			const options: FakeCtxOptions = Object.create(ctxOptions);
+			Object.defineProperties(options, {
+				entries: { get: () => [...(ctxOptions.entries ?? ctxOptions.branch ?? []), ...committed] },
+				branch: { get: () => [...(ctxOptions.branch ?? []), ...committed] },
+			});
+			const { ctx, stale } = makeCtx(options, {
 				statuses, notifications, widgets, editorTexts, shutdowns, shutdownReasons,
 				onCompact: () => { compactions++; },
 			});
@@ -486,6 +496,7 @@ export function createFakePi(): FakePi {
 			// starts exactly one continuation when requested.
 			if (event.type === "agent_before_settle" || event.type === "turn_end") {
 				for (const entry of entries) {
+					committed.push(entry);
 					if (entry.type === "custom_message") {
 						messages.push({ customType: entry.customType!, content: entry.content as string, display: entry.display });
 					}

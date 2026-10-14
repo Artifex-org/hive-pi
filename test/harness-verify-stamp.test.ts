@@ -61,6 +61,21 @@ describe.runIf(hasGit)("treeStamp — the writer guard's stamp", () => {
 		expect(await guardSaysNoChange(cwd, () => writeFileSync(join(cwd, "verification", "b.py"), "y = 2\n"))).toBe(false);
 	});
 
+	it("sees a writer that commits its change (clean-to-clean is not a no-op)", async () => {
+		const cwd = repoWith("code.ts", "one\n");
+		expect(await guardSaysNoChange(cwd, () => {
+			writeFileSync(join(cwd, "code.ts"), "committed\n");
+			execSync("git add code.ts && git -c user.email=t@t -c user.name=t commit -qm fix", { cwd, stdio: "ignore" });
+		})).toBe(false);
+	});
+
+	it.each(["commit --allow-empty -qm empty", "commit --amend -qm metadata"])("rejects metadata-only %s as a writer no-op", async command => {
+		const cwd = repoWith("code.ts", "one\n");
+		expect(await guardSaysNoChange(cwd, () => {
+			execSync(`git -c user.email=t@t -c user.name=t ${command}`, { cwd, stdio: "ignore" });
+		})).toBe(true);
+	});
+
 	it("is still identical when nothing changed — the guard keeps catching real no-ops", async () => {
 		const cwd = repoWith("code.ts", "one\n");
 		writeFileSync(join(cwd, "code.ts"), "two\n");

@@ -36,6 +36,8 @@ export interface ChainInjection {
 	/** The policy that injected — `PolicyWork.name`. */
 	policy: string;
 	text: string;
+	/** Forwarded to the host; walking the chain alone does not deliver a notice. */
+	delivered?: () => Promise<void>;
 }
 
 /**
@@ -66,7 +68,7 @@ export async function walkChain(
 		// Re-checked LIVE: the policy's work is slow (a gate can run for
 		// minutes) and the user may well have typed during it.
 		if (!host.mayInject()) return null;
-		return { policy: work.name, text: outcome.inject };
+		return { policy: work.name, text: outcome.inject, ...(outcome.delivered ? { delivered: outcome.delivered } : {}) };
 	}
 	return null;
 }

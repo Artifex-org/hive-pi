@@ -19,6 +19,10 @@ Run by the plugin as `$HIVE_NODE $HIVE_PI_BASE/claude/cli.ts <command>` —
 plain Node 24 with type stripping. Nothing here imports `@earendil-works/*` at
 runtime; pi's frontmatter parser and conversation serializer are loaded from
 the **pinned** pi install that `HIVE_PI_BIN` points into (`pi-runtime.ts`).
+Automatic-gate admission likewise resolves `proper-lockfile` (pi's direct
+4.1.2 dependency) from that pinned install, never checkout-local dependencies.
+The runtime test executes lease acquisition with checkout bare imports refused,
+not merely module loading. Plain pi/npm consumers use their installed package.
 
 ## Environment (from the launch)
 
@@ -113,9 +117,22 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   `{"decision":"block","reason":…}`. Budget 110 s: every model call's timeout
   is clamped to what is left (a clamped timeout is a judge error,
   fail-closed), the gate keeps 70 s back for the goal judge when it will run, is
-  not started with under 15 s for it, and a check cut short by that cap (not
-  by the repo's own `checkTimeoutMs`) is a skip — never "TIMED OUT", never
-  charged; drift is skipped below 100 s left. Drift and the judge (and the
+  not started with under 15 s for it. A host-cutoff is **incomplete**, never
+  green verification or a repo timeout: one charged notice directs explicit
+  `quality_gate`/bounded background verification. A durable attempt receipt is
+  written before spawn; unchanged input is not automatically restarted after
+  success, failure, cancellation or hook death. Admission is single-flight per
+  canonical worktree and at most two automatic gates per user/host (manual
+  checks remain available). Waiting spends the same hook budget. Input identity
+  includes HEAD, tracked/untracked changes, command, timeout and Node/PATH;
+  a skip is **not** cached green evidence. Receipt lookup takes only the
+  worktree lease, not an execution slot. Failed/incomplete warnings are persisted
+  separately and replayed without re-executing, including at the attempt cap.
+  Pi acknowledges only after observing the committed continuation entry;
+  the Stop hook acknowledges after its JSON is written to stdout (not proof
+  that Claude parsed or acted on it). Notice replay does not spend another
+  execution attempt. Drift is
+  skipped below 100 s left. Drift and the judge (and the
   evaluator lookup) are not even considered on a hand-back or a failed API
   turn (`isApiErrorMessage` → `stopReason: error`). The repo gate is not model-backed, so it runs even without
   `HIVE_PI_AGENT_DIR`. `stop_hook_active` is **not** a reason to stand down — a goal loop is
@@ -256,9 +273,13 @@ stderr):
 
 The adapter marks itself `HIVE_PI_HELPER_CHILD=1` (inherited by its pi
 children only — not inferred from `HIVE_PI_AGENT_DIR`, which every process in
-the launch has). Helper children spawn as process groups and are killed by
-group on timeout or cancel (`hive-common/child-tree.ts`); a hook or `brief`
-told to stop (SIGTERM/SIGINT/SIGHUP) kills every group it started. The MCP
+the launch has). Helpers/jobs carry additive per-tree ownership tokens and
+own process groups (`hive-common/child-tree.ts`). On Linux cancellation and
+normal wrapper close discover token-bearing orphans plus live descendants,
+check PID start times, and kill them even across GNU timeout/setsid groups.
+A hook or `brief` told to stop (SIGTERM/SIGINT/SIGHUP) cleans up every tree it
+started. Other platforms/unreadable procfs retain group cleanup; a process
+that scrubs its environment and reparents requires OS-level containment. The MCP
 server on SIGTERM/SIGINT, or when its parent dies (ppid polled every 5 s),
 stops reading, aborts and awaits in-flight requests and background jobs, then
 exits — and closes the session's Chromium (Playwright's own signal handlers

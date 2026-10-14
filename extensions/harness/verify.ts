@@ -85,7 +85,7 @@ export function diffStamp(cwd: string): Promise<string | null> {
  * by the writer guard ("did this writer change anything?") and the gate-retry
  * throttle ("has anything changed since the red gate?").
  *
- * Three parts, each closing a hole the measured false "writer produced no
+ * Four parts, each closing a hole the measured false "writer produced no
  * working-tree change" fell through (papercuts 2026-10-02T03:38, 10-03T03:27):
  *
  *   1. `status --porcelain --untracked-files=all` — paths and codes, with every
@@ -94,7 +94,10 @@ export function diffStamp(cwd: string): Promise<string | null> {
  *      inside it changed nothing the stamp could see.
  *   2. a hash of `git diff-index -p HEAD` — tracked content, staged and unstaged. An edit
  *      to an ALREADY-modified file leaves the status line ` M a.ts` unchanged.
- *   3. size + mtime of every untracked, non-ignored file — an edit to an
+ *   3. committed tree identity — a writer that commits content still changed
+ *      the input, but empty commits/amendments remain no-ops. Gates opt into
+ *      HEAD commit identity to invalidate receipts on every new commit.
+ *   4. size + mtime of every untracked, non-ignored file — an edit to an
  *      ALREADY-untracked file changes neither the status nor the diff. Metadata
  *      rather than content so a large untracked asset costs a stat, not a read.
  *
@@ -103,8 +106,8 @@ export function diffStamp(cwd: string): Promise<string | null> {
  * verifier that ran and failed (the gate's bashAvailable rule). That includes
  * a repo with no commit yet — `git diff HEAD` has nothing to diff against.
  */
-export async function treeStamp(cwd: string): Promise<string | null> {
-	const [status, diff, root] = await Promise.all([
+export async function treeStamp(cwd: string, identity: "tree" | "commit" = "tree"): Promise<string | null> {
+	const [status, diff, root, head] = await Promise.all([
 		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
 		// `diff-index`, never `diff HEAD`: the latter rewrites a stat-dirty
 		// index even under --no-optional-locks. diff-index reads the index and
@@ -112,10 +115,13 @@ export async function treeStamp(cwd: string): Promise<string | null> {
 		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"]),
 		// Porcelain paths are relative to the repo ROOT, not to cwd.
 		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"]),
+		// Writers must change CONTENT, not just make an empty/amended commit.
+		// Gate receipts additionally invalidate on commit identity.
+		gitOutput(cwd, [LOCK_FREE, "rev-parse", identity === "commit" ? "HEAD" : "HEAD^{tree}"]),
 	]);
-	if (status === null || diff === null || root === null) return null;
+	if (status === null || diff === null || root === null || head === null) return null;
 	const untracked = untrackedFingerprint(root.trim(), status);
-	const hash = createHash("sha256").update(diff).update("\0").update(untracked).digest("hex");
+	const hash = createHash("sha256").update(head).update("\0").update(diff).update("\0").update(untracked).digest("hex");
 	return `${status}\n#content:${hash}`;
 }
 

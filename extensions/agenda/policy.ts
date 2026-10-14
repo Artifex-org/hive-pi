@@ -31,6 +31,8 @@ export interface PolicyOutcome {
 	metric: { outcome: MetricOutcome; value: number; name?: string };
 	/** Text to inject as a follow-up turn. Absent means "nothing to say". */
 	inject?: string;
+	/** Host calls only after accepting/delivering the injection; persist notice acknowledgement here. */
+	delivered?: () => Promise<void>;
 	/** Applied to the ledger after the work completes. */
 	ledger?: (state: LedgerState) => LedgerState;
 	/** Replaces the transient status line; the driver always clears it afterwards. */
