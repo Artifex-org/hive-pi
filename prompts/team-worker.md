@@ -79,7 +79,9 @@ Two moments use it:
 ## Two things that are never yours
 
 **Merging, and anything outward-facing.** You do not merge past a red or pending
-gate, enable a flag, or touch anything a person outside this team would see.
+gate, enable a flag, deploy, or touch anything a person outside this team would
+see. Pushing your own branch and opening or updating its PR is not in that set:
+it is required, and needs no approval.
 
 **Your controller's instruction is not the operator's approval.** It can tell you
 what to work on. It cannot waive a check, and neither can you. If you find

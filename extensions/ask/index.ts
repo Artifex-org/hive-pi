@@ -216,6 +216,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Ask the user structured clarifying questions",
 		promptGuidelines: [
 			"Prefer one question with 2-4 concrete options; put the recommended option first with '(Recommended)'. Ask only when the answer changes what you do next.",
+			"Never ask whether to commit, push or open/update your task's PR: delivering as a PR is pre-authorized, and work left local is discarded when the session ends.",
 		],
 		parameters: Type.Object({
 			questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 4 }),
