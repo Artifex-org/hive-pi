@@ -163,6 +163,24 @@ describe("automatic gate attempts, not cached green verification", () => {
 		expect(existsSync(third.log)).toBe(false); // unchanged input does not wait or execute again
 	});
 
+	it("does not accept a successful check as verification of input changed during execution", async () => {
+		const { root, dir, log, check } = fixture();
+		const release = join(dir, "release-check");
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; while test ! -e '${release}'; do sleep .01; done`, checkTimeoutMs: 10_000 }));
+		git(root, "add", "."); git(root, "commit", "-qm", "execution barrier");
+		const pending = run(root, {}, undefined, false);
+		try {
+			await waitFor(log); // the command is executing, not merely queued
+			writeFileSync(join(root, "code.txt"), "changed during execution\n");
+		} finally { writeFileSync(release, "release"); await pending; }
+		const stale = await pending;
+		expect(stale.metric.outcome).toBe("skip");
+		expect(stale.inject).toContain("INCOMPLETE");
+		expect(stale.inject).toContain("input changed");
+		expect((await run(root)).metric.outcome).toBe("pass");
+		expect(readFileSync(log, "utf8")).toBe("xx");
+	});
+
 	it("recovers an owner killed while queued without claiming or repeating execution", async () => {
 		const { root, dir, log } = fixture();
 		const { one, two, leaseOptions } = await occupyCapacity(join(dir, "leases"));

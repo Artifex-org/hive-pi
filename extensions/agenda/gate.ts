@@ -294,15 +294,18 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					const effectiveTimeoutMs = Math.max(0, Math.min(executionBudget, hostDeadline - now, options.timeoutCapMs?.() ?? Infinity));
 					if (effectiveTimeoutMs <= 0) return await admissionIncomplete();
 					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal);
-					const elapsed = Date.now() - startedAt;
-					const incomplete = result.cancelled || (result.timedOut && effectiveTimeoutMs < timeoutMs);
 					// Cancellation leaves a running receipt for recovery. It is never green.
 					if (result.cancelled) return skipped();
-					if (result.ok) {
+					const inputChanged = input !== null && await gateInputStamp(root, command, timeoutMs) !== input;
+					const elapsed = Date.now() - startedAt;
+					const incomplete = inputChanged || (result.timedOut && effectiveTimeoutMs < timeoutMs);
+					if (result.ok && !inputChanged) {
 						if (input !== null) { await lease.write({ input, outcome: "pass" }); stamps?.set(id, input); }
 						return { metric: { outcome: "pass", value: elapsed }, ledger: (state) => clear(state, id) };
 					}
-					const header = incomplete
+					const header = inputChanged
+						? `The automatic project gate \`${command}\` is INCOMPLETE: its input changed or could not be revalidated after execution. This result does NOT verify the current input. Settle again to check changed input; if input identity is unavailable, use quality_gate explicitly.`
+						: incomplete
 						? `The automatic project gate \`${command}\` is INCOMPLETE: the host/admission budget ended before a verdict. This is NOT successful verification. Run quality_gate or a bounded background check with enough time; the Stop hook will not restart unchanged input.`
 						: result.timedOut
 							? `The project gate \`${command}\` TIMED OUT.`
