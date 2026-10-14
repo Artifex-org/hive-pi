@@ -204,6 +204,31 @@ describe("process-group kill for a Claude helper's children", () => {
 		await new Promise((r) => setTimeout(r, 100));
 		expect(() => process.kill(grandchild, 0)).toThrow();
 	});
+
+	it.runIf(process.platform === "linux")("kills a TERM-resistant GNU-timeout descendant outside the original group", async () => {
+		const marker = join(tmp(), "escaped.pid");
+		const abort = new AbortController();
+		const command = `timeout 20s setsid sh -c 'trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done'`;
+		const result = nodeGateHost.exec("bash", ["-c", command], { cwd: process.cwd(), timeout: 5_000, signal: abort.signal });
+		const deadline = Date.now() + 5_000;
+		let pid = 0;
+		while (Date.now() < deadline) {
+			try { pid = Number(readFileSync(marker, "utf8").trim()); if (pid) break; } catch { /* awaiting child startup */ }
+			await new Promise((r) => setTimeout(r, 20));
+		}
+		const pgid = pid ? Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).trim()) : 0;
+		abort.abort();
+		await result;
+		expect(pid).toBeGreaterThan(0);
+		expect(pgid).not.toBe(process.pid);
+		const goneBy = Date.now() + 1_000;
+		while (pid && Date.now() < goneBy) {
+			try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); if (stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] === "Z") break; }
+			catch { break; }
+			await new Promise((r) => setTimeout(r, 20));
+		}
+		expect(() => process.kill(pid, 0)).toThrow();
+	}, 10_000);
 });
 
 describe("the repo gate under a host's wall clock", () => {

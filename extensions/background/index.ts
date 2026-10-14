@@ -58,6 +58,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
+import { killTree as signalChildTree, trackTree } from "../hive-common/child-tree.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
 import { announceOwnWork } from "../hive-common/own-work.ts";
 import { createdPullURL } from "../hive-common/pull-delivery.ts";
@@ -320,19 +321,8 @@ export default function background(pi: ExtensionAPI) {
 	const killTree = (id: string): void => {
 		const proc = procs.get(id);
 		if (!proc?.pid) return;
-		const pid = proc.pid;
-		try {
-			process.kill(-pid, "SIGTERM");
-		} catch {
-			/* already gone */
-		}
-		setTimeout(() => {
-			try {
-				process.kill(-pid, "SIGKILL");
-			} catch {
-				/* already gone — the normal case */
-			}
-		}, KILL_GRACE_MS).unref();
+		signalChildTree(proc, "SIGTERM", true);
+		setTimeout(() => signalChildTree(proc, "SIGKILL", true), KILL_GRACE_MS).unref();
 	};
 
 	/** Terminal transition + notification + footer, in one place. */
@@ -585,6 +575,7 @@ export default function background(pi: ExtensionAPI) {
 			return textResult(`Could not start background job: ${(err as Error).message}`, true);
 		}
 
+		trackTree(proc, true);
 		procs.set(id, proc);
 
 		const appendSafe = (chunk: Buffer): void => {
