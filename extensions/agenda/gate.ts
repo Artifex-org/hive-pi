@@ -224,10 +224,12 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 				const skipped = () => ({ metric: { outcome: "skip" as const, value: 0 } });
 				let input: string | null = null;
 				const startedAt = Date.now();
-				// Admission wait spends the SAME budget as execution, not another
-				// timeout in front of the hook's already-short wall clock.
-				const admissionDeadline = startedAt + Math.max(0, Math.min(timeoutMs, options.timeoutCapMs?.() ?? timeoutMs));
-				const deadline = () => Math.min(admissionDeadline, Date.now() + Math.max(0, options.timeoutCapMs?.() ?? timeoutMs));
+				// The host wall clock includes preparation. Capacity waits and execution
+				// share a separate repository budget; free capacity leaves the command
+				// its full configured execution window, not a fingerprint-shortened one.
+				const hostDeadline = startedAt + Math.max(0, options.timeoutCapMs?.() ?? Infinity);
+				let admissionDeadline = Infinity;
+				const deadline = () => Math.min(admissionDeadline, hostDeadline, Date.now() + Math.max(0, options.timeoutCapMs?.() ?? Infinity));
 				// Admission is mandatory even when Git cannot fingerprint the input
 				// (e.g. an unborn HEAD). Only receipt reuse is optional.
 				const leaseOptions = { ...options.leaseOptions, deferSlot: true };
@@ -278,20 +280,22 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					// Publish BEFORE waiting as well as spawning: an owner killed while
 					// queued must not repeatedly consume its whole budget without notice.
 					if (input !== null) await lease.write({ input, outcome: "running" });
+					admissionDeadline = Date.now() + timeoutMs;
 					if (!await lease.admit()) {
 						if (signal?.aborted || lease.signal.aborted) return skipped();
 						return await admissionIncomplete();
 					}
 					input = await gateInputStamp(root, command, timeoutMs);
-					const cap = options.timeoutCapMs?.();
-					const effectiveTimeoutMs = Math.max(0, Math.min(timeoutMs, deadline() - Date.now(), cap ?? timeoutMs));
 					if (signal?.aborted || lease.signal.aborted) return skipped();
-					if (effectiveTimeoutMs <= 0) return await admissionIncomplete();
-					// Refresh the input immediately before spawn.
+					// Refresh the input before spawn; charge metadata IO to the host clock.
 					if (input !== null) await lease.write({ input, outcome: "running" });
+					const now = Date.now();
+					const executionBudget = lease.waitedForSlot ? admissionDeadline - now : timeoutMs;
+					const effectiveTimeoutMs = Math.max(0, Math.min(executionBudget, hostDeadline - now, options.timeoutCapMs?.() ?? Infinity));
+					if (effectiveTimeoutMs <= 0) return await admissionIncomplete();
 					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal);
 					const elapsed = Date.now() - startedAt;
-					const incomplete = result.cancelled || (result.timedOut && (lease.waitedForSlot || (cap !== undefined && cap < timeoutMs)));
+					const incomplete = result.cancelled || (result.timedOut && effectiveTimeoutMs < timeoutMs);
 					// Cancellation leaves a running receipt for recovery. It is never green.
 					if (result.cancelled) return skipped();
 					if (result.ok) {

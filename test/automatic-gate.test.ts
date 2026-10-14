@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,6 +30,18 @@ const run = async (root: string, options: GatePolicyOptions = {}, signal?: Abort
 	if (deliver) await outcome.delivered?.(); // model the host accepting the follow-up
 	return outcome;
 };
+
+function receiptPath(root: string, directory: string) {
+	return join(directory, `${createHash("sha256").update(realpathSync(root)).digest("hex")}.json`);
+}
+async function occupyCapacity(directory: string) {
+	const first = fixture(), second = fixture(), end = Date.now() + 5_000;
+	const leaseOptions = { directory, slots: 2 };
+	const one = await acquireGateLease(first.root, () => end, undefined, leaseOptions);
+	const two = await acquireGateLease(second.root, () => end, undefined, leaseOptions);
+	expect(one).not.toBeNull(); expect(two).not.toBeNull();
+	return { one, two, leaseOptions };
+}
 
 async function waitFor(path: string) {
 	const end = Date.now() + 3_000;
@@ -148,6 +161,63 @@ describe("automatic gate attempts, not cached green verification", () => {
 		} finally { await one?.release(); await two?.release(); }
 		expect((await run(third.root, { leaseOptions })).inject).toBeUndefined();
 		expect(existsSync(third.log)).toBe(false); // unchanged input does not wait or execute again
+	});
+
+	it("recovers an owner killed while queued without claiming or repeating execution", async () => {
+		const { root, dir, log } = fixture();
+		const { one, two, leaseOptions } = await occupyCapacity(join(dir, "leases"));
+		const source = `
+			import { createGatePolicy } from ${JSON.stringify(new URL("../extensions/agenda/gate.ts", import.meta.url).href)};
+			import { emptyLedger } from ${JSON.stringify(new URL("../extensions/agenda/ledger.ts", import.meta.url).href)};
+			await createGatePolicy(undefined, { leaseOptions: ${JSON.stringify(leaseOptions)}, timeoutCapMs: () => 5000 })
+				.decide({ cwd: ${JSON.stringify(root)}, ledger: emptyLedger, transcript: '', lastAssistantText: undefined }).run();
+		`;
+		const child = spawn(process.execPath, ["--input-type=module", "-e", source], { stdio: ["ignore", "pipe", "pipe"] });
+		const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+		let stderr = "";
+		child.stdout.resume(); child.stderr.on("data", data => { stderr += String(data); });
+		try {
+			const receipt = receiptPath(root, leaseOptions.directory);
+			await waitFor(receipt).catch(error => { throw new Error(`queued owner failed to publish: ${stderr}`, { cause: error }); });
+			expect(JSON.parse(readFileSync(receipt, "utf8")).outcome).toBe("running");
+			expect(existsSync(log)).toBe(false);
+		} finally {
+			child.kill("SIGTERM");
+			const force = setTimeout(() => child.kill("SIGKILL"), 1_000);
+			try { await closed; } finally { clearTimeout(force); }
+			await one?.release(); await two?.release();
+		}
+		const recovered = await run(root, { leaseOptions });
+		expect(recovered.inject).toContain("was interrupted");
+		expect(recovered.inject).toContain("NOT verified");
+		expect(recovered.ledger).toBeUndefined();
+		expect(existsSync(log)).toBe(false);
+		expect((await run(root, { leaseOptions })).inject).toBeUndefined();
+		expect(existsSync(log)).toBe(false);
+	}, 15_000);
+
+	it("refreshes a queued input before execution and retains its resulting pending failure", async () => {
+		const { root, dir, log, check } = fixture();
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; echo BOOM; exit 1`, checkTimeoutMs: 10_000 }));
+		git(root, "add", "."); git(root, "commit", "-qm", "failure");
+		const { one, two, leaseOptions } = await occupyCapacity(join(dir, "leases"));
+		const pending = run(root, { leaseOptions }, undefined, false);
+		try {
+			const receipt = receiptPath(root, leaseOptions.directory);
+			await waitFor(receipt);
+			const queued = JSON.parse(readFileSync(receipt, "utf8")).input;
+			writeFileSync(join(root, "code.txt"), "changed while queued\n");
+			await one?.release();
+			const failed = await pending;
+			expect(failed.inject).toContain("BOOM");
+			const stored = JSON.parse(readFileSync(receipt, "utf8"));
+			expect(stored.outcome).toBe("fail");
+			expect(stored.notice).toBe(failed.inject);
+			expect(stored.input).not.toBe(queued);
+			expect(stored.input).toBe(await gateInputStamp(root, `${check}; echo BOOM; exit 1`, 10_000));
+			expect((await run(root, { leaseOptions })).inject).toBe(failed.inject);
+			expect(readFileSync(log, "utf8")).toBe("x");
+		} finally { await one?.release(); await two?.release(); await pending; }
 	});
 
 	it("an acknowledgement blocked by a worktree owner returns promptly and preserves the notice", async () => {

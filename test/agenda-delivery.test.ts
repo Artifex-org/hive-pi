@@ -47,11 +47,16 @@ describe("agenda notice delivery at actual host boundaries", () => {
 
 	it("retains recovery eligibility when the session disappears before accepting a draft", async () => {
 		const { pi, delivered } = fixture();
-		pi.api.on("agent_before_settle", () => { throw new Error("host died before accepting continuation"); });
+		let crash = true;
+		pi.api.on("agent_before_settle", () => { if (crash) throw new Error("host died before accepting continuation"); });
 		await expect(pi.emit({ type: "agent_before_settle" })).rejects.toThrow("host died");
 		await pi.emit({ type: "session_start" });
-		await pi.emit({ type: "turn_start" }, { branch: [oldEntry] });
+		await pi.emit({ type: "agent_start" }, { branch: [oldEntry] });
 		expect(delivered).not.toHaveBeenCalled();
+		crash = false;
+		const recovered = await pi.emit({ type: "agent_before_settle" });
+		expect(recovered).toContainEqual(expect.objectContaining({ continue: true, entries: [expect.objectContaining({ content: text })] }));
+		expect(delivered).toHaveBeenCalledTimes(1);
 	});
 
 	it("also waits for a committed entry after sendMessage accepts a queued follow-up", async () => {
