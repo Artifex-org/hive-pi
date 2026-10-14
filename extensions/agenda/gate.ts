@@ -222,8 +222,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 			status: capped ? "" : `running: ${command}`,
 			run: async () => {
 				const skipped = () => ({ metric: { outcome: "skip" as const, value: 0 } });
-				let input = await gateInputStamp(root, command, timeoutMs);
-				if (input !== null && stamps?.get(id) === input) return skipped();
+				let input: string | null = null;
 				const startedAt = Date.now();
 				// Admission wait spends the SAME budget as execution, not another
 				// timeout in front of the hook's already-short wall clock.
@@ -265,15 +264,30 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 							await lease.write({ input, outcome: "incomplete", notice });
 						}
 						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice) };
-						stamps?.set(id, input);
+						if (stamps?.get(id) !== input) stamps?.set(id, input);
 						return skipped(); // an acknowledged attempt, never cached green evidence
 					}
-					if (capped || !await lease.admit()) return skipped();
+					if (capped) return skipped();
+					const admissionIncomplete = async () => {
+						input = await gateInputStamp(root, command, timeoutMs);
+						const notice = `The automatic project gate \`${command}\` is INCOMPLETE: the host/admission budget ended before execution. No check was executed. This input is NOT verified. Run quality_gate or a bounded background check with enough time; the Stop hook will not wait again on unchanged input.`;
+						if (input !== null) await lease.write({ input, outcome: "incomplete", notice });
+						return { metric: { outcome: "skip" as const, value: Date.now() - startedAt }, inject: notice,
+							...(input !== null ? { delivered: acknowledge(input, notice) } : {}) };
+					};
+					// Publish BEFORE waiting as well as spawning: an owner killed while
+					// queued must not repeatedly consume its whole budget without notice.
+					if (input !== null) await lease.write({ input, outcome: "running" });
+					if (!await lease.admit()) {
+						if (signal?.aborted || lease.signal.aborted) return skipped();
+						return await admissionIncomplete();
+					}
 					input = await gateInputStamp(root, command, timeoutMs);
 					const cap = options.timeoutCapMs?.();
 					const effectiveTimeoutMs = Math.max(0, Math.min(timeoutMs, deadline() - Date.now(), cap ?? timeoutMs));
-					if (effectiveTimeoutMs <= 0 || signal?.aborted) return skipped();
-					// Publish BEFORE spawn. An external kill must not reset eligibility.
+					if (signal?.aborted || lease.signal.aborted) return skipped();
+					if (effectiveTimeoutMs <= 0) return await admissionIncomplete();
+					// Refresh the input immediately before spawn.
 					if (input !== null) await lease.write({ input, outcome: "running" });
 					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal);
 					const elapsed = Date.now() - startedAt;

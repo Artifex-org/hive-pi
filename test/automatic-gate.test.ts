@@ -113,6 +113,43 @@ describe("automatic gate attempts, not cached green verification", () => {
 		expect((await run(root)).inject).toBeUndefined();
 	});
 
+	it("a retained session stamp cannot hide another session's newer undelivered warning", async () => {
+		const { root, dir, check, log } = fixture();
+		const unavailable = join(dir, "external-dependency-down");
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; test ! -e '${unavailable}'`, checkTimeoutMs: 10_000 }));
+		git(root, "add", "."); git(root, "commit", "-qm", "external dependency");
+		const values = new Map<string, string>();
+		const policy = createGatePolicy({ get: id => values.get(id), set: (id, value) => { if (value === undefined) values.delete(id); else values.set(id, value); } });
+		const sessionA = () => policy.decide({ cwd: root, ledger: emptyLedger, transcript: "", lastAssistantText: undefined })!.run();
+		expect((await sessionA()).metric.outcome).toBe("pass"); // remembers X
+		writeFileSync(join(root, "code.txt"), "Y\n");
+		expect((await run(root)).metric.outcome).toBe("pass");
+		writeFileSync(join(root, "code.txt"), "base\n"); // restores X
+		writeFileSync(unavailable, "down");
+		const failed = await run(root, {}, undefined, false); // B dies before delivering
+		expect(failed.inject).toContain("FAILED");
+		expect((await sessionA()).inject).toBe(failed.inject);
+		expect(readFileSync(log, "utf8")).toBe("xxx"); // no fourth execution
+	});
+
+	it("reports and remembers incomplete admission when capacity stays occupied through the whole deadline", async () => {
+		const first = fixture(), second = fixture(), third = fixture();
+		const leaseOptions = { directory: join(third.dir, "leases"), slots: 2 };
+		const deadline = Date.now() + 5_000;
+		const one = await acquireGateLease(first.root, () => deadline, undefined, leaseOptions);
+		const two = await acquireGateLease(second.root, () => deadline, undefined, leaseOptions);
+		try {
+			const result = await run(third.root, { leaseOptions, timeoutCapMs: () => 150 });
+			expect(result.inject).toContain("INCOMPLETE");
+			expect(result.inject).toContain("No check was executed");
+			expect(result.metric.outcome).toBe("skip");
+			expect(result.ledger).toBeUndefined();
+			expect(existsSync(third.log)).toBe(false);
+		} finally { await one?.release(); await two?.release(); }
+		expect((await run(third.root, { leaseOptions })).inject).toBeUndefined();
+		expect(existsSync(third.log)).toBe(false); // unchanged input does not wait or execute again
+	});
+
 	it("an acknowledgement blocked by a worktree owner returns promptly and preserves the notice", async () => {
 		const { root, dir, check } = fixture();
 		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1`, checkTimeoutMs: 10_000 }));
