@@ -116,7 +116,9 @@ describe("subagent worker invocation", () => {
 		// entries are pinned below; remaining entries stay tool-only and scoped.
 		// Raised 5 -> 6 for fast/worker.ts (Fast mode for delegations), whose
 		// single session_start hook is pinned below.
-		expect(workerExtensionPaths().length).toBeLessThanOrEqual(6);
+		// Raised 6 -> 7 for public-fetch/index.ts: hook-free, broker-only transport,
+		// with real SDK role-grant coverage in public-fetch-worker.test.ts.
+		expect(workerExtensionPaths().length).toBeLessThanOrEqual(7);
 	});
 
 	it("loads the fast worker module, with its one hook and no tools or commands", () => {

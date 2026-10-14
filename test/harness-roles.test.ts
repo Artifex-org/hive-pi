@@ -63,6 +63,7 @@ describe("discoverAgents — package-local roles", () => {
 			"knowledge_get",
 			"knowledge_multi_get",
 			"knowledge_collections",
+			"fetch_public_url",
 		]);
 		expect(agents.filter((agent) => agent.name === "explorer")).toHaveLength(0);
 	});
