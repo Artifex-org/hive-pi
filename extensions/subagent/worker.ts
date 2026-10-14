@@ -34,6 +34,8 @@ import { ensureWorkerAgentDir } from "../mcp-common/config.ts";
  * tools) would put that hook in the worker's loop, which `--no-extensions`
  * exists to prevent.
  *
+ * - `public-fetch/index.ts` — hook-free scoped Hive broker reader. Only roles
+ *   granting `fetch_public_url` can reach it; no local source-origin transport.
  * - `knowledge-tools.ts` — registers tools only, no hooks. A worker's knowledge
  *   path that does not depend on MCP being granted or connected.
  * - `edit-common/rowtool.ts` (HIV-1884) — the row-script `edit` override. THIS
@@ -76,6 +78,7 @@ import { ensureWorkerAgentDir } from "../mcp-common/config.ts";
 const WORKER_EXTENSIONS = [
 	"../loadout/index.ts",
 	"../knowledge-tools.ts",
+	"../public-fetch/index.ts",
 	"../edit-common/rowtool.ts",
 	"../opmode/index.ts",
 	"../meta-media/provider-only.ts",

@@ -3,9 +3,13 @@
  * Hive retains only the directly verified strict JSON-schema tool capability.
  * Meta rejects tool_search; no tool-search/grammar capabilities are added.
  */
-import { metaProvider } from "@earendil-works/pi-ai/providers/meta";
+// Pi 1.0.2's extension loader aliases providers/all explicitly, but rewrites
+// other pi-ai subpaths under compat.js. Use the public built-in registry so
+// native worker startup loads the SAME Meta provider without a loader shim.
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 
-const native = metaProvider();
+const native = builtinProviders().find(provider => provider.id === "meta");
+if (!native) throw new Error("Pi's built-in provider registry is missing Meta.");
 export const META_BASE_URL = native.baseUrl;
 export const metaModels = native.getModels().map(model => ({
 	...model,

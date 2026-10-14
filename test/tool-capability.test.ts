@@ -60,6 +60,7 @@ const READ_ONLY: Record<string, string> = {
 	bugfix_root_cause: "records an in-memory string and restores the tool set",
 	compact_schedule: "sets a flag; compaction itself is pi's",
 	fetch_content: "network read; has its own SSRF vetting per redirect hop",
+	fetch_public_url: "scoped Hive broker read only; no source-origin connection, filesystem write or subprocess",
 	find: "read-only search",
 	watch_media: "network read: hands a media URL to Hive's server-side watcher and returns text; writes nothing, spawns nothing",
 	goal_set: "persists a session entry via pi.appendEntry",

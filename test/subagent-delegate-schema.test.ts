@@ -115,7 +115,7 @@ describe("delegate.ts schema requests", () => {
 describe("the pi subagent tool's schema wiring", () => {
 	function run(params: Record<string, unknown>) {
 		const pi = createFakePi();
-		for (const name of ["read", "grep", "find", "ls", "knowledge_search", "knowledge_grep", "knowledge_get", "knowledge_multi_get", "knowledge_collections"]) {
+		for (const name of ["read", "grep", "find", "ls", "knowledge_search", "knowledge_grep", "knowledge_get", "knowledge_multi_get", "knowledge_collections", "fetch_public_url"]) {
 			pi.api.registerTool({ name, label: name, description: name, parameters: { type: "object", properties: {} } as never, execute: async () => ({ content: [], details: {} }) } as never);
 		}
 		subagentExtension(pi.api);
