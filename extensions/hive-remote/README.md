@@ -252,6 +252,12 @@ enabled; it does not enable remote reporting or approve access. An explicit
 setting, followed by a session restart; no workspace capability is declared
 while it is off. Server policy and approval still apply when it is on.
 
+Workspace requests rejoin the original per-repo decision by default. After an
+expired request, supply a fresh `request_id` to `request_workspace` to open a new
+consent card; reuse that same ID on retries to rejoin the new request. This does
+not reset the old verdict or change approval policy. An expired request without
+a new ID keeps returning its expired verdict.
+
 An approved grant's value is delivered once. A repeated request returning HTTP
 410 means **delivered**, not proof the clone succeeded: inspect the earlier tool
 result for its checkout path or clone error. A transient fetch failure is

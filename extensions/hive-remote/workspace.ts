@@ -225,6 +225,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 		parameters: Type.Object({
 			repo: Type.String({ description: "Catalog name of the repo to request (from list_workspace_catalog), e.g. 'gitops'." }),
 			reason: Type.Optional(Type.String({ description: "One sentence: why this task needs the repo. Shown to the approver." })),
+			request_id: Type.Optional(Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", description: "A fresh ID to deliberately open new consent after expiry. Reuse the same ID to retry/rejoin that request; omit to rejoin the original request." })),
 		}),
 		async execute(_id, params, signal) {
 			if (deps.enabled !== true) return fail(disabled);
@@ -247,11 +248,9 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 				return fail(`"${repoName}" is not a grantable repo. Available: ${names}.`);
 			}
 
-			// Deterministic call id: idempotent per (session, repo). A retry rejoins
-			// the same request rather than opening a duplicate. The trade-off is that
-			// a denied repo stays denied for the rest of the session (until the row
-			// expires) — the idempotency the design chose over free re-asking.
-			const clientCallID = `workspace:${repoName}`;
+			// Rejoin by default, including pending requests and one-shot delivery retries.
+			// An explicit fresh ID starts new consent without mutating the old verdict.
+			const clientCallID = params.request_id ? `workspace:${repoName}:${params.request_id}` : `workspace:${repoName}`;
 
 			const decision = await requestAndWait<WorkspaceGrantValue>(
 				auth,
@@ -266,7 +265,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 				case "deny":
 					return fail(`The request to add "${repoName}" was denied. Continue without it.`);
 				case "expired":
-					return fail(`The request to add "${repoName}" expired without a decision. Continue without it, or ask again later.`);
+					return fail(`The request to add "${repoName}" expired without a decision. To open a new consent card, call request_workspace with a fresh request_id. Reuse that ID on retries; otherwise continue without it.`);
 				case "timeout":
 					return fail(`No decision on "${repoName}" within the wait window — it may still be pending. Continue with other work; request it again later to rejoin the decision.`);
 				case "error":
