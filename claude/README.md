@@ -114,7 +114,11 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
 - **`hook stop`** (sync) — `walkChain` over repo gate (`.pi/harness.json`) →
   drift (every 5th settle with an active goal) → goal judge; the driver's
   turn-failure and hand-back guards first. At most one continuation:
-  `{"decision":"block","reason":…}`. Budget 110 s: every model call's timeout
+  `{"decision":"block","reason":…}`. A per-session transaction lock covers
+  snapshot reads, policy work and state publication; overlapping Stop processes
+  coalesce without another ledger write or continuation. Linux uses the same
+  owner-FD kernel lock primitive; other platforms use the existing PID lock.
+  Linux Stop processing requires util-linux `flock`. Budget 110 s: every model call's timeout
   is clamped to what is left (a clamped timeout is a judge error,
   fail-closed), the gate keeps 70 s back for the goal judge when it will run, is
   not started with under 15 s for it. A host-cutoff is **incomplete**, never
