@@ -19,6 +19,10 @@ Run by the plugin as `$HIVE_NODE $HIVE_PI_BASE/claude/cli.ts <command>` —
 plain Node 24 with type stripping. Nothing here imports `@earendil-works/*` at
 runtime; pi's frontmatter parser and conversation serializer are loaded from
 the **pinned** pi install that `HIVE_PI_BIN` points into (`pi-runtime.ts`).
+Automatic-gate admission likewise resolves `proper-lockfile` (pi's direct
+4.1.2 dependency) from that pinned install, never checkout-local dependencies.
+The runtime test executes lease acquisition with checkout bare imports refused,
+not merely module loading. Plain pi/npm consumers use their installed package.
 
 ## Environment (from the launch)
 
@@ -110,12 +114,62 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
 - **`hook stop`** (sync) — `walkChain` over repo gate (`.pi/harness.json`) →
   drift (every 5th settle with an active goal) → goal judge; the driver's
   turn-failure and hand-back guards first. At most one continuation:
-  `{"decision":"block","reason":…}`. Budget 110 s: every model call's timeout
+  `{"decision":"block","reason":…}`. A per-session transaction lock covers
+  snapshot reads, policy work and state publication; overlapping Stop processes
+  coalesce without another ledger write or continuation. Linux uses the same
+  owner-FD kernel lock primitive; other platforms use the existing PID lock.
+  Linux Stop processing requires util-linux `flock`. Budget 110 s: every model call's timeout
   is clamped to what is left (a clamped timeout is a judge error,
   fail-closed), the gate keeps 70 s back for the goal judge when it will run, is
-  not started with under 15 s for it, and a check cut short by that cap (not
-  by the repo's own `checkTimeoutMs`) is a skip — never "TIMED OUT", never
-  charged; drift is skipped below 100 s left. Drift and the judge (and the
+  not started with under 15 s for it. A host-cutoff is **incomplete**, never
+  green verification or a repo timeout: one charged notice directs explicit
+  `quality_gate`/bounded background verification. A durable attempt receipt is
+  written before spawn; unchanged input is not automatically restarted after
+  success, failure, cancellation or hook death. Linux metadata publication holds a kernel lock through a Node-owned file
+  descriptor, preventing paused owners from expiring during asynchronous writes.
+  Heartbeats coordinate two advisory execution slots (manual checks remain
+  available). On Linux, automatic
+  commands additionally require `flock` (util-linux): native worktree and slot
+  locks stay with the executing wrappers, not the Node owner. Suspended/killed
+  owners cannot recycle a still-running foreground check's capacity. Other
+  platforms retain advisory heartbeat coordination, including metadata writes,
+  not stopped-owner fencing or this execution-lifetime bound.
+  POSIX helpers share `/tmp` regardless of TMPDIR;
+  private mount namespaces do not share these locks. Preparation and waiting
+  spend the same hook budget; Git subprocesses are terminated at that deadline.
+  Synchronous filesystem/kernel stalls and cleanup are not hard OS containment.
+  Large diff/status output is streamed into fingerprints rather than silently
+  disabling identity at a size cutoff. Session shutdown/replacement aborts only
+  that driver's policy work. Process exit/signal cleanup owns all tracked trees
+  across extension-module replicas, using the pinned exit observer without
+  suppressing default termination or lock release. Owner SIGKILL cannot run it.
+  Coordination contention/errors produce bounded explicit unverified notices;
+  no durable notice can be stored while its coordination store is unavailable.
+  A queued configuration change is discarded; execution and source identity are
+  revalidated before reporting a current-input result. Input identity
+  includes HEAD, tracked/untracked changes, command, timeout and Node/PATH;
+  if identity is unavailable, raw command exit status is still reported, but
+  it is NOT input-bound verification and cannot create/reuse an input-bound
+  attempt receipt. Separate delivery/liveness state survives owner death without
+  suppressing future unknown-input attempts. New unknown-input warnings spend
+  the continuation cap even when no command executed; pending notices still
+  replay at the cap until acknowledged. Unique durable notice IDs prevent an
+  old acknowledgement from clearing a newer identical warning. Unknown-input
+  and completed known-input failure charges are idempotent by notice ID in the persisted session ledger;
+  no sidecar flag acknowledges a charge before the ledger is durable. IDs are
+  retained only for the current capped budget cycle and cleared on resolution.
+  Chargeable notices are recovered before new input/configuration eligibility:
+  edits cannot erase a debt, and a historical warning does not verify new input.
+  Native locks are not cgroups: helpers escaping after all lockholders close
+  their descriptors still require OS containment. A skip
+  is **not** cached green evidence. Receipt lookup takes only the
+  worktree lease, not an execution slot. Failed/incomplete warnings are persisted
+  separately and replayed without re-executing, including at the attempt cap.
+  Pi acknowledges only after observing the committed continuation entry;
+  the Stop hook acknowledges after its JSON is written to stdout (not proof
+  that Claude parsed or acted on it). Notice replay does not spend another
+  execution attempt. Drift is
+  skipped below 100 s left. Drift and the judge (and the
   evaluator lookup) are not even considered on a hand-back or a failed API
   turn (`isApiErrorMessage` → `stopReason: error`). The repo gate is not model-backed, so it runs even without
   `HIVE_PI_AGENT_DIR`. `stop_hook_active` is **not** a reason to stand down — a goal loop is
@@ -256,9 +310,13 @@ stderr):
 
 The adapter marks itself `HIVE_PI_HELPER_CHILD=1` (inherited by its pi
 children only — not inferred from `HIVE_PI_AGENT_DIR`, which every process in
-the launch has). Helper children spawn as process groups and are killed by
-group on timeout or cancel (`hive-common/child-tree.ts`); a hook or `brief`
-told to stop (SIGTERM/SIGINT/SIGHUP) kills every group it started. The MCP
+the launch has). Helpers/jobs carry additive per-tree ownership tokens and
+own process groups (`hive-common/child-tree.ts`). On Linux cancellation and
+normal wrapper close discover token-bearing orphans plus live descendants,
+check PID start times, and kill them even across GNU timeout/setsid groups.
+A hook or `brief` told to stop (SIGTERM/SIGINT/SIGHUP) cleans up every tree it
+started. Other platforms/unreadable procfs retain group cleanup; a process
+that scrubs its environment and reparents requires OS-level containment. The MCP
 server on SIGTERM/SIGINT, or when its parent dies (ppid polled every 5 s),
 stops reading, aborts and awaits in-flight requests and background jobs, then
 exits — and closes the session's Chromium (Playwright's own signal handlers

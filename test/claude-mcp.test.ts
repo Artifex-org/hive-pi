@@ -357,6 +357,30 @@ describe("hive_watch_run", () => {
 		expect(launch.spoolRecords().filter((r) => r.kind === "wake")).toHaveLength(1);
 	}, PROCESS_TEST_TIMEOUT_MS);
 
+	it.runIf(process.platform === "linux")("cleans up a pipe-holding escaped worker after the hive wrapper exits", async () => {
+		const cli = fakeHiveCli(0, 0);
+		const marker = join(launch.root, "escaped-worker");
+		writeFileSync(join(launch.root, "bin", "hive"), `#!/bin/bash\nsetsid bash -c 'echo $$ > ${marker}; trap "" TERM HUP; sleep 10' &\nsleep 0.1\nexit 0\n`);
+		const c = await connect(cli.env);
+		let pid = 0;
+		const running = () => {
+			try { const raw = readFileSync(`/proc/${pid}/stat`, "utf8"); return !["Z", "X"].includes(raw.slice(raw.lastIndexOf(")") + 2).split(" ")[0]); }
+			catch { return false; }
+		};
+		try {
+			await c.call("hive_watch_run", { run: RUN, what: "escaping wrapper test" });
+			const end = Date.now() + 5_000;
+			while (!existsSync(marker) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+			pid = Number(readFileSync(marker, "utf8").trim()); expect(pid).toBeGreaterThan(1);
+			const [wake] = await wakes(1);
+			expect(String(wake?.text)).toContain("the run PASSED");
+			expect(running()).toBe(false);
+		} finally {
+			await c.close();
+			if (pid && running()) { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } }
+		}
+	}, PROCESS_TEST_TIMEOUT_MS);
+
 	it("reports a red run as FAILED and points at explain_failure", async () => {
 		const cli = fakeHiveCli(0.1, 1);
 		const c = await connect(cli.env);

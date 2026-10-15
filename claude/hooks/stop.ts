@@ -25,6 +25,9 @@
  * every charge is written BEFORE the block is printed.
  */
 
+import { join } from "node:path";
+import { acquireMetadataLock } from "../../extensions/agenda/execution-admission.ts";
+import { ensureDir, tryLock } from "../state.ts";
 import { classifyHandback, handbackClass } from "../../extensions/hive-common/handback.ts";
 import { walkChain } from "../../extensions/agenda/chain.ts";
 import { createDriftPolicy } from "../../extensions/agenda/drift.ts";
@@ -83,7 +86,23 @@ function readEntries(input: HookInput, deps: StopDeps): PiEntry[] {
 	return withFinalAssistant(readClaudeTranscript(path), input.last_assistant_message);
 }
 
-export async function stopDecision(input: HookInput, deps: StopDeps): Promise<HookOutput> {
+type StopOutput = (NonNullable<HookOutput> & { delivered?: () => Promise<void> }) | null;
+
+export async function stopDecision(input: HookInput, deps: StopDeps): Promise<StopOutput> {
+	// One transaction owns the session snapshot, policy work and publication.
+	// A duplicate Stop must not emit a new charge from an obsolete snapshot.
+	ensureDir(deps.stateDir);
+	const release = process.platform === "linux"
+		? await acquireMetadataLock(join(deps.stateDir, "stop.kernel"))
+		: tryLock(join(deps.stateDir, "stop.lock"));
+	if (!release) {
+		deps.stderr("hive-pi: Stop agenda already running; duplicate coalesced, no current-input verification verdict");
+		return null;
+	}
+	try { return await decideStop(input, deps); } finally { await release(); }
+}
+
+async function decideStop(input: HookInput, deps: StopDeps): Promise<StopOutput> {
 	const now = deps.now ?? Date.now;
 	const deadline = now() + (deps.budgetMs ?? STOP_BUDGET_MS);
 	const left = () => deadline - now();
@@ -115,14 +134,15 @@ export async function stopDecision(input: HookInput, deps: StopDeps): Promise<Ho
 				else agenda.gateStamps[id] = stamp;
 			},
 		},
-		// A check the cap cuts short reports skip (gate.ts), never "TIMED OUT".
+		// A host-cutoff reports incomplete once (gate.ts), never repo timeout
+		// or green verification; the attempt receipt prevents unchanged retries.
 		{ timeoutCapMs: gateTime },
 	);
 	const policies: Policy[] = [
 		{
 			...gate,
 			// Not started at all without real time to run: a check killed at once
-			// tells nothing, and the next settle runs it.
+			// tells nothing. No attempt receipt is written until it actually starts.
 			decide: (context) => (gateTime() < GATE_MIN_REMAINING_MS ? null : gate.decide(context)),
 		},
 	];
@@ -208,5 +228,5 @@ export async function stopDecision(input: HookInput, deps: StopDeps): Promise<Ho
 	);
 	// Persist every charge BEFORE the block reaches Claude.
 	writeAgendaState(deps.stateDir, agenda);
-	return injection ? blockStop(injection.text) : null;
+	return injection ? { ...blockStop(injection.text), ...(injection.delivered ? { delivered: injection.delivered } : {}) } : null;
 }

@@ -36,7 +36,7 @@ import {
 	watchCommand,
 	type ResolveDeps,
 } from "../../extensions/background/watch-run.ts";
-import { killTree } from "../../extensions/hive-common/child-tree.ts";
+import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../../extensions/hive-common/child-tree.ts";
 import type { Spool } from "../spool.ts";
 import type { ToolDefinition, ToolResult } from "./protocol.ts";
 import { cancelledByCaller, type BackgroundJobs } from "./subagent-tool.ts";
@@ -183,7 +183,9 @@ async function watchToEnd(o: {
 		// `-c`, never `-lc`: a login shell's /etc/profile can replace PATH and lose
 		// the launch's `hive` (pi's background/index.ts measured it on Debian).
 		// Detached so the whole group is killed, never only the shell.
-		const child = spawn("bash", ["-c", watchCommand(o.uuid)], { cwd: o.cwd, env: o.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+		const tree = treeSpawnOptions(o.env);
+		const child = spawn("bash", ["-c", watchCommand(o.uuid)], { cwd: o.cwd, ...tree, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+		trackTree(child, true, tree.env[TREE_TOKEN]);
 		const signalGroup = (signal: NodeJS.Signals) => {
 			try {
 				killTree(child, signal, true);

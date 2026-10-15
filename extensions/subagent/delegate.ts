@@ -24,7 +24,7 @@ import * as path from "node:path";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { getPiInvocation } from "../agenda/spawn.ts";
 import { guardWorkerCwd, workerCwdRefusal } from "../guards-common/capability.ts";
-import { killTree, trackTree, treeSpawnOptions } from "../hive-common/child-tree.ts";
+import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 import { distillFailure } from "../harness/distill.ts";
 import { frame } from "../harness/framing.ts";
 import { emptyJsonRunState, foldJsonLine, type WorkerRetries } from "../harness/json-protocol.ts";
@@ -699,7 +699,7 @@ export async function runSingleAgent(
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
-			const tree = treeSpawnOptions();
+			const tree = treeSpawnOptions({ ...process.env, PI_AGENDA_WORKER: "1", ...workerMcpEnv(agent.tools), ...(writerLock?.childEnv ?? {}) });
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: executionCwd,
 				shell: false,
@@ -720,11 +720,10 @@ export async function runSingleAgent(
 				// workerMcpEnv points a worker that can reach MCP at the HTTP-only
 				// agent-dir mirror (mcp-common/config.ts): native MCP has no lazy
 				// lifecycle, so this is what keeps a fan-out cheap.
-				env: { ...process.env, PI_AGENDA_WORKER: "1", ...workerMcpEnv(agent.tools), ...(writerLock?.childEnv ?? {}) },
 				// A Claude helper's worker is a process group (hive-common/child-tree.ts).
 				...tree,
 			});
-			trackTree(proc, tree.detached);
+			trackTree(proc, tree.detached, tree.env[TREE_TOKEN]);
 			// A worker that dies before reading its task closes the pipe (EPIPE):
 			// that is the worker's failure, reported through its exit and stderr,
 			// not an unhandled error event here.

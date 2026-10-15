@@ -35,7 +35,7 @@ export interface AgendaState {
 	ledger: LedgerState;
 	/** Drift's cadence counter (settles since the last probe). */
 	driftSettles: number;
-	/** Gate-retry stamps by gate id: the tree a red gate last ran on. */
+	/** Attempt fingerprints by gate id, including interrupted/green attempts. Not verification receipts. */
 	gateStamps: Record<string, string>;
 }
 
@@ -47,12 +47,21 @@ export function readAgendaState(stateDir: string): AgendaState {
 	const raw = readJson(agendaPath(stateDir));
 	if (raw === undefined) return { ledger: emptyLedger, driftSettles: 0, gateStamps: {} };
 	if (!raw || typeof raw !== "object") throw new Error(`${agendaPath(stateDir)} is not an object`);
-	const doc = raw as { ledger?: { iterations?: unknown }; driftSettles?: unknown; gateStamps?: unknown };
+	const doc = raw as { ledger?: { iterations?: unknown; noticeCharges?: unknown }; driftSettles?: unknown; gateStamps?: unknown };
 	const iterations: Record<string, number> = {};
 	const rawIterations = doc.ledger?.iterations;
 	if (rawIterations && typeof rawIterations === "object") {
 		for (const [id, count] of Object.entries(rawIterations as Record<string, unknown>)) {
 			if (Number.isSafeInteger(count) && (count as number) >= 0) iterations[id] = count as number;
+		}
+	}
+	const noticeCharges: Record<string, string[]> = {};
+	if (doc.ledger?.noticeCharges && typeof doc.ledger.noticeCharges === "object") {
+		for (const [id, notice] of Object.entries(doc.ledger.noticeCharges)) {
+			if (Array.isArray(notice)) {
+				const ids = [...new Set(notice.filter((value): value is string => typeof value === "string" && value.length > 0))].slice(0, iterations[id] ?? 0);
+				if (ids.length) noticeCharges[id] = ids;
+			}
 		}
 	}
 	const gateStamps: Record<string, string> = {};
@@ -62,7 +71,7 @@ export function readAgendaState(stateDir: string): AgendaState {
 		}
 	}
 	const driftSettles = Number.isSafeInteger(doc.driftSettles) && (doc.driftSettles as number) >= 0 ? (doc.driftSettles as number) : 0;
-	return { ledger: { iterations }, driftSettles, gateStamps };
+	return { ledger: { iterations, ...(Object.keys(noticeCharges).length ? { noticeCharges } : {}) }, driftSettles, gateStamps };
 }
 
 export function writeAgendaState(stateDir: string, state: AgendaState): void {

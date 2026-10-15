@@ -33,8 +33,10 @@ Every command reads Claude Code's hook JSON (or MCP JSON-RPC) on stdin. See clau
 
 const stderr = (line: string) => process.stderr.write(`${line}\n`);
 
-function print(output: HookOutput): void {
-	if (output) process.stdout.write(`${JSON.stringify(output)}\n`);
+async function print(output: HookOutput): Promise<void> {
+	if (output) await new Promise<void>((resolve, reject) => {
+		process.stdout.write(`${JSON.stringify(output)}\n`, (error) => error ? reject(error) : resolve());
+	});
 }
 
 async function runHook(name: string, env: AdapterEnv): Promise<void> {
@@ -53,12 +55,12 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 				const { currentEpisode } = await import("./bugfix.ts");
 				rootCause = currentEpisode(dir, control)?.rootCause != null;
 			}
-			print(preToolDecision(input, control, rootCause, env.configDir));
+			await print(preToolDecision(input, control, rootCause, env.configDir));
 			return;
 		}
 		case "prompt": {
 			const { promptDecision } = await import("./hooks/prompt.ts");
-			print(promptDecision(dir ? readControl(dir) : DEFAULT_CONTROL));
+			await print(promptDecision(dir ? readControl(dir) : DEFAULT_CONTROL));
 			return;
 		}
 		case "post-tool": {
@@ -69,7 +71,7 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 				const phase = currentEpisode(dir, readControl(dir))?.machine.phase;
 				bugfixLive = phase !== undefined && phase !== "done" && phase !== "blocked";
 			}
-			print(await postToolDecision(input, dir, bugfixLive));
+			await print(await postToolDecision(input, dir, bugfixLive));
 			return;
 		}
 		case "stop": {
@@ -80,16 +82,17 @@ async function runHook(name: string, env: AdapterEnv): Promise<void> {
 			const { stopDecision } = await import("./hooks/stop.ts");
 			const { lazyLease, resolveEvaluator } = await import("./models.ts");
 			const providers = lazyLease(unavailable ? undefined : env.piAgentDir);
-			print(
-				await stopDecision(input, {
-					stateDir: dir,
-					spool,
-					modelUnavailable: unavailable,
-					resolveEvaluator: () => resolveEvaluator(env, providers),
-					transcriptPath: env.transcript,
-					stderr,
-				}),
-			);
+			const output = await stopDecision(input, {
+				stateDir: dir,
+				spool,
+				modelUnavailable: unavailable,
+				resolveEvaluator: () => resolveEvaluator(env, providers),
+				transcriptPath: env.transcript,
+				stderr,
+			});
+			// Do not suppress a persisted warning until its JSON reached stdout.
+			await print(output);
+			await output?.delivered?.();
 			return;
 		}
 		case "settle": {
@@ -181,7 +184,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 				} catch (error) {
 					const cause = error instanceof Error ? error.message : String(error);
 					stderr(`hive-pi: pre-tool could not decide: ${cause}`);
-					print(denyToolUse(`hive-pi could not check this call against the session's operating mode (${cause}), so it is refused rather than allowed unchecked.`));
+					await print(denyToolUse(`hive-pi could not check this call against the session's operating mode (${cause}), so it is refused rather than allowed unchecked.`));
 				}
 				return 0;
 			}

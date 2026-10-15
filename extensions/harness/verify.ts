@@ -19,40 +19,65 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 
 const GIT_TIMEOUT_MS = 10_000;
+const GIT_OUTPUT_LIMIT = 32 * 1024 * 1024;
 
-/** One git invocation's stdout, or null when it could not run. */
-function gitOutput(cwd: string, args: string[]): Promise<string | null> {
+export interface StampOptions {
+	signal?: AbortSignal;
+	/** Absolute wall deadline shared by all preparation subprocesses and stats. */
+	deadline?: number;
+}
+function exhausted(options: StampOptions): boolean {
+	return Boolean(options.signal?.aborted) || Date.now() >= (options.deadline ?? Infinity);
+}
+
+interface StreamDigest { write(data: string): void; finish(): string }
+
+/** Scalar stdout or a streaming digest; null when the invocation could not run. */
+function gitOutput(cwd: string, args: string[], options: StampOptions = {}, stream?: StreamDigest): Promise<string | null> {
+	if (exhausted(options)) return Promise.resolve(null);
 	return new Promise((resolve) => {
-		let out = "";
-		let settled = false;
+		let out = "", settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let terminate = () => {};
 		const finish = (value: string | null) => {
-			if (!settled) {
-				settled = true;
-				resolve(value);
-			}
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			options.signal?.removeEventListener("abort", terminate);
+			resolve(value);
 		};
 		try {
-			const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"] });
-			const timer = setTimeout(() => {
-				child.kill("SIGKILL");
+			const owned = treeSpawnOptions();
+			const child = spawn("git", args, { ...owned, cwd, stdio: ["ignore", "pipe", "ignore"] });
+			trackTree(child, Boolean(owned.detached), owned.env[TREE_TOKEN]);
+			terminate = () => {
+				if (settled) return;
+				killTree(child, "SIGKILL", Boolean(owned.detached));
+				child.stdout.destroy();
+				child.unref();
 				finish(null);
-			}, GIT_TIMEOUT_MS);
-			child.stdout.on("data", (d: Buffer) => {
-				out += d.toString();
+			};
+			timer = setTimeout(terminate, Math.max(0, Math.min(GIT_TIMEOUT_MS, (options.deadline ?? Infinity) - Date.now())));
+			options.signal?.addEventListener("abort", terminate, { once: true });
+			child.stdout.setEncoding("utf8");
+			child.stdout.on("data", (data: string) => {
+				if (settled) return;
+				try {
+					if (exhausted(options)) return terminate();
+					if (stream) stream.write(data);
+					else { out += data; if (out.length > GIT_OUTPUT_LIMIT) terminate(); }
+				} catch { terminate(); }
 			});
-			child.on("close", (code) => {
-				clearTimeout(timer);
-				finish(code === 0 ? out : null);
+			child.on("close", code => {
+				try { finish(code === 0 && !exhausted(options) ? stream ? stream.finish() : out : null); }
+				catch { finish(null); }
 			});
-			child.on("error", () => {
-				clearTimeout(timer);
-				finish(null);
-			});
-		} catch {
-			finish(null);
-		}
+			child.on("error", () => finish(null));
+			if (options.signal?.aborted) terminate();
+		} catch { finish(null); }
 	});
 }
 
@@ -85,7 +110,7 @@ export function diffStamp(cwd: string): Promise<string | null> {
  * by the writer guard ("did this writer change anything?") and the gate-retry
  * throttle ("has anything changed since the red gate?").
  *
- * Three parts, each closing a hole the measured false "writer produced no
+ * Four parts, each closing a hole the measured false "writer produced no
  * working-tree change" fell through (papercuts 2026-10-02T03:38, 10-03T03:27):
  *
  *   1. `status --porcelain --untracked-files=all` — paths and codes, with every
@@ -94,7 +119,10 @@ export function diffStamp(cwd: string): Promise<string | null> {
  *      inside it changed nothing the stamp could see.
  *   2. a hash of `git diff-index -p HEAD` — tracked content, staged and unstaged. An edit
  *      to an ALREADY-modified file leaves the status line ` M a.ts` unchanged.
- *   3. size + mtime of every untracked, non-ignored file — an edit to an
+ *   3. committed tree identity — a writer that commits content still changed
+ *      the input, but empty commits/amendments remain no-ops. Gates opt into
+ *      HEAD commit identity to invalidate receipts on every new commit.
+ *   4. size + mtime of every untracked, non-ignored file — an edit to an
  *      ALREADY-untracked file changes neither the status nor the diff. Metadata
  *      rather than content so a large untracked asset costs a stat, not a read.
  *
@@ -103,41 +131,54 @@ export function diffStamp(cwd: string): Promise<string | null> {
  * verifier that ran and failed (the gate's bashAvailable rule). That includes
  * a repo with no commit yet — `git diff HEAD` has nothing to diff against.
  */
-export async function treeStamp(cwd: string): Promise<string | null> {
-	const [status, diff, root] = await Promise.all([
-		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
-		// `diff-index`, never `diff HEAD`: the latter rewrites a stat-dirty
-		// index even under --no-optional-locks. diff-index reads the index and
-		// the working tree and writes nothing (a stat-only change patches empty).
-		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"]),
-		// Porcelain paths are relative to the repo ROOT, not to cwd.
-		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"]),
+export async function treeStamp(cwd: string, identity: "tree" | "commit" = "tree", options: StampOptions = {}): Promise<string | null> {
+	if (exhausted(options)) return null;
+	// Resolve the root before streaming untracked stats: porcelain paths are
+	// root-relative even when the caller is in a subdirectory.
+	const [root, head] = await Promise.all([
+		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"], options),
+		gitOutput(cwd, [LOCK_FREE, "rev-parse", identity === "commit" ? "HEAD" : "HEAD^{tree}"], options),
 	]);
-	if (status === null || diff === null || root === null) return null;
-	const untracked = untrackedFingerprint(root.trim(), status);
-	const hash = createHash("sha256").update(diff).update("\0").update(untracked).digest("hex");
-	return `${status}\n#content:${hash}`;
+	if (root === null || head === null || exhausted(options)) return null;
+	const diffHash = createHash("sha256");
+	const [status, diff] = await Promise.all([
+		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"], options, statusDigest(root.trim(), options)),
+		// diff-index reads the index without refreshing/writing it.
+		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"], options, { write: data => { diffHash.update(data); }, finish: () => diffHash.digest("hex") }),
+	]);
+	if (status === null || diff === null || exhausted(options)) return null;
+	return createHash("sha256").update(head).update("\0").update(status).update("\0").update(diff).digest("hex");
 }
 
-/**
- * `path size mtime` for each `??` entry of a `-z` porcelain listing. A file
- * that vanished between the listing and the stat is recorded as gone — that
- * is itself a change.
- */
-function untrackedFingerprint(root: string, porcelainZ: string): string {
-	return porcelainZ
-		.split("\0")
-		.filter((entry) => entry.startsWith("?? "))
-		.map((entry) => entry.slice(3))
-		.map((rel) => {
-			try {
-				const stats = statSync(join(root, rel));
-				return `${rel} ${stats.size} ${stats.mtimeMs}`;
-			} catch {
-				return `${rel} gone`;
+/** Hash arbitrary-size status output, retaining only one NUL-delimited path. */
+function statusDigest(root: string, options: StampOptions): StreamDigest {
+	const listing = createHash("sha256"), metadata = createHash("sha256");
+	let pending = "", renameSource = false;
+	return {
+		write(data) {
+			listing.update(data); pending += data;
+			let end: number;
+			while ((end = pending.indexOf("\0")) !== -1) {
+				if (exhausted(options)) throw new Error("Fingerprint deadline exhausted");
+				const entry = pending.slice(0, end); pending = pending.slice(end + 1);
+				if (renameSource) { renameSource = false; continue; }
+				renameSource = /^[RC]|^.[RC]/.test(entry);
+				if (!entry.startsWith("?? ")) continue;
+				const rel = entry.slice(3); metadata.update(rel).update("\0");
+				try {
+					const stats = statSync(join(root, rel));
+					metadata.update(`${stats.size} ${stats.mtimeMs}\0`);
+				} catch { metadata.update("gone\0"); }
 			}
-		})
-		.join("\n");
+			// Valid filesystem paths fit well below this; reject malformed output,
+			// not a valid listing merely because its total size exceeds 32MiB.
+			if (pending.length > 1024 * 1024) throw new Error("Invalid status record");
+		},
+		finish() {
+			if (pending || renameSource) throw new Error("Incomplete status listing");
+			return `${listing.digest("hex")}:${metadata.digest("hex")}`;
+		},
+	};
 }
 
 export const NO_CHANGE_ERROR =

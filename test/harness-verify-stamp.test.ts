@@ -46,6 +46,12 @@ describe.runIf(hasGit)("treeStamp — the writer guard's stamp", () => {
 		expect(await guardSaysNoChange(cwd, () => writeFileSync(join(cwd, "code.ts"), "three\n"))).toBe(false);
 	});
 
+	it("sees another edit to an already-modified tracked binary", async () => {
+		const cwd = repoWith("asset.bin", "\0one");
+		writeFileSync(join(cwd, "asset.bin"), "\0two");
+		expect(await guardSaysNoChange(cwd, () => writeFileSync(join(cwd, "asset.bin"), "\0three"))).toBe(false);
+	});
+
 	it("sees an edit to an ALREADY-UNTRACKED file", async () => {
 		const cwd = repoWith("code.ts", "one\n");
 		writeFileSync(join(cwd, "window_materials.py"), "def a(): pass\n");
@@ -59,6 +65,21 @@ describe.runIf(hasGit)("treeStamp — the writer guard's stamp", () => {
 		mkdirSync(join(cwd, "verification"));
 		writeFileSync(join(cwd, "verification", "a.py"), "x = 1\n");
 		expect(await guardSaysNoChange(cwd, () => writeFileSync(join(cwd, "verification", "b.py"), "y = 2\n"))).toBe(false);
+	});
+
+	it("sees a writer that commits its change (clean-to-clean is not a no-op)", async () => {
+		const cwd = repoWith("code.ts", "one\n");
+		expect(await guardSaysNoChange(cwd, () => {
+			writeFileSync(join(cwd, "code.ts"), "committed\n");
+			execSync("git add code.ts && git -c user.email=t@t -c user.name=t commit -qm fix", { cwd, stdio: "ignore" });
+		})).toBe(false);
+	});
+
+	it.each(["commit --allow-empty -qm empty", "commit --amend -qm metadata"])("rejects metadata-only %s as a writer no-op", async command => {
+		const cwd = repoWith("code.ts", "one\n");
+		expect(await guardSaysNoChange(cwd, () => {
+			execSync(`git -c user.email=t@t -c user.name=t ${command}`, { cwd, stdio: "ignore" });
+		})).toBe(true);
 	});
 
 	it("is still identical when nothing changed — the guard keeps catching real no-ops", async () => {
