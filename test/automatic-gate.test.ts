@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as verification from "../extensions/harness/verify.ts";
 import { createGatePolicy, gateInputStamp, runCheck } from "../extensions/agenda/gate.ts";
 import { emptyLedger } from "../extensions/agenda/ledger.ts";
+import { readAgendaState, writeAgendaState } from "../claude/agenda-state.ts";
 import { acquireGateLease } from "../extensions/agenda/gate-lease.ts";
 import type { GatePolicyOptions } from "../extensions/agenda/gate.ts";
 
@@ -201,6 +202,27 @@ describe("automatic gate attempts, not cached green verification", () => {
 		} finally { await one?.release(); await two?.release(); }
 	});
 
+	it.each([false, true])("charges an ordinary unknown-input notice once across ledger publication=%s", async published => {
+		const { root, dir, check, log } = fixture(undefined, false);
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1` }));
+		const options = { leaseOptions: { directory: join(dir, "leases") } };
+		const first = await run(root, options, undefined, false);
+		const stateDir = join(dir, "state"); mkdirSync(stateDir);
+		writeAgendaState(stateDir, { ledger: published ? first.ledger!(emptyLedger) : emptyLedger, driftSettles: 0, gateStamps: {} });
+		let ledger = readAgendaState(stateDir).ledger;
+		const replay = await createGatePolicy(undefined, options).decide({ cwd: root, ledger, transcript: "", lastAssistantText: undefined })!.run();
+		if (published) expect(replay.ledger).toBeUndefined();
+		else {
+			expect(replay.ledger).toBeTypeOf("function"); ledger = replay.ledger!(ledger);
+			writeAgendaState(stateDir, { ledger, driftSettles: 0, gateStamps: {} });
+			const again = await createGatePolicy(undefined, options).decide({ cwd: root, ledger: readAgendaState(stateDir).ledger, transcript: "", lastAssistantText: undefined })!.run();
+			expect(again.ledger).toBeUndefined();
+		}
+		expect(ledger.iterations[`gate:${root}`]).toBe(1);
+		expect(readFileSync(log, "utf8")).toBe("x");
+		await replay.delivered?.();
+	});
+
 	it.each(["known", "unknown"])("an old %s-input acknowledgement cannot clear a newer identical notice", async kind => {
 		const { root, dir, check } = fixture(undefined, kind === "known");
 		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1` }));
@@ -232,8 +254,11 @@ describe("automatic gate attempts, not cached green verification", () => {
 		try {
 			const path = receiptPath(root, leaseOptions.directory).replace(/\.json$/, ".notice.json");
 			await waitFor(path);
-			expect(JSON.parse(readFileSync(path, "utf8")).chargeOnReplay).toBe(true);
+			expect(JSON.parse(readFileSync(path, "utf8")).id).toBeTypeOf("string");
 			controller.abort(); await active;
+			// A fresh Stop process recovers the notice, then dies BEFORE persisting its ledger.
+			const source = new URL("../extensions/agenda/gate.ts", import.meta.url).href;
+			execFileSync(process.execPath, ["--input-type=module", "-e", `const {createGatePolicy}=await import(${JSON.stringify(source)}); const work=createGatePolicy(undefined,${JSON.stringify({ leaseOptions })}).decide({cwd:${JSON.stringify(root)},ledger:{iterations:{}},transcript:""}); await work.run();`], { timeout: 3_000 });
 			const recovered = await run(root, { leaseOptions }, undefined, false);
 			expect(recovered.inject).toContain("interrupted");
 			expect(recovered.ledger!(emptyLedger).iterations[`gate:${root}`]).toBe(1);

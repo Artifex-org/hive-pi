@@ -121,9 +121,13 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   green verification or a repo timeout: one charged notice directs explicit
   `quality_gate`/bounded background verification. A durable attempt receipt is
   written before spawn; unchanged input is not automatically restarted after
-  success, failure, cancellation or hook death. Admission is single-flight per
-  canonical worktree and at most two automatic gates per user/host (manual
-  checks remain available). POSIX helpers share `/tmp` regardless of TMPDIR;
+  success, failure, cancellation or hook death. Heartbeat leases coordinate preparation per canonical worktree and two
+  advisory execution slots (manual checks remain available). On Linux, automatic
+  commands additionally require `flock` (util-linux): native worktree and slot
+  locks stay with the executing wrappers, not the Node owner. Suspended/killed
+  owners cannot recycle a still-running foreground check's capacity. Other
+  platforms retain advisory heartbeat limits, not this execution-lifetime bound.
+  POSIX helpers share `/tmp` regardless of TMPDIR;
   private mount namespaces do not share these locks. Preparation and waiting
   spend the same hook budget; Git subprocesses are terminated at that deadline.
   Synchronous filesystem/kernel stalls and cleanup are not hard OS containment.
@@ -143,7 +147,12 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   suppressing future unknown-input attempts. New unknown-input warnings spend
   the continuation cap even when no command executed; pending notices still
   replay at the cap until acknowledged. Unique durable notice IDs prevent an
-  old acknowledgement from clearing a newer identical warning. A skip
+  old acknowledgement from clearing a newer identical warning. Unknown-input
+  notice charges are idempotent by notice ID in the persisted session ledger;
+  no sidecar flag acknowledges a charge before the ledger is durable. IDs are
+  retained only for the current capped budget cycle and cleared on resolution.
+  Native locks are not cgroups: helpers escaping after all lockholders close
+  their descriptors still require OS containment. A skip
   is **not** cached green evidence. Receipt lookup takes only the
   worktree lease, not an execution slot. Failed/incomplete warnings are persisted
   separately and replayed without re-executing, including at the attempt cap.

@@ -16,6 +16,8 @@
 export interface LedgerState {
 	/** Injections charged per item id. Absent means zero. */
 	readonly iterations: Readonly<Record<string, number>>;
+	/** Durable notices charged in this budget cycle; replay never adds entries. */
+	readonly noticeCharges?: Readonly<Record<string, readonly string[]>>;
 }
 
 export const emptyLedger: LedgerState = { iterations: {} };
@@ -37,7 +39,13 @@ export function atCap(ledger: LedgerState, id: string, max: number): boolean {
 
 /** Charge one injection. Returns a new state; never mutates. */
 export function record(ledger: LedgerState, id: string): LedgerState {
-	return { iterations: { ...ledger.iterations, [id]: count(ledger, id) + 1 } };
+	return { ...ledger, iterations: { ...ledger.iterations, [id]: count(ledger, id) + 1 } };
+}
+
+/** Charge a durable notice once, including after a host crashes before delivery. */
+export function recordNotice(ledger: LedgerState, id: string, noticeId: string): LedgerState {
+	if (ledger.noticeCharges?.[id]?.includes(noticeId)) return ledger;
+	return { ...record(ledger, id), noticeCharges: { ...ledger.noticeCharges, [id]: [...(ledger.noticeCharges?.[id] ?? []), noticeId] } };
 }
 
 /**
@@ -45,10 +53,10 @@ export function record(ledger: LedgerState, id: string): LedgerState {
  * so the next genuine failure gets a full budget rather than a spent one.
  */
 export function clear(ledger: LedgerState, id: string): LedgerState {
-	if (!(id in ledger.iterations)) return ledger;
-	const next = { ...ledger.iterations };
-	delete next[id];
-	return { iterations: next };
+	if (!(id in ledger.iterations) && !(id in (ledger.noticeCharges ?? {}))) return ledger;
+	const next = { ...ledger.iterations }, charges = { ...ledger.noticeCharges };
+	delete next[id]; delete charges[id];
+	return { iterations: next, ...(Object.keys(charges).length ? { noticeCharges: charges } : {}) };
 }
 
 /** How many injections remain after the one just charged. Never negative. */

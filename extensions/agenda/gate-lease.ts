@@ -1,11 +1,13 @@
 /**
  * Cross-process admission for automatic gates. One canonical-worktree lease,
- * two execution slots per user/host. Receipts record attempts, not cached green
- * evidence; pending notices survive owner death until the host delivers them.
- * Heartbeats recover crashed owners without trusting namespace-local PIDs.
+ * two advisory execution slots per shared namespace. Linux actual commands add
+ * execution-held native locks: heartbeat expiry is not execution termination.
+ * Receipts record attempts, not green evidence; pending notices survive death.
+ * Heartbeats recover metadata owners without trusting namespace-local PIDs.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import type { ExecutionAdmission } from "./execution-admission.ts";
 import { hostRequire } from "../hive-common/host-dependencies.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,9 +25,10 @@ export interface GateNotice {
 	id: string;
 	configuration: string;
 	content: string;
-	chargeOnReplay: boolean;
 }
 export interface GateLease {
+	/** Native command-lifetime protection where supported; metadata locks remain advisory. */
+	readonly execution?: ExecutionAdmission;
 	signal: AbortSignal;
 	readonly waitedForSlot: boolean;
 	/** Receipt lookup needs only the root lock; reserve a slot only to execute. */
@@ -115,6 +118,7 @@ export async function acquireGateLease(
 		await rename(temp, file);
 	};
 	return {
+		execution: process.platform === "linux" ? { directory, rootLock: `${path}.kernel`, slots: options.slots ?? AUTOMATIC_SLOTS } : undefined,
 		signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
 		get waitedForSlot() { return waitedForSlot; },
 		admit,
@@ -142,7 +146,7 @@ export async function acquireGateLease(
 			}
 			const notice: unknown = JSON.parse(text);
 			if (!notice || typeof notice !== "object" || !("id" in notice) || typeof notice.id !== "string" || !("configuration" in notice) || typeof notice.configuration !== "string" ||
-				!("content" in notice) || typeof notice.content !== "string" || !("chargeOnReplay" in notice) || typeof notice.chargeOnReplay !== "boolean") {
+				!("content" in notice) || typeof notice.content !== "string") {
 				throw new Error(`Invalid automatic gate delivery notice: ${noticePath}`);
 			}
 			return notice as GateNotice;

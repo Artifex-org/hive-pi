@@ -16,13 +16,14 @@
 
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { treeStamp, type StampOptions } from "../harness/verify.ts";
 import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 import { acquireGateLease, type GateLease, type GateLeaseOptions } from "./gate-lease.ts";
+import { EXECUTION_SCRIPT, type ExecutionAdmission } from "./execution-admission.ts";
 import { repoRoot } from "../hive-common/git.ts";
-import { atCap, clear, record, remaining } from "./ledger.ts";
+import { atCap, clear, record, recordNotice, remaining } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyOutcome, PolicyWork } from "./policy.ts";
 
 const DEFAULT_TIMEOUT_MS = 600_000;
@@ -69,6 +70,7 @@ interface CheckResult {
 	output: string;
 	timedOut: boolean;
 	cancelled?: boolean;
+	notExecuted?: boolean;
 }
 
 /**
@@ -99,14 +101,19 @@ async function withGateLease(lease: GateLease, run: () => Promise<PolicyOutcome>
 	try { return await run(); } finally { await lease.release(); }
 }
 
-export function runCheck(command: string, cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<CheckResult> {
+export function runCheck(command: string, cwd: string, timeoutMs: number, signal?: AbortSignal, execution?: ExecutionAdmission): Promise<CheckResult> {
 	if (signal?.aborted) return Promise.resolve({ ok: false, output: "Check cancelled before starting.", timedOut: false, cancelled: true });
 	return new Promise((resolve) => {
 		// Every gate owns its group, including interactive pi (not only Claude
 		// helpers). `-c` preserves the session PATH; a login shell resets it.
 		const grouped = process.platform !== "win32";
 		const tree = treeSpawnOptions();
-		const child = spawn("bash", ["-c", command], { cwd, stdio: ["ignore", "pipe", "pipe"], ...tree, detached: grouped });
+		const marker = execution ? join(execution.directory, `execution-${randomUUID()}.started`) : undefined;
+		const args = execution ? ["-n", "-E", "250", "--", execution.rootLock, "bash", "-c", EXECUTION_SCRIPT, "--", execution.directory, marker!, command, String(execution.slots)] : ["-c", command];
+		const child = spawn(execution ? "flock" : "bash", args, { cwd, stdio: execution ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"], ...tree, detached: grouped });
+		const control = execution ? child.stdio[3] : undefined;
+		let executionStarted = !execution;
+		control?.on("data", () => { executionStarted = true; });
 		trackTree(child, grouped, tree.env[TREE_TOKEN]);
 		let out = "";
 		let timedOut = false;
@@ -119,9 +126,11 @@ export function runCheck(command: string, cwd: string, timeoutMs: number, signal
 			clearTimeout(timer);
 			clearTimeout(drain);
 			signal?.removeEventListener("abort", abort);
-			child.stdout.destroy();
-			child.stderr.destroy();
-			resolve({ ok: code === 0 && !timedOut && !cancelled, output: error ?? out.slice(-OUTPUT_TAIL_CHARS), timedOut, ...(cancelled ? { cancelled: true } : {}) });
+			child.stdout!.destroy();
+			child.stderr!.destroy();
+			control?.destroy();
+			if (marker) try { rmSync(marker, { force: true }); } catch (error) { console.error("hive-pi: execution marker cleanup failed:", error); }
+			resolve({ ok: code === 0 && !timedOut && !cancelled && executionStarted, output: error ?? out.slice(-OUTPUT_TAIL_CHARS), timedOut, ...(cancelled ? { cancelled: true } : {}), ...(!executionStarted ? { notExecuted: true } : {}) });
 		};
 		const stop = () => {
 			killTree(child, "SIGKILL", grouped);
@@ -136,8 +145,8 @@ export function runCheck(command: string, cwd: string, timeoutMs: number, signal
 			out += d.toString();
 			if (out.length > OUTPUT_TAIL_CHARS * 4) out = out.slice(-OUTPUT_TAIL_CHARS * 2);
 		};
-		child.stdout.on("data", collect);
-		child.stderr.on("data", collect);
+		child.stdout!.on("data", collect);
+		child.stderr!.on("data", collect);
 		child.on("close", (code) => finish(code));
 		child.on("error", (err) => finish(null, String(err)));
 	});
@@ -265,8 +274,8 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 				// The lease is released before the host delivers a notice. Acknowledge
 				// under a NEW root-only lease, and never overwrite a different input.
 				const configuration = createHash("sha256").update(JSON.stringify([command, timeoutMs, max, process.execPath, process.version, process.env.PATH ?? ""])).digest("hex");
-				const unboundNotice = async (content: string, chargeOnReplay = false) => {
-					const notice = { id: randomUUID(), configuration, content, chargeOnReplay };
+				const unboundNotice = async (content: string) => {
+					const notice = { id: randomUUID(), configuration, content };
 					await lease.writeNotice(notice); return notice;
 				};
 				const saveNotice = async (outcome: "incomplete" | "timeout" | "fail", notice: string) => {
@@ -281,7 +290,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						await lease.writeNotice(undefined);
 						await lease.write({ input, outcome: "running" });
 					} else {
-						await unboundNotice(`The previous automatic project gate \`${command}\` was interrupted before a verdict. Input identity is unavailable. This is NOT successful verification. Run quality_gate or a bounded background check; automatic warning continuations are bounded by maxInjections.`, true);
+						await unboundNotice(`The previous automatic project gate \`${command}\` was interrupted before a verdict. Input identity is unavailable. This is NOT successful verification. Run quality_gate or a bounded background check; automatic warning continuations are bounded by maxInjections.`);
 					}
 				};
 				const acknowledge = (fingerprint: string | null, notice: string, noticeId: string) => async () => {
@@ -310,9 +319,8 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					// attempt. Recover it even at the positive continuation cap.
 					const pending = await lease.readNotice();
 					if (pending?.configuration === configuration) {
-						if (pending.chargeOnReplay) await lease.writeNotice({ ...pending, chargeOnReplay: false });
 						return { ...skipped(), inject: `Previous automatic gate attempt (source identity was unavailable):\n${pending.content}`, delivered: acknowledge(null, pending.content, pending.id),
-							...(pending.chargeOnReplay && !capped ? { ledger: (state: typeof ledger) => record(state, id) } : {}) };
+							...(!capped && !ledger.noticeCharges?.[id]?.includes(pending.id) ? { ledger: (state: typeof ledger) => recordNotice(state, id, pending.id) } : {}) };
 					}
 					if (pending) await lease.writeNotice(undefined); // obsolete configuration
 					// Deduplicate before waiting for execution capacity.
@@ -340,7 +348,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						return { metric: { outcome: "skip" as const, value: Date.now() - startedAt }, inject: notice, delivered: acknowledge(input, notice, noticeId),
 							// Without input identity there is no attempt deduplication. Charge
 							// the continuation, NOT an executed check, to stop warning loops.
-							...(input === null ? { ledger: (state: typeof ledger) => record(state, id) } : {}) };
+							...(input === null ? { ledger: (state: typeof ledger) => recordNotice(state, id, noticeId) } : {}) };
 					};
 					// Publish BEFORE waiting as well as spawning: an owner killed while
 					// queued must not repeatedly consume its whole budget without notice.
@@ -364,9 +372,13 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					const effectiveTimeoutMs = Math.max(0, Math.min(executionBudget, hostDeadline - now, options.timeoutCapMs?.() ?? Infinity));
 					if (effectiveTimeoutMs <= 0) return await admissionIncomplete();
 					executed = true;
-					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal);
+					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal, lease.execution);
 					// Cancellation leaves a running receipt for recovery. It is never green.
 					if (result.cancelled) return cancelled();
+					if (result.notExecuted) {
+						executed = false;
+						return await admissionIncomplete(`execution-held admission was unavailable: ${result.output.trim() || "another check still holds its native lock"}`);
+					}
 					const configurationChanged = !sameConfiguration();
 					const afterInput = input !== null && !configurationChanged ? await fingerprint() : null;
 					const inputChanged = configurationChanged || (input !== null && afterInput !== null && afterInput !== input);
@@ -403,7 +415,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					metric: { outcome: incomplete ? "skip" : result.timedOut ? "timeout" : "fail", value: elapsed },
 					inject: notice,
 					delivered: acknowledge(input, notice, noticeId),
-					ledger: (state) => record(state, id),
+					ledger: (state) => input === null ? recordNotice(state, id, noticeId) : record(state, id),
 				};
 				}).catch(error => unavailable(`verification could not complete safely: ${String(error)}`));
 			},

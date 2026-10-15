@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { atCap, clear, count, emptyLedger, record, remaining } from "../extensions/agenda/ledger.ts";
+import { atCap, clear, count, emptyLedger, record, recordNotice, remaining } from "../extensions/agenda/ledger.ts";
 
 describe("ledger — counting", () => {
 	it("reports zero for an item it has never seen", () => {
@@ -31,6 +31,16 @@ describe("ledger — counting", () => {
 		const after = record(before, "a");
 		expect(count(before, "a")).toBe(1);
 		expect(count(after, "a")).toBe(2);
+	});
+});
+
+describe("ledger — durable notices", () => {
+	it("charges each identity once, including an older notice replayed after a newer one", () => {
+		const before = recordNotice(recordNotice(emptyLedger, "a", "one"), "a", "two");
+		expect(recordNotice(before, "a", "one")).toBe(before);
+		expect(count(before, "a")).toBe(2);
+		expect(clear(before, "a")).toEqual(emptyLedger);
+		expect(record(before, "b").noticeCharges).toEqual(before.noticeCharges);
 	});
 });
 
