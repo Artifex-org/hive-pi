@@ -164,3 +164,8 @@ Unverified rollout gates above remain unchanged. The subsequent empty-cache revi
 - Completed tool proposals require an explicit tool_use stop; refusal/pause/end-turn/unknown terminals fail closed before Pi handoff. Real-Agent regressions include parked MCP requests without a later masking SDK error.
 - Positive SDK process/ownership tests are Linux-scoped; unsupported-platform/preflight rejection tests remain unconditional. Existing non-SDK portable behavior is unchanged.
 - Typecheck and 142 focused tests passed. Earlier full gate bg-28 passed 5,820 tests/20 skips but predates these changes and is not final-tree evidence.
+
+### Parked-disposal replay review correction
+
+- Every idle handed-off query quarantines its original result-free attempt before disposal, covering cancellation and parked expiry even after the active stream has completed. Canonical correlated results still rebuild safely.
+- Typecheck and 121 provider regressions passed. Prior full gates are superseded by this change; final frozen full gate/review/hosted checks remain required.

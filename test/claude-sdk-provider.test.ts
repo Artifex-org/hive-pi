@@ -524,13 +524,31 @@ describe("stream and lifecycle edge cases", () => {
 		expect(queries).toBe(2); expect(closes).toHaveBeenCalledTimes(2);
 		expect(seen[1]).toMatchObject({ message: { content: [{ type: "tool_result", tool_use_id: "account-call" }] } });
 	});
-	it("abort after toolUse also closes the parked query and leaves canonical results reconstructible", async () => {
-		const close = vi.fn();
-		const { provider, model, root } = await fixture(() => ({ close, [Symbol.asyncIterator]: () => (async function* () { yield* tools(["parked-call"]); })() }));
-		const controller = new AbortController();
-		expect((await provider.streamSimple(model, context(), { signal: controller.signal }).result()).stopReason).toBe("toolUse");
-		controller.abort();
-		await vi.waitFor(async () => expect(await readdir(root)).toEqual([])); expect(close).toHaveBeenCalledOnce();
+	it.each(["abort", "expiry"])("parked %s quarantines the original attempt but allows correlated reconstruction", async boundary => {
+		vi.useFakeTimers();
+		try {
+			const close = vi.fn(); let queries = 0;
+			const f = await fixture(() => {
+				const first = ++queries === 1;
+				return { close, [Symbol.asyncIterator]: () => (async function* () {
+					if (first) yield* tools(["parked-call"]); else yield* text("correlated reconstruction");
+				})() };
+			});
+			const controller = new AbortController(); const ctx = context();
+			const first = await f.provider.streamSimple(f.model, ctx, { signal: controller.signal }).result();
+			expect(first.stopReason).toBe("toolUse");
+			// Pi can already have executed this handoff before cancellation or expiry.
+			if (boundary === "abort") controller.abort();
+			else await vi.advanceTimersByTimeAsync(5 * 60_000);
+			await vi.waitFor(async () => expect(await readdir(f.root)).toEqual([]));
+			expect(close).toHaveBeenCalledOnce();
+			const replay = await f.provider.streamSimple(f.model, ctx).result();
+			expect(replay).toMatchObject({ stopReason: "error", errorMessage: expect.stringMatching(/Ambiguous previous SDK attempt/) });
+			expect(queries).toBe(1);
+			ctx.messages.push(first, ...correlated(first));
+			expect((await f.provider.streamSimple(f.model, ctx).result()).stopReason).toBe("stop");
+			expect(queries).toBe(2); expect(close).toHaveBeenCalledTimes(2);
+		} finally { vi.useRealTimers(); }
 	});
 	it.each(["edit", "compaction", "fork", "model-switch", "steering"])("canonical %s boundary rebuilds without reexecuting old tools", async boundary => {
 		let queries = 0;

@@ -185,6 +185,10 @@ Failed/aborted assistant frames remain in canonical Pi history but are omitted
 from SDK seeds and settlement: Pi does not execute their proposals. An independent
 next user prompt can proceed; the exact failed attempt remains quarantined.
 Actual unresolved handed-off calls still reject; no synthetic results are added.
+Disposing an idle handed-off query also quarantines its original result-free
+attempt, including cancellation and parked expiry. The exact attempt cannot
+restart a potentially side-effecting batch; canonical correlated results still
+permit reconstruction.
 SDK history tool-use IDs and both historical/following result IDs share an SDK-only
 conversion: valid `[a-zA-Z0-9_-]` IDs of 1–64 characters remain unchanged; others
 use the existing SHA-256 fingerprint. Settlement validates uniqueness of converted

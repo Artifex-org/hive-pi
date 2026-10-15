@@ -68,6 +68,9 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 		}
 	}
 	function dispose(state: Parked): Promise<void> {
+		// An idle handoff may already have executed in Pi. Losing the transport
+		// cannot authorize replay of the original, result-free attempt.
+		if (!state.busy && state.expected.length) ambiguous.add(fingerprint(state.prefix));
 		if (state.closing) return state.closing;
 		states.delete(state.key); clearTimeout(state.timer); state.releaseAbort?.();
 		state.closing = cleanupResources(state);
