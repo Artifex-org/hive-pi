@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, readdirSync, rmSync, symlinkSync, utimesSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +44,7 @@ async function contender(root: string, directory?: string, env: NodeJS.ProcessEn
 			await writeFile(process.argv[3], 'executing');
 			console.log('admitted');
 			await release;
+			if (process.env.GATE_WRITE_PASS) await lease.write({ input: "old", outcome: "pass" });
 			await lease.release();
 		}
 	`;
@@ -66,6 +67,27 @@ async function contender(root: string, directory?: string, env: NodeJS.ProcessEn
 }
 
 describe("cross-process automatic gate admission", () => {
+	it.runIf(process.platform === "linux")("keeps metadata ownership through suspension and resumed writes, not heartbeat age", async () => {
+		const { one, options } = fixture();
+		const first = await contender(one, options.directory, { GATE_WRITE_PASS: "1" });
+		expect(first.state).toBe("admitted");
+		first.child.kill("SIGSTOP");
+		let blocked = false;
+		const failure = { input: "new", outcome: "fail" as const, notice: "successor failed", noticeId: "new", charge: true as const };
+		try {
+			const old = new Date(Date.now() - 31_000);
+			for (const entry of readdirSync(options.directory)) if (entry.endsWith(".lock")) utimesSync(join(options.directory, entry), old, old);
+			const successor = await acquireGateLease(one, () => Date.now() + 500, undefined, { ...options, deferSlot: true });
+			blocked = successor === null;
+			if (successor) { await successor.write(failure); await successor.release(); }
+		} finally {
+			first.child.kill("SIGCONT"); first.child.stdin.end("resume and write\n"); await first.closed;
+		}
+		const successor = await own(acquireGateLease(one, () => Date.now() + 500, undefined, { ...options, deferSlot: true }));
+		if (blocked) await successor.write(failure);
+		expect(await successor.read()).toEqual(failure);
+		expect(blocked).toBe(true); // no stale writer can publish after a successor
+	});
 	it("excludes independent processes by root and two host slots, then recovers after release and holder termination", async () => {
 		const { one, two, options } = fixture();
 		const three = `${one}-third`; mkdirSync(three);

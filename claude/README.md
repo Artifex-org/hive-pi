@@ -121,12 +121,15 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   green verification or a repo timeout: one charged notice directs explicit
   `quality_gate`/bounded background verification. A durable attempt receipt is
   written before spawn; unchanged input is not automatically restarted after
-  success, failure, cancellation or hook death. Heartbeat leases coordinate preparation per canonical worktree and two
-  advisory execution slots (manual checks remain available). On Linux, automatic
+  success, failure, cancellation or hook death. Linux metadata publication holds a kernel lock through a Node-owned file
+  descriptor, preventing paused owners from expiring during asynchronous writes.
+  Heartbeats coordinate two advisory execution slots (manual checks remain
+  available). On Linux, automatic
   commands additionally require `flock` (util-linux): native worktree and slot
   locks stay with the executing wrappers, not the Node owner. Suspended/killed
   owners cannot recycle a still-running foreground check's capacity. Other
-  platforms retain advisory heartbeat limits, not this execution-lifetime bound.
+  platforms retain advisory heartbeat coordination, including metadata writes,
+  not stopped-owner fencing or this execution-lifetime bound.
   POSIX helpers share `/tmp` regardless of TMPDIR;
   private mount namespaces do not share these locks. Preparation and waiting
   spend the same hook budget; Git subprocesses are terminated at that deadline.

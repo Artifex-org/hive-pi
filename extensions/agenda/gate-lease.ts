@@ -1,13 +1,14 @@
 /**
  * Cross-process admission for automatic gates. One canonical-worktree lease,
  * two advisory execution slots per shared namespace. Linux actual commands add
- * execution-held native locks: heartbeat expiry is not execution termination.
+ * execution-held native locks and a parent-owned metadata FD lock. Paused
+ * metadata owners cannot expire during asynchronous publication.
  * Receipts record attempts, not green evidence; pending notices survive death.
- * Heartbeats recover metadata owners without trusting namespace-local PIDs.
+ * Non-Linux metadata/slot heartbeat leases remain advisory.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import type { ExecutionAdmission } from "./execution-admission.ts";
+import { acquireMetadataLock, type ExecutionAdmission } from "./execution-admission.ts";
 import { hostRequire } from "../hive-common/host-dependencies.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +28,7 @@ export interface GateNotice {
 	content: string;
 }
 export interface GateLease {
-	/** Native command-lifetime protection where supported; metadata locks remain advisory. */
+	/** Native command-lifetime protection, separate from the metadata owner FD. */
 	readonly execution?: ExecutionAdmission;
 	signal: AbortSignal;
 	readonly waitedForSlot: boolean;
@@ -83,7 +84,7 @@ export async function acquireGateLease(
 			throw error;
 		}
 	};
-	const unlockRoot = await acquire(path);
+	const unlockRoot = process.platform === "linux" ? await acquireMetadataLock(`${path}.metadata.kernel`) : await acquire(path);
 	if (!unlockRoot) return null; // same worktree never queues a duplicate attempt
 	let unlockSlot: (() => Promise<void>) | null = null;
 	let waitedForSlot = false;
@@ -112,6 +113,7 @@ export async function acquireGateLease(
 	const receiptPath = `${path}.json`;
 	const noticePath = `${path}.notice.json`;
 	const save = async (file: string, value: unknown) => {
+		if (released) throw new Error("Automatic gate lease already released");
 		if (controller.signal.aborted) throw controller.signal.reason;
 		const temp = `${file}.${randomUUID()}.tmp`;
 		await writeFile(temp, JSON.stringify(value), { mode: 0o600 });

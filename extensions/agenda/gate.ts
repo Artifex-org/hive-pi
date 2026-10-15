@@ -98,7 +98,17 @@ function bashAvailable(): boolean {
 }
 
 async function withGateLease(lease: GateLease, run: () => Promise<PolicyOutcome>): Promise<PolicyOutcome> {
-	try { return await run(); } finally { await lease.release(); }
+	let outcome: PolicyOutcome | undefined;
+	try { return outcome = await run(); }
+	finally {
+		try { await lease.release(); }
+		catch (error) {
+			if (!outcome?.inject) throw error;
+			// Keep the durable notice ID and its idempotent ledger update. A
+			// generic fallback here would charge the same execution twice.
+			console.error("Automatic gate cleanup failed; preserving pending outcome:", error);
+		}
+	}
 }
 
 export function runCheck(command: string, cwd: string, timeoutMs: number, signal?: AbortSignal, execution?: ExecutionAdmission): Promise<CheckResult> {
@@ -282,7 +292,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					if (input === null) return (await unboundNotice(notice)).id;
 					const noticeId = randomUUID();
 					await lease.write({ input, outcome, notice, noticeId, ...(charge ? { charge: true as const } : {}) });
-					await lease.writeNotice(undefined);
+					// publishRunning already removed the unbound marker before execution.
 					return noticeId;
 				};
 				const publishRunning = async () => {

@@ -1,3 +1,22 @@
+import { spawnSync } from "node:child_process";
+import { open } from "node:fs/promises";
+
+/** Lock the parent's open file description via an inherited FD. No heartbeat
+ * or holder subprocess: pause retains ownership, process death releases it. */
+export async function acquireMetadataLock(path: string): Promise<(() => Promise<void>) | null> {
+	const file = await open(path, "a", 0o600);
+	try {
+		const result = spawnSync("flock", ["-n", "-E", "250", "3"], {
+			stdio: ["ignore", "ignore", "pipe", file.fd], timeout: 1_000, killSignal: "SIGKILL",
+		});
+		if (result.error) throw result.error;
+		if (result.status === 0) return () => file.close();
+		if (result.status !== 250) throw new Error(`Metadata flock failed: ${result.stderr?.toString() || result.signal || result.status}`);
+	} catch (error) { await file.close(); throw error; }
+	await file.close();
+	return null;
+}
+
 /** Linux execution-held locks: heartbeat expiry is never proof a check ended. */
 export interface ExecutionAdmission {
 	directory: string;

@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,6 +66,13 @@ describe.runIf(process.platform === "linux")("execution lifetime survives stale 
 			await until(() => contender.ended);
 			expect(existsSync(third), contender.output).toBe(false);
 			expect(contender.output).toContain("No check was executed");
+			if (mode === "killed-slots") {
+				writeFileSync(release, "release"); // orphans end naturally, not test cleanup
+				await until(() => [...checks.keys()].every(pid => !identity(pid)?.live));
+				await until(() => [0, 1].every(slot => spawnSync("flock", ["-n", "-E", "250", join(directory, `slot-${slot}.kernel`), "true"]).status === 0));
+				const resumed = await runCheck(`printf released > ${quote(third)}`, base, 2_000, undefined, { directory, rootLock: join(directory, "fresh.kernel"), slots: 2 });
+				expect(resumed.ok).toBe(true); expect(readFileSync(third, "utf8")).toBe("released");
+			}
 		} finally {
 			writeFileSync(release, "release");
 			for (const owner of owners) if (!owner.ended) { owner.child.kill("SIGCONT"); owner.child.kill("SIGTERM"); }

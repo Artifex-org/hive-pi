@@ -9,6 +9,7 @@ import { createGatePolicy, gateInputStamp, runCheck } from "../extensions/agenda
 import { emptyLedger } from "../extensions/agenda/ledger.ts";
 import { readAgendaState, writeAgendaState } from "../claude/agenda-state.ts";
 import { acquireGateLease } from "../extensions/agenda/gate-lease.ts";
+import * as gateLeases from "../extensions/agenda/gate-lease.ts";
 import type { GatePolicyOptions } from "../extensions/agenda/gate.ts";
 
 const dirs: string[] = [];
@@ -125,6 +126,28 @@ describe("automatic gate attempts, not cached green verification", () => {
 			try { expect((await receiptLease!.read())?.outcome).toBe("incomplete"); }
 			finally { await receiptLease?.release(); }
 		} finally { clearTimeout(release); await one?.release(); await two?.release(); }
+	});
+
+	it("retains one durable charge through a release error after failure publication", async () => {
+		const { root, log, check } = fixture();
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1`, maxInjections: 3 }));
+		const acquire = gateLeases.acquireGateLease;
+		vi.spyOn(gateLeases, "acquireGateLease").mockImplementationOnce(async (...args) => {
+			const lease = await acquire(...args);
+			if (lease) {
+				const release = lease.release;
+				lease.release = async () => { await release(); throw new Error("transient release failure"); };
+			}
+			return lease;
+		});
+		const first = await run(root, {}, undefined, false);
+		expect(first.inject).toContain("FAILED");
+		const ledger = first.ledger!(emptyLedger);
+		expect(ledger.iterations[`gate:${root}`]).toBe(1);
+		const replay = await createGatePolicy().decide({ cwd: root, ledger, transcript: "", lastAssistantText: undefined })!.run();
+		expect(replay.inject).toContain("FAILED"); expect(replay.ledger).toBeUndefined();
+		expect(readFileSync(log, "utf8")).toBe("x");
+		await replay.delivered?.();
 	});
 
 	it("replays an undelivered terminal warning without re-running the check", async () => {
@@ -317,6 +340,10 @@ describe("automatic gate attempts, not cached green verification", () => {
 		expect(stale.metric.outcome).toBe("skip");
 		expect(stale.inject).toContain("INCOMPLETE");
 		expect(stale.inject).toContain("input changed");
+		const recovered = await run(root);
+		expect(recovered.metric.outcome).toBe("skip");
+		expect(recovered.inject).toBe(`Recovered previous automatic gate attempt (not current-input verification):\n${stale.inject}`);
+		expect(readFileSync(log, "utf8")).toBe("x");
 		expect((await run(root)).metric.outcome).toBe("pass");
 		expect(readFileSync(log, "utf8")).toBe("xx");
 	});
@@ -396,7 +423,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 			expect(stored.notice).toBe(failed.inject);
 			expect(stored.input).not.toBe(queued);
 			expect(stored.input).toBe(await gateInputStamp(root, `${check}; echo BOOM; exit 1`, 10_000));
-			expect((await run(root, { leaseOptions })).inject).toBe(failed.inject);
+			expect((await run(root, { leaseOptions })).inject).toBe(`Recovered previous automatic gate attempt (not current-input verification):\n${failed.inject}`);
 			expect(readFileSync(log, "utf8")).toBe("x");
 		} finally { await one?.release(); await two?.release(); await pending; }
 	});
@@ -412,7 +439,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 		try {
 			await Promise.race([first.delivered!(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("notice acknowledgement blocked")), 500))]);
 		} finally { await held?.release(); }
-		expect((await run(root, { leaseOptions })).inject).toBe(first.inject);
+		expect((await run(root, { leaseOptions })).inject).toBe(`Recovered previous automatic gate attempt (not current-input verification):\n${first.inject}`);
 	});
 
 	it("a cached attempt skips promptly even when all execution slots are occupied", async () => {
