@@ -123,9 +123,16 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   written before spawn; unchanged input is not automatically restarted after
   success, failure, cancellation or hook death. Admission is single-flight per
   canonical worktree and at most two automatic gates per user/host (manual
-  checks remain available). Waiting spends the same hook budget. Input identity
+  checks remain available). POSIX helpers share `/tmp` regardless of TMPDIR;
+  private mount namespaces do not share these locks. Preparation and waiting
+  spend the same hook budget; Git subprocesses are terminated at that deadline.
+  Synchronous filesystem/kernel stalls and cleanup are not hard OS containment.
+  A queued configuration change is discarded; execution and source identity are
+  revalidated before reporting a current-input result. Input identity
   includes HEAD, tracked/untracked changes, command, timeout and Node/PATH;
-  a skip is **not** cached green evidence. Receipt lookup takes only the
+  if identity is unavailable, raw command exit status is still reported, but
+  it is NOT input-bound verification and cannot create/reuse a receipt. A skip
+  is **not** cached green evidence. Receipt lookup takes only the
   worktree lease, not an execution slot. Failed/incomplete warnings are persisted
   separately and replayed without re-executing, including at the attempt cap.
   Pi acknowledges only after observing the committed continuation entry;

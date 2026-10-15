@@ -18,7 +18,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import { treeStamp } from "../harness/verify.ts";
+import { treeStamp, type StampOptions } from "../harness/verify.ts";
 import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 import { acquireGateLease, type GateLeaseOptions } from "./gate-lease.ts";
 import { repoRoot } from "../hive-common/git.ts";
@@ -173,8 +173,8 @@ export interface GatePolicyOptions {
 }
 
 /** Input identity includes HEAD (via treeStamp), gate command/budget and runtime. */
-export async function gateInputStamp(root: string, command: string, timeoutMs: number): Promise<string | null> {
-	const stamp = await treeStamp(root, "commit");
+export async function gateInputStamp(root: string, command: string, timeoutMs: number, options: StampOptions = {}): Promise<string | null> {
+	const stamp = await treeStamp(root, "commit", options);
 	if (stamp === null) return null;
 	return createHash("sha256").update(JSON.stringify([stamp, command, timeoutMs, process.version, process.execPath, process.env.PATH])).digest("hex");
 }
@@ -195,6 +195,12 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 		const id = gateItemId(root);
 		const max = loaded.config.maxInjections ?? DEFAULT_MAX_INJECTIONS;
 		const timeoutMs = loaded.config.checkTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+		const sameConfiguration = () => {
+			const current = loadConfig(root);
+			return current?.root === root && current.config.check === command &&
+				(current.config.checkTimeoutMs ?? DEFAULT_TIMEOUT_MS) === timeoutMs &&
+				(current.config.maxInjections ?? DEFAULT_MAX_INJECTIONS) === max;
+		};
 
 		// Explicitly disabled items do nothing. A spent execution budget must
 		// still recover warnings from its final, potentially undelivered attempt.
@@ -235,6 +241,12 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 				const leaseOptions = { ...options.leaseOptions, deferSlot: true };
 				const lease = await acquireGateLease(root, deadline, signal, leaseOptions);
 				if (!lease) return skipped();
+				const preparationDeadline = () => Math.min(hostDeadline, lease.waitedForSlot ? admissionDeadline : Infinity, Date.now() + Math.max(0, options.timeoutCapMs?.() ?? Infinity));
+				const fingerprint = () => {
+					const end = preparationDeadline();
+					return lease.signal.aborted || Date.now() >= end ? Promise.resolve(null)
+						: gateInputStamp(root, command, timeoutMs, { signal: lease.signal, deadline: end });
+				};
 				// The lease is released before the host delivers a notice. Acknowledge
 				// under a NEW root-only lease, and never overwrite a different input.
 				const acknowledge = (fingerprint: string, notice: string) => async () => {
@@ -257,7 +269,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 				};
 				try {
 					// Deduplicate before waiting for execution capacity.
-					input = await gateInputStamp(root, command, timeoutMs);
+					input = await fingerprint();
 					const previous = await lease.read();
 					if (input !== null && previous?.input === input) {
 						let notice = previous.notice;
@@ -270,9 +282,11 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						return skipped(); // an acknowledged attempt, never cached green evidence
 					}
 					if (capped) return skipped();
-					const admissionIncomplete = async () => {
-						input = await gateInputStamp(root, command, timeoutMs);
-						const notice = `The automatic project gate \`${command}\` is INCOMPLETE: the host/admission budget ended before execution. No check was executed. This input is NOT verified. Run quality_gate or a bounded background check with enough time; the Stop hook will not wait again on unchanged input.`;
+					const admissionIncomplete = async (reason = "the host/admission budget ended before execution") => {
+						// Never start more preparation after exhaustion; retain any known input
+						// so a killed/expired waiter cannot silently repeat its whole budget.
+						const recovery = input !== null ? "The Stop hook will not wait again on unchanged input." : "Input identity is unavailable; automatic receipt reuse is disabled.";
+						const notice = `The automatic project gate \`${command}\` is INCOMPLETE: ${reason}. No check was executed. This input is NOT verified. Run quality_gate or a bounded background check with enough time. ${recovery}`;
 						if (input !== null) await lease.write({ input, outcome: "incomplete", notice });
 						return { metric: { outcome: "skip" as const, value: Date.now() - startedAt }, inject: notice,
 							...(input !== null ? { delivered: acknowledge(input, notice) } : {}) };
@@ -285,8 +299,13 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						if (signal?.aborted || lease.signal.aborted) return skipped();
 						return await admissionIncomplete();
 					}
-					input = await gateInputStamp(root, command, timeoutMs);
+					if (!sameConfiguration()) return await admissionIncomplete("the gate configuration changed while queued; settle again to use the current configuration");
+					const refreshed = await fingerprint();
 					if (signal?.aborted || lease.signal.aborted) return skipped();
+					if (Date.now() >= preparationDeadline()) return await admissionIncomplete();
+					if (input !== null && refreshed === null) return await admissionIncomplete("input identity could not be revalidated before execution");
+					input = refreshed;
+					if (!sameConfiguration()) return await admissionIncomplete("the gate configuration changed during preparation; settle again to use the current configuration");
 					// Refresh the input before spawn; charge metadata IO to the host clock.
 					if (input !== null) await lease.write({ input, outcome: "running" });
 					const now = Date.now();
@@ -296,14 +315,17 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal);
 					// Cancellation leaves a running receipt for recovery. It is never green.
 					if (result.cancelled) return skipped();
-					const inputChanged = input !== null && await gateInputStamp(root, command, timeoutMs) !== input;
+					const configurationChanged = !sameConfiguration();
+					const afterInput = input !== null && !configurationChanged ? await fingerprint() : null;
+					const inputChanged = configurationChanged || (input !== null && afterInput !== null && afterInput !== input);
+					const unvalidated = input !== null && !configurationChanged && afterInput === null;
 					const elapsed = Date.now() - startedAt;
-					const incomplete = inputChanged || (result.timedOut && effectiveTimeoutMs < timeoutMs);
-					if (result.ok && !inputChanged) {
+					const incomplete = inputChanged || unvalidated || (result.timedOut && effectiveTimeoutMs < timeoutMs);
+					if (result.ok && !incomplete) {
 						if (input !== null) { await lease.write({ input, outcome: "pass" }); stamps?.set(id, input); }
 						return { metric: { outcome: "pass", value: elapsed }, ledger: (state) => clear(state, id) };
 					}
-					const header = inputChanged
+					const header = inputChanged || (unvalidated && Date.now() < preparationDeadline())
 						? `The automatic project gate \`${command}\` is INCOMPLETE: its input changed or could not be revalidated after execution. This result does NOT verify the current input. Settle again to check changed input; if input identity is unavailable, use quality_gate explicitly.`
 						: incomplete
 						? `The automatic project gate \`${command}\` is INCOMPLETE: the host/admission budget ended before a verdict. This is NOT successful verification. Run quality_gate or a bounded background check with enough time; the Stop hook will not restart unchanged input.`

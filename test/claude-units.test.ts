@@ -8,7 +8,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as verification from "../extensions/harness/verify.ts";
 
 import { recapTranscript } from "../extensions/agenda/recap.ts";
 import { createGatePolicy } from "../extensions/agenda/gate.ts";
@@ -240,19 +241,26 @@ describe("the repo gate under a host's wall clock", () => {
 		const repo = join(tmp(), "repo");
 		mkdirSync(join(repo, ".pi"), { recursive: true });
 		execFileSync("git", ["init", "-q", repo]);
-		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: "sleep 5", checkTimeoutMs: 600000 }));
-		const stamps = new Map<string, string>();
-		const policy = createGatePolicy(
-			{ get: (id) => stamps.get(id), set: (id, stamp) => (stamp === undefined ? stamps.delete(id) : stamps.set(id, stamp)) },
-			{ timeoutCapMs: () => 200, leaseOptions: { directory: tmp() } },
-		);
-		const work = policy.decide({ cwd: repo, ledger: emptyLedger, lastAssistantText: undefined, transcript: "" });
-		const outcome = await work?.run();
-		expect(outcome?.metric).toEqual({ outcome: "skip", value: expect.any(Number) });
-		expect(outcome?.inject).toContain("INCOMPLETE");
-		expect(outcome?.inject).not.toContain("TIMED OUT");
-		expect(outcome?.ledger!(emptyLedger).iterations[`gate:${repo}`]).toBe(1);
-		expect(stamps.size).toBe(0); // no committed HEAD: cannot fingerprint this fixture
+		const started = join(tmp(), "started");
+		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: `echo started > '${started}'; sleep 5`, checkTimeoutMs: 600000 }));
+		// Isolate COMMAND cutoff/charging from preparation (covered with real
+		// subprocesses separately); retain the fixture's unavailable identity.
+		const preparation = vi.spyOn(verification, "treeStamp").mockResolvedValue(null);
+		try {
+			const stamps = new Map<string, string>();
+			const policy = createGatePolicy(
+				{ get: (id) => stamps.get(id), set: (id, stamp) => (stamp === undefined ? stamps.delete(id) : stamps.set(id, stamp)) },
+				{ timeoutCapMs: () => 200, leaseOptions: { directory: tmp() } },
+			);
+			const work = policy.decide({ cwd: repo, ledger: emptyLedger, lastAssistantText: undefined, transcript: "" });
+			const outcome = await work?.run();
+			expect(outcome?.metric).toEqual({ outcome: "skip", value: expect.any(Number) });
+			expect(outcome?.inject).toContain("INCOMPLETE");
+			expect(outcome?.inject).not.toContain("TIMED OUT");
+			expect(outcome?.ledger!(emptyLedger).iterations[`gate:${repo}`]).toBe(1);
+			expect(stamps.size).toBe(0); // no committed HEAD: cannot fingerprint this fixture
+			expect(existsSync(started)).toBe(true); // the charged attempt really executed
+		} finally { preparation.mockRestore(); }
 	});
 
 	it("still reports the repo's OWN timeout as a timeout", async () => {

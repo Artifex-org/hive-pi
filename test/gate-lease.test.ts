@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,13 +28,16 @@ async function own(lease: Promise<GateLease | null>) {
 	const value = await lease; expect(value).not.toBeNull(); leases.push(value!); return value!;
 }
 
-async function contender(root: string, directory: string) {
+async function contender(root: string, directory?: string, env: NodeJS.ProcessEnv = {}) {
 	const marker = join(root, `execution-${workers.length}`);
 	const source = `
 		import { acquireGateLease } from ${JSON.stringify(new URL("../extensions/agenda/gate-lease.ts", import.meta.url).href)};
 		import { writeFile } from 'node:fs/promises';
+		// Isolate the DEFAULT-directory test from real users' slots without
+		// changing its directory selection: an impossible negative uid namespace.
+		if (process.env.GATE_TEST_UID) process.getuid = () => Number(process.env.GATE_TEST_UID);
 		const end = Date.now() + 300;
-		const lease = await acquireGateLease(process.argv[1], () => end, undefined, { directory: process.argv[2], slots: 2 });
+		const lease = await acquireGateLease(process.argv[1], () => end, undefined, { directory: process.argv[2] || undefined, slots: 2 });
 		if (!lease) console.log('blocked');
 		else {
 			const release = new Promise(resolve => process.stdin.once('data', resolve));
@@ -44,7 +47,7 @@ async function contender(root: string, directory: string) {
 			await lease.release();
 		}
 	`;
-	const child = spawn(process.execPath, ["--input-type=module", "-e", source, root, directory, marker], { stdio: ["pipe", "pipe", "pipe"] });
+	const child = spawn(process.execPath, ["--input-type=module", "-e", source, root, directory ?? "", marker], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
 	const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
 	workers.push({ child, closed });
 	let stderr = "";
@@ -79,6 +82,29 @@ describe("cross-process automatic gate admission", () => {
 		second.child.kill("SIGTERM"); await second.closed;
 		expect((await contender(two, options.directory)).state).toBe("admitted");
 	}, 15_000);
+
+	it.runIf(process.platform !== "win32")("coordinates default admission across distinct process TMPDIR values", async () => {
+		const { one, two } = fixture();
+		const tmpOne = join(one, "tmp"), tmpTwo = join(two, "tmp"); mkdirSync(tmpOne); mkdirSync(tmpTwo);
+		const uid = String(-process.pid); // no real user can own this uid
+		dirs.push(join("/tmp", `hive-pi-auto-gates-${uid}`));
+		expect((await contender(one, undefined, { TMPDIR: tmpOne, GATE_TEST_UID: uid })).state).toBe("admitted");
+		const duplicate = await contender(one, undefined, { TMPDIR: tmpTwo, GATE_TEST_UID: uid });
+		expect(duplicate.state).toBe("blocked"); expect(existsSync(duplicate.marker)).toBe(false);
+		expect((await contender(two, undefined, { TMPDIR: tmpTwo, GATE_TEST_UID: uid })).state).toBe("admitted");
+		const third = join(two, "third"); mkdirSync(third);
+		const overCapacity = await contender(third, undefined, { TMPDIR: tmpOne, GATE_TEST_UID: uid });
+		expect(overCapacity.state).toBe("blocked"); expect(existsSync(overCapacity.marker)).toBe(false);
+	});
+
+	it.runIf(process.platform !== "win32").each(["shared", "symlink"])("rejects a %s coordination directory instead of trusting public state", async kind => {
+		const { one, options } = fixture();
+		if (kind === "shared") { mkdirSync(options.directory); chmodSync(options.directory, 0o777); }
+		else symlinkSync(one, options.directory, "dir");
+		const attempt = acquireGateLease(one, () => Date.now() + 1_000, undefined, options);
+		try { await expect(attempt).rejects.toThrow(); }
+		finally { await (await attempt.catch(() => null))?.release(); }
+	});
 
 	it("canonicalizes symlinks and refuses another lease on the same worktree", async () => {
 		const { one, options } = fixture();

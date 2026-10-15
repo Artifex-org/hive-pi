@@ -19,40 +19,57 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 
 const GIT_TIMEOUT_MS = 10_000;
+const GIT_OUTPUT_LIMIT = 32 * 1024 * 1024;
+
+export interface StampOptions {
+	signal?: AbortSignal;
+	/** Absolute wall deadline shared by all preparation subprocesses and stats. */
+	deadline?: number;
+}
+function exhausted(options: StampOptions): boolean {
+	return Boolean(options.signal?.aborted) || Date.now() >= (options.deadline ?? Infinity);
+}
 
 /** One git invocation's stdout, or null when it could not run. */
-function gitOutput(cwd: string, args: string[]): Promise<string | null> {
+function gitOutput(cwd: string, args: string[], options: StampOptions = {}): Promise<string | null> {
+	if (exhausted(options)) return Promise.resolve(null);
 	return new Promise((resolve) => {
-		let out = "";
-		let settled = false;
+		let out = "", settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let terminate = () => {};
 		const finish = (value: string | null) => {
-			if (!settled) {
-				settled = true;
-				resolve(value);
-			}
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			options.signal?.removeEventListener("abort", terminate);
+			resolve(value);
 		};
 		try {
-			const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"] });
-			const timer = setTimeout(() => {
-				child.kill("SIGKILL");
+			const owned = treeSpawnOptions();
+			const child = spawn("git", args, { ...owned, cwd, stdio: ["ignore", "pipe", "ignore"] });
+			trackTree(child, Boolean(owned.detached), owned.env[TREE_TOKEN]);
+			terminate = () => {
+				if (settled) return;
+				killTree(child, "SIGKILL", Boolean(owned.detached));
+				child.stdout.destroy();
+				child.unref();
 				finish(null);
-			}, GIT_TIMEOUT_MS);
-			child.stdout.on("data", (d: Buffer) => {
-				out += d.toString();
+			};
+			timer = setTimeout(terminate, Math.max(0, Math.min(GIT_TIMEOUT_MS, (options.deadline ?? Infinity) - Date.now())));
+			options.signal?.addEventListener("abort", terminate, { once: true });
+			child.stdout.setEncoding("utf8");
+			child.stdout.on("data", (data: string) => {
+				if (settled) return;
+				out += data;
+				if (out.length > GIT_OUTPUT_LIMIT) terminate();
 			});
-			child.on("close", (code) => {
-				clearTimeout(timer);
-				finish(code === 0 ? out : null);
-			});
-			child.on("error", () => {
-				clearTimeout(timer);
-				finish(null);
-			});
-		} catch {
-			finish(null);
-		}
+			child.on("close", code => finish(code === 0 && !exhausted(options) ? out : null));
+			child.on("error", () => finish(null));
+			if (options.signal?.aborted) terminate();
+		} catch { finish(null); }
 	});
 }
 
@@ -106,23 +123,25 @@ export function diffStamp(cwd: string): Promise<string | null> {
  * verifier that ran and failed (the gate's bashAvailable rule). That includes
  * a repo with no commit yet — `git diff HEAD` has nothing to diff against.
  */
-export async function treeStamp(cwd: string, identity: "tree" | "commit" = "tree"): Promise<string | null> {
+export async function treeStamp(cwd: string, identity: "tree" | "commit" = "tree", options: StampOptions = {}): Promise<string | null> {
+	if (exhausted(options)) return null;
 	const [status, diff, root, head] = await Promise.all([
-		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"]),
+		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"], options),
 		// `diff-index`, never `diff HEAD`: the latter rewrites a stat-dirty
 		// index even under --no-optional-locks. diff-index reads the index and
 		// the working tree and writes nothing (a stat-only change patches empty).
-		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"]),
+		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"], options),
 		// Porcelain paths are relative to the repo ROOT, not to cwd.
-		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"]),
+		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"], options),
 		// Writers must change CONTENT, not just make an empty/amended commit.
 		// Gate receipts additionally invalidate on commit identity.
-		gitOutput(cwd, [LOCK_FREE, "rev-parse", identity === "commit" ? "HEAD" : "HEAD^{tree}"]),
+		gitOutput(cwd, [LOCK_FREE, "rev-parse", identity === "commit" ? "HEAD" : "HEAD^{tree}"], options),
 	]);
-	if (status === null || diff === null || root === null || head === null) return null;
-	const untracked = untrackedFingerprint(root.trim(), status);
+	if (status === null || diff === null || root === null || head === null || exhausted(options)) return null;
+	const untracked = untrackedFingerprint(root.trim(), status, options);
+	if (untracked === null || exhausted(options)) return null;
 	const hash = createHash("sha256").update(head).update("\0").update(diff).update("\0").update(untracked).digest("hex");
-	return `${status}\n#content:${hash}`;
+	return exhausted(options) ? null : `${status}\n#content:${hash}`;
 }
 
 /**
@@ -130,20 +149,18 @@ export async function treeStamp(cwd: string, identity: "tree" | "commit" = "tree
  * that vanished between the listing and the stat is recorded as gone — that
  * is itself a change.
  */
-function untrackedFingerprint(root: string, porcelainZ: string): string {
-	return porcelainZ
-		.split("\0")
-		.filter((entry) => entry.startsWith("?? "))
-		.map((entry) => entry.slice(3))
-		.map((rel) => {
-			try {
-				const stats = statSync(join(root, rel));
-				return `${rel} ${stats.size} ${stats.mtimeMs}`;
-			} catch {
-				return `${rel} gone`;
-			}
-		})
-		.join("\n");
+function untrackedFingerprint(root: string, porcelainZ: string, options: StampOptions): string | null {
+	const rows: string[] = [];
+	for (const entry of porcelainZ.split("\0")) {
+		if (exhausted(options)) return null;
+		if (!entry.startsWith("?? ")) continue;
+		const rel = entry.slice(3);
+		try {
+			const stats = statSync(join(root, rel));
+			rows.push(`${rel} ${stats.size} ${stats.mtimeMs}`);
+		} catch { rows.push(`${rel} gone`); }
+	}
+	return rows.join("\n");
 }
 
 export const NO_CHANGE_ERROR =

@@ -6,7 +6,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,8 +50,15 @@ export async function acquireGateLease(
 	// A supplied but invalid pin must fail, never silently use another runtime.
 	const require = createRequire(process.env.HIVE_PI_BIN ? realpathSync(process.env.HIVE_PI_BIN) : import.meta.url);
 	const lockfile: typeof import("proper-lockfile") = require("proper-lockfile");
-	const directory = options.directory ?? join(tmpdir(), `hive-pi-auto-gates-${process.getuid?.() ?? "user"}`);
+	// POSIX helpers must share the SAME location even when their TMPDIR differs.
+	// This coordinates a shared filesystem/mount namespace, not isolated hosts.
+	const directory = options.directory ?? join(process.platform === "win32" ? tmpdir() : "/tmp", `hive-pi-auto-gates-${process.getuid?.() ?? "user"}`);
 	await mkdir(directory, { recursive: true, mode: 0o700 });
+	const info = await lstat(directory);
+	const wrongOwner = typeof process.geteuid === "function" && info.uid !== process.geteuid();
+	if (!info.isDirectory() || (process.platform !== "win32" && (wrongOwner || (info.mode & 0o077) !== 0))) {
+		throw new Error(`Automatic gate state must be a private owned directory, not a symlink: ${directory}`);
+	}
 	const key = createHash("sha256").update(await realpath(root)).digest("hex");
 	const path = join(directory, key);
 	const controller = new AbortController();

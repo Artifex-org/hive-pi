@@ -3,14 +3,22 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as verification from "../extensions/harness/verify.ts";
 import { createGatePolicy, gateInputStamp, runCheck } from "../extensions/agenda/gate.ts";
 import { emptyLedger } from "../extensions/agenda/ledger.ts";
 import { acquireGateLease } from "../extensions/agenda/gate-lease.ts";
 import type { GatePolicyOptions } from "../extensions/agenda/gate.ts";
 
 const dirs: string[] = [];
-afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+/** Separate real metadata capture from narrow tests of execution/admission clocks. */
+async function stableInput(root: string) {
+	const snapshot = await verification.treeStamp(root, "commit");
+	expect(snapshot).not.toBeNull();
+	vi.spyOn(verification, "treeStamp").mockResolvedValue(snapshot);
+}
 
 function fixture(command?: string, committed = true) {
 	const dir = mkdtempSync(join(tmpdir(), "hive-auto-gate-")); dirs.push(dir);
@@ -63,6 +71,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 	it("a host-cutoff reports incomplete once, charges once and never restarts unchanged input", async () => {
 		const { root, log, check } = fixture();
 		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; sleep 5`, checkTimeoutMs: 10_000 }));
+		await stableInput(root); // leave the 250ms command cutoff unchanged
 		const options = { timeoutCapMs: () => 250 };
 		const first = await run(root, options);
 		expect(first.metric.outcome).toBe("skip");
@@ -90,6 +99,10 @@ describe("automatic gate attempts, not cached green verification", () => {
 		const outcomes = await Promise.all([run(root, options), run(root, options)]);
 		expect(outcomes.map((x) => x.metric.outcome).sort()).toEqual(["pass", "skip"]);
 		expect(readFileSync(log, "utf8")).toBe("x");
+		// Raw exit status is not input-bound verification: no reusable receipt.
+		const receipt = await acquireGateLease(root, () => Date.now() + 1_000, undefined, { ...options.leaseOptions, deferSlot: true });
+		try { expect(receipt).not.toBeNull(); expect(await receipt!.read()).toBeUndefined(); }
+		finally { await receipt?.release(); }
 	});
 
 	it("reports admission-clipped execution as incomplete, not the repo timeout, and persists that receipt", async () => {
@@ -147,6 +160,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 
 	it("reports and remembers incomplete admission when capacity stays occupied through the whole deadline", async () => {
 		const first = fixture(), second = fixture(), third = fixture();
+		await stableInput(third.root);
 		const leaseOptions = { directory: join(third.dir, "leases"), slots: 2 };
 		const deadline = Date.now() + 5_000;
 		const one = await acquireGateLease(first.root, () => deadline, undefined, leaseOptions);
@@ -213,6 +227,28 @@ describe("automatic gate attempts, not cached green verification", () => {
 		expect((await run(root, { leaseOptions })).inject).toBeUndefined();
 		expect(existsSync(log)).toBe(false);
 	}, 15_000);
+
+	it.each(["command", "timeout", "disable"] as const)("does not execute a queued attempt after its gate %s configuration changes", async kind => {
+		const { root, dir, log, check } = fixture();
+		const { one, two, leaseOptions } = await occupyCapacity(join(dir, "leases"));
+		const pending = run(root, { leaseOptions });
+		try {
+			await waitFor(receiptPath(root, leaseOptions.directory));
+			writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({
+				check: kind === "command" ? `${check}; exit 1` : check,
+				checkTimeoutMs: kind === "timeout" ? 20_000 : 10_000,
+				maxInjections: kind === "disable" ? 0 : 3,
+			}));
+			await one?.release();
+			const obsolete = await pending;
+			expect(obsolete.metric.outcome).toBe("skip");
+			expect(obsolete.inject).toContain("configuration changed");
+			expect(existsSync(log)).toBe(false);
+			const current = await run(root, { leaseOptions });
+			expect(current.metric.outcome).toBe(kind === "command" ? "fail" : kind === "disable" ? "skip" : "pass");
+			expect(kind === "disable" ? existsSync(log) : readFileSync(log, "utf8")).toBe(kind === "disable" ? false : "x");
+		} finally { await one?.release(); await two?.release(); await pending; }
+	});
 
 	it("refreshes a queued input before execution and retains its resulting pending failure", async () => {
 		const { root, dir, log, check } = fixture();
