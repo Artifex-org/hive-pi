@@ -67,6 +67,19 @@ async function contender(root: string, directory?: string, env: NodeJS.ProcessEn
 }
 
 describe("cross-process automatic gate admission", () => {
+	it.runIf(process.platform === "linux")("releases the actual metadata FD on owner SIGKILL without waiting for stale expiry", async () => {
+		const { one, options } = fixture();
+		const first = await contender(one, options.directory);
+		expect(first.state).toBe("admitted");
+		const key = createHash("sha256").update(realpathSync(one)).digest("hex");
+		expect(existsSync(join(options.directory, `${key}.metadata.kernel`))).toBe(true);
+		const end = Date.now() + 1_000;
+		expect(await acquireGateLease(one, () => end, undefined, { ...options, deferSlot: true })).toBeNull();
+		first.child.kill("SIGKILL"); await first.closed;
+		const recovered = await own(acquireGateLease(one, () => end, undefined, { ...options, deferSlot: true }));
+		await recovered.write({ input: "after-owner-death", outcome: "incomplete" });
+		expect(await recovered.read()).toEqual({ input: "after-owner-death", outcome: "incomplete" });
+	});
 	it.runIf(process.platform === "linux")("keeps metadata ownership through suspension and resumed writes, not heartbeat age", async () => {
 		const { one, options } = fixture();
 		const first = await contender(one, options.directory, { GATE_WRITE_PASS: "1" });
@@ -158,14 +171,17 @@ describe("cross-process automatic gate admission", () => {
 		await own(acquireGateLease(two, () => Date.now() + 1_000, undefined, options));
 	});
 
-	it("attempt receipts survive releases, and a dead owner's heartbeat lock expires", async () => {
+	it("attempt receipts survive releases, and abandoned advisory slot heartbeats expire", async () => {
 		const { one, options } = fixture();
 		const first = await own(acquireGateLease(one, () => Date.now() + 1_000, undefined, options));
 		await first.write({ input: "input-at-spawn", outcome: "running" }); await first.release();
-		const key = createHash("sha256").update(realpathSync(one)).digest("hex");
-		const lock = join(options.directory, `${key}.lock`);
-		mkdirSync(lock); const past = new Date(Date.now() - 60_000); utimesSync(lock, past, past);
-		const second = await own(acquireGateLease(one, () => Date.now() + 1_000, undefined, options));
+		const lock = join(options.directory, "slot-0.lock");
+		mkdirSync(lock);
+		const busyEnd = Date.now() + 80;
+		expect(await acquireGateLease(one, () => busyEnd, undefined, options)).toBeNull();
+		const past = new Date(Date.now() - 60_000); utimesSync(lock, past, past);
+		const end = Date.now() + 1_000;
+		const second = await own(acquireGateLease(one, () => end, undefined, options));
 		expect(await second.read()).toEqual({ input: "input-at-spawn", outcome: "running" });
 		await second.write({ input: "input-at-spawn", outcome: "incomplete" });
 		expect(await second.read()).toEqual({ input: "input-at-spawn", outcome: "incomplete" });
