@@ -114,7 +114,7 @@ describe.runIf(process.platform === "linux")("SDK scope reuses procfs child-tree
 	}
  });
 
- it.each(["abort", "close", "shutdown", "escalation"])("latches post-spawn procfs loss at %s without unsafe signals or observer throws", async stage => {
+ it.runIf(process.platform === "linux").each(["abort", "close", "shutdown", "escalation"])("latches post-spawn procfs loss at %s without unsafe signals or observer throws", async stage => {
 	const child = syntheticChild(); const scope = processScope(); const abort = new AbortController();
 	const send = vi.spyOn(process, "kill").mockReturnValue(true);
 	scope.spawn(request(abort.signal));
@@ -147,7 +147,7 @@ describe.runIf(process.platform === "linux")("SDK scope reuses procfs child-tree
 	}
  });
 
- it("retains token-owned descendants after the leader and all its pipes close", async () => {
+ it.runIf(process.platform === "linux")("retains token-owned descendants after the leader and all its pipes close", async () => {
 	const child = syntheticChild(); const scope = processScope();
 	const send = vi.spyOn(process, "kill").mockReturnValue(true);
 	scope.spawn(request()); fixture.missingRoot = true;
@@ -161,7 +161,7 @@ describe.runIf(process.platform === "linux")("SDK scope reuses procfs child-tree
 	child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
  });
 
- it("fails closed when an own-UID orphan candidate environment becomes unreadable", async () => {
+ it.runIf(process.platform === "linux")("fails closed when an own-UID orphan candidate environment becomes unreadable", async () => {
 	const child = syntheticChild(); const scope = processScope();
 	const send = vi.spyOn(process, "kill").mockReturnValue(true);
 	scope.spawn(request()); fixture.missingRoot = true; fixture.deniedEnvironment = true;
@@ -171,7 +171,7 @@ describe.runIf(process.platform === "linux")("SDK scope reuses procfs child-tree
 	child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
  });
 
-it.each(["before-release", "after-release"])("routes SDK kill callbacks through strict ownership %s", async stage => {
+it.runIf(process.platform === "linux").each(["before-release", "after-release"])("routes SDK kill callbacks through strict ownership %s", async stage => {
 	const child = syntheticChild(); const scope = processScope();
 	const handle = scope.spawn(request()); const send = vi.spyOn(process, "kill").mockReturnValue(true);
 	if (stage === "after-release") { await scope.close(); send.mockClear(); }
@@ -183,7 +183,7 @@ it.each(["before-release", "after-release"])("routes SDK kill callbacks through 
 	child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 });
 
-it("does not confuse an environ exit race with loss of live ownership visibility", async () => {
+it.runIf(process.platform === "linux")("does not confuse an environ exit race with loss of live ownership visibility", async () => {
 	const child = syntheticChild(); const scope = processScope();
 	const send = vi.spyOn(process, "kill").mockReturnValue(true);
 	scope.spawn(request()); fixture.missingRoot = true;
@@ -193,7 +193,7 @@ it("does not confuse an environ exit race with loss of live ownership visibility
 	child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 });
 
-it("continues signalling verified siblings and the root after one member refuses cleanup", async () => {
+it.runIf(process.platform === "linux")("continues signalling verified siblings and the root after one member refuses cleanup", async () => {
 	const child = syntheticChild(); const scope = processScope();
 	const send = vi.spyOn(process, "kill").mockImplementation(pid => {
 		if (pid === fixture.member) throw Object.assign(new Error("offline denied signal"), { code: "EPERM" });

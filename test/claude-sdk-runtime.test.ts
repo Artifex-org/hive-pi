@@ -51,7 +51,7 @@ it("closing a lease manager aborts acquisition without authorizing a later reque
 	await expect(leases.get(new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" });
 });
 
-it("the real process launcher inherits umask 077, restores the parent mask and cleans its process group", async () => {
+it.runIf(process.platform === "linux")("the real process launcher inherits umask 077, restores the parent mask and cleans its process group", async () => {
 	// A synthetic Node child, NOT Claude or an SDK inference invocation.
 	const dir = await mkdtemp(join(tmpdir(), "claude-sdk-process-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
 	const scope = processScope(); cleanup.push(scope.close);
@@ -95,7 +95,7 @@ it.runIf(process.platform === "linux")("finds a token-owned detached Node descen
 	});
 });
 
-it("cleanup escalates to SIGKILL for a synthetic descendant that ignores SIGTERM", async () => {
+it.runIf(process.platform === "linux")("cleanup escalates to SIGKILL for a synthetic descendant that ignores SIGTERM", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "claude-sdk-descendant-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
 	const scope = processScope(); cleanup.push(scope.close);
 	const child = scope.spawn({ command: process.execPath, args: ["-e", `

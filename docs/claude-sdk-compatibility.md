@@ -99,6 +99,11 @@ bridge closes before returning the MCP failure. All parked calls/registration
 waiters settle, and even otherwise valid streamed siblings fail batch validation;
 no subsequent `assistant.error` is needed to prevent Pi execution.
 
+Tool proposals require an explicit `tool_use` terminal stop before Pi handoff.
+Refusal, pause, ordinary end-turn, or unknown terminal stops with tool blocks fail
+closed even when a real MCP request is already parked; no later SDK error frame
+is required to prevent execution.
+
 The query requires `includePartialMessages:true`: partial `message_start` through
 `message_stop` frames are authoritative for response boundaries, stop reason and
 usage. Pinned SDK 0.3.289 documents canonical `assistant` frames **per completed

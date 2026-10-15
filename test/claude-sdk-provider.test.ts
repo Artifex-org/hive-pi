@@ -953,3 +953,34 @@ describe("final review agent-loop safeguards", () => {
 		expect(output.errorMessage).toMatch(/tool choice/i); expect(f.requests).toHaveLength(0);
 	});
 });
+
+describe("explicit terminal tool handoff", () => {
+	it.each(["refusal", "pause_turn", "end_turn", "unknown-terminal"])("never executes completed proposals with %s, including a real parked MCP call", async reason => {
+		let queries = 0; let pending: Promise<unknown> | undefined;
+		const f = await fixture(request => {
+			queries++;
+			const client = new Client({ name: "terminal-stop-regression", version: "1" });
+			return { close: () => { void client.close(); }, [Symbol.asyncIterator]: () => (async function* () {
+				const bridge = request.options.mcpServers!.pi;
+				if (bridge.type !== "sdk") throw new Error("Missing SDK bridge");
+				const [server, transport] = InMemoryTransport.createLinkedPair();
+				await bridge.instance.connect(server); await client.connect(transport);
+				pending = client.callTool({ name: "read", arguments: { path: "refused" }, _meta: { "claudecode/toolUseId": "refused" } });
+				// Observe transport closure too; no injected assistant.error masks the stop boundary.
+				void pending.catch(() => {});
+				for (const event of tools(["refused"])) {
+					if (event.type === "stream_event" && event.event.type === "message_delta") yield stop(reason)[0];
+					else yield event;
+				}
+				yield result;
+			})() };
+		});
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "must not run" }], details: undefined }));
+		const agent = new Agent({ initialState: { model: f.model, tools: [{ ...tool, label: "Read", execute }] },
+			streamFn: (model, ctx, opts) => f.provider.streamSimple(model, normalizeContext(ctx), opts) });
+		await agent.prompt("refused proposal");
+		expect(execute).not.toHaveBeenCalled(); expect(queries).toBe(1);
+		expect(agent.state.messages).toContainEqual(expect.objectContaining({ role: "assistant", stopReason: "error", rawStopReason: reason }));
+		await Promise.allSettled([pending!]); expect(await readdir(f.root)).toEqual([]);
+	});
+});

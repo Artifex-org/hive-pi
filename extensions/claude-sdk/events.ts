@@ -151,6 +151,7 @@ export class EventConverter {
 				const block = this.output.content[b.index]; return block.type === "toolCall" ? [block.id] : [];
 			});
 			if (tools.length) {
+				if (this.stop !== "tool_use") throw new Error("SDK tool handoff requires an explicit tool_use stop reason");
 				this.bridge.validateBatch(tools);
 				this.output.stopReason = "toolUse"; return "tools";
 			}

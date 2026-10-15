@@ -158,3 +158,9 @@ Unverified rollout gates above remain unchanged. The subsequent empty-cache revi
 - Strict process cleanup now records each signalling failure but still attempts every other verified member and the root, including escalation; EPERM regression preserves the operator-cleanup latch.
 - Shutdown awaits all cleanup/setup settlements before reporting failure, including concurrent cleanup where one disposal rejects and another is still pending; repeated close calls share that barrier.
 - Typecheck and both focused ownership/setup-cleanup files passed (18 tests). Full frozen gate and exact-head hosted checks remain pending; no live activation or subscription/renewal acceptance is inferred.
+
+### Terminal-stop and platform review corrections
+
+- Completed tool proposals require an explicit tool_use stop; refusal/pause/end-turn/unknown terminals fail closed before Pi handoff. Real-Agent regressions include parked MCP requests without a later masking SDK error.
+- Positive SDK process/ownership tests are Linux-scoped; unsupported-platform/preflight rejection tests remain unconditional. Existing non-SDK portable behavior is unchanged.
+- Typecheck and 142 focused tests passed. Earlier full gate bg-28 passed 5,820 tests/20 skips but predates these changes and is not final-tree evidence.
