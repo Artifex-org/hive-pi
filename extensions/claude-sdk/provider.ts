@@ -131,6 +131,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						await dispose(state); state = undefined;
 					} else {
 						clearTimeout(state.timer); state.releaseAbort?.(); state.releaseAbort = undefined; state.busy = true;
+						attemptedPrefix = structuredClone(context.messages);
 						for (const result of results) if (result.role === "toolResult") state.bridge.complete(result);
 						state.prefix = structuredClone(context.messages);
 					}
@@ -151,9 +152,10 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					const history = context.messages.slice(0, split);
 					const controller = new AbortController();
 					const dir = await privateDirectory(config.stateRoot);
-					const bridge = new PiToolBridge(tools, controller.signal, 10_000);
+					let bridge: PiToolBridge | undefined;
 					const processes = processScope();
 					try {
+						bridge = new PiToolBridge(tools, controller.signal, 10_000);
 						await (deps.validateExecutable ?? validateExecutable)(config, signal);
 						const resume = await seedHistory(dir, history, randomUUID(), config.cwd, context.messages.slice(split));
 						const sdkOptions = isolatedOptions({ executablePath: config.executable, cwd: config.cwd, privateRoot: dir, model: model.id,
@@ -177,7 +179,12 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						state = { key: randomUUID(), session: options.sessionId, model: model.id, prefix: structuredClone(context.messages), expected: [],
 							queryOptions: structuredClone(queryOptions), lease, bridge, query, iterator: query[Symbol.asyncIterator](), controller, dir, processes, observedIds: new Set(), busy: true };
 						states.set(state.key, state);
-					} catch (error) { controller.abort(); bridge.close(); await processes.close(); await removePrivateDirectory(dir); throw error; }
+					} catch (error) {
+						controller.abort(); bridge?.close();
+						try { await processes.close(); await bridge?.config.instance.close(); }
+						finally { await removePrivateDirectory(dir); }
+						throw error;
+					}
 				}
 				const owned = state;
 				abortParked = () => { owned.controller.abort(); if (!owned.busy) void dispose(owned); };
@@ -212,7 +219,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				} finally { clearTimeout(expiry); }
 			} catch (error) {
 				let cleanupFailed = false;
-				if (!state && attemptedPrefix) ambiguous.add(fingerprint(attemptedPrefix));
+				if (attemptedPrefix) ambiguous.add(fingerprint(attemptedPrefix));
 				if (state) {
 					ambiguous.add(fingerprint(state.prefix));
 					try { await dispose(state); } catch { cleanupFailed = true; }

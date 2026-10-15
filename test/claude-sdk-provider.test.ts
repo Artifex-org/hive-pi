@@ -10,6 +10,7 @@ import type { SDKMessage, Options } from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createClaudeSdkRuntime, type QueryFactory } from "../extensions/claude-sdk/provider.ts";
+import { PiToolBridge } from "../extensions/claude-sdk/tool-bridge.ts";
 import { hiveLease, launchConfig, LeaseManager, privateDirectory } from "../extensions/claude-sdk/runtime.ts";
 import { workerExtensionPaths } from "../extensions/subagent/worker.ts";
 import { chooseWorkerModel } from "../extensions/subagent/model.ts";
@@ -224,6 +225,81 @@ describe("offline production Claude SDK transport", () => {
 		await ready; abort.abort();
 		expect((await output).stopReason).toBe("aborted"); expect(close).toHaveBeenCalledOnce(); expect(await readdir(root)).toEqual([]);
 		expect((await provider.streamSimple(model, ctx, { sessionId: "cancel" }).result()).errorMessage).toMatch(/Ambiguous/);
+	});
+	it.each([1, 2])("quarantines cancelled parked delivery after toolUse with %i calls through the real Agent", async count => {
+		const ids = ["delivered", "cancelled"].slice(2 - count);
+		const cancel = new AbortController(); let client!: Client; let queries = 0;
+		const replies: Promise<unknown>[] = [];
+		const f = await fixture(request => {
+			const attempt = ++queries;
+			client = new Client({ name: "cancel-after-toolUse", version: "1" });
+			return { close: () => { void client.close(); }, [Symbol.asyncIterator]: () => (async function* () {
+				if (attempt > 1) { yield* text("independent completed"); return; }
+				const bridge = request.options.mcpServers!.pi; if (bridge.type !== "sdk") throw new Error("No bridge");
+				const [a, b] = InMemoryTransport.createLinkedPair(); await bridge.instance.connect(b); await client.connect(a);
+				yield* tools(ids);
+				throw new Error("Cancelled continuation must not resume SDK iterator");
+			})() };
+		});
+		let attempted: ReturnType<typeof normalizeContext> | undefined;
+		const outputs: AssistantMessage[] = [];
+		const execute = vi.fn(async () => {
+			// Pi only executes after the completed toolUse output. Cancel MCP now,
+			// not while the provider is still validating the streamed tool batch.
+			if (!replies.length) {
+				for (const id of ids) replies.push(client.callTool({ name: "read", arguments: { path: id },
+					_meta: { "claudecode/toolUseId": id } }, undefined, id === "cancelled" ? { signal: cancel.signal } : undefined).catch(error => error));
+				await client.ping(); cancel.abort(); await replies.at(-1); await client.ping();
+			}
+			return { content: [{ type: "text" as const, text: "Pi already executed" }], details: undefined };
+		});
+		const agent = new Agent({ initialState: { model: f.model, tools: [{ ...tool, label: "Read", execute }] }, sessionId: "parked-cancel",
+			streamFn: (model, ctx, opts) => {
+				const canonical = normalizeContext(ctx);
+				if (canonical.messages.at(-1)?.role === "toolResult") attempted = structuredClone(canonical);
+				return f.provider.streamSimple(model, canonical, opts);
+			} });
+		agent.subscribe(event => { if (event.type === "message_end" && event.message.role === "assistant") outputs.push(structuredClone(event.message)); });
+		const completion = vi.spyOn(PiToolBridge.prototype, "complete");
+		let deliveries: { id: string; type: string; value: unknown }[];
+		try {
+			await agent.prompt("execute before MCP cancellation");
+			deliveries = completion.mock.calls.map(([result], index) => ({ id: result.toolCallId, ...completion.mock.results[index] }));
+		} finally { completion.mockRestore(); }
+		expect(deliveries!.map(({ id, type }) => ({ id, type }))).toEqual(ids.map(id => ({ id, type: id === "cancelled" ? "throw" : "return" })));
+		expect(deliveries!.at(-1)!.value).toMatchObject({ message: "MCP tool request cancelled; reconcile before retrying" });
+		expect(execute).toHaveBeenCalledTimes(count);
+		expect(outputs[0].stopReason).toBe("toolUse");
+		expect(outputs.at(-1)).toMatchObject({ stopReason: "error", errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" });
+		expect(attempted).toBeDefined();
+		expect(attempted!.messages.filter(m => m.role === "toolResult")).toHaveLength(count);
+		// The first bridge completion succeeds before its sibling throws, but
+		// fail-closed disposal can close MCP before that queued reply is sent.
+		await Promise.all(replies);
+		expect(await readdir(f.root)).toEqual([]);
+		const retry = await f.provider.streamSimple(f.model, attempted!, { sessionId: "parked-cancel" }).result();
+		expect(retry.errorMessage).toMatch(/Ambiguous previous/); expect(queries).toBe(1);
+		const independent = normalizeContext({ tools: [tool], messages: [{ role: "user", content: "independent", timestamp: 4 }] });
+		expect((await f.provider.streamSimple(f.model, independent, { sessionId: "parked-cancel" }).result()).stopReason).toBe("stop");
+		expect(queries).toBe(2); expect(await readdir(f.root)).toEqual([]);
+		await f.close(); expect(await readdir(f.root)).toEqual([]);
+	});
+	it("cleans private setup state when an invalid tool name rejects bridge construction", async () => {
+		const f = await fixture();
+		const ctx = normalizeContext({ tools: [{ ...tool, name: "bad.name" }], messages: [{ role: "user", content: "invalid tool", timestamp: 1 }] });
+		expect((await f.provider.streamSimple(f.model, ctx).result()).errorMessage).toMatch(/Invalid Pi tool names/);
+		expect(f.requests).toEqual([]); expect(await readdir(f.root)).toEqual([]);
+		await f.close(); expect(await readdir(f.root)).toEqual([]);
+	});
+	it("canonicalizes duplicate tool declarations at the provider boundary and leaves no private state", async () => {
+		const f = await fixture();
+		// Pi resolves tools by name before constructing the bridge; duplicate
+		// transcript declarations cannot reach its constructor as duplicates.
+		const ctx = normalizeContext({ tools: [tool, tool], messages: [{ role: "user", content: "duplicate tools", timestamp: 1 }] });
+		expect((await f.provider.streamSimple(f.model, ctx).result()).stopReason).toBe("stop");
+		expect(f.requests).toHaveLength(1); expect(f.requests[0].options.allowedTools).toEqual(["mcp__pi__read"]);
+		expect(await readdir(f.root)).toEqual([]);
+		await f.close(); expect(await readdir(f.root)).toEqual([]);
 	});
 	it.each(["fetch", "headers", "env", "mutation"])("rejects unsupported HTTP/config mutation: %s", async kind => {
 		const { provider, model, requests } = await fixture();
