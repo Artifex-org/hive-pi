@@ -177,6 +177,71 @@ describe("automatic gate attempts, not cached green verification", () => {
 		expect(existsSync(third.log)).toBe(false); // unchanged input does not wait or execute again
 	});
 
+	it("bounds unknown-input admission warnings and recovers the final undelivered notice at the cap", async () => {
+		const { root, dir, log } = fixture(undefined, false);
+		expect(await verification.treeStamp(root, "commit")).toBeNull();
+		vi.spyOn(verification, "treeStamp").mockResolvedValue(null);
+		const { one, two, leaseOptions } = await occupyCapacity(join(dir, "leases"));
+		let ledger = emptyLedger;
+		const settle = () => createGatePolicy(undefined, { leaseOptions, timeoutCapMs: () => 80 }).decide({ cwd: root, ledger, transcript: "", lastAssistantText: undefined })!.run();
+		try {
+			for (let i = 0; i < 2; i++) {
+				const notice = await settle(); expect(notice.inject).toContain("No check was executed");
+				expect(notice.ledger).toBeTypeOf("function");
+				ledger = notice.ledger!(ledger); await notice.delivered?.();
+			}
+			const terminal = await settle();
+			ledger = terminal.ledger!(ledger); // owner dies after state publication, before acknowledgement
+			expect(ledger.iterations[`gate:${root}`]).toBe(3);
+			const replay = await settle();
+			expect(replay.inject).toContain(terminal.inject!); expect(replay.ledger).toBeUndefined();
+			await replay.delivered?.();
+			expect((await settle()).inject).toBeUndefined();
+			expect(existsSync(log)).toBe(false);
+		} finally { await one?.release(); await two?.release(); }
+	});
+
+	it.each(["known", "unknown"])("an old %s-input acknowledgement cannot clear a newer identical notice", async kind => {
+		const { root, dir, check } = fixture(undefined, kind === "known");
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1` }));
+		const leaseOptions = { directory: join(dir, "leases") };
+		const original = await run(root, { leaseOptions }, undefined, false);
+		expect(original.delivered).toBeTypeOf("function");
+		const end = Date.now() + 2_000;
+		const lease = await acquireGateLease(root, () => end, undefined, { ...leaseOptions, deferSlot: true });
+		try {
+			if (kind === "known") {
+				const receipt = await lease!.read();
+				if (!receipt?.notice) throw new Error("Expected a failed gate notice");
+				await lease!.write({ ...receipt, noticeId: "newer-attempt" });
+			} else await lease!.writeNotice({ ...(await lease!.readNotice())!, id: "newer-attempt" });
+		} finally { await lease?.release(); }
+		await original.delivered!();
+		const current = await acquireGateLease(root, () => end, undefined, { ...leaseOptions, deferSlot: true });
+		try {
+			expect(kind === "known" ? (await current!.read())?.noticeId : (await current!.readNotice())?.id).toBe("newer-attempt");
+		} finally { await current?.release(); }
+	});
+
+	it("persists unknown-input liveness before waiting and charges recovery, not execution", async () => {
+		const { root, dir, log } = fixture(undefined, false);
+		vi.spyOn(verification, "treeStamp").mockResolvedValue(null);
+		const { one, two, leaseOptions } = await occupyCapacity(join(dir, "leases"));
+		const controller = new AbortController();
+		const active = run(root, { leaseOptions, timeoutCapMs: () => 2_000 }, controller.signal);
+		try {
+			const path = receiptPath(root, leaseOptions.directory).replace(/\.json$/, ".notice.json");
+			await waitFor(path);
+			expect(JSON.parse(readFileSync(path, "utf8")).chargeOnReplay).toBe(true);
+			controller.abort(); await active;
+			const recovered = await run(root, { leaseOptions }, undefined, false);
+			expect(recovered.inject).toContain("interrupted");
+			expect(recovered.ledger!(emptyLedger).iterations[`gate:${root}`]).toBe(1);
+			expect(existsSync(log)).toBe(false);
+			await recovered.delivered?.();
+		} finally { controller.abort(); await active; await one?.release(); await two?.release(); }
+	});
+
 	it("does not accept a successful check as verification of input changed during execution", async () => {
 		const { root, dir, log, check } = fixture();
 		const release = join(dir, "release-check");

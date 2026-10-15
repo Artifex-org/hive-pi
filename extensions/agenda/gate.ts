@@ -15,7 +15,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { treeStamp, type StampOptions } from "../harness/verify.ts";
@@ -249,16 +249,39 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 				};
 				// The lease is released before the host delivers a notice. Acknowledge
 				// under a NEW root-only lease, and never overwrite a different input.
-				const acknowledge = (fingerprint: string, notice: string) => async () => {
-					stamps?.set(id, fingerprint);
+				const configuration = createHash("sha256").update(JSON.stringify([command, timeoutMs, max, process.execPath, process.version, process.env.PATH ?? ""])).digest("hex");
+				const unboundNotice = async (content: string, chargeOnReplay = false) => {
+					const notice = { id: randomUUID(), configuration, content, chargeOnReplay };
+					await lease.writeNotice(notice); return notice;
+				};
+				const saveNotice = async (outcome: "incomplete" | "timeout" | "fail", notice: string) => {
+					if (input === null) return (await unboundNotice(notice)).id;
+					const noticeId = randomUUID();
+					await lease.write({ input, outcome, notice, noticeId });
+					await lease.writeNotice(undefined);
+					return noticeId;
+				};
+				const publishRunning = async () => {
+					if (input !== null) {
+						await lease.writeNotice(undefined);
+						await lease.write({ input, outcome: "running" });
+					} else {
+						await unboundNotice(`The previous automatic project gate \`${command}\` was interrupted before a verdict. Input identity is unavailable. This is NOT successful verification. Run quality_gate or a bounded background check; automatic warning continuations are bounded by maxInjections.`, true);
+					}
+				};
+				const acknowledge = (fingerprint: string | null, notice: string, noticeId: string) => async () => {
+					stamps?.set(id, fingerprint ?? undefined);
 					try {
 						const ackDeadline = Date.now() + 1_000;
 						const ack = await acquireGateLease(root, () => ackDeadline, undefined, leaseOptions);
 						if (!ack) return; // conservative replay is safer than losing a warning
 						try {
-							const current = await ack.read();
-							if (current?.input === fingerprint && current.notice === notice) {
-								await ack.write({ input: fingerprint, outcome: current.outcome });
+							if (fingerprint === null) {
+								const current = await ack.readNotice();
+								if (current?.id === noticeId && current.configuration === configuration && current.content === notice) await ack.writeNotice(undefined);
+							} else {
+								const current = await ack.read();
+								if (current?.noticeId === noticeId && current.input === fingerprint && current.notice === notice) await ack.write({ input: fingerprint, outcome: current.outcome });
 							}
 						} finally { await ack.release(); }
 					} catch (error) {
@@ -268,16 +291,26 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					}
 				};
 				try {
+					// Unbound delivery/liveness state never identifies or suppresses an
+					// attempt. Recover it even at the positive continuation cap.
+					const pending = await lease.readNotice();
+					if (pending?.configuration === configuration) {
+						if (pending.chargeOnReplay) await lease.writeNotice({ ...pending, chargeOnReplay: false });
+						return { ...skipped(), inject: `Previous automatic gate attempt (source identity was unavailable):\n${pending.content}`, delivered: acknowledge(null, pending.content, pending.id),
+							...(pending.chargeOnReplay && !capped ? { ledger: (state: typeof ledger) => record(state, id) } : {}) };
+					}
+					if (pending) await lease.writeNotice(undefined); // obsolete configuration
 					// Deduplicate before waiting for execution capacity.
 					input = await fingerprint();
 					const previous = await lease.read();
 					if (input !== null && previous?.input === input) {
 						let notice = previous.notice;
+						let noticeId = previous.noticeId;
 						if (previous.outcome === "running") {
 							notice = `The previous automatic project gate \`${command}\` was interrupted. This input is NOT verified. Run quality_gate or a bounded background check to obtain a verdict; the Stop hook will not repeatedly restart this unchanged input.`;
-							await lease.write({ input, outcome: "incomplete", notice });
+							noticeId = await saveNotice("incomplete", notice);
 						}
-						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice) };
+						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice, noticeId!) }; // read() validates paired notice identity
 						if (stamps?.get(id) !== input) stamps?.set(id, input);
 						return skipped(); // an acknowledged attempt, never cached green evidence
 					}
@@ -285,15 +318,18 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					const admissionIncomplete = async (reason = "the host/admission budget ended before execution") => {
 						// Never start more preparation after exhaustion; retain any known input
 						// so a killed/expired waiter cannot silently repeat its whole budget.
-						const recovery = input !== null ? "The Stop hook will not wait again on unchanged input." : "Input identity is unavailable; automatic receipt reuse is disabled.";
+						const left = remaining(record(ledger, id), id, max);
+						const recovery = input !== null ? "The Stop hook will not wait again on unchanged input." : `Input identity is unavailable; input-bound attempt reuse is disabled. ${left > 0 ? `${left} automatic warning(s) remain.` : "This is the final automatic warning; stop and summarize what remains unverified."}`;
 						const notice = `The automatic project gate \`${command}\` is INCOMPLETE: ${reason}. No check was executed. This input is NOT verified. Run quality_gate or a bounded background check with enough time. ${recovery}`;
-						if (input !== null) await lease.write({ input, outcome: "incomplete", notice });
-						return { metric: { outcome: "skip" as const, value: Date.now() - startedAt }, inject: notice,
-							...(input !== null ? { delivered: acknowledge(input, notice) } : {}) };
+						const noticeId = await saveNotice("incomplete", notice);
+						return { metric: { outcome: "skip" as const, value: Date.now() - startedAt }, inject: notice, delivered: acknowledge(input, notice, noticeId),
+							// Without input identity there is no attempt deduplication. Charge
+							// the continuation, NOT an executed check, to stop warning loops.
+							...(input === null ? { ledger: (state: typeof ledger) => record(state, id) } : {}) };
 					};
 					// Publish BEFORE waiting as well as spawning: an owner killed while
 					// queued must not repeatedly consume its whole budget without notice.
-					if (input !== null) await lease.write({ input, outcome: "running" });
+					await publishRunning();
 					admissionDeadline = Date.now() + timeoutMs;
 					if (!await lease.admit()) {
 						if (signal?.aborted || lease.signal.aborted) return skipped();
@@ -307,7 +343,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					input = refreshed;
 					if (!sameConfiguration()) return await admissionIncomplete("the gate configuration changed during preparation; settle again to use the current configuration");
 					// Refresh the input before spawn; charge metadata IO to the host clock.
-					if (input !== null) await lease.write({ input, outcome: "running" });
+					await publishRunning();
 					const now = Date.now();
 					const executionBudget = lease.waitedForSlot ? admissionDeadline - now : timeoutMs;
 					const effectiveTimeoutMs = Math.max(0, Math.min(executionBudget, hostDeadline - now, options.timeoutCapMs?.() ?? Infinity));
@@ -323,10 +359,11 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					const incomplete = inputChanged || unvalidated || (result.timedOut && effectiveTimeoutMs < timeoutMs);
 					if (result.ok && !incomplete) {
 						if (input !== null) { await lease.write({ input, outcome: "pass" }); stamps?.set(id, input); }
+						else await lease.writeNotice(undefined); // raw success is not reusable verification
 						return { metric: { outcome: "pass", value: elapsed }, ledger: (state) => clear(state, id) };
 					}
 					const header = inputChanged || (unvalidated && Date.now() < preparationDeadline())
-						? `The automatic project gate \`${command}\` is INCOMPLETE: its input changed or could not be revalidated after execution. This result does NOT verify the current input. Settle again to check changed input; if input identity is unavailable, use quality_gate explicitly.`
+						? `The automatic project gate \`${command}\` is INCOMPLETE: its input changed or could not be revalidated after execution. This result does NOT verify the current input. This is NOT successful verification. Settle again to check changed input; if input identity is unavailable, use quality_gate explicitly.`
 						: incomplete
 						? `The automatic project gate \`${command}\` is INCOMPLETE: the host/admission budget ended before a verdict. This is NOT successful verification. Run quality_gate or a bounded background check with enough time; the Stop hook will not restart unchanged input.`
 						: result.timedOut
@@ -343,11 +380,11 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						: `This was the final automatic attempt — stop, summarize what is still failing, and hand back to the user.`;
 
 				const notice = `${header}\n\nOutput (tail):\n\`\`\`\n${result.output.trim()}\n\`\`\`\n\n${footer}`;
-				if (input !== null) await lease.write({ input, outcome: incomplete ? "incomplete" : result.timedOut ? "timeout" : "fail", notice });
+				const noticeId = await saveNotice(incomplete ? "incomplete" : result.timedOut ? "timeout" : "fail", notice);
 				return {
 					metric: { outcome: incomplete ? "skip" : result.timedOut ? "timeout" : "fail", value: elapsed },
 					inject: notice,
-					...(input !== null ? { delivered: acknowledge(input, notice) } : {}),
+					delivered: acknowledge(input, notice, noticeId),
 					ledger: (state) => record(state, id),
 				};
 				} finally { await lease.release(); }

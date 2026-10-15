@@ -131,7 +131,12 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   revalidated before reporting a current-input result. Input identity
   includes HEAD, tracked/untracked changes, command, timeout and Node/PATH;
   if identity is unavailable, raw command exit status is still reported, but
-  it is NOT input-bound verification and cannot create/reuse a receipt. A skip
+  it is NOT input-bound verification and cannot create/reuse an input-bound
+  attempt receipt. Separate delivery/liveness state survives owner death without
+  suppressing future unknown-input attempts. New unknown-input warnings spend
+  the continuation cap even when no command executed; pending notices still
+  replay at the cap until acknowledged. Unique durable notice IDs prevent an
+  old acknowledgement from clearing a newer identical warning. A skip
   is **not** cached green evidence. Receipt lookup takes only the
   worktree lease, not an execution slot. Failed/incomplete warnings are persisted
   separately and replayed without re-executing, including at the attempt cap.

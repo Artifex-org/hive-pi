@@ -6,7 +6,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,11 +14,17 @@ import { join } from "node:path";
 const STALE_MS = 30_000;
 const AUTOMATIC_SLOTS = 2;
 
-export interface GateReceipt {
+/** A pending notice always has an identity; both disappear on delivery. */
+export type GateReceipt = {
 	input: string;
 	outcome: "running" | "pass" | "fail" | "timeout" | "incomplete";
-	/** Persisted separately from the attempt verdict; cleared only on delivery. */
-	notice?: string;
+} & ({ notice?: undefined; noticeId?: undefined } | { notice: string; noticeId: string });
+/** Delivery/liveness only: never identifies source or deduplicates an attempt. */
+export interface GateNotice {
+	id: string;
+	configuration: string;
+	content: string;
+	chargeOnReplay: boolean;
 }
 export interface GateLease {
 	signal: AbortSignal;
@@ -27,6 +33,8 @@ export interface GateLease {
 	admit(): Promise<boolean>;
 	read(): Promise<GateReceipt | undefined>;
 	write(receipt: GateReceipt): Promise<void>;
+	readNotice(): Promise<GateNotice | undefined>;
+	writeNotice(notice: GateNotice | undefined): Promise<void>;
 	release(): Promise<void>;
 }
 export interface GateLeaseOptions {
@@ -100,6 +108,13 @@ export async function acquireGateLease(
 		if (!options.deferSlot && !await admit()) { await release(); return null; }
 	} catch (error) { await release(); throw error; }
 	const receiptPath = `${path}.json`;
+	const noticePath = `${path}.notice.json`;
+	const save = async (file: string, value: unknown) => {
+		if (controller.signal.aborted) throw controller.signal.reason;
+		const temp = `${file}.${randomUUID()}.tmp`;
+		await writeFile(temp, JSON.stringify(value), { mode: 0o600 });
+		await rename(temp, file);
+	};
 	return {
 		signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
 		get waitedForSlot() { return waitedForSlot; },
@@ -114,14 +129,29 @@ export async function acquireGateLease(
 			const receipt: unknown = JSON.parse(text);
 			if (!receipt || typeof receipt !== "object" || !("input" in receipt) || typeof receipt.input !== "string" ||
 				!("outcome" in receipt) || !["running", "pass", "fail", "timeout", "incomplete"].includes(String(receipt.outcome)) ||
-				("notice" in receipt && typeof receipt.notice !== "string")) throw new Error(`Invalid automatic gate receipt: ${receiptPath}`);
+				("noticeId" in receipt && !("notice" in receipt)) ||
+				("notice" in receipt && (typeof receipt.notice !== "string" || !("noticeId" in receipt) || typeof receipt.noticeId !== "string"))) throw new Error(`Invalid automatic gate receipt: ${receiptPath}`);
 			return receipt as GateReceipt;
 		},
-		write: async (receipt) => {
+		write: (receipt) => save(receiptPath, receipt),
+		readNotice: async () => {
+			let text: string;
+			try { text = await readFile(noticePath, "utf8"); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+				throw error;
+			}
+			const notice: unknown = JSON.parse(text);
+			if (!notice || typeof notice !== "object" || !("id" in notice) || typeof notice.id !== "string" || !("configuration" in notice) || typeof notice.configuration !== "string" ||
+				!("content" in notice) || typeof notice.content !== "string" || !("chargeOnReplay" in notice) || typeof notice.chargeOnReplay !== "boolean") {
+				throw new Error(`Invalid automatic gate delivery notice: ${noticePath}`);
+			}
+			return notice as GateNotice;
+		},
+		writeNotice: async (notice) => {
 			if (controller.signal.aborted) throw controller.signal.reason;
-			const temp = `${receiptPath}.${randomUUID()}.tmp`;
-			await writeFile(temp, JSON.stringify(receipt), { mode: 0o600 });
-			await rename(temp, receiptPath);
+			if (notice) await save(noticePath, notice);
+			else await rm(noticePath, { force: true });
 		},
 		release,
 	};
