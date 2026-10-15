@@ -129,6 +129,71 @@ describe("large delivery review evidence (HIV-3868)", () => {
 		expect(log.prompt).toContain("JSON array of string chunks");
 		expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
 	});
+	it.each(["success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
+		writeFileSync(launch.piBin, `#!${process.execPath}
+const fs = require("node:fs");
+const prompt = fs.readFileSync(0, "utf8");
+const mode = ${JSON.stringify(mode)};
+const callsPath = ${JSON.stringify(join(launch.root, "patch-log.json"))};
+const calls = fs.existsSync(callsPath) ? JSON.parse(fs.readFileSync(callsPath, "utf8")) : [];
+const argv = process.argv.slice(2), option = key => argv[argv.indexOf(key) + 1];
+const sessionDir = argv.includes("--session-dir") ? option("--session-dir") : undefined;
+const sessionId = argv.includes("--session-id") ? option("--session-id") : undefined;
+const patchPath = calls[0]?.patchPath ?? prompt.match(/Complete captured patch: (.+) \\(\\d+ bytes,/)[1];
+const patch = fs.readFileSync(patchPath, "utf8");
+(async () => {
+ const {createReadToolDefinition} = await import(${JSON.stringify(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/read.js"))});
+ const {SessionManager} = await import(${JSON.stringify(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"))});
+ let session, prior = "";
+ if(sessionDir && sessionId) {
+  const existing = SessionManager.findById(${JSON.stringify(launch.root)}, sessionId, sessionDir);
+  if(calls.length && !existing) throw Error("lost reviewer session");
+  session = existing ? SessionManager.open(existing, sessionDir) : SessionManager.create(${JSON.stringify(launch.root)}, sessionDir, {id:sessionId});
+  prior = JSON.stringify(session.buildSessionContext().messages);
+ }
+ const read = createReadToolDefinition(${JSON.stringify(launch.root)});
+ let offset = calls.length && mode !== "no-progress" ? calls[0].next : 1;
+ for(; offset <= patch.split("\\n").length;) {
+  const args = {path:patchPath, offset, limit:1500}, toolCallId = "read-" + offset;
+  console.log(JSON.stringify({type:"tool_execution_start",toolName:"read",toolCallId,args}));
+  const result = await read.execute(toolCallId, args);
+  console.log(JSON.stringify({type:"tool_execution_end",toolName:"read",toolCallId,result,isError:false}));
+  offset += result.details?.truncation?.outputLines ?? Math.min(1500, patch.split("\\n").length-offset+1);
+  if(!calls.length || mode === "no-progress") break;
+ }
+ const finding = "code0.ts may expose an unsafe value";
+ if(calls.length && !prior.includes(finding)) throw Error("prior finding lost");
+ const text = calls.length ? "Complete cumulative review: " + finding + "; remainder reviewed." : "DELIVERY_REVIEW_INCOMPLETE: more patch remains; " + finding;
+ const message = {role:"assistant",content:[{type:"text",text}],stopReason:"stop",timestamp:Date.now()};
+ if(calls.length && mode === "aborted") message.stopReason = "aborted";
+ if(!(calls.length && mode === "no-output")) session?.appendMessage(message);
+ if(mode === "missing-session" && sessionDir) fs.rmSync(sessionDir,{recursive:true,force:true});
+ if(mode === "mutated") fs.appendFileSync(${JSON.stringify(join(launch.root,"code0.ts"))}, "export const mutation = true;\\n");
+ calls.push({argv,prompt,patchPath,sessionDir,sessionId,prior,next:offset}); fs.writeFileSync(callsPath,JSON.stringify(calls));
+ if(!(calls.length === 2 && mode === "no-output")) console.log(JSON.stringify({type:"message_end",message}));
+ if(calls.length === 2 && mode === "nonzero") process.exitCode = 1;
+})().catch(error => { console.error(error); process.exit(1); });
+`);
+		const expected = captureDeliveryDiff(launch.root)!;
+		const outcome = await run();
+		expect(existsSync(join(launch.root, "patch-log.json")), outcome.text).toBe(true);
+		const calls = JSON.parse(readFileSync(join(launch.root, "patch-log.json"), "utf8"));
+		expect(calls).toHaveLength(["mutated", "missing-session"].includes(mode) ? 1 : 2);
+		expect(calls[0].sessionDir).toBeTruthy(); expect(calls[0].sessionId).toBeTruthy();
+		if (calls.length === 2) {
+			expect(calls[1].sessionDir).toBe(calls[0].sessionDir); expect(calls[1].sessionId).toBe(calls[0].sessionId);
+			expect(calls[1].prior).toContain("code0.ts may expose an unsafe value");
+		}
+		if (mode === "success") {
+			expect(outcome.text).toContain("Complete cumulative review: code0.ts may expose an unsafe value");
+			expect(outcome.isError, outcome.text).toBeUndefined();
+			expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
+		} else {
+			expect(outcome.isError, outcome.text).toBe(true);
+			expect(outcome.results[0].reviewFingerprint).toBeUndefined();
+		}
+		expect(existsSync(calls[0].patchPath)).toBe(false); expect(existsSync(calls[0].sessionDir)).toBe(false);
+	});
 	it.each(["none", "first"])("does not stamp a successful worker with %s artifact read coverage", async pages => {
 		artifactWorker("Complete review; no findings.", 0, pages);
 		const outcome = await run();

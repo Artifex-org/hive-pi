@@ -31,6 +31,20 @@ of fenced or indented code containing a marker line is ambiguous and fails
 closed as incomplete; a genuine refusal must use the plain-line contract. The
 artifact exists throughout worker execution and is removed afterward, including
 on failure. Its temporary path is not part of the fingerprint.
+
+Oversized `code-reviewer` reviews can continue in the **same private persisted
+conversation**, retaining the artifact and observed read coverage. There are at
+most four continuation invocations, each requiring newly observed coverage;
+once all pages are read, at most one of those invocations may finish the
+integration review and cumulative conclusion. No progress stops the loop.
+The runner verifies the exact session ID, checkout and last persisted assistant
+report before resuming: a missing transcript is a refusal, not a fresh review.
+Every continuation and final result rechecks the original evidence fingerprint.
+Failures, aborts, changed evidence and a final incomplete declaration never
+stamp. Earlier findings remain in the conversation and the final report must
+cover the entire change, not only newly read pages. Coverage is necessary, not
+approval. Session files and artifacts are deleted on all exits; ordinary workers
+remain ephemeral (`--no-session`).
 The command's `cd` / `git -C` checkout is checked, not the launch's checkout.
 Newline-separated commands count too; quoted body text does not.
 
@@ -52,6 +66,8 @@ delivery diff. For bare clones lacking remote refs, Git's FETCH_HEAD is evidence
 only when it records origin's exact URL and a fetched main/master branch.
 The checkpoint supports literal git/gh delivery forms, not
 arbitrary shell programs; only literal `cd` prefixes may precede delivery.
+`hive ship --draft` is target-preserving and uses the same matching-review check
+as `hive ship` and `hive ship --no-pr`; destination-changing flags remain refused.
 Revision-changing prefixes, alternate PR heads/bases, dynamic checkouts, Git
 configuration overrides and
 over-budget delivery commands require an explicit override. Review is scoped to

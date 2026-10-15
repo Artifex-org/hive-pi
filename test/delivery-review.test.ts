@@ -26,6 +26,7 @@ const substantive = Array.from({ length: 12 }, (_, i) => `export const n${i} = $
 describe("delivery review", () => {
 	it.each([
 		"hive ship --no-pr && gh pr create",
+		"hive ship --draft",
 		"hive ship --no-pr && gh pr create --title 'review stamped'",
 		"HIVE_PRESIGN_REQUIRED=1 git push",
 		"git commit -m 'code && docs' && hive ship && git push",
@@ -375,6 +376,8 @@ describe("delivery review", () => {
 			["gh pr create --repo a/b", "`--repo`"],
 			["GIT_DIR=/x git push", "GIT_DIR=/x"],
 			["hive ship --force", "argument `--force`"],
+			["hive ship --draft --remote other", "argument `--remote`"],
+			["hive ship --draft --pr-base other", "argument `--pr-base`"],
 			['git -C "$REPO" push', "dynamic"],
 		])("names the offending token of %s", async (command, cause) => {
 			const pi = createFakePi(); registerDeliveryReview(pi.api, () => null);

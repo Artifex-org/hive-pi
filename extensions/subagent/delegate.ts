@@ -55,6 +55,7 @@ import {
 import { captureDeliveryDiff, captureReviewDiff, withReviewCallers, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewFingerprint, reviewScopeFiles, reviewTaskWithDiff, stampableReview, reviewDeclaresIncomplete, DELIVERY_INLINE_BYTES } from "./reviewdiff.ts";
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 import { ReviewArtifactReads, reviewArtifactText } from "./review-artifact.ts";
+import { ReviewContinuation } from "./review-continuation.ts";
 
 /**
  * A schema the caller wants the final answer validated against, WITH the
@@ -614,6 +615,7 @@ export async function runSingleAgent(
 	let tmpPromptPath: string | null = null;
 	let tmpReviewPatch: { dir: string; filePath: string } | null = null;
 	let artifactReads: ReviewArtifactReads | null = null;
+	let reviewContinuation: ReviewContinuation | null = null;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -678,7 +680,13 @@ export async function runSingleAgent(
 						"Read every encoded page; concatenating the decoded array entries reproduces the exact complete patch. Array row numbers are transport positions, not source line numbers.";
 				} else effectiveTask = reviewTaskWithDiff(task, diff, neutralize);
 				currentResult.reviewFiles = reviewScopeFiles(diff);
-				if (agent.name === "code-reviewer" && stampableReview(diff)) currentResult.reviewFingerprint = reviewFingerprint(diff);
+				if (agent.name === "code-reviewer" && stampableReview(diff)) {
+					currentResult.reviewFingerprint = reviewFingerprint(diff);
+					if (artifactReads) {
+						reviewContinuation = new ReviewContinuation(executionCwd, task, currentResult.reviewFingerprint, artifactReads);
+						reviewContinuation.configure(args);
+					}
+				}
 			} else if (agent.name === "code-reviewer") {
 				effectiveTask += "\nComplete merge-base diff unavailable. Review the requested scope paths, but report delivery scope as unverified; do not invent a change inventory.";
 			}
@@ -688,7 +696,7 @@ export async function runSingleAgent(
 		// patches use a private artifact), and Linux refuses an argument over 128 KiB
 		// (MAX_ARG_STRLEN): a ~4,700-line staged change failed `spawn E2BIG` and
 		// could not be reviewed at all. pi reads piped stdin as the message.
-		const prompt = `Task: ${effectiveTask}`;
+		let prompt = `Task: ${effectiveTask}`;
 		let wasAborted = false;
 		emitUpdate();
 
@@ -697,7 +705,10 @@ export async function runSingleAgent(
 		// failure — see harness/verify.ts.
 		const stampBefore = writerLock ? await treeStamp(executionCwd) : null;
 
-		const exitCode = await new Promise<number>((resolve) => {
+		// JSON mode emits only NEW messages on resume; keep accounting across
+		// rounds without counting restored transcript messages twice.
+		let runState = emptyJsonRunState();
+		const runWorker = () => new Promise<number>((resolve) => {
 			const invocation = getPiInvocation(args);
 			const tree = treeSpawnOptions({ ...process.env, PI_AGENDA_WORKER: "1", ...workerMcpEnv(agent.tools), ...(writerLock?.childEnv ?? {}) });
 			const proc = spawn(invocation.command, invocation.args, {
@@ -743,8 +754,6 @@ export async function runSingleAgent(
 			// The accounting half of this fold lives in harness/json-protocol.ts so
 			// it is testable without spawning a worker; what stays here is the part
 			// that genuinely needs the closure — the liveness clock and the UI.
-			let runState = emptyJsonRunState();
-
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
 				let event: Record<string, unknown>;
@@ -827,7 +836,7 @@ export async function runSingleAgent(
 				if (forceKillTimer) clearTimeout(forceKillTimer);
 				if (signal && killProc) signal.removeEventListener("abort", killProc);
 				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+				resolve(code ?? 1);
 			});
 
 			proc.on("error", (error) => {
@@ -846,8 +855,33 @@ export async function runSingleAgent(
 			}
 		});
 
-		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new DelegationAborted(currentResult);
+		for (;;) {
+			if (reviewContinuation && !reviewContinuation.unchanged()) {
+				currentResult.errorMessage = "Delivery review evidence changed before continuation.";
+				currentResult.stopReason = "error";
+				delete currentResult.reviewFingerprint;
+				break;
+			}
+			if (signal?.aborted) throw new DelegationAborted(currentResult);
+			const roundStart = currentResult.messages.length;
+			const exitCode = await runWorker();
+			currentResult.exitCode = exitCode;
+			if (reviewContinuation && !isFailedResult(currentResult) && !getFinalOutput(currentResult.messages.slice(roundStart))) {
+				currentResult.errorMessage = "Delivery review incomplete: resumed worker returned no review conclusion.";
+				currentResult.stopReason = "error";
+				delete currentResult.reviewFingerprint;
+			}
+			if (wasAborted) throw new DelegationAborted(currentResult);
+			const next = reviewContinuation?.next(getFinalOutput(currentResult.messages), !isFailedResult(currentResult));
+			if (next?.error) {
+				currentResult.errorMessage = next.error;
+				currentResult.stopReason = "error";
+				delete currentResult.reviewFingerprint;
+			}
+			if (!next?.prompt) break;
+			prompt = next.prompt;
+			recordActivity("continuing retained delivery review");
+		}
 		if (writerLock && !isFailedResult(currentResult) && writerMadeNoChange(stampBefore, await treeStamp(executionCwd))) {
 			currentResult.stopReason = "error";
 			currentResult.errorMessage = NO_CHANGE_ERROR;
@@ -866,6 +900,7 @@ export async function runSingleAgent(
 		if (!isFailedResult(currentResult) && stoppedMidWork(getFinalOutput(currentResult.messages))) {
 			currentResult.midWork = true;
 		}
+		if (isFailedResult(currentResult)) delete currentResult.reviewFingerprint;
 		const declaredIncomplete = reviewDeclaresIncomplete(getFinalOutput(currentResult.messages));
 		if ((artifactReads && !artifactReads.complete()) || (isReviewRole(agent.name) && declaredIncomplete)) {
 			delete currentResult.reviewFingerprint;
@@ -880,6 +915,7 @@ export async function runSingleAgent(
 		}
 		return currentResult;
 	} finally {
+		reviewContinuation?.cleanup();
 		if (tmpReviewPatch) fs.rmSync(tmpReviewPatch.dir, { recursive: true, force: true });
 		if (tmpPromptPath)
 			try {
