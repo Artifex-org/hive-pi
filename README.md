@@ -133,6 +133,13 @@ npm run check      # tsc --noEmit && vitest run
 
 MIT. See [LICENSE](LICENSE).
 
+## Claude subscription compatibility work
+
+The [Claude Agent SDK compatibility record](docs/claude-sdk-compatibility.md)
+tracks the non-serving prototype and its offline tests. It does **not** add a
+selectable Claude SDK provider or acquire subscription credentials. Existing
+Hive authd account reuse, live billing validation and rollout remain gated there.
+
 ## Account quota recovery
 
 `credential-recovery` activates only when the Hive lease holder exposes its
