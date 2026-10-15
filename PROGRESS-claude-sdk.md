@@ -23,7 +23,9 @@ below are historical handbacks, not the integration owner's delivery contract.
   scanning, independently verified signals and sticky cleanup failures remain.
   Sanitized diagnostic operation/errno/PID is preserved without raw OS text.
 - Three deterministic new regressions failed before this repair; the focused
-  ownership/runtime suite now passes 32 tests and typecheck. Final post-repair
+  ownership/runtime suite now passes 34 tests and typecheck. The initial token
+  capture uses the same exit proof; an initially unreadable root is never signalled
+  without token verification. Final post-repair
   complete review, immutable full gate and hosted PR checks remain pending.
 - Hive final-source snapshot #14328 passed 2,182 tests in selected partitions,
   including 738 API and 762 store Postgres cases. Separate #14342 passed the named

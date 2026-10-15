@@ -235,13 +235,19 @@ export function trackTree(child: ChildProcess, grouped: boolean, tokens?: string
 	try {
 		entry.root = child.pid === undefined ? undefined : identity(child.pid, options.requireIdentity);
 		if (entry.requireIdentity && entry.root && entry.token) {
-			// A very short-lived leader may have been recycled before capture.
-			const env = readFileSync(`/proc/${entry.root.pid}/environ`, "utf8").split("\0").find(value => value.startsWith(`${TREE_TOKEN}=`));
-			if (!env?.slice(TREE_TOKEN.length + 1).split(",").includes(entry.token)) entry.root = undefined;
+			// A very short-lived leader may exit or be recycled before capture.
+			const candidate = entry.root;
+			try {
+				const env = readFileSync(`/proc/${candidate.pid}/environ`, "utf8").split("\0").find(value => value.startsWith(`${TREE_TOKEN}=`));
+				if (!env?.slice(TREE_TOKEN.length + 1).split(",").includes(entry.token)) entry.root = undefined;
+			} catch (error) {
+				entry.root = undefined; // never signal an initially unverified root
+				if (!["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "") && !singleExitingTask(candidate)) throw ownershipError("environ", error, candidate.pid);
+			}
 		}
 	} catch (error) {
 		entry.root = undefined;
-		if (!entry.requireIdentity || !["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) entry.cleanupError = ownershipError();
+		if (!entry.requireIdentity || !["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) entry.cleanupError = ownershipError(undefined, error);
 	}
 	byChild.set(child, entry);
 	live.add(entry);

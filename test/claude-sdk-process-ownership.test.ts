@@ -310,3 +310,19 @@ it.runIf(process.platform === "linux")("does not signal a candidate that disappe
 	expect(send).toHaveBeenCalledWith(fixture.root, "SIGKILL");
 	child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 });
+
+it.runIf(process.platform === "linux").each(["1", "2"])("checks thread-group exit proof during initial ownership capture (Threads: %s)", async threads => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	fixture.rootState = "R"; fixture.rootFlags = "4"; fixture.rootThreads = threads; fixture.deniedRootEnvironment = true;
+	scope.spawn(request());
+	try {
+		if (threads === "1") await expect(scope.close()).resolves.toBeUndefined();
+		else await expect(scope.close()).rejects.toThrow(/operator cleanup required/);
+		// The initial token was never readable: never signal that unverified root.
+		expect(send).not.toHaveBeenCalledWith(fixture.root, expect.anything());
+	} finally {
+		fixture.deniedRootEnvironment = false; child.emit("close", 0);
+		child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+	}
+});
