@@ -269,8 +269,8 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 		const remaining = [...states.values()];
 		shutdown.abort(); leases.close();
 		closing = (async () => {
-			await Promise.all([...remaining.map(dispose), ...disposals, ...runs]); ambiguous.clear();
-			if (cleanupError) throw new Error("Claude SDK private-state cleanup failed; operator cleanup required");
+			const settled = await Promise.allSettled([...remaining.map(dispose), ...disposals, ...runs]); ambiguous.clear();
+			if (cleanupError || settled.some(result => result.status === "rejected")) throw new Error("Claude SDK private-state cleanup failed; operator cleanup required");
 		})();
 		return closing;
 	} };

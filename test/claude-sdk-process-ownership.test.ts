@@ -192,3 +192,22 @@ it("does not confuse an environ exit race with loss of live ownership visibility
 	expect(fixture.memberState).toBe("Z"); expect(send).not.toHaveBeenCalled();
 	child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 });
+
+it("continues signalling verified siblings and the root after one member refuses cleanup", async () => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockImplementation(pid => {
+		if (pid === fixture.member) throw Object.assign(new Error("offline denied signal"), { code: "EPERM" });
+		return true;
+	});
+	scope.spawn(request());
+	try {
+		await expect(scope.close()).rejects.toThrow(/operator cleanup required/);
+		expect(send).toHaveBeenCalledWith(fixture.member, "SIGTERM");
+		expect(send).toHaveBeenCalledWith(fixture.member, "SIGKILL");
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGTERM");
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGKILL");
+		expect(send.mock.calls.every(([pid]) => pid > 0)).toBe(true);
+	} finally {
+		child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+	}
+});

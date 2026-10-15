@@ -157,10 +157,12 @@ function signalTree(tree: Tree, signal: NodeJS.Signals): void {
 			discover(tree);
 			// Never signal a group: even a verified member cannot prove every
 			// current occupant belongs to this tree. Recheck each individual.
-			for (const item of [...tree.members.values()].reverse()) {
-				if (alive(item, true)) send(item.pid, signal, true);
+			const members = [...tree.members.values()].reverse();
+			if (tree.root && !tree.members.has(tree.root.pid)) members.push(tree.root);
+			for (const item of members) {
+				try { if (alive(item, true)) send(item.pid, signal, true); }
+				catch { tree.cleanupError ??= ownershipError(); }
 			}
-			if (tree.root && !tree.members.has(tree.root.pid) && alive(tree.root, true)) send(tree.root.pid, signal, true);
 		} catch {
 			tree.cleanupError ??= ownershipError();
 		}

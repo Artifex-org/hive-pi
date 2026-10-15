@@ -5,13 +5,15 @@ import { expect, it, vi } from "vitest";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { createClaudeSdkRuntime } from "../extensions/claude-sdk/provider.ts";
 
-const fault = vi.hoisted(() => ({ remove: false, processes: false, processCloses: 0, paths: [] as string[] }));
+const fault = vi.hoisted(() => ({ remove: false, processes: false, processCloses: 0, secondClose: undefined as Promise<void> | undefined, paths: [] as string[] }));
 vi.mock("../extensions/claude-sdk/runtime.ts", async original => {
 	const runtime = await original<typeof import("../extensions/claude-sdk/runtime.ts")>();
 	return { ...runtime, processScope: () => {
 		const scope = runtime.processScope();
 		return { ...scope, close: async () => {
-			fault.processCloses++; await scope.close();
+			fault.processCloses++;
+			if (fault.processCloses === 2) await fault.secondClose;
+			await scope.close();
 			if (fault.processes) throw new Error("synthetic ownership loss; operator cleanup required");
 		} };
 	} };
@@ -83,5 +85,37 @@ it("setup cleanup still closes processes and removes private state when query.cl
 		expect(queries).toBe(1); await expect(runtime.close()).rejects.toThrow(/operator cleanup required/);
 	} finally {
 		fault.processes = false; await runtime.close().catch(() => {}); await rm(root, { force: true, recursive: true });
+	}
+});
+
+it("shutdown awaits all owned cleanup even after another disposal fails", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sdk-shutdown-settlement-"));
+	let release!: () => void;
+	fault.secondClose = new Promise<void>(resolve => { release = resolve; });
+	fault.processCloses = 0; fault.processes = true;
+	const runtime = createClaudeSdkRuntime({ executable: "/pinned/claude", stateRoot: root, cwd: process.cwd(),
+		url: "https://hive.invalid", token: "synthetic", launch: "offline" }, {
+		lease: async () => ({ access_token: "synthetic", expires_at: new Date(Date.now() + 3600_000).toISOString(), credential: "a", slot: "a" }),
+		validateExecutable: async () => {},
+		query: () => ({ close() {}, [Symbol.asyncIterator]() { throw new Error("synthetic setup failure"); } }),
+	});
+	const model = runtime.provider.getModels().find(model => model.id.includes("sonnet"))!;
+	const context = normalizeContext({ messages: [{ role: "user", content: "offline", timestamp: 1 }] });
+	const requests = ["a", "b"].map(sessionId => runtime.provider.streamSimple(model, context, { sessionId }).result());
+	try {
+		await vi.waitFor(() => expect(fault.processCloses).toBe(2));
+		const closing = runtime.close(); let settled = false;
+		const observed = closing.then(() => { settled = true; }, () => { settled = true; });
+		expect(runtime.close()).toBe(closing);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(settled).toBe(false);
+		release();
+		await expect(closing).rejects.toThrow(/operator cleanup required/);
+		await observed; await Promise.all(requests);
+		expect(settled).toBe(true); expect(await readdir(root)).toEqual([]);
+	} finally {
+		release(); fault.secondClose = undefined; fault.processes = false;
+		await Promise.allSettled(requests); await runtime.close().catch(() => {});
+		await rm(root, { force: true, recursive: true });
 	}
 });
