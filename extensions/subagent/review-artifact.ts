@@ -72,5 +72,18 @@ export class ReviewArtifactReads {
 		if (output === undefined || !(output === expected || output.startsWith(expected + "\n\n["))) return;
 		this.covered.fill(1, page.start, page.start + count);
 	}
+	beginRound(): void { this.pending.clear(); }
+	coveredLines(): number { return this.covered.reduce((sum, value) => sum + value, 0); }
+	missingRanges(): string {
+		const ranges: string[] = [];
+		for (let i = 0; i < this.covered.length; i++) {
+			if (this.covered[i]) continue;
+			const start = i + 1;
+			while (i + 1 < this.covered.length && !this.covered[i + 1]) i++;
+			ranges.push(`${start}-${i + 1}`);
+			if (ranges.length === 32) { ranges.push("(further gaps omitted; complete all pages)"); break; }
+		}
+		return ranges.join(", ");
+	}
 	complete(): boolean { return this.covered.every(value => value === 1); }
 }

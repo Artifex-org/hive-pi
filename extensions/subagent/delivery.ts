@@ -108,8 +108,8 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 		const envCause = `\`${clip(assignments)}\` sets environment that can redirect or reconfigure the delivery`;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);
-			const extra = tokens?.slice(2).find((token) => token !== "--no-pr");
-			targets.push(preceded || configuredEnv || redirected || !tokens || extra !== undefined ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, "the leg redirects input or output"], [!tokens, "its arguments are dynamic (substitution or variable)"], [extra !== undefined, `argument \`${extra}\` is not supported (only \`hive ship\` and \`hive ship --no-pr\`)`]) : ok(dir));
+			const extra = tokens?.slice(2).find((token) => !["--no-pr", "--draft"].includes(token));
+			targets.push(preceded || configuredEnv || redirected || !tokens || extra !== undefined ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, "the leg redirects input or output"], [!tokens, "its arguments are dynamic (substitution or variable)"], [extra !== undefined, `argument \`${extra}\` is not supported (supported flags: \`--no-pr\`, \`--draft\`)`]) : ok(dir));
 			continue;
 		}
 		if (/^gh\s/.test(cleaned)) {
