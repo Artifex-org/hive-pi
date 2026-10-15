@@ -82,6 +82,8 @@ const WORKER_EXTENSIONS = [
 	"../edit-common/rowtool.ts",
 	"../opmode/index.ts",
 	"../meta-media/provider-only.ts",
+	// Launch-gated provider and cleanup only; no tool execution or policy hooks.
+	"../claude-sdk/index.ts",
 	"../fast/worker.ts",
 ];
 

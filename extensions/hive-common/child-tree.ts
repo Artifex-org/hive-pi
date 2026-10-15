@@ -15,7 +15,7 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostRequire } from "./host-dependencies.ts";
 
@@ -33,8 +33,30 @@ export function treeSpawnOptions(env: NodeJS.ProcessEnv = process.env): { detach
 	return { detached: isClaudeHelper(env), env: { ...env, [TREE_TOKEN]: [...inherited, randomUUID()].join(",") } };
 }
 
-type Identity = { pid: number; start: string; state: string; ppid: number; pgid: number };
-type Tree = { child: ChildProcess; grouped: boolean; token?: string; root?: Identity; members: Map<number, Identity> };
+type Identity = { pid: number; start: string; state: string; ppid: number; pgid: number; flags: number };
+const PF_EXITING = 0x4; // Linux include/linux/sched.h; set before exit_mm, not just at zombie state.
+type Tree = { child: ChildProcess; grouped: boolean; token?: string; root?: Identity; members: Map<number, Identity>; requireIdentity?: boolean; cleanupError?: Error };
+export type TreeOwnershipOptions = { requireIdentity?: boolean };
+
+class ChildTreeOwnershipError extends Error { override name = "ChildTreeOwnershipError"; }
+function ownershipError(operation?: "stat" | "environ" | "proc" | "signal" | "status", error?: unknown, pid?: number): Error {
+	if (error instanceof ChildTreeOwnershipError) return error;
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	// Never propagate OS messages, paths, argv or environment contents.
+	const errno = typeof code === "string" && ["EACCES", "EPERM", "EIO", "EMFILE", "ENFILE", "ENOMEM", "EINVAL", "ENOTDIR", "ENOENT", "ESRCH"].includes(code) ? code : "unknown";
+	const detail = operation ? ` [${operation} errno=${errno}${pid === undefined ? "" : ` pid=${pid}`}]` : "";
+	return new ChildTreeOwnershipError(`Child-tree ownership unavailable; operator cleanup required (Linux with readable procfs required)${detail}`);
+}
+
+/** Fail before spawning when verified ownership is unavailable. No portable fallback. */
+export function assertTreeIdentityReadable(): void {
+	if (process.platform !== "linux") throw ownershipError();
+	try {
+		readdirSync("/proc");
+		if (!identity(process.pid, true)) throw ownershipError();
+		readFileSync(`/proc/${process.pid}/environ`, "utf8");
+	} catch { throw ownershipError(); }
+}
 // Pi evaluates extension graphs with separate module caches. Ownership and
 // signal installation must still be process-wide, not one copy per extension.
 const OWNERS = Symbol.for("hive-pi.child-tree.owners");
@@ -54,33 +76,60 @@ function installShutdownCleanup(): void {
 	owners.shutdownInstalled = true;
 }
 
-function identity(pid: number): Identity | undefined {
+function identity(pid: number, strict = false): Identity | undefined {
 	try {
 		const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
 		const fields = raw.slice(raw.lastIndexOf(")") + 2).trim().split(/\s+/);
-		return { pid, start: fields[19], state: fields[0], ppid: Number(fields[1]), pgid: Number(fields[2]) };
-	} catch { return undefined; } // exited, unreadable, or non-Linux
+		if (strict && (!/^\d+$/.test(fields[19] ?? "") || !/^\d+$/.test(fields[6] ?? "") || !Number.isSafeInteger(Number(fields[6])) || !fields[0] || !Number.isInteger(Number(fields[1])) || !Number.isInteger(Number(fields[2])))) throw ownershipError();
+		return { pid, start: fields[19], state: fields[0], ppid: Number(fields[1]), pgid: Number(fields[2]), flags: Number(fields[6]) };
+	} catch (error) {
+		if (strict && !["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) throw ownershipError("stat", error, pid);
+		return undefined;
+	}
 }
 
-function alive(item: Identity): boolean {
-	const current = identity(item.pid);
-	return current?.start === item.start && current.state !== "Z" && current.state !== "X";
+/** A leader's exit flag/state alone says nothing about surviving user threads. */
+function singleExitingTask(item: Identity): boolean {
+	const exiting = (row: Identity) => (row.flags & PF_EXITING) !== 0 || ["Z", "X"].includes(row.state);
+	if (!exiting(item)) return false;
+	try {
+		const status = readFileSync(`/proc/${item.pid}/status`, "utf8");
+		const count = /^Threads:\s+(\d+)\s*$/m.exec(status)?.[1];
+		const current = identity(item.pid, true);
+		if (!current) return true;
+		if (current.start !== item.start || !count || !Number.isSafeInteger(Number(count)) || Number(count) < 1) throw ownershipError();
+		return exiting(current) && Number(count) === 1;
+	} catch (error) {
+		if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+			const current = identity(item.pid, true);
+			if (!current || current.start !== item.start) return true;
+		}
+		throw ownershipError("status", error, item.pid);
+	}
+}
+
+function alive(item: Identity, strict = false): boolean {
+	const current = identity(item.pid, strict);
+	if (current?.start !== item.start) return false;
+	if (current.state !== "Z" && current.state !== "X") return true;
+	return strict && !singleExitingTask(current);
 }
 
 /** Snapshot relation AND token membership before any ancestor can reparent it. */
 function discover(tree: Tree): void {
 	if (process.platform !== "linux" || tree.child.pid === undefined) return;
 	let names: string[];
-	try { names = readdirSync("/proc"); } catch { return; }
+	try { names = readdirSync("/proc"); } catch (error) { if (tree.requireIdentity) throw ownershipError("proc", error); return; }
 	const rows = new Map<number, Identity>();
-	const currentRoot = identity(tree.child.pid);
-	const ownGroup = tree.grouped && tree.root && (!currentRoot || currentRoot.start === tree.root.start);
+	const currentRoot = identity(tree.child.pid, tree.requireIdentity);
+	const ownGroup = !tree.requireIdentity && tree.grouped && tree.root && (!currentRoot || currentRoot.start === tree.root.start);
 	for (const name of names) {
 		if (!/^\d+$/.test(name)) continue;
 		const pid = Number(name);
 		if (pid === process.pid) continue;
-		const item = identity(pid);
+		const item = identity(pid, tree.requireIdentity);
 		if (!item) continue;
+		if (tree.requireIdentity && ["Z", "X"].includes(item.state) && !alive(item, true)) continue;
 		rows.set(pid, item);
 		// A surviving original group also owns env-cleared children after root
 		// exit. Reject a reused leader PID and validate member identities below.
@@ -91,13 +140,29 @@ function discover(tree: Tree): void {
 			try {
 				const entry = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").find((e) => e.startsWith(`${TREE_TOKEN}=`));
 				if (entry?.slice(TREE_TOKEN.length + 1).split(",").includes(tree.token)) tree.members.set(pid, item);
-			} catch { /* permission denied or process exited; ancestry can still identify it */ }
+			} catch (error) {
+				// Other users' environments are normally private. Our own unreadable
+				// candidates could be token-owned orphans: do not report a clean tree.
+				if (tree.requireIdentity && !["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+					// exit_mm can revoke environ access while state is still R/D.
+					// Only a single exiting task rules out surviving user threads.
+					// Keep its row for ancestry and still scan surviving descendants.
+					if (!alive(item, true)) continue;
+					const current = identity(pid, true);
+					if (current?.start !== item.start || singleExitingTask(current)) continue;
+					try { if (statSync(`/proc/${pid}`).uid === process.getuid?.()) throw ownershipError("environ", error, pid); }
+					catch (failure) {
+						if (!["ENOENT", "ESRCH"].includes((failure as NodeJS.ErrnoException).code ?? "")) throw ownershipError("environ", failure, pid);
+					}
+				}
+				// Legacy portable policy can still identify members by ancestry.
+			}
 		}
 	}
 	// Remembered members seed the walk too: TERM can reparent them before KILL,
 	// and a surviving wrapper can have spawned another child during its grace.
-	const parents = new Set([...tree.members.values()].filter(alive).map((item) => item.pid));
-	if (tree.root && alive(tree.root)) parents.add(tree.root.pid);
+	const parents = new Set([...tree.members.values()].filter(item => alive(item, tree.requireIdentity)).map((item) => item.pid));
+	if (tree.root && alive(tree.root, tree.requireIdentity)) parents.add(tree.root.pid);
 	let changed = true;
 	while (changed) {
 		changed = false;
@@ -109,15 +174,33 @@ function discover(tree: Tree): void {
 	}
 }
 
-function send(pid: number, signal: NodeJS.Signals): void {
+function send(pid: number, signal: NodeJS.Signals, strict = false): void {
 	try { process.kill(pid, signal); }
 	catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code !== "ESRCH" && code !== "EPERM") throw error;
+		if (code !== "ESRCH" && (strict || code !== "EPERM")) throw error;
 	}
 }
 
 function signalTree(tree: Tree, signal: NodeJS.Signals): void {
+	if (tree.requireIdentity) {
+		try {
+			if (process.platform !== "linux") throw ownershipError();
+			try { discover(tree); } catch (error) { tree.cleanupError ??= ownershipError(undefined, error); }
+			// Never signal a group: even a verified member cannot prove every
+			// current occupant belongs to this tree. Recheck each individual.
+			const members = [...tree.members.values()].reverse();
+			if (tree.root && !tree.members.has(tree.root.pid)) members.push(tree.root);
+			for (const item of members) {
+				try { if (alive(item, true)) send(item.pid, signal, true); }
+				catch (error) { tree.cleanupError ??= ownershipError("signal", error, item.pid); }
+			}
+		} catch (error) {
+			tree.cleanupError ??= ownershipError(undefined, error);
+		}
+		if (tree.cleanupError) throw tree.cleanupError;
+		return;
+	}
 	discover(tree);
 	const groupMember = [...tree.members.values()].some(item => item.pgid === tree.child.pid && alive(item));
 	// Without procfs retain the portable group-only fallback, including an
@@ -144,16 +227,39 @@ export function killTree(child: ChildProcess, signal: NodeJS.Signals, grouped: b
 }
 
 /** Pass the token-bearing child env's TREE_TOKEN value, not the parent's env. */
-export function trackTree(child: ChildProcess, grouped: boolean, tokens?: string): void {
+export function trackTree(child: ChildProcess, grouped: boolean, tokens?: string, options: TreeOwnershipOptions = {}): void {
 	installShutdownCleanup();
 	const existing = byChild.get(child);
 	if (existing) return;
-	const entry: Tree = { child, grouped, token: tokens?.split(",").at(-1), root: child.pid === undefined ? undefined : identity(child.pid), members: new Map() };
+	const entry: Tree = { child, grouped, token: tokens?.split(",").at(-1), members: new Map(), requireIdentity: options.requireIdentity };
+	try {
+		entry.root = child.pid === undefined ? undefined : identity(child.pid, options.requireIdentity);
+		if (entry.requireIdentity && entry.root && entry.token) {
+			// A very short-lived leader may exit or be recycled before capture.
+			const candidate = entry.root;
+			try {
+				const env = readFileSync(`/proc/${candidate.pid}/environ`, "utf8").split("\0").find(value => value.startsWith(`${TREE_TOKEN}=`));
+				if (!env?.slice(TREE_TOKEN.length + 1).split(",").includes(entry.token)) entry.root = undefined;
+			} catch (error) {
+				entry.root = undefined; // never signal an initially unverified root
+				if (!["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "") && !singleExitingTask(candidate)) throw ownershipError("environ", error, candidate.pid);
+			}
+		}
+	} catch (error) {
+		entry.root = undefined;
+		if (!entry.requireIdentity || !["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) entry.cleanupError = ownershipError(undefined, error);
+	}
 	byChild.set(child, entry);
 	live.add(entry);
 	const forget = () => {
 		// Even a successful wrapper must not leave detached workers behind. In
 		// particular a closed pipe is not proof of a TERM-resistant child's exit.
+		if (entry.requireIdentity) {
+			if (!live.has(entry)) return;
+			// Event observers cannot throw; explicit kill/release surfaces the latch.
+			try { if (child.pid !== undefined) signalTree(entry, "SIGKILL"); } catch { /* latched */ }
+			return; // retain orphan discovery and failure evidence until scope release
+		}
 		if (child.pid !== undefined) signalTree(entry, "SIGKILL");
 		live.delete(entry);
 	};
@@ -161,6 +267,20 @@ export function trackTree(child: ChildProcess, grouped: boolean, tokens?: string
 	child.once("error", forget);
 }
 
+/** Release only after the explicit owner has finished cleanup. */
+export function releaseTree(child: ChildProcess): void {
+	const tree = byChild.get(child);
+	if (tree?.cleanupError) throw tree.cleanupError;
+	if (tree) live.delete(tree);
+	// Retain strict policy in the WeakMap for delayed SDK transport callbacks.
+	// Dropping it would let killTree rebuild this handle with portable fallback.
+	if (!tree?.requireIdentity) byChild.delete(child);
+}
+
 export function killAllTrees(signal: NodeJS.Signals): void {
-	for (const entry of live) signalTree(entry, signal);
+	for (const entry of live) {
+		if (entry.requireIdentity) {
+			try { signalTree(entry, signal); } catch { /* latched for explicit owner */ }
+		} else signalTree(entry, signal);
+	}
 }

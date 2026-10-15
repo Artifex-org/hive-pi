@@ -142,12 +142,22 @@ npm run check      # tsc --noEmit && vitest run
 
 MIT. See [LICENSE](LICENSE).
 
-## Claude subscription compatibility work
+## Opt-in Claude Agent SDK provider
 
-The [Claude Agent SDK compatibility record](docs/claude-sdk-compatibility.md)
-tracks the non-serving prototype and its offline tests. It does **not** add a
-selectable Claude SDK provider or acquire subscription credentials. Existing
-Hive authd account reuse, live billing validation and rollout remain gated there.
+`HIVE_CLAUDE_SDK=1` enables the native `claude-sdk/<model>` provider through the
+package's discovered `extensions/claude-sdk/index.ts` entry and explicit worker
+allowlist. It requires a pinned absolute Claude executable, a private absolute
+0700 state root, server-authorized Hive access-only launch leases, and **Linux
+with readable procfs ownership**. SDK execution fails closed on macOS/other
+platforms or unreadable procfs; no group-only fallback is permitted. Pi retains
+its original prompt/history, tool guards and execution; SDK MCP calls park until
+Pi supplies their correlated results. No login, full Pi auth import, token
+persistence or API fallback is provided.
+
+See the [configuration, lifecycle and instrumentation contract](docs/claude-sdk-compatibility.md).
+The implementation and tests are **offline**: live subscription eligibility,
+billing, native CLI enforcement and renewal acceptance remain unverified and
+separately gated. Disabled by default; no deployment or live inference is implied.
 
 ## Account quota recovery
 

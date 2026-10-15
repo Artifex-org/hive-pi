@@ -1,8 +1,4 @@
-/**
- * In-memory protocol prototype only. The bridge never executes a Pi tool.
- * A future provider must register stream-observed calls and let Pi run its
- * validation/guards before supplying a result. No provider imports this module.
- */
+/** In-process MCP bridge: correlated calls park; only Pi executes tools. */
 import { isDeepStrictEqual } from "node:util";
 import type { Tool, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
@@ -21,15 +17,17 @@ interface Call {
 
 const failure = (text: string): CallToolResult => ({ isError: true, content: [{ type: "text", text }] });
 
-/** One bounded query-step fixture, not a persistent multi-turn session manager. */
+/** One bounded SDK query. Lifecycle and canonical transcript ownership live in the provider. */
 export class PiToolBridge {
 	readonly config: McpSdkServerConfigWithInstance;
 	readonly toolNames: readonly string[];
 	private readonly calls = new Map<string, Call>();
+	private readonly registrations = new Map<string, Set<() => void>>();
+	private readonly failedRegistrations = new Set<string>();
 	private closed = false;
 	private readonly abort: () => void;
 
-	constructor(tools: readonly Tool[], private readonly signal: AbortSignal) {
+	constructor(tools: readonly Tool[], private readonly signal: AbortSignal, private readonly registrationTimeout = 0) {
 		this.toolNames = tools.map(tool => tool.name);
 		if (new Set(this.toolNames).size !== tools.length || tools.some(tool => !/^[a-zA-Z0-9_-]+$/.test(tool.name))) {
 			throw new Error("Invalid Pi tool names");
@@ -43,9 +41,18 @@ export class PiToolBridge {
 		server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 			if (this.closed) return failure("Pi bridge closed");
 			const id = request.params._meta?.["claudecode/toolUseId"];
-			if (typeof id !== "string") return failure("Missing tool-use correlation");
+			if (typeof id !== "string" || !id || id.length > 256 || /[\s\p{Cc}]/u.test(id)) {
+				// No trustworthy ID exists to tombstone: reject the entire query before replying.
+				this.close();
+				return failure("Missing tool-use correlation");
+			}
+			if (this.failedRegistrations.has(id)) return failure("Failed tool-use registration");
+			if (this.registrations.has(id)) return failure("Duplicate MCP tool request");
+			if (!this.calls.has(id) && this.registrationTimeout > 0) await this.waitForRegistration(id, extra.signal);
+			if (this.closed || this.failedRegistrations.has(id)) return failure("Failed tool-use registration");
 			const call = this.calls.get(id);
 			if (!call || call.name !== request.params.name || !isDeepStrictEqual(call.input, request.params.arguments ?? {})) {
+				this.failRegistration(id);
 				return failure("Unknown tool-use correlation");
 			}
 			if (call.requested) return failure("Duplicate MCP tool request");
@@ -81,9 +88,54 @@ export class PiToolBridge {
 		if (!id || id.length > 256 || /[\s\p{Cc}]/u.test(id) || !this.toolNames.includes(name)) {
 			throw new Error("Invalid Pi tool call");
 		}
+		if (this.failedRegistrations.has(id)) throw new Error("Failed tool-use registration; reconcile before retrying");
 		if (this.calls.has(id)) throw new Error("Duplicate tool-use ID");
-		if (this.calls.size >= 256) throw new Error("Prototype query-step limit reached");
+		if (!this.registrations.has(id) && this.calls.size + this.failedRegistrations.size + this.registrations.size >= 256) {
+			this.close(); throw new Error("SDK query tool-call limit reached");
+		}
 		this.calls.set(id, { name, input: structuredClone(input), requested: false, completed: false, cancelled: false });
+		for (const ready of this.registrations.get(id) ?? []) ready();
+	}
+
+	/** SDK MCP dispatch can overtake an awaited Pi stream observer; never execute or trust it early. */
+	private async waitForRegistration(id: string, signal: AbortSignal): Promise<void> {
+		if (signal.aborted || this.closed) { this.failRegistration(id); return; }
+		if (this.calls.size + this.failedRegistrations.size + this.registrations.size >= 256) { this.close(); return; }
+		await new Promise<void>(resolve => {
+			const ready = () => {
+				if (!this.calls.has(id) || signal.aborted) this.failRegistration(id);
+				clearTimeout(timer); signal.removeEventListener("abort", ready);
+				const waiting = this.registrations.get(id); waiting?.delete(ready);
+				if (!waiting?.size) this.registrations.delete(id); resolve(); };
+			const timer = setTimeout(ready, this.registrationTimeout);
+			const waiting = this.registrations.get(id) ?? new Set(); waiting.add(ready); this.registrations.set(id, waiting);
+			signal.addEventListener("abort", ready, { once: true });
+			if (this.calls.has(id) || signal.aborted || this.closed) ready();
+		});
+	}
+
+	private failRegistration(id: string): void {
+		if (this.closed) return;
+		if (!this.failedRegistrations.has(id) && this.calls.size + this.failedRegistrations.size >= 256) {
+			this.close(); return;
+		}
+		this.failedRegistrations.add(id);
+		const call = this.calls.get(id);
+		if (call) {
+			call.cancelled = true;
+			call.resolve?.(failure("Failed tool-use registration"));
+		}
+	}
+
+	/** Recheck after observers yield: MCP cancellation can settle a registered call before handoff. */
+	validateBatch(ids: readonly string[]): void {
+		if (this.closed) throw new Error("Pi bridge closed");
+		for (const id of ids) {
+			const call = this.calls.get(id);
+			if (!call || call.cancelled || call.completed || this.failedRegistrations.has(id)) {
+				throw new Error("Invalid or cancelled MCP tool batch; reconcile before retrying");
+			}
+		}
 	}
 
 	get pendingCallIds(): string[] {
@@ -114,6 +166,7 @@ export class PiToolBridge {
 		this.closed = true;
 		this.signal.removeEventListener("abort", this.abort);
 		for (const call of this.calls.values()) call.resolve?.(failure("Pi bridge closed"));
-		this.calls.clear();
+		for (const waiting of this.registrations.values()) for (const ready of waiting) ready();
+		this.registrations.clear(); this.calls.clear(); this.failedRegistrations.clear();
 	}
 }

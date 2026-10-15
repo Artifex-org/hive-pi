@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PiToolBridge } from "../prototypes/claude-sdk/tool-bridge.ts";
+import { PiToolBridge } from "../extensions/claude-sdk/tool-bridge.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -10,12 +10,12 @@ afterEach(async () => {
 	finally { vi.useRealTimers(); }
 });
 
-async function fixture() {
+async function fixture(registrationTimeout = 0) {
 	const controller = new AbortController();
 	const bridge = new PiToolBridge([
 		{ name: "read", description: "Pi-owned read", parameters: Type.Object({ path: Type.String() }) },
 		{ name: "bash", description: "Pi-owned bash", parameters: Type.Object({ command: Type.String() }) },
-	], controller.signal);
+	], controller.signal, registrationTimeout);
 	const client = new Client({ name: "offline-fixture", version: "1.0.0" });
 	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 	await bridge.config.instance.connect(serverTransport);
@@ -29,6 +29,65 @@ async function fixture() {
 }
 
 describe("actual MCP over in-memory transports, not a Claude query", () => {
+	it("parks SDK dispatch that overtakes an awaited stream observer, then validates registration", async () => {
+		const { bridge, call, complete } = await fixture(1000);
+		let settled = false;
+		const early = call("overtook").then(result => { settled = true; return result; });
+		await new Promise(resolve => setTimeout(resolve, 10));
+		expect(settled).toBe(false);
+		bridge.expectCall("overtook", "read", { path: "/fixture" });
+		await vi.waitFor(() => expect(bridge.pendingCallIds).toEqual(["overtook"]));
+		complete("overtook", "guarded Pi output");
+		expect(await early).toMatchObject({ isError: false, content: [{ text: "guarded Pi output" }] });
+	});
+	it("bounds unknown pre-registration requests and settles them on shutdown", async () => {
+		const { bridge, call } = await fixture(10);
+		expect(await call("unknown")).toMatchObject({ isError: true });
+		const pending = call("shutdown-before-registration");
+		bridge.close();
+		expect(await pending).toMatchObject({ isError: true });
+	});
+	it("never exposes a timed-out pre-registration call to Pi", async () => {
+		const { bridge, call, complete } = await fixture(10);
+		expect(await call("late-effect")).toMatchObject({ isError: true });
+		const execute = vi.fn();
+		expect(() => { bridge.expectCall("late-effect", "read", { path: "/fixture" }); execute(); }).toThrow(/registration/);
+		expect(execute).not.toHaveBeenCalled();
+		expect(bridge.pendingCallIds).toEqual([]);
+		expect(() => complete("late-effect", "late")).toThrow(/correlation/);
+		expect(await call("late-effect")).toMatchObject({ isError: true });
+	});
+	it.each(["cancel", "timeout"])("remembers pre-registration MCP %s before a late stream event", async mode => {
+		const { bridge, client } = await fixture(10_000);
+		const abort = new AbortController();
+		vi.useFakeTimers();
+		const pending = client.callTool({ name: "read", arguments: { path: "/fixture" },
+			_meta: { "claudecode/toolUseId": "late-cancel" } }, undefined,
+			mode === "cancel" ? { signal: abort.signal } : { timeout: 1000 });
+		const rejected = expect(pending).rejects.toThrow();
+		await vi.advanceTimersByTimeAsync(1);
+		if (mode === "cancel") abort.abort(); else await vi.advanceTimersByTimeAsync(1000);
+		await rejected;
+		await vi.advanceTimersByTimeAsync(1);
+		expect(() => bridge.expectCall("late-cancel", "read", { path: "/fixture" })).toThrow(/registration/);
+		expect(bridge.pendingCallIds).toEqual([]);
+	});
+	it("bounds failed registration memory without evicting IDs that could execute late", async () => {
+		const { bridge, call } = await fixture();
+		for (let index = 0; index < 257; index++) expect(await call(`unknown-${index}`)).toMatchObject({ isError: true });
+		expect(() => bridge.expectCall("unknown-0", "read")).toThrow(/closed/);
+		expect(() => bridge.expectCall("fresh", "read")).toThrow(/closed/);
+	});
+	it("rejects duplicate unregistered dispatch without unbounded waiters", async () => {
+		const { bridge, call, complete } = await fixture(1000);
+		const first = call("waiting");
+		// MCP transports dispatch in order; the second response proves both reached the bridge.
+		expect(await call("waiting")).toMatchObject({ isError: true });
+		bridge.expectCall("waiting", "read", { path: "/fixture" });
+		await vi.waitFor(() => expect(bridge.pendingCallIds).toEqual(["waiting"]));
+		complete("waiting", "Pi result");
+		expect(await first).toMatchObject({ isError: false });
+	});
 	it("advertises Pi schemas and parks a correlated call until Pi supplies the result", async () => {
 		const { bridge, client, call, complete } = await fixture();
 		const listed = await client.listTools();
@@ -62,17 +121,45 @@ describe("actual MCP over in-memory transports, not a Claude query", () => {
 		complete("first", "result one");
 		expect(await first).toMatchObject({ content: [{ type: "text", text: "result one" }] });
 	});
-	it("rejects missing/forged metadata and changed tool names or arguments", async () => {
+	it.each([undefined, null, 42, "", " ", "bad id", "bad\u0000id", "x".repeat(257)])("closes the whole bridge for unattributable correlation %j and settles all waiters", async id => {
+		const { bridge, client, call, complete } = await fixture(1000);
+		bridge.expectCall("known", "read", { path: "/fixture" });
+		const parked = call("known");
+		const waiting = call("not-yet-streamed");
+		await client.ping();
+		expect(bridge.pendingCallIds).toEqual(["known"]);
+		expect(await client.callTool({ name: "read", arguments: {}, ...(id === undefined ? {} : { _meta: { "claudecode/toolUseId": id } }) })).toMatchObject({ isError: true });
+		expect(await parked).toMatchObject({ isError: true });
+		expect(await waiting).toMatchObject({ isError: true });
+		expect(bridge.pendingCallIds).toEqual([]);
+		expect(() => bridge.validateBatch(["known"])).toThrow(/closed/);
+		expect(() => complete("known", "late")).toThrow(/closed/);
+		expect(() => bridge.expectCall("fresh", "read")).toThrow(/closed/);
+	});
+	it("rejects forged metadata and changed tool names or arguments", async () => {
 		const { bridge, client, call, complete } = await fixture();
 		bridge.expectCall("known", "read", { path: "/fixture" });
-		expect(await client.callTool({ name: "read", arguments: {} })).toMatchObject({ isError: true });
 		expect(await call("unknown")).toMatchObject({ isError: true });
 		expect(await call("known", "bash")).toMatchObject({ isError: true });
 		expect(await call("known", "read", { path: "/different" })).toMatchObject({ isError: true });
 		expect(() => complete("unknown", "bad")).toThrow("correlation");
 		expect(() => complete("known", "bad", "bash")).toThrow("correlation");
-		complete("known", "valid");
-		expect(await call("known")).toMatchObject({ isError: false });
+		expect(() => bridge.validateBatch(["known"])).toThrow(/cancelled/);
+		expect(() => complete("known", "late")).toThrow(/reconcile/);
+		expect(await call("known")).toMatchObject({ isError: true });
+		expect(() => bridge.expectCall("known", "read")).toThrow(/registration/);
+	});
+	it.each(["name", "arguments"])("settles a parked resolver on mismatched %s without reviving it", async mode => {
+		const { bridge, call, complete } = await fixture();
+		bridge.expectCall("parked", "read", { path: "/fixture" });
+		const pending = call("parked");
+		await vi.waitFor(() => expect(bridge.pendingCallIds).toEqual(["parked"]));
+		expect(await call("parked", mode === "name" ? "bash" : "read", { path: mode === "name" ? "/fixture" : "/wrong" })).toMatchObject({ isError: true });
+		expect(await pending).toMatchObject({ isError: true });
+		expect(bridge.pendingCallIds).toEqual([]);
+		expect(() => bridge.validateBatch(["parked"])).toThrow(/cancelled/);
+		expect(() => complete("parked", "late")).toThrow(/reconcile/);
+		expect(await call("parked")).toMatchObject({ isError: true });
 	});
 	it("refuses duplicate calls/results instead of completing another call", async () => {
 		const { bridge, call, complete } = await fixture();
@@ -124,6 +211,9 @@ describe("actual MCP over in-memory transports, not a Claude query", () => {
 		else await vi.advanceTimersByTimeAsync(1000);
 		await rejected;
 		await vi.waitFor(() => expect(bridge.pendingCallIds).toEqual(["sibling"]));
+		expect(() => bridge.validateBatch(["sibling", "cancelled"])).toThrow(/cancelled/);
+		expect(() => bridge.expectCall("cancelled", "read", { path: "/fixture" })).toThrow(/Duplicate/);
+		expect(() => bridge.validateBatch(["sibling"])).not.toThrow();
 		expect(() => complete("cancelled", "late result")).toThrow("reconcile");
 		expect(await call("cancelled")).toMatchObject({ isError: true });
 		complete("sibling", "still active");
