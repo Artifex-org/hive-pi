@@ -129,7 +129,7 @@ describe("large delivery review evidence (HIV-3868)", () => {
 		expect(log.prompt).toContain("JSON array of string chunks");
 		expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
 	});
-	it.each(["success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
+	it.each(["success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress", "signal"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
 		writeFileSync(launch.piBin, `#!${process.execPath}
 const fs = require("node:fs");
 const prompt = fs.readFileSync(0, "utf8");
@@ -169,12 +169,26 @@ const patch = fs.readFileSync(patchPath, "utf8");
  if(!(calls.length && mode === "no-output")) session?.appendMessage(message);
  if(mode === "missing-session" && sessionDir) fs.rmSync(sessionDir,{recursive:true,force:true});
  if(mode === "mutated") fs.appendFileSync(${JSON.stringify(join(launch.root,"code0.ts"))}, "export const mutation = true;\\n");
- calls.push({argv,prompt,patchPath,sessionDir,sessionId,prior,next:offset}); fs.writeFileSync(callsPath,JSON.stringify(calls));
+ calls.push({argv,prompt,patchPath,sessionDir,sessionId,prior,next:offset,pid:process.pid}); fs.writeFileSync(callsPath,JSON.stringify(calls));
+ if(calls.length === 2 && mode === "signal") { setInterval(() => {}, 1000); console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"ABORT_READY"}],stopReason:"stop"}})); return; }
  if(!(calls.length === 2 && mode === "no-output")) console.log(JSON.stringify({type:"message_end",message}));
  if(calls.length === 2 && mode === "nonzero") process.exitCode = 1;
 })().catch(error => { console.error(error); process.exit(1); });
 `);
 		const expected = captureDeliveryDiff(launch.root)!;
+		if (mode === "signal") {
+			const controller = new AbortController();
+			const controlled = host(); controlled.signal = controller.signal;
+			controlled.reportUpdate = update => {
+				if (update.content.some(block => block.type === "text" && block.text === "ABORT_READY")) controller.abort();
+			};
+			await expect(runSingleDelegation({ agent: "code-reviewer", task: "Review the change", model: "zai/glm-low" }, "off", controlled)).rejects.toMatchObject({ name: "DelegationAborted" });
+			const calls = JSON.parse(readFileSync(join(launch.root, "patch-log.json"), "utf8"));
+			expect(calls).toHaveLength(2);
+			expect(() => process.kill(calls[1].pid, 0)).toThrow();
+			expect(existsSync(calls[0].patchPath)).toBe(false); expect(existsSync(calls[0].sessionDir)).toBe(false);
+			return;
+		}
 		const outcome = await run();
 		expect(existsSync(join(launch.root, "patch-log.json")), outcome.text).toBe(true);
 		const calls = JSON.parse(readFileSync(join(launch.root, "patch-log.json"), "utf8"));
