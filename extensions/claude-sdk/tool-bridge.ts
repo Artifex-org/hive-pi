@@ -47,8 +47,8 @@ export class PiToolBridge {
 			if (!this.calls.has(id) && this.registrationTimeout > 0) await this.waitForRegistration(id, extra.signal);
 			if (this.closed || this.failedRegistrations.has(id)) return failure("Failed tool-use registration");
 			const call = this.calls.get(id);
-			if (!call) this.failRegistration(id);
 			if (!call || call.name !== request.params.name || !isDeepStrictEqual(call.input, request.params.arguments ?? {})) {
+				this.failRegistration(id);
 				return failure("Unknown tool-use correlation");
 			}
 			if (call.requested) return failure("Duplicate MCP tool request");
@@ -117,7 +117,10 @@ export class PiToolBridge {
 		}
 		this.failedRegistrations.add(id);
 		const call = this.calls.get(id);
-		if (call) call.cancelled = true;
+		if (call) {
+			call.cancelled = true;
+			call.resolve?.(failure("Failed tool-use registration"));
+		}
 	}
 
 	/** Recheck after observers yield: MCP cancellation can settle a registered call before handoff. */

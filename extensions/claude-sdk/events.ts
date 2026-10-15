@@ -5,6 +5,14 @@ import type { PiToolBridge } from "./tool-bridge.ts";
 
 export function emptyUsage(): Usage { return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }; }
+const failureCodes = ["overloaded", "rate_limit", "server_error"] as const;
+type FailureCode = typeof failureCodes[number];
+/** Only structured allowlisted codes, never SDK text, cross the error boundary. */
+export class SdkAssistantFailure extends Error {
+	constructor(readonly code: FailureCode) {
+		super(`Claude SDK assistant failure (${code})`);
+	}
+}
 interface Block { index: number; json: string; stopped: boolean; invalidArguments?: boolean }
 export class EventConverter {
 	private blocks = new Map<number, Block>();
@@ -42,7 +50,11 @@ export class EventConverter {
 			return "done";
 		}
 		if (message.type === "assistant") {
-			if (message.error) throw new Error(`Claude SDK assistant error (${message.error})`);
+			if (message.error) {
+				const code = failureCodes.find(code => code === message.error);
+				if (code) throw new SdkAssistantFailure(code);
+				throw new Error("Unclassified Claude SDK assistant error");
+			}
 			if (this.observedIds.has(message.message.id)) return "continue"; // duplicate may arrive on the next Pi tool turn
 			// Canonical frames may carry only one completed block, not a complete response.
 			if (message.message.stop_reason == null) throw new Error("Missing Claude SDK partial frames; no complete assistant response");

@@ -70,6 +70,33 @@ async function fixture(query?: QueryFactory, leaseSource = vi.fn(async () => lea
 	const model = runtime.provider.getModels().find(m => m.id.includes("sonnet"))!;
 	return { ...runtime, root, config, model, requests, leaseSource };
 }
+const sdkFailure = (code = "rate_limit", content: unknown[] = []): SDKMessage => ({
+	type: "assistant", error: code, parent_tool_use_id: null, uuid: "SECRET-SDK-TOKEN", session_id: "SECRET-SDK-TOKEN",
+	message: { id: "SECRET-SDK-TOKEN", content, stop_reason: null, model: "SECRET-SDK-TOKEN" },
+}) as unknown as SDKMessage;
+async function retrySession(f: Awaited<ReturnType<typeof fixture>>, maxRetries = 1, history: Message[] = []) {
+	const modelRuntime = await ModelRuntime.create({ authPath: join(f.root, "pi-auth.json"), modelsPath: null,
+		modelsStorePath: join(f.root, "models-store.json"), refreshOnCreate: false });
+	modelRuntime.registerNativeProvider(f.provider);
+	const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "must not run" }], details: undefined }));
+	const settings = SettingsManager.inMemory({ retry: { enabled: true, maxRetries, baseDelayMs: 1, maxAgentDelayMs: 1 }, compaction: { enabled: false } });
+	const loader = new DefaultResourceLoader({ cwd: f.root, agentDir: f.root, settingsManager: settings,
+		noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		systemPromptOverride: () => "Pi retry boundary", extensionFactories: [pi => { pi.registerTool({ ...tool, label: "Read", execute }); }] });
+	await loader.reload();
+	const manager = SessionManager.inMemory(f.root);
+	for (const entry of history) manager.appendMessage(entry);
+	const { session } = await createAgentSession({ cwd: f.root, agentDir: f.root, modelRuntime, model: f.model,
+		settingsManager: settings, resourceLoader: loader, tools: ["read"], sessionManager: manager });
+	cleanups.push(async () => { session.dispose(); });
+	await session.bindExtensions({ mode: "json" });
+	const outputs: AssistantMessage[] = []; const retries: unknown[] = [];
+	session.subscribe(event => {
+		if (event.type === "auto_retry_start") retries.push(event);
+		if (event.type === "message_end" && event.message.role === "assistant") outputs.push(structuredClone(event.message));
+	});
+	return { session, execute, outputs, retries };
+}
 function correlated(output: AssistantMessage): Message[] {
 	return output.content.flatMap(block => block.type === "toolCall" ? [{ role: "toolResult" as const, toolCallId: block.id, toolName: block.name,
 		content: [{ type: "text" as const, text: `Pi result ${block.id}` }], isError: false, timestamp: 3 }] : []);
@@ -220,6 +247,100 @@ describe("offline production Claude SDK transport", () => {
 		expect(await chooseWorkerModel({ requested: spec, roleName: "reviewer" }, { isConfigured: s => s === spec, catalog: async () => [] })).toEqual({ spec });
 		vi.stubEnv("PI_YOU_SHOULD_KNOW_MODEL", spec);
 		expect(await resolveYouShouldKnowModel({ modelRegistry: { find: (p: string, id: string) => models.getModel(p, id), getApiKeyAndHeaders: async () => ({ ok: true }) } } as never)).toBe(model);
+	});
+});
+
+describe("conservative post-start SDK failures through Pi AgentSession", () => {
+	it.each(["overloaded", "rate_limit", "server_error"])("never retries an empty classified %s failure without a nonexecution guarantee", async code => {
+		const options: Options[] = []; const closed = vi.fn();
+		const f = await fixture(request => {
+			options.push(request.options);
+			return { close: closed, [Symbol.asyncIterator]: () => (async function* () {
+				await request.prompt[Symbol.asyncIterator]().next();
+				yield sdkFailure(code);
+			})() };
+		});
+		const { session, outputs, retries, execute } = await retrySession(f, 2);
+		await session.prompt("fresh request");
+		expect(retries).toEqual([]); expect(options).toHaveLength(1); expect(closed).toHaveBeenCalledOnce();
+		expect(outputs).toHaveLength(1);
+		expect(outputs[0]).toMatchObject({ stopReason: "error", content: [], errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying",
+			diagnostics: [{ type: "claude_sdk_assistant_failure", timestamp: expect.any(Number),
+				error: { message: "Claude SDK assistant failure", code }, details: { retrySafe: false } }] });
+		expect(JSON.stringify(outputs)).not.toContain("SECRET-SDK-TOKEN");
+		expect(execute).not.toHaveBeenCalled();
+		expect((await readdir(f.root)).filter(name => name.startsWith("query-"))).toEqual([]);
+	});
+	it("does not retry a parked continuation after Pi execution", async () => {
+		let queries = 0;
+		const f = await fixture(() => { queries++; return { close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			yield* tools(["already-executed"]); yield sdkFailure("server_error");
+		})() }; });
+		const { session, retries, outputs, execute } = await retrySession(f, 2);
+		await session.prompt("tool continuation");
+		expect(execute).toHaveBeenCalledOnce(); expect(queries).toBe(1); expect(retries).toEqual([]);
+		expect(outputs.at(-1)).toMatchObject({ stopReason: "error", errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying",
+			diagnostics: [{ error: { code: "server_error" }, details: { retrySafe: false } }] });
+		expect((await readdir(f.root)).filter(name => name.startsWith("query-"))).toEqual([]);
+	});
+	it.each(["overloaded", "rate_limit", "server_error", "unknown", "synchronous-throw", "started", "tool-proposal", "history"])("quarantines the exact failed %s context against explicit replay", async mode => {
+		let queries = 0;
+		const f = await fixture(() => { queries++;
+			if (mode === "synchronous-throw") throw new Error("rate_limit SECRET-SDK-TOKEN");
+			return { close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			if (mode === "unknown") throw new Error("rate_limit SECRET-SDK-TOKEN");
+			if (mode === "started") yield start();
+			if (mode === "tool-proposal") { for (const frame of tools(["unexecuted"])) { if (frame.type === "stream_event" && frame.event.type === "message_stop") break; yield frame; } }
+			yield sdkFailure(["overloaded", "rate_limit", "server_error"].includes(mode) ? mode : "overloaded");
+		})() }; });
+		const ctx = context(); if (mode === "history") ctx.messages.unshift({ role: "user", content: "old history", timestamp: 0 });
+		const first = await f.provider.streamSimple(f.model, ctx, { sessionId: "quarantine" }).result();
+		expect(first.errorMessage).toBe("Claude SDK interrupted or failed; reconcile any pending side effects before retrying");
+		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "quarantine" }).result()).errorMessage).toMatch(/Ambiguous previous/);
+		expect(queries).toBe(1); expect(await readdir(f.root)).toEqual([]);
+	});
+	it("quarantines a classified failure without preventing an independent request", async () => {
+		let queries = 0;
+		const f = await fixture(() => { const attempt = ++queries; return { close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			if (attempt === 1) yield sdkFailure("overloaded"); else yield* text("independent request completed");
+		})() }; });
+		const ctx = context();
+		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "reuse" }).result()).stopReason).toBe("error");
+		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "reuse" }).result()).errorMessage).toMatch(/Ambiguous previous/);
+		ctx.messages = [{ role: "user", content: "independent request", timestamp: 2 }];
+		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "reuse" }).result()).stopReason).toBe("stop");
+		expect(queries).toBe(2); expect(await readdir(f.root)).toEqual([]);
+	});
+	it.each(["unknown-exception", "unknown-code", "started", "text", "tool-proposal", "failure-content", "mcp-missing-id", "mcp-pending", "mcp-discovery", "mcp-connect", "history"])("never retries ambiguous %s even with Pi retries enabled", async mode => {
+		let queries = 0; let pending: Promise<unknown> | undefined;
+		const f = await fixture(request => {
+			queries++; const client = new Client({ name: "unsafe-retry-probe", version: "1" });
+			return { close: () => { void client.close(); }, [Symbol.asyncIterator]: () => (async function* () {
+				await request.prompt[Symbol.asyncIterator]().next();
+				if (mode.startsWith("mcp-")) {
+					const bridge = request.options.mcpServers!.pi; if (bridge.type !== "sdk") throw new Error("No bridge");
+					const [a, b] = InMemoryTransport.createLinkedPair(); await bridge.instance.connect(b); await client.connect(a);
+					if (mode === "mcp-discovery") await client.listTools();
+					else if (mode === "mcp-missing-id") expect(await client.callTool({ name: "read", arguments: {} })).toMatchObject({ isError: true });
+					else if (mode === "mcp-pending") { pending = client.callTool({ name: "read", arguments: { path: "unknown" }, _meta: { "claudecode/toolUseId": "unknown" } }).catch(error => error); await client.ping(); }
+					else await client.ping(); // Drain initialized notification before the failure.
+				}
+				if (mode === "unknown-exception") throw new Error("SECRET-SDK-TOKEN rate_limit server_error overloaded");
+				if (mode === "started") yield start();
+				if (mode === "text") { for (const frame of text("partial output")) { if (frame.type === "result") break; yield frame; } }
+				if (mode === "tool-proposal") { for (const frame of tools(["unexecuted"])) { if (frame.type === "stream_event" && frame.event.type === "message_stop") break; yield frame; } }
+				yield sdkFailure(mode === "unknown-code" ? "SECRET-SDK-TOKEN" : "rate_limit", mode === "failure-content" ? [{ type: "text", text: "SECRET-SDK-TOKEN" }] : []);
+			})() };
+		});
+		const history: Message[] = mode === "history" ? [{ role: "user", content: "old turn", timestamp: 1 }] : [];
+		const { session, retries, outputs, execute } = await retrySession(f, 2, history);
+		await session.prompt("ambiguous request");
+		expect(queries).toBe(1); expect(retries).toEqual([]); expect(execute).not.toHaveBeenCalled();
+		expect(outputs.at(-1)).toMatchObject({ stopReason: "error", errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" });
+		if (!["unknown-exception", "unknown-code"].includes(mode)) expect(outputs.at(-1)?.diagnostics).toMatchObject([{ error: { code: "rate_limit" }, details: { retrySafe: false } }]);
+		expect(JSON.stringify(outputs)).not.toContain("SECRET-SDK-TOKEN");
+		if (pending) await pending;
+		expect((await readdir(f.root)).filter(name => name.startsWith("query-"))).toEqual([]);
 	});
 });
 
@@ -565,6 +686,35 @@ describe("final review agent-loop safeguards", () => {
 		expect(reachedStopReason).toBe(true);
 		expect(execute).not.toHaveBeenCalled();
 		expect(agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+	it.each(["name", "arguments"])("never executes or revives a registered tool after mismatched %s during message_stop observer", async mode => {
+		let client!: Client; let starts = 0;
+		const f = await fixture(request => {
+			starts++; client = new Client({ name: "mismatch-after-registration", version: "1" });
+			return { close: () => { void client.close(); }, [Symbol.asyncIterator]: () => (async function* () {
+				const bridge = request.options.mcpServers!.pi; if (bridge.type !== "sdk") throw new Error("No bridge");
+				const [a, b] = InMemoryTransport.createLinkedPair(); await bridge.instance.connect(b); await client.connect(a);
+				if (starts > 1) { yield* text(); return; }
+				yield* tools(["mismatch", "sibling"]); yield result;
+			})() };
+		});
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "must not run" }], details: undefined }));
+		const agent = new Agent({ initialState: { model: f.model, tools: [{ ...tool, label: "Read", execute }] }, sessionId: "mismatch-session",
+			streamFn: (model, ctx, opts) => f.provider.streamSimple(model, normalizeContext(ctx), { ...opts,
+				onProviderStreamEvent: async event => {
+					const sdk = event as SDKMessage;
+					if (sdk.type !== "stream_event" || sdk.event.type !== "message_stop") return;
+					const send = (name: string, path: string) => client.callTool({ name, arguments: { path }, _meta: { "claudecode/toolUseId": "mismatch" } });
+					expect(await send(mode === "name" ? "bash" : "read", mode === "arguments" ? "wrong" : "mismatch")).toMatchObject({ isError: true });
+					expect(await send("read", "mismatch")).toMatchObject({ isError: true });
+				} }) });
+		await agent.prompt("mismatched registered tool");
+		expect(execute).not.toHaveBeenCalled();
+		expect(agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+		expect(await readdir(f.root)).toEqual([]);
+		const retry = await f.provider.streamSimple(f.model, normalizeContext({ tools: [tool], messages: [{ role: "user", content: "independent request", timestamp: 2 }] }), { sessionId: "mismatch-session" }).result();
+		expect(retry.stopReason).toBe("stop"); expect(starts).toBe(2);
+		expect(await readdir(f.root)).toEqual([]);
 	});
 	it.each(["cancel", "timeout"])("never executes a registered tool after %s while message_stop observer is held", async mode => {
 		const cancel = new AbortController(); let client!: Client; let reply: Promise<unknown> | undefined;

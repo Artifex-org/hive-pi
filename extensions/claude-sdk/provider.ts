@@ -8,7 +8,7 @@ import { createAssistantMessageEventStream, createProvider, collapseSystemMessag
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
-import { EventConverter, emptyUsage } from "./events.ts";
+import { EventConverter, emptyUsage, SdkAssistantFailure } from "./events.ts";
 import { fingerprint, seedHistory, userMessage, imageOrText } from "./history.ts";
 import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
@@ -69,6 +69,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 			let state: Parked | undefined;
 			let reservation: string | undefined;
 			let sdkStarted = false;
+			let attemptedPrefix: Message[] | undefined;
 			const signal = AbortSignal.any([options.signal ?? new AbortController().signal, shutdown.signal]);
 			let abortParked: (() => void) | undefined;
 			try {
@@ -169,6 +170,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 								else controller.signal.addEventListener("abort", () => resolve(), { once: true }); });
 						}
 						signal.throwIfAborted();
+						attemptedPrefix = structuredClone(context.messages);
 						sdkStarted = true;
 						const query = deps.query ? deps.query({ prompt: prompt(), options: sdkOptions }) :
 							(await import("@anthropic-ai/claude-agent-sdk")).query({ prompt: prompt(), options: sdkOptions });
@@ -210,12 +212,19 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				} finally { clearTimeout(expiry); }
 			} catch (error) {
 				let cleanupFailed = false;
+				if (!state && attemptedPrefix) ambiguous.add(fingerprint(attemptedPrefix));
 				if (state) {
 					ambiguous.add(fingerprint(state.prefix));
 					try { await dispose(state); } catch { cleanupFailed = true; }
 				}
 				output.stopReason = signal.aborted ? "aborted" : "error";
-				// Errors from SDK may embed tokens. Only our pre-query errors are surfaced verbatim.
+				if (error instanceof SdkAssistantFailure) output.diagnostics = [{
+					type: "claude_sdk_assistant_failure", timestamp: now(),
+					error: { message: "Claude SDK assistant failure", code: error.code },
+					details: { retrySafe: false },
+				}];
+				// SDK classification does not promise nonexecution. Keep all post-start
+				// failures generic/nonretryable; allowlisted codes are diagnostics only.
 				output.errorMessage = cleanupFailed ? "Claude SDK failed to remove private state; operator cleanup required" : state || sdkStarted ? "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" :
 					(error instanceof Error ? error.message : "Claude SDK request failed");
 				events.push({ type: "error", reason: output.stopReason, error: output });

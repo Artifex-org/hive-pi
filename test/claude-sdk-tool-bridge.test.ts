@@ -130,8 +130,22 @@ describe("actual MCP over in-memory transports, not a Claude query", () => {
 		expect(await call("known", "read", { path: "/different" })).toMatchObject({ isError: true });
 		expect(() => complete("unknown", "bad")).toThrow("correlation");
 		expect(() => complete("known", "bad", "bash")).toThrow("correlation");
-		complete("known", "valid");
-		expect(await call("known")).toMatchObject({ isError: false });
+		expect(() => bridge.validateBatch(["known"])).toThrow(/cancelled/);
+		expect(() => complete("known", "late")).toThrow(/reconcile/);
+		expect(await call("known")).toMatchObject({ isError: true });
+		expect(() => bridge.expectCall("known", "read")).toThrow(/registration/);
+	});
+	it.each(["name", "arguments"])("settles a parked resolver on mismatched %s without reviving it", async mode => {
+		const { bridge, call, complete } = await fixture();
+		bridge.expectCall("parked", "read", { path: "/fixture" });
+		const pending = call("parked");
+		await vi.waitFor(() => expect(bridge.pendingCallIds).toEqual(["parked"]));
+		expect(await call("parked", mode === "name" ? "bash" : "read", { path: mode === "name" ? "/fixture" : "/wrong" })).toMatchObject({ isError: true });
+		expect(await pending).toMatchObject({ isError: true });
+		expect(bridge.pendingCallIds).toEqual([]);
+		expect(() => bridge.validateBatch(["parked"])).toThrow(/cancelled/);
+		expect(() => complete("parked", "late")).toThrow(/reconcile/);
+		expect(await call("parked")).toMatchObject({ isError: true });
 	});
 	it("refuses duplicate calls/results instead of completing another call", async () => {
 		const { bridge, call, complete } = await fixture();

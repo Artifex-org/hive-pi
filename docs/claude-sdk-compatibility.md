@@ -88,8 +88,10 @@ per call. The bridge checks Pi names, stream-observed IDs and JSON arguments;
 parallel/out-of-order/early results, images and error results remain correlated.
 It has no execution callback. SDK dispatch that overtakes an awaited stream
 observer waits for registration for at most ten seconds, then fails closed.
-Failed registration IDs (including cancelled/timed-out requests) remain tombstoned:
-late stream registration cannot expose them to Pi execution. A query admits at most
+Failed registration IDs (including cancelled/timed-out requests and registered-ID
+name/argument mismatches) remain tombstoned: late stream registration or corrected
+redispatch cannot expose them to Pi execution. A mismatch also settles any already
+parked MCP resolver with an error; the entire model batch fails validation. A query admits at most
 256 IDs across calls, failed registrations and waiters; exhaustion closes the bridge
 rather than evicting safety state.
 
@@ -115,6 +117,22 @@ stop/length/error/abort and uncached/output/cache-read/cache-write token counts.
 Subscription models report zero monetary cost: this is **not** evidence of free
 inference or a billing determination. SDK errors are redacted at the transport
 boundary; no token-bearing options or raw stderr are logged.
+
+Only structured SDK `assistant.error` codes `overloaded`, `rate_limit` and
+`server_error` retain sanitized classification in `output.diagnostics`
+(`claude_sdk_assistant_failure`, allowlisted `error.code`, fixed `error.message`,
+`details.retrySafe: false`). SDK text, IDs and credentials are not copied into diagnostics.
+Known codes do **not** prove pre-effect rejection: the inspected SDK type contract
+(`sdk.d.ts` `SDKAssistantMessage` / `SDKAssistantMessageError`) provides no
+nonexecution promise, even for an empty first frame with no visible tools or MCP
+activity. Synthetic fixtures cannot establish that promise.
+
+All post-start SDK failures remain generic/nonretryable in `errorMessage` and
+quarantine the failed context against explicit replay, including classified
+empty failures and synchronous query-launch throws. There is no automatic SDK
+post-start failure retry, either here or through Pi's retry classifier, absent a
+verified protocol guarantee of nonexecution. Diagnostics preserve failure
+classification without authorizing replay; private state is still cleaned up.
 
 ## Reasoning capabilities
 
