@@ -153,8 +153,8 @@ function send(pid: number, signal: NodeJS.Signals, strict = false): void {
 function signalTree(tree: Tree, signal: NodeJS.Signals): void {
 	if (tree.requireIdentity) {
 		try {
-			assertTreeIdentityReadable();
-			discover(tree);
+			if (process.platform !== "linux") throw ownershipError();
+			try { discover(tree); } catch { tree.cleanupError ??= ownershipError(); }
 			// Never signal a group: even a verified member cannot prove every
 			// current occupant belongs to this tree. Recheck each individual.
 			const members = [...tree.members.values()].reverse();

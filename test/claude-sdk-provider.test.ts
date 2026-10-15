@@ -250,7 +250,7 @@ describe("offline production Claude SDK transport", () => {
 		const history: Message[] = [{ role: "user", content: "old prompt", timestamp: 0 }, failed];
 		const before = structuredClone(history);
 		const root = await mkdtemp(join(tmpdir(), "sdk-failed-history-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
-		const path = await seedHistory(root, history, "fixture", process.cwd());
+		const path = await seedHistory(root, history, "fixture", process.cwd(), { id: "fixture", api: "claude-sdk", provider: "claude-sdk" });
 		const entries = (await readFile(path!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
 		expect(entries).toHaveLength(1); expect(entries[0].message).toMatchObject({ role: "user", content: "old prompt" });
 		expect(history).toEqual(before);
@@ -1000,5 +1000,45 @@ describe("explicit terminal tool handoff", () => {
 		expect(execute).not.toHaveBeenCalled(); expect(queries).toBe(1);
 		expect(agent.state.messages).toContainEqual(expect.objectContaining({ role: "assistant", stopReason: "error", rawStopReason: reason }));
 		await Promise.allSettled([pending!]); expect(await readdir(f.root)).toEqual([]);
+	});
+});
+
+describe("handoff reservation and destination history", () => {
+	it.each(["original", "other"])("blocks original context replay while still parked, using session %s", async sessionId => {
+		let queries = 0;
+		const f = await fixture(() => { queries++; return { close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			yield* tools(["already-handed-off"]); yield* text("correlated continuation");
+		})() }; });
+		const ctx = context();
+		const first = await f.provider.streamSimple(f.model, ctx, { sessionId: "original" }).result();
+		expect(first.stopReason).toBe("toolUse");
+		expect((await f.provider.streamSimple(f.model, ctx, { sessionId }).result()).errorMessage).toMatch(/Ambiguous previous SDK attempt/);
+		expect(queries).toBe(1);
+		ctx.messages.push(first, ...correlated(first));
+		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "original" }).result()).stopReason).toBe("stop");
+		expect(queries).toBe(1);
+	});
+	it.each(["same", "model-switch", "provider-switch", "opaque-only-switch"])("reconstructs signed and redacted reasoning for %s without changing Pi history", async boundary => {
+		let contents: unknown;
+		const f = await fixture(request => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			const seed = (await readFile(request.options.resume!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+			contents = seed.find(entry => entry.type === "assistant")?.message.content;
+			yield* text();
+		})() }));
+		const source: AssistantMessage = { role: "assistant", api: boundary === "provider-switch" ? "anthropic-messages" : f.model.api,
+			provider: boundary === "provider-switch" ? "anthropic" : f.model.provider, model: f.model.id, timestamp: 2,
+			content: [{ type: "thinking", thinking: "visible reasoning", thinkingSignature: "signed-reasoning" },
+				{ type: "thinking", thinking: "", thinkingSignature: "opaque-reasoning", redacted: true }, { type: "text", text: "answer" }],
+			usage: emptyUsage(), stopReason: "stop" };
+		if (boundary === "opaque-only-switch") source.content = source.content.filter(block => block.type === "thinking" && block.redacted);
+		const ctx = context(); ctx.messages.push(source, { role: "user", content: "next", timestamp: 3 });
+		const before = structuredClone(ctx);
+		const model = ["model-switch", "opaque-only-switch"].includes(boundary) ? f.provider.getModels().find(model => model.id !== f.model.id)! : f.model;
+		expect((await f.provider.streamSimple(model, ctx).result()).stopReason).toBe("stop");
+		expect(contents).toEqual(boundary === "opaque-only-switch" ? undefined : boundary === "same" ? [
+			{ type: "thinking", thinking: "visible reasoning", signature: "signed-reasoning" },
+			{ type: "redacted_thinking", data: "opaque-reasoning" }, { type: "text", text: "answer" },
+		] : [{ type: "text", text: "visible reasoning" }, { type: "text", text: "answer" }]);
+		expect(ctx).toEqual(before);
 	});
 });

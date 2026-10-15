@@ -2,7 +2,7 @@
 import { randomUUID, createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Message, UserMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+import type { Message, UserMessage, ToolResultMessage, Model } from "@earendil-works/pi-ai";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 export function fingerprint(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
@@ -23,19 +23,21 @@ export function sdkToolCallId(id: string): string {
 function failedAssistant(message: Message): boolean {
 	return message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted");
 }
-export function nativeMessage(message: Exclude<Message, { role: "system" }>): Record<string, unknown> {
+type DestinationModel = Pick<Model<string>, "id" | "api" | "provider">;
+export function nativeMessage(message: Exclude<Message, { role: "system" }>, model: DestinationModel): Record<string, unknown> {
 	if (message.role === "user") return { ...userMessage(message).message };
 	if (message.role === "toolResult") return { role: "user", content: [{ type: "tool_result", tool_use_id: sdkToolCallId(message.toolCallId),
 		is_error: message.isError, content: message.content.map(imageOrText) }] };
 	return { role: "assistant", type: "message", id: randomUUID(), model: message.model,
-		content: message.content.map(block => {
+		content: message.content.flatMap<Record<string, unknown>>(block => {
 			if (block.type === "toolCall") return { type: "tool_use", id: sdkToolCallId(block.id), name: `mcp__pi__${block.name}`, input: block.arguments };
 			if (block.type === "thinking") {
-				// Foreign/unsigned reasoning has no Anthropic signature. Preserve its visible text,
-				// not an invalid signed-thinking claim; the Pi transcript itself is never rewritten.
-				if (!block.thinkingSignature || !["claude-sdk", "anthropic-messages"].includes(message.api)) return { type: "text", text: block.thinking };
-				return block.redacted ? { type: "redacted_thinking", data: block.thinkingSignature }
-					: { type: "thinking", thinking: block.thinking, signature: block.thinkingSignature };
+				// Match Pi's destination-model boundary without synthesizing tool results:
+				// opaque reasoning is model/provider/API-bound; visible reasoning is text.
+				const sameModel = message.model === model.id && message.api === model.api && message.provider === model.provider;
+				if (block.redacted) return sameModel && block.thinkingSignature ? [{ type: "redacted_thinking", data: block.thinkingSignature }] : [];
+				if (!sameModel || !block.thinkingSignature) return block.thinking.trim() ? [{ type: "text", text: block.thinking }] : [];
+				return [{ type: "thinking", thinking: block.thinking, signature: block.thinkingSignature }];
 			}
 			return { type: "text", text: block.text };
 		}), stop_reason: message.rawStopReason ?? (message.stopReason === "toolUse" ? "tool_use" : "end_turn"),
@@ -68,16 +70,19 @@ export function assertSettledHistory(messages: readonly Message[]): void {
 }
 
 /** Pinned CLI JSONL resume chain; no token or auth document is ever written. */
-export async function seedHistory(dir: string, messages: readonly Message[], sessionId: string, cwd: string, following: readonly Message[] = []): Promise<string | undefined> {
+export async function seedHistory(dir: string, messages: readonly Message[], sessionId: string, cwd: string, model: DestinationModel, following: readonly Message[] = []): Promise<string | undefined> {
 	assertSettledHistory([...messages, ...following]);
 	let parentUuid: string | null = null;
-	const entries = messages.filter((message): message is Exclude<Message, { role: "system" }> => message.role !== "system" && !failedAssistant(message)).map(message => {
+	const entries = messages.filter((message): message is Exclude<Message, { role: "system" }> => message.role !== "system" && !failedAssistant(message)).flatMap(message => {
+		const native = nativeMessage(message, model);
+		// Cross-model opaque-only reasoning has no replayable assistant content.
+		if (message.role === "assistant" && Array.isArray(native.content) && !native.content.length) return [];
 		const uuid = randomUUID();
 		const entry = { type: message.role === "assistant" ? "assistant" : "user", uuid, parentUuid,
 			sessionId, cwd, version: "2.1.286", isSidechain: false, userType: "external",
-			timestamp: new Date(message.timestamp).toISOString(), message: nativeMessage(message) };
+			timestamp: new Date(message.timestamp).toISOString(), message: native };
 		parentUuid = uuid;
-		return entry;
+		return [entry];
 	});
 	if (!entries.length) return undefined;
 	const path = join(dir, "history.jsonl");

@@ -211,3 +211,19 @@ it.runIf(process.platform === "linux")("continues signalling verified siblings a
 		child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 	}
 });
+
+it.runIf(process.platform === "linux")("signals a verifiable root even when discovery of an unrelated candidate fails", async () => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request()); fixture.deniedEnvironment = true;
+	try {
+		await expect(scope.close()).rejects.toThrow(/operator cleanup required/);
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGTERM");
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGKILL");
+		expect(send).not.toHaveBeenCalledWith(fixture.member, expect.anything());
+		expect(send.mock.calls.every(([pid]) => pid > 0)).toBe(true);
+	} finally {
+		fixture.deniedEnvironment = false; child.emit("close", 0);
+		child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+	}
+});

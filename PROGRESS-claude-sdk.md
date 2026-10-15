@@ -169,3 +169,10 @@ Unverified rollout gates above remain unchanged. The subsequent empty-cache revi
 
 - Every idle handed-off query quarantines its original result-free attempt before disposal, covering cancellation and parked expiry even after the active stream has completed. Canonical correlated results still rebuild safely.
 - Typecheck and 121 provider regressions passed. Prior full gates are superseded by this change; final frozen full gate/review/hosted checks remain required.
+
+### Final invariant review batch
+
+- Result-free attempts are reserved at tool handoff, before replacement or a different session can replay them. Canonical correlated continuation remains supported.
+- Failed descendant discovery latches the error but does not prevent independently identity-verified root/member cleanup.
+- History conversion now takes the destination model identity: signatures are same-model/provider/API only; cross-model visible reasoning becomes text, opaque/empty assistant frames are omitted from SDK seed only.
+- Typecheck and focused provider/ownership regressions passed. Mixed-tree intermediate gates bg-28/bg-29 are not final evidence. Final-tree Hive snapshot #14328 passed lint and both DB shards on tree2063ccf7; logs prove 738 API/762 store tests exercised Postgres and strengthened SDK lease assertions passed.

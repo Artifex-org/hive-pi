@@ -175,7 +175,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					try {
 						bridge = new PiToolBridge(tools, controller.signal, 10_000);
 						await (deps.validateExecutable ?? validateExecutable)(config, signal);
-						const resume = await seedHistory(dir, history, randomUUID(), config.cwd, context.messages.slice(split));
+						const resume = await seedHistory(dir, history, randomUUID(), config.cwd, model, context.messages.slice(split));
 						const sdkOptions = isolatedOptions({ executablePath: config.executable, cwd: config.cwd, privateRoot: dir, model: model.id,
 							systemPrompt: queryOptions.systemPrompt, lease, now: now(), abortController: controller,
 							bridge: bridge.config, toolNames: bridge.toolNames });
@@ -220,6 +220,9 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						signal.throwIfAborted(); state.controller.signal.throwIfAborted();
 						const action = converter.consume(next.value);
 						if (action === "tools") {
+							// Reserve the result-free attempt at handoff, across session IDs,
+							// before Pi can execute it or a replacement can pass admission.
+							ambiguous.add(contextHash);
 							state.expected = [...structuredClone(context.messages), structuredClone(output)];
 							state.busy = false;
 							const parked = state;
