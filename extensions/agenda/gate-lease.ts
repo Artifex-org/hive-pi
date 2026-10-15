@@ -19,7 +19,7 @@ const AUTOMATIC_SLOTS = 2;
 export type GateReceipt = {
 	input: string;
 	outcome: "running" | "pass" | "fail" | "timeout" | "incomplete";
-} & ({ notice?: undefined; noticeId?: undefined } | { notice: string; noticeId: string });
+} & ({ notice?: undefined; noticeId?: undefined; charge?: undefined } | { notice: string; noticeId: string; charge?: true });
 /** Delivery/liveness only: never identifies source or deduplicates an attempt. */
 export interface GateNotice {
 	id: string;
@@ -133,6 +133,7 @@ export async function acquireGateLease(
 			if (!receipt || typeof receipt !== "object" || !("input" in receipt) || typeof receipt.input !== "string" ||
 				!("outcome" in receipt) || !["running", "pass", "fail", "timeout", "incomplete"].includes(String(receipt.outcome)) ||
 				("noticeId" in receipt && !("notice" in receipt)) ||
+				("charge" in receipt && (!("notice" in receipt) || receipt.charge !== true)) ||
 				("notice" in receipt && (typeof receipt.notice !== "string" || !("noticeId" in receipt) || typeof receipt.noticeId !== "string"))) throw new Error(`Invalid automatic gate receipt: ${receiptPath}`);
 			return receipt as GateReceipt;
 		},

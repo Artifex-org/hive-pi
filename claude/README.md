@@ -148,7 +148,7 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   the continuation cap even when no command executed; pending notices still
   replay at the cap until acknowledged. Unique durable notice IDs prevent an
   old acknowledgement from clearing a newer identical warning. Unknown-input
-  notice charges are idempotent by notice ID in the persisted session ledger;
+  and completed known-input failure charges are idempotent by notice ID in the persisted session ledger;
   no sidecar flag acknowledges a charge before the ledger is durable. IDs are
   retained only for the current capped budget cycle and cleared on resolution.
   Native locks are not cgroups: helpers escaping after all lockholders close

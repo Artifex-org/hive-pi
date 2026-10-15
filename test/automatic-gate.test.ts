@@ -130,12 +130,14 @@ describe("automatic gate attempts, not cached green verification", () => {
 	it("replays an undelivered terminal warning without re-running the check", async () => {
 		const { root, log, check } = fixture();
 		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1`, checkTimeoutMs: 10_000 }));
-		const first = await run(root, {}, undefined, false); // host killed after run, BEFORE delivery
+		const first = await run(root, {}, undefined, false);
 		expect(first.inject).toContain("FAILED");
-		const replay = await run(root); // new hook delivers and acknowledges the stored warning
+		const ledger = first.ledger!(emptyLedger); // host saved its ledger, then died BEFORE delivery
+		const replay = await createGatePolicy().decide({ cwd: root, ledger, transcript: "", lastAssistantText: undefined })!.run();
 		expect(replay.inject).toBe(first.inject);
 		expect(replay.metric.outcome).toBe("skip");
 		expect(replay.ledger).toBeUndefined(); // replay is not another attempt
+		await replay.delivered?.();
 		expect(readFileSync(log, "utf8")).toBe("x");
 		expect((await run(root)).inject).toBeUndefined();
 	});
@@ -202,9 +204,9 @@ describe("automatic gate attempts, not cached green verification", () => {
 		} finally { await one?.release(); await two?.release(); }
 	});
 
-	it.each([false, true])("charges an ordinary unknown-input notice once across ledger publication=%s", async published => {
-		const { root, dir, check, log } = fixture(undefined, false);
-		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1` }));
+	it.each([false, true].flatMap(known => [false, true].map(published => ({ known, published }))))("charges a completed failure once: known=$known, published=$published", async ({ known, published }) => {
+		const { root, dir, check, log } = fixture(undefined, known);
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1`, maxInjections: 1 }));
 		const options = { leaseOptions: { directory: join(dir, "leases") } };
 		const first = await run(root, options, undefined, false);
 		const stateDir = join(dir, "state"); mkdirSync(stateDir);
@@ -221,6 +223,9 @@ describe("automatic gate attempts, not cached green verification", () => {
 		expect(ledger.iterations[`gate:${root}`]).toBe(1);
 		expect(readFileSync(log, "utf8")).toBe("x");
 		await replay.delivered?.();
+		writeFileSync(join(root, "code.txt"), "changed input after the final attempt");
+		const capped = await createGatePolicy(undefined, options).decide({ cwd: root, ledger: readAgendaState(stateDir).ledger, transcript: "", lastAssistantText: undefined })!.run();
+		expect(capped.inject).toBeUndefined(); expect(readFileSync(log, "utf8")).toBe("x");
 	});
 
 	it.each(["known", "unknown"])("an old %s-input acknowledgement cannot clear a newer identical notice", async kind => {

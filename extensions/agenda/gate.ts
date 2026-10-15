@@ -278,10 +278,10 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					const notice = { id: randomUUID(), configuration, content };
 					await lease.writeNotice(notice); return notice;
 				};
-				const saveNotice = async (outcome: "incomplete" | "timeout" | "fail", notice: string) => {
+				const saveNotice = async (outcome: "incomplete" | "timeout" | "fail", notice: string, charge = false) => {
 					if (input === null) return (await unboundNotice(notice)).id;
 					const noticeId = randomUUID();
-					await lease.write({ input, outcome, notice, noticeId });
+					await lease.write({ input, outcome, notice, noticeId, ...(charge ? { charge: true as const } : {}) });
 					await lease.writeNotice(undefined);
 					return noticeId;
 				};
@@ -333,7 +333,10 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 							notice = `The previous automatic project gate \`${command}\` was interrupted. This input is NOT verified. Run quality_gate or a bounded background check to obtain a verdict; the Stop hook will not repeatedly restart this unchanged input.`;
 							noticeId = await saveNotice("incomplete", notice);
 						}
-						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice, noticeId!) }; // read() validates paired notice identity
+						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice, noticeId!),
+							// Completed failures carry a recoverable charge; admission-only
+							// notices do not. The host publishes IDs with its ledger atomically.
+							...(previous.charge && !capped && !ledger.noticeCharges?.[id]?.includes(noticeId!) ? { ledger: (state: typeof ledger) => recordNotice(state, id, noticeId!) } : {}) }; // read() validates paired identity
 						if (stamps?.get(id) !== input) stamps?.set(id, input);
 						return skipped(); // an acknowledged attempt, never cached green evidence
 					}
@@ -410,12 +413,12 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						: `This was the final automatic attempt — stop, summarize what is still failing, and hand back to the user.`;
 
 				const notice = `${header}\n\nOutput (tail):\n\`\`\`\n${result.output.trim()}\n\`\`\`\n\n${footer}`;
-				const noticeId = await saveNotice(incomplete ? "incomplete" : result.timedOut ? "timeout" : "fail", notice);
+				const noticeId = await saveNotice(incomplete ? "incomplete" : result.timedOut ? "timeout" : "fail", notice, true);
 				return {
 					metric: { outcome: incomplete ? "skip" : result.timedOut ? "timeout" : "fail", value: elapsed },
 					inject: notice,
 					delivered: acknowledge(input, notice, noticeId),
-					ledger: (state) => input === null ? recordNotice(state, id, noticeId) : record(state, id),
+					ledger: (state) => recordNotice(state, id, noticeId),
 				};
 				}).catch(error => unavailable(`verification could not complete safely: ${String(error)}`));
 			},
