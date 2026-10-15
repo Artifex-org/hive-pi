@@ -65,10 +65,12 @@
 		}
 	},
 	"devDependencies": {
+		"@anthropic-ai/claude-agent-sdk": "0.3.289",
 		"@earendil-works/pi-agent-core": "1.0.2",
 		"@earendil-works/pi-ai": "1.0.2",
 		"@earendil-works/pi-coding-agent": "1.0.2",
 		"@earendil-works/pi-tui": "1.0.2",
+		"@modelcontextprotocol/sdk": "1.32.0",
 		"@types/node": "24.12.4",
 		"@types/proper-lockfile": "4.1.4",
 		"typescript": "7.0.2",
