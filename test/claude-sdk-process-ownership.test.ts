@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
 	root: 990000101, member: 990000102, rootStart: "100", memberStart: "101", token: "", recycled: false, denied: false, missingRoot: false, deniedEnvironment: false, exitingEnvironment: false, memberState: "S",
+	memberFlags: "0", memberThreads: "1", rootState: "S", rootFlags: "0", rootThreads: "1", deniedRootEnvironment: false,
+	deniedStatus: false, malformedStatus: false, missingStatus: false, recycleOnStatus: false, disappearOnStatus: false, missingMember: false, leaf: false, memberParentRoot: false,
 	child: undefined as import("node:child_process").ChildProcess | undefined,
 }));
 vi.mock("node:child_process", async original => {
@@ -20,21 +22,30 @@ vi.mock("node:child_process", async original => {
 vi.mock("node:fs", async original => {
 	const fs = await original<typeof import("node:fs")>();
 	return { ...fs,
-		readdirSync: vi.fn((path, ...args) => String(path) === "/proc" ? [String(fixture.root), String(fixture.member)] : (fs.readdirSync as (...args: unknown[]) => unknown)(path, ...args)),
-		statSync: vi.fn((path, ...args) => String(path) === `/proc/${fixture.member}` ? { uid: process.getuid?.() } : (fs.statSync as (...args: unknown[]) => unknown)(path, ...args)),
+		readdirSync: vi.fn((path, ...args) => String(path) === "/proc" ? [String(fixture.root), String(fixture.member), ...(fixture.leaf ? [String(fixture.member + 1)] : [])] : (fs.readdirSync as (...args: unknown[]) => unknown)(path, ...args)),
+		statSync: vi.fn((path, ...args) => [fixture.root, fixture.member].some(pid => String(path) === `/proc/${pid}`) ? { uid: process.getuid?.() } : (fs.statSync as (...args: unknown[]) => unknown)(path, ...args)),
 		readFileSync: vi.fn((path, ...args) => {
-			if (fixture.deniedEnvironment && String(path) === `/proc/${fixture.member}/environ`) {
+			if ((fixture.deniedEnvironment && String(path) === `/proc/${fixture.member}/environ`) || (fixture.deniedRootEnvironment && String(path) === `/proc/${fixture.root}/environ`)) {
 				if (fixture.exitingEnvironment) fixture.memberState = "Z";
 				throw Object.assign(new Error("offline environment denied"), { code: "EACCES" });
 			}
 			if (fixture.denied && String(path).startsWith("/proc/")) throw Object.assign(new Error("offline denied"), { code: "EACCES" });
-			if (fixture.missingRoot && String(path) === `/proc/${fixture.root}/stat`) throw Object.assign(new Error("offline exited"), { code: "ENOENT" });
-			const match = /^\/proc\/(\d+)\/(stat|environ)$/.exec(String(path));
-			if (match && [fixture.root, fixture.member].includes(Number(match[1]))) {
-				if (match[2] === "environ") return `HIVE_PI_TREE_TOKENS=${fixture.recycled ? "unrelated-token" : fixture.token}\0`;
-				const fields = Array<string>(20).fill("0"); fields[0] = Number(match[1]) === fixture.member ? fixture.memberState : "S"; fields[1] = "1";
-				fields[2] = String(fixture.root);
-				fields[19] = Number(match[1]) === fixture.root ? fixture.rootStart : fixture.memberStart;
+			if ((fixture.missingRoot && String(path) === `/proc/${fixture.root}/stat`) || (fixture.missingMember && String(path) === `/proc/${fixture.member}/stat`)) throw Object.assign(new Error("offline exited"), { code: "ENOENT" });
+			const match = /^\/proc\/(\d+)\/(stat|environ|status)$/.exec(String(path));
+			if (match && [fixture.root, fixture.member, ...(fixture.leaf ? [fixture.member + 1] : [])].includes(Number(match[1]))) {
+				const root = Number(match[1]) === fixture.root;
+				const leaf = Number(match[1]) === fixture.member + 1;
+				if (match[2] === "status") {
+					if (fixture.deniedStatus) throw Object.assign(new Error("secret status text"), { code: "EACCES" });
+					if (fixture.recycleOnStatus) fixture.memberStart = "201";
+					if (fixture.disappearOnStatus) fixture.missingMember = true;
+					return fixture.missingStatus ? "" : fixture.malformedStatus ? "Threads: unknown\n" : `Threads:\t${root ? fixture.rootThreads : fixture.memberThreads}\n`;
+				}
+				if (match[2] === "environ") return leaf ? "" : `HIVE_PI_TREE_TOKENS=${fixture.recycled ? "unrelated-token" : fixture.token}\0`;
+				const fields = Array<string>(20).fill("0"); fields[0] = root ? fixture.rootState : leaf ? "S" : fixture.memberState;
+				fields[1] = String(leaf ? fixture.member : !root && fixture.memberParentRoot ? fixture.root : 1);
+				fields[2] = String(fixture.root); fields[6] = root ? fixture.rootFlags : leaf ? "0" : fixture.memberFlags;
+				fields[19] = root ? fixture.rootStart : leaf ? "102" : fixture.memberStart;
 				return `${match[1]} (offline fixture) ${fields.join(" ")}`;
 			}
 			return (fs.readFileSync as (...args: unknown[]) => unknown)(path, ...args);
@@ -50,6 +61,9 @@ afterEach(() => { fixture.denied = false; fixture.missingRoot = false; fixture.d
 function syntheticChild() {
 	fixture.rootStart = "100"; fixture.memberStart = "101"; fixture.recycled = false;
 	fixture.denied = false; fixture.missingRoot = false; fixture.deniedEnvironment = false; fixture.exitingEnvironment = false; fixture.memberState = "S";
+	fixture.memberFlags = "0"; fixture.memberThreads = "1"; fixture.rootState = "S"; fixture.rootFlags = "0"; fixture.rootThreads = "1";
+	fixture.deniedRootEnvironment = false; fixture.deniedStatus = false; fixture.malformedStatus = false; fixture.missingStatus = false;
+	fixture.recycleOnStatus = false; fixture.disappearOnStatus = false; fixture.missingMember = false; fixture.leaf = false; fixture.memberParentRoot = false;
 	const child = new ChildProcess();
 	Object.defineProperty(child, "pid", { value: fixture.root });
 	child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
@@ -226,4 +240,73 @@ it.runIf(process.platform === "linux")("signals a verifiable root even when disc
 		fixture.deniedEnvironment = false; child.emit("close", 0);
 		child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 	}
+});
+
+it.runIf(process.platform === "linux")("recognizes single-task PF_EXITING teardown before the leader becomes a zombie", async () => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request()); fixture.missingRoot = true; fixture.deniedEnvironment = true;
+	fixture.memberState = "R"; fixture.memberFlags = "4195340";
+	await expect(scope.close()).resolves.toBeUndefined();
+	expect(fixture.memberState).toBe("R"); expect(send).not.toHaveBeenCalled();
+	child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+});
+
+it.runIf(process.platform === "linux").each(["R", "Z"])("does not mistake an exiting %s leader with live threads for a dead process", async state => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request()); fixture.deniedRootEnvironment = true;
+	fixture.rootState = state; fixture.rootFlags = "4"; fixture.rootThreads = "2";
+	try {
+		await expect(scope.close()).rejects.toThrow(/operator cleanup required/);
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGTERM");
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGKILL");
+		expect(send.mock.calls.every(([pid]) => pid > 0)).toBe(true);
+	} finally {
+		fixture.deniedRootEnvironment = false; child.emit("close", 0);
+		child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+	}
+});
+
+it.runIf(process.platform === "linux")("preserves ancestry discovery through a single-task exiting candidate", async () => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request()); fixture.deniedEnvironment = true; fixture.memberFlags = "4";
+	fixture.memberParentRoot = true; fixture.leaf = true;
+	await expect(scope.close()).resolves.toBeUndefined();
+	for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+		expect(send).toHaveBeenCalledWith(fixture.root, signal);
+		expect(send).toHaveBeenCalledWith(fixture.member + 1, signal);
+	}
+	child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+});
+
+it.runIf(process.platform === "linux").each(["denied", "malformed", "missing", "recycled"])("requires trustworthy thread-group exit proof: %s status", async fault => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request()); fixture.deniedEnvironment = true; fixture.memberFlags = "4";
+	fixture.deniedStatus = fault === "denied"; fixture.malformedStatus = fault === "malformed";
+	fixture.missingStatus = fault === "missing"; fixture.recycleOnStatus = fault === "recycled";
+	try {
+		const failure = await scope.close().catch(error => error);
+		expect(failure).toMatchObject({ message: expect.stringMatching(/operator cleanup required/) });
+		expect(failure.message).not.toContain("secret status text");
+		if (fault === "denied") expect(failure.message).toContain("status errno=EACCES");
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGTERM");
+		expect(send).toHaveBeenCalledWith(fixture.root, "SIGKILL");
+		expect(send).not.toHaveBeenCalledWith(fixture.member, expect.anything());
+	} finally {
+		fixture.deniedEnvironment = false; child.emit("close", 0);
+		child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+	}
+});
+
+it.runIf(process.platform === "linux")("does not signal a candidate that disappears during its status snapshot", async () => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request()); fixture.deniedEnvironment = true; fixture.memberFlags = "4"; fixture.disappearOnStatus = true;
+	await expect(scope.close()).resolves.toBeUndefined();
+	expect(send).not.toHaveBeenCalledWith(fixture.member, expect.anything());
+	expect(send).toHaveBeenCalledWith(fixture.root, "SIGKILL");
+	child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 });

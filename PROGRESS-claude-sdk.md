@@ -1,7 +1,39 @@
-# Claude SDK provider — offline completion checkpoint
+# Claude SDK provider — offline delivery checkpoint
 
 Worktree: `feat-claude-sdk-integration-be584e28`
-Delivery constraint: **no commit/push/deploy**, per task; parent owns separate Hive server work.
+Current delivery authorization: coordinated **draft PRs**, no ready/merge/deploy,
+activation, live credential probing or inference. Delegation-era no-commit notes
+below are historical handbacks, not the integration owner's delivery contract.
+
+## Current verification boundary (supersedes historical final-gate labels below)
+
+- Committed `2f60c6a` passed complete-diff static review and secret scans, but its
+  untouched full gate failed one orphan-cleanup test (5,835 passed, 20 skipped).
+  The generic error did not identify the triggering PID/syscall. An instrumented
+  rerun passed 5,836 tests, demonstrating intermittency, not resolving the defect.
+- Root mechanism reproduced independently on Linux: a synthetic child opening
+  16,000 `/dev/null` FDs returned environment `EACCES` in all 20 exit probes while
+  state remained `R`, with unchanged PID/starttime and `PF_EXITING` set. Kernel
+  `do_exit` removes memory before zombie state. A second pthread probe proved
+  zombie leaders can retain live threads (`Threads: 2`). No environment content,
+  live credentials or Claude inference was inspected.
+- Strict cleanup now distinguishes single-task kernel exit teardown using fresh
+  identity, exit evidence and validated `Threads: 1`; unknown live ownership still
+  fails closed. Threaded zombie leaders are not ignored; ancestry rows, descendant
+  scanning, independently verified signals and sticky cleanup failures remain.
+  Sanitized diagnostic operation/errno/PID is preserved without raw OS text.
+- Three deterministic new regressions failed before this repair; the focused
+  ownership/runtime suite now passes 32 tests and typecheck. Final post-repair
+  complete review, immutable full gate and hosted PR checks remain pending.
+- Hive final-source snapshot #14328 passed 2,182 tests in selected partitions,
+  including 738 API and 762 store Postgres cases. Separate #14342 passed the named
+  newest-eligible same-owner resume regression and four ordering subtests, with
+  Postgres explicitly exercised. Companion #8687/#8691 were externally merged;
+  their canceled exact-head PR gates are not green evidence.
+- Live SDK/CLI pairing, subscription/billing eligibility, activation and real
+  account/token renewal remain separately authorized, **unverified** rollout gates.
+
+## Historical implementation and delegation evidence
 
 ## Implemented
 
