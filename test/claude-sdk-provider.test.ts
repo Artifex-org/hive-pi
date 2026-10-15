@@ -11,6 +11,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createClaudeSdkRuntime, type QueryFactory } from "../extensions/claude-sdk/provider.ts";
 import { PiToolBridge } from "../extensions/claude-sdk/tool-bridge.ts";
+import { assertSettledHistory, fingerprint, seedHistory } from "../extensions/claude-sdk/history.ts";
+import { emptyUsage } from "../extensions/claude-sdk/events.ts";
 import { hiveLease, launchConfig, LeaseManager, privateDirectory } from "../extensions/claude-sdk/runtime.ts";
 import { workerExtensionPaths } from "../extensions/subagent/worker.ts";
 import { chooseWorkerModel } from "../extensions/subagent/model.ts";
@@ -214,6 +216,53 @@ describe("offline production Claude SDK transport", () => {
 		expect((await secondRuntime.provider.streamSimple(model, ctx).result()).stopReason).toBe("stop");
 		expect(seed).toContain("/literal @file"); expect(seed).toContain('"role":"assistant"'); expect(seed).not.toContain("synthetic-access-only");
 		expect(mode).toBe(0o600); expect(requests).toHaveLength(1); expect(await readdir(root)).toEqual([]);
+	});
+	it.each([false, true])("normalizes foreign completed OpenAI history and rebuilt following results (following: %s)", async following => {
+		const ids = ["call_abc|fc_xyz", "a".repeat(449) + "x", "a".repeat(449) + "y", "a|b", "a/b", "a_b", "toolu_native-OK"];
+		let seed: { message: { content: { type: string; id?: string; tool_use_id?: string }[] } }[] = [];
+		let input: unknown; let queries = 0;
+		const f = await fixture(request => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			queries++;
+			seed = (await readFile(request.options.resume!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+			input = (await request.prompt[Symbol.asyncIterator]().next()).value;
+			yield* text("foreign history accepted offline");
+		})() }));
+		const assistant: AssistantMessage = { role: "assistant", api: "openai-responses", provider: "openai", model: "gpt-foreign",
+			content: ids.map(id => ({ type: "toolCall", id, name: "read", arguments: { path: id } })),
+			usage: emptyUsage(), stopReason: "toolUse", timestamp: 2 };
+		const results = correlated(assistant);
+		const ctx = context(); ctx.messages.push(assistant, ...results);
+		if (!following) ctx.messages.push({ role: "user", content: "handoff to SDK", timestamp: 4 });
+		const canonical = structuredClone(ctx);
+		expect((await f.provider.streamSimple(f.model, ctx).result()).stopReason).toBe("stop");
+		const wireIds = seed.flatMap(entry => Array.isArray(entry.message.content) ? entry.message.content : []).filter(block => block.type === "tool_use").map(block => block.id);
+		expect(wireIds).toHaveLength(ids.length); expect(new Set(wireIds).size).toBe(ids.length);
+		for (const id of wireIds) expect(id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+		expect(wireIds.slice(-2)).toEqual(ids.slice(-2));
+		const wireResults = following ? (input as { message: { content: { tool_use_id: string }[] } }).message.content.map(block => block.tool_use_id)
+			: seed.flatMap(entry => Array.isArray(entry.message.content) ? entry.message.content : []).filter(block => block.type === "tool_result").map(block => block.tool_use_id);
+		expect(wireResults).toEqual(wireIds);
+		expect(ctx).toEqual(canonical); expect(queries).toBe(1);
+	});
+	it.each(["error", "aborted"] as const)("omits %s frames only from SDK history without synthesizing results or hiding pending effects", async stopReason => {
+		const failed: AssistantMessage = { role: "assistant", api: "claude-sdk", provider: "claude-sdk", model: "fixture", timestamp: 1,
+			content: [{ type: "toolCall", id: "failed-proposal", name: "read", arguments: {} }], usage: emptyUsage(), stopReason };
+		const history: Message[] = [{ role: "user", content: "old prompt", timestamp: 0 }, failed];
+		const before = structuredClone(history);
+		const root = await mkdtemp(join(tmpdir(), "sdk-failed-history-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+		const path = await seedHistory(root, history, "fixture", process.cwd());
+		const entries = (await readFile(path!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+		expect(entries).toHaveLength(1); expect(entries[0].message).toMatchObject({ role: "user", content: "old prompt" });
+		expect(history).toEqual(before);
+		expect(() => assertSettledHistory([...history, { ...failed, stopReason: "toolUse" }])).toThrow(/Unresolved historical/);
+		expect(() => assertSettledHistory([{ ...failed, stopReason: "toolUse" }, ...history])).toThrow(/Unresolved historical/);
+		expect(() => assertSettledHistory([...history, ...correlated(failed)])).toThrow(/Uncorrelated historical/);
+	});
+	it("rejects a normalized-ID collision with a valid native ID rather than miscorrelating results", () => {
+		const foreign = "foreign|id";
+		const assistant: AssistantMessage = { role: "assistant", api: "openai-responses", provider: "openai", model: "foreign", timestamp: 1,
+			content: [foreign, fingerprint(foreign)].map(id => ({ type: "toolCall", id, name: "read", arguments: {} })), usage: emptyUsage(), stopReason: "toolUse" };
+		expect(() => assertSettledHistory([assistant, ...correlated(assistant)])).toThrow(/Colliding historical SDK tool IDs/);
 	});
 	it("cancels a blocked SDK iterator, cleans pending tools and refuses ambiguous retries", async () => {
 		const close = vi.fn(); let started!: () => void; const ready = new Promise<void>(resolve => { started = resolve; });
@@ -746,8 +795,13 @@ describe("final review agent-loop safeguards", () => {
 		expect(starts).toBe(2);
 	});
 	it.each(["tool_use", "end_turn"])("rejects malformed tool JSON with nontruncated %s without execution", async reason => {
-		let reachedStopReason = false;
-		const f = await fixture(() => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+		let reachedStopReason = false; let starts = 0; let seed = "";
+		const f = await fixture(request => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			starts++;
+			if (starts > 1) {
+				seed = await readFile(request.options.resume!, "utf8");
+				yield* text("independent prompt succeeded"); return;
+			}
 			yield start();
 			yield message({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "malformed-json", name: "mcp__pi__read", input: {} } });
 			yield message({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"unfinished' } });
@@ -756,12 +810,60 @@ describe("final review agent-loop safeguards", () => {
 			yield* stop(reason); yield result;
 		})() }));
 		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "must not run" }], details: undefined }));
-		const agent = new Agent({ initialState: { model: f.model, tools: [{ ...tool, label: "Read", execute }] },
-			streamFn: (model, ctx, opts) => f.provider.streamSimple(model, normalizeContext(ctx), opts) });
+		let failedContext = context();
+		const agent = new Agent({ initialState: { model: f.model, tools: [{ ...tool, label: "Read", execute }] }, sessionId: "malformed-same-agent",
+			streamFn: (model, ctx, opts) => {
+				failedContext = structuredClone(normalizeContext(ctx));
+				return f.provider.streamSimple(model, normalizeContext(ctx), opts);
+			} });
 		await agent.prompt("malformed tool arguments");
 		expect(reachedStopReason).toBe(true);
 		expect(execute).not.toHaveBeenCalled();
+		expect(agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error", content: [{ type: "toolCall", id: "malformed-json" }] });
+		const failedHistory = structuredClone(agent.state.messages);
+		expect((await f.provider.streamSimple(f.model, failedContext, { sessionId: "malformed-same-agent" }).result()).errorMessage).toMatch(/Ambiguous previous/);
+		expect(starts).toBe(1);
+		await agent.prompt("independent next prompt");
+		expect(agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop", content: [{ text: "independent prompt succeeded" }] });
+		expect(agent.state.messages.slice(0, failedHistory.length)).toEqual(failedHistory);
+		expect(seed).not.toContain("malformed-json"); expect(seed).not.toContain('"tool_use"');
+		expect(starts).toBe(2); expect(execute).not.toHaveBeenCalled();
+	});
+	it.each([undefined, null, 42, "", " ", "bad id", "bad\u0000id", "x".repeat(257)])("rejects the whole real-Agent batch after malformed MCP correlation %j without assistant.error", async id => {
+		let client!: Client;
+		let malformed: unknown;
+		let pending: Promise<unknown> | undefined;
+		const observed: SDKMessage[] = [];
+		const f = await fixture(request => {
+			client = new Client({ name: "malformed-correlation", version: "1" });
+			return { close: () => { void client.close(); }, [Symbol.asyncIterator]: () => (async function* () {
+				const bridge = request.options.mcpServers!.pi; if (bridge.type !== "sdk") throw new Error("No bridge");
+				const [a, b] = InMemoryTransport.createLinkedPair(); await bridge.instance.connect(b); await client.connect(a);
+				yield* tools(["valid-proposal", "sibling"]);
+				yield* text("would otherwise complete");
+			})() };
+		});
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "must not run" }], details: undefined }));
+		const agent = new Agent({ initialState: { model: f.model, tools: [{ ...tool, label: "Read", execute }] },
+			streamFn: (model, ctx, opts) => f.provider.streamSimple(model, normalizeContext(ctx), { ...opts,
+				onProviderStreamEvent: async event => {
+					const sdk = event as SDKMessage; observed.push(sdk);
+					if (sdk.type !== "stream_event" || sdk.event.type !== "message_stop" || pending) return;
+					pending = client.callTool({ name: "read", arguments: { path: "valid-proposal" }, _meta: { "claudecode/toolUseId": "valid-proposal" } }).catch(error => error);
+					await client.ping();
+					malformed = await client.callTool({ name: "read", arguments: { path: "valid-proposal" },
+						...(id === undefined ? {} : { _meta: { "claudecode/toolUseId": id } }) });
+					// Wait for the already parked reply before provider disposal closes the transport.
+					await pending;
+				} }) });
+		await agent.prompt("malformed MCP before message_stop");
+		expect(malformed).toMatchObject({ isError: true });
+		expect(await pending).toMatchObject({ isError: true, content: [{ text: "Pi bridge closed" }] });
+		expect(observed.some(event => event.type === "assistant" && event.error)).toBe(false);
+		expect(execute).not.toHaveBeenCalled();
 		expect(agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+		expect(agent.state.messages.filter(message => message.role === "toolResult")).toEqual([]);
+		expect(await readdir(f.root)).toEqual([]);
 	});
 	it.each(["name", "arguments"])("never executes or revives a registered tool after mismatched %s during message_stop observer", async mode => {
 		let client!: Client; let starts = 0;

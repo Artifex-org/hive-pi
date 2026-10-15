@@ -9,7 +9,7 @@ import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-a
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
 import { EventConverter, emptyUsage, SdkAssistantFailure } from "./events.ts";
-import { fingerprint, seedHistory, userMessage, imageOrText } from "./history.ts";
+import { fingerprint, seedHistory, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
 import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
 
@@ -49,14 +49,28 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 	const ambiguous = new Set<string>();
 	const shutdown = new AbortController();
 	let closed = false;
+	async function cleanupResources(resources: Pick<Parked, "controller" | "dir" | "processes"> & Partial<Pick<Parked, "bridge" | "query">>): Promise<void> {
+		let failed = false;
+		// Every resource gets its cleanup attempt, even when an earlier owner fails.
+		for (const cleanup of [
+			() => resources.controller.abort(),
+			() => resources.bridge?.close(),
+			() => resources.query?.close(),
+			() => resources.processes.close(),
+			() => resources.bridge?.config.instance.close(),
+			() => removePrivateDirectory(resources.dir),
+		]) {
+			try { await cleanup(); } catch { failed = true; }
+		}
+		if (failed) {
+			cleanupError = true;
+			throw new Error("Claude SDK resource cleanup failed; operator cleanup required");
+		}
+	}
 	function dispose(state: Parked): Promise<void> {
 		if (state.closing) return state.closing;
 		states.delete(state.key); clearTimeout(state.timer); state.releaseAbort?.();
-		state.closing = (async () => {
-			state.controller.abort(); state.bridge.close(); state.query.close();
-			try { await state.processes.close(); await state.bridge.config.instance.close(); }
-			finally { await removePrivateDirectory(state.dir); }
-		})();
+		state.closing = cleanupResources(state);
 		disposals.add(state.closing);
 		void state.closing.then(() => disposals.delete(state.closing!), () => { disposals.delete(state.closing!); cleanupError = true; });
 		return state.closing;
@@ -145,7 +159,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					else if (last?.role === "toolResult") {
 						while (split > 0 && context.messages[split - 1].role === "toolResult") split--;
 						input = { type: "user", message: { role: "user", content: context.messages.slice(split).flatMap(result =>
-							result.role === "toolResult" ? [{ type: "tool_result" as const, tool_use_id: result.toolCallId,
+							result.role === "toolResult" ? [{ type: "tool_result" as const, tool_use_id: sdkToolCallId(result.toolCallId),
 								is_error: result.isError, content: result.content.map(imageOrText) }] : []) },
 							parent_tool_use_id: null, client_composed: true } as SDKUserMessage;
 					} else throw new Error("Claude SDK request requires a user message or correlated tool results");
@@ -153,6 +167,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					const controller = new AbortController();
 					const dir = await privateDirectory(config.stateRoot);
 					let bridge: PiToolBridge | undefined;
+					let query: SdkQuery | undefined;
 					const processes = processScope();
 					try {
 						bridge = new PiToolBridge(tools, controller.signal, 10_000);
@@ -174,15 +189,13 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						signal.throwIfAborted();
 						attemptedPrefix = structuredClone(context.messages);
 						sdkStarted = true;
-						const query = deps.query ? deps.query({ prompt: prompt(), options: sdkOptions }) :
+						query = deps.query ? deps.query({ prompt: prompt(), options: sdkOptions }) :
 							(await import("@anthropic-ai/claude-agent-sdk")).query({ prompt: prompt(), options: sdkOptions });
 						state = { key: randomUUID(), session: options.sessionId, model: model.id, prefix: structuredClone(context.messages), expected: [],
 							queryOptions: structuredClone(queryOptions), lease, bridge, query, iterator: query[Symbol.asyncIterator](), controller, dir, processes, observedIds: new Set(), busy: true };
 						states.set(state.key, state);
 					} catch (error) {
-						controller.abort(); bridge?.close();
-						try { await processes.close(); await bridge?.config.instance.close(); }
-						finally { await removePrivateDirectory(dir); }
+						await cleanupResources({ controller, dir, processes, bridge, query });
 						throw error;
 					}
 				}
@@ -218,7 +231,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					}
 				} finally { clearTimeout(expiry); }
 			} catch (error) {
-				let cleanupFailed = false;
+				let cleanupFailed = cleanupError;
 				if (attemptedPrefix) ambiguous.add(fingerprint(attemptedPrefix));
 				if (state) {
 					ambiguous.add(fingerprint(state.prefix));

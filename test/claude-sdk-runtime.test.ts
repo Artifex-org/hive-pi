@@ -71,6 +71,30 @@ it("the real process launcher inherits umask 077, restores the parent mask and c
 	await scope.close(); await exited;
 });
 
+it.runIf(process.platform === "linux")("finds a token-owned detached Node descendant after its leader exits", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "claude-sdk-orphan-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+	const scope = processScope(); cleanup.push(scope.close);
+	const child = scope.spawn({ command: process.execPath, args: ["-e", `
+		const cp = require('node:child_process');
+		require('node:fs').writeFileSync(process.env.STATE + '/leader', String(process.pid));
+		cp.spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(process.env.STATE + '/pid', String(process.pid)); console.log('ready'); setInterval(()=>{},10000)"],
+			{detached:true, stdio:['ignore','inherit','ignore']}).unref();
+	`], cwd: dir, env: { STATE: dir }, signal: new AbortController().signal });
+	const exited = new Promise(resolve => child.once("exit", resolve));
+	await once(child.stdout, "data"); await exited;
+	const descendant = Number(await readFile(join(dir, "pid"), "utf8"));
+	const raw = await readFile(`/proc/${descendant}/stat`, "utf8");
+	expect(Number(raw.slice(raw.lastIndexOf(")") + 2).split(" ")[2])).toBe(descendant);
+	expect(descendant).not.toBe(Number(await readFile(join(dir, "leader"), "utf8"))); expect(child.exitCode).toBe(0);
+	const environment = await readFile(`/proc/${descendant}/environ`, "utf8");
+	expect(environment).toContain("HIVE_PI_TREE_TOKENS=");
+	await scope.close();
+	await vi.waitFor(async () => {
+		try { expect(await readFile(`/proc/${descendant}/status`, "utf8")).toMatch(/State:\s+Z/); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+	});
+});
+
 it("cleanup escalates to SIGKILL for a synthetic descendant that ignores SIGTERM", async () => {
 	const dir = await mkdtemp(join(tmpdir(), "claude-sdk-descendant-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
 	const scope = processScope(); cleanup.push(scope.close);
@@ -90,3 +114,24 @@ it("cleanup escalates to SIGKILL for a synthetic descendant that ignores SIGTERM
 		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 	});
 });
+
+ it.runIf(process.platform === "linux")("reaps a real detached Node orphan after all leader pipes close", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "claude-sdk-silent-orphan-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+	const scope = processScope(); cleanup.push(scope.close);
+	const child = scope.spawn({ command: process.execPath, args: ["-e", `
+		const worker = require('node:child_process').spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(process.env.STATE + '/pid', String(process.pid)); setInterval(()=>{},10000)"], {detached:true, stdio:'ignore'});
+		worker.unref();
+		const ready = setInterval(() => { if (require('node:fs').existsSync(process.env.STATE + '/pid')) clearInterval(ready); }, 5);
+	`], cwd: dir, env: { STATE: dir }, signal: new AbortController().signal });
+	const leaderExited = new Promise(resolve => child.once("exit", resolve));
+	const outputClosed = once(child.stdout, "close"); child.stdout.resume();
+	await Promise.all([leaderExited, outputClosed]);
+	await new Promise(resolve => setImmediate(resolve));
+	let descendant = 0;
+	await vi.waitFor(async () => { descendant = Number(await readFile(join(dir, "pid"), "utf8")); expect(descendant).toBeGreaterThan(1); });
+	await scope.close();
+	await vi.waitFor(async () => {
+		try { expect(await readFile(`/proc/${descendant}/status`, "utf8")).toMatch(/State:\s+Z/); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+	});
+ });

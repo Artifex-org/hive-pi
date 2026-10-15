@@ -121,10 +121,24 @@ describe("actual MCP over in-memory transports, not a Claude query", () => {
 		complete("first", "result one");
 		expect(await first).toMatchObject({ content: [{ type: "text", text: "result one" }] });
 	});
-	it("rejects missing/forged metadata and changed tool names or arguments", async () => {
+	it.each([undefined, null, 42, "", " ", "bad id", "bad\u0000id", "x".repeat(257)])("closes the whole bridge for unattributable correlation %j and settles all waiters", async id => {
+		const { bridge, client, call, complete } = await fixture(1000);
+		bridge.expectCall("known", "read", { path: "/fixture" });
+		const parked = call("known");
+		const waiting = call("not-yet-streamed");
+		await client.ping();
+		expect(bridge.pendingCallIds).toEqual(["known"]);
+		expect(await client.callTool({ name: "read", arguments: {}, ...(id === undefined ? {} : { _meta: { "claudecode/toolUseId": id } }) })).toMatchObject({ isError: true });
+		expect(await parked).toMatchObject({ isError: true });
+		expect(await waiting).toMatchObject({ isError: true });
+		expect(bridge.pendingCallIds).toEqual([]);
+		expect(() => bridge.validateBatch(["known"])).toThrow(/closed/);
+		expect(() => complete("known", "late")).toThrow(/closed/);
+		expect(() => bridge.expectCall("fresh", "read")).toThrow(/closed/);
+	});
+	it("rejects forged metadata and changed tool names or arguments", async () => {
 		const { bridge, client, call, complete } = await fixture();
 		bridge.expectCall("known", "read", { path: "/fixture" });
-		expect(await client.callTool({ name: "read", arguments: {} })).toMatchObject({ isError: true });
 		expect(await call("unknown")).toMatchObject({ isError: true });
 		expect(await call("known", "bash")).toMatchObject({ isError: true });
 		expect(await call("known", "read", { path: "/different" })).toMatchObject({ isError: true });

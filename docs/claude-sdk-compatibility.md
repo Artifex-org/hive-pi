@@ -93,7 +93,11 @@ name/argument mismatches) remain tombstoned: late stream registration or correct
 redispatch cannot expose them to Pi execution. A mismatch also settles any already
 parked MCP resolver with an error; the entire model batch fails validation. A query admits at most
 256 IDs across calls, failed registrations and waiters; exhaustion closes the bridge
-rather than evicting safety state.
+rather than evicting safety state. Missing, nonstring, empty, whitespace/control-containing
+or overlength correlation metadata cannot identify a safe tombstone: the whole
+bridge closes before returning the MCP failure. All parked calls/registration
+waiters settle, and even otherwise valid streamed siblings fail batch validation;
+no subsequent `assistant.error` is needed to prevent Pi execution.
 
 The query requires `includePartialMessages:true`: partial `message_start` through
 `message_stop` frames are authoritative for response boundaries, stop reason and
@@ -172,6 +176,16 @@ to the bridge for re-execution. Unresolved historical calls and ambiguous failed
 attempts require reconciliation; there is no automatic crash-after-side-effect
 replay. Completed results allow a new account-bound history rebuild.
 
+Failed/aborted assistant frames remain in canonical Pi history but are omitted
+from SDK seeds and settlement: Pi does not execute their proposals. An independent
+next user prompt can proceed; the exact failed attempt remains quarantined.
+Actual unresolved handed-off calls still reject; no synthetic results are added.
+SDK history tool-use IDs and both historical/following result IDs share an SDK-only
+conversion: valid `[a-zA-Z0-9_-]` IDs of 1–64 characters remain unchanged; others
+use the existing SHA-256 fingerprint. Settlement validates uniqueness of converted
+IDs (including collisions with valid native IDs) and refuses collisions rather
+than miscorrelating results. Canonical Pi and live bridge IDs are never rewritten.
+
 Concurrent anonymous helpers receive separate queries/directories. Named sessions
 reject overlapping requests. The common subagent/brief worker extension allowlist
 explicitly loads this launch-gated provider. Advisor, subagent and helper model
@@ -179,9 +193,41 @@ lookups discover native `claude-sdk` models through Pi's registry, with no new
 provider-name fallback or bare-model substitution.
 
 Abort (including after `toolUse`), shutdown and lifecycle reset settle pending MCP
-calls, close the SDK, terminate the native process group, escalate to SIGKILL and
-remove private directories. Shutdown awaits in-flight setup and disposals and is
-idempotent. Parked queries expire after at most five minutes or lease expiry.
+calls, close the SDK, terminate verified native tree members, escalate to SIGKILL and
+remove private directories. Setup allocations and parked states use the same
+cleanup owner: any cleanup failure is reported as requiring operator cleanup,
+latches the runtime against subsequent requests, and makes shutdown reject.
+This includes query/iterator setup throws after private history has been written;
+a removal failure is not treated as successful shutdown. Shutdown awaits in-flight
+setup and disposals and is idempotent. Parked queries expire after at most five
+minutes or lease expiry.
+
+The SDK spawns the pinned command directly, detached and under umask 077, using
+`hive-common/child-tree.ts` ownership rather than retaining numeric PGIDs. Its
+unique inherited tree token is added to the SDK's isolated child environment,
+not to an ambient environment merge. **SDK execution supports only Linux with
+readable procfs ownership.** Both executable preflight and actual spawn check this
+boundary. macOS/other portable SDK runtimes are unavailable pending verified
+ownership support, not accepted with an unverified fallback.
+
+The SDK opts into the shared utility's strict ownership policy; existing non-SDK
+callers retain their portable group fallback unchanged. Strict cleanup never sends
+negative-group or bare-child signals, including SDK transport/exit/timer `kill()`
+callbacks (also after scope release): each individual PID's starttime is checked
+immediately before signalling. TERM-to-KILL escalation and normal close rediscover
+ancestry/token descendants and recheck identities. Closed leaders' handles remain
+owned until scope close, including silent detached descendants inheriting the token.
+Loss of procfs visibility or a signal failure is sticky: event-close, abort and
+shutdown observers do not throw, but explicit tree cleanup/scope close reports
+**operator cleanup required**. Restored visibility does not erase the failure.
+All other resource cleanup is still attempted and the provider refuses new requests.
+
+This is cooperative-job cleanup, not a sandbox. A descendant that clears its token
+and reparents before discovery can evade tracking; strict mode does not adopt an
+unverified group occupant as a substitute. Readable procfs does not make the
+identity-check-to-signal interval atomic (no pidfd guarantee), and SIGKILL delivery
+is not a proof of completed process reaping. Stronger OS-enforced guarantees require
+cgroups/job objects or kernel identity handles.
 A SIGKILL of the entire parent cannot run cleanup: the provisioner owns root
 retention/sweeping after verifying the launch/process is dead. Never use leftover
 SDK state as a source of truth or automatically resume it.

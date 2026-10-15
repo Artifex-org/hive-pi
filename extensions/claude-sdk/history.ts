@@ -16,13 +16,20 @@ export function userMessage(message: UserMessage): SDKUserMessage {
 	return { type: "user", message: { role: "user", content: typeof message.content === "string" ? message.content : message.content.map(imageOrText) },
 		parent_tool_use_id: null, client_composed: true } as SDKUserMessage;
 }
+/** SDK wire IDs only. Canonical Pi/bridge IDs remain untouched. */
+export function sdkToolCallId(id: string): string {
+	return /^[a-zA-Z0-9_-]{1,64}$/.test(id) ? id : fingerprint(id);
+}
+function failedAssistant(message: Message): boolean {
+	return message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted");
+}
 export function nativeMessage(message: Exclude<Message, { role: "system" }>): Record<string, unknown> {
 	if (message.role === "user") return { ...userMessage(message).message };
-	if (message.role === "toolResult") return { role: "user", content: [{ type: "tool_result", tool_use_id: message.toolCallId,
+	if (message.role === "toolResult") return { role: "user", content: [{ type: "tool_result", tool_use_id: sdkToolCallId(message.toolCallId),
 		is_error: message.isError, content: message.content.map(imageOrText) }] };
 	return { role: "assistant", type: "message", id: randomUUID(), model: message.model,
 		content: message.content.map(block => {
-			if (block.type === "toolCall") return { type: "tool_use", id: block.id, name: `mcp__pi__${block.name}`, input: block.arguments };
+			if (block.type === "toolCall") return { type: "tool_use", id: sdkToolCallId(block.id), name: `mcp__pi__${block.name}`, input: block.arguments };
 			if (block.type === "thinking") {
 				// Foreign/unsigned reasoning has no Anthropic signature. Preserve its visible text,
 				// not an invalid signed-thinking claim; the Pi transcript itself is never rewritten.
@@ -39,10 +46,17 @@ export function nativeMessage(message: Exclude<Message, { role: "system" }>): Re
 export function assertSettledHistory(messages: readonly Message[]): void {
 	const pending = new Map<string, string>();
 	const seen = new Set<string>();
+	const wireIds = new Map<string, string>();
 	for (const message of messages) {
+		// Pi never executes failed assistant proposals. Do not invent results for them,
+		// or let them hide genuinely handed-off, unresolved toolUse calls.
+		if (failedAssistant(message)) continue;
 		if (message.role === "assistant") for (const block of message.content) if (block.type === "toolCall") {
 			if (seen.has(block.id)) throw new Error("Duplicate historical tool call");
 			seen.add(block.id);
+			const wireId = sdkToolCallId(block.id);
+			if (wireIds.has(wireId) && wireIds.get(wireId) !== block.id) throw new Error("Colliding historical SDK tool IDs");
+			wireIds.set(wireId, block.id);
 			pending.set(block.id, block.name);
 		}
 		if (message.role === "toolResult") {
@@ -57,7 +71,7 @@ export function assertSettledHistory(messages: readonly Message[]): void {
 export async function seedHistory(dir: string, messages: readonly Message[], sessionId: string, cwd: string, following: readonly Message[] = []): Promise<string | undefined> {
 	assertSettledHistory([...messages, ...following]);
 	let parentUuid: string | null = null;
-	const entries = messages.filter(message => message.role !== "system").map(message => {
+	const entries = messages.filter((message): message is Exclude<Message, { role: "system" }> => message.role !== "system" && !failedAssistant(message)).map(message => {
 		const uuid = randomUUID();
 		const entry = { type: message.role === "assistant" ? "assistant" : "user", uuid, parentUuid,
 			sessionId, cwd, version: "2.1.286", isSidechain: false, userType: "external",

@@ -138,7 +138,9 @@ MIT. See [LICENSE](LICENSE).
 `HIVE_CLAUDE_SDK=1` enables the native `claude-sdk/<model>` provider through the
 package's discovered `extensions/claude-sdk/index.ts` entry and explicit worker
 allowlist. It requires a pinned absolute Claude executable, a private absolute
-0700 state root, and server-authorized Hive access-only launch leases. Pi retains
+0700 state root, server-authorized Hive access-only launch leases, and **Linux
+with readable procfs ownership**. SDK execution fails closed on macOS/other
+platforms or unreadable procfs; no group-only fallback is permitted. Pi retains
 its original prompt/history, tool guards and execution; SDK MCP calls park until
 Pi supplies their correlated results. No login, full Pi auth import, token
 persistence or API fallback is provided.

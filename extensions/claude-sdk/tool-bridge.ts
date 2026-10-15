@@ -41,7 +41,11 @@ export class PiToolBridge {
 		server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 			if (this.closed) return failure("Pi bridge closed");
 			const id = request.params._meta?.["claudecode/toolUseId"];
-			if (typeof id !== "string" || !id || id.length > 256 || /[\s\p{Cc}]/u.test(id)) return failure("Missing tool-use correlation");
+			if (typeof id !== "string" || !id || id.length > 256 || /[\s\p{Cc}]/u.test(id)) {
+				// No trustworthy ID exists to tombstone: reject the entire query before replying.
+				this.close();
+				return failure("Missing tool-use correlation");
+			}
 			if (this.failedRegistrations.has(id)) return failure("Failed tool-use registration");
 			if (this.registrations.has(id)) return failure("Duplicate MCP tool request");
 			if (!this.calls.has(id) && this.registrationTimeout > 0) await this.waitForRegistration(id, extra.signal);

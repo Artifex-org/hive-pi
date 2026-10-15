@@ -6,6 +6,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { accessLease, type AccessLease } from "./options.ts";
+import { assertTreeIdentityReadable, killTree, releaseTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 
 export const CLI_VERSION = "2.1.286";
 export interface LaunchConfig { executable: string; stateRoot: string; url: string; token: string; launch: string; cwd: string }
@@ -93,6 +94,7 @@ export async function privateFile(dir: string, name: string, value: unknown): Pr
 
 /** Only version inspection, never login, inference, wrapper scripts or CLI rewriting. */
 export async function validateExecutable(config: LaunchConfig, signal: AbortSignal): Promise<void> {
+	assertTreeIdentityReadable();
 	const stat = await lstat(config.executable);
 	if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o022) !== 0) throw new Error("Unsafe pinned Claude executable");
 	await access(config.executable, constants.X_OK);
@@ -103,31 +105,60 @@ export async function validateExecutable(config: LaunchConfig, signal: AbortSign
 	if (stdout.trim() !== `${CLI_VERSION} (Claude Code)`) throw new Error(`Claude SDK requires pinned Claude Code ${CLI_VERSION}`);
 }
 
-/** Track a separate process group; teardown also kills descendants retaining pipes. */
+/** SDK-only strict ownership: Linux readable procfs; never group-only fallback. */
 export function processScope(): { spawn: NonNullable<Options["spawnClaudeCodeProcess"]>; close: () => Promise<void> } {
-	const groups = new Set<number>();
+	const children = new Set<ReturnType<typeof spawn>>();
+	let cleanupError: unknown;
+	let closed = false;
+	const signal = (child: ReturnType<typeof spawn>, value: NodeJS.Signals) => {
+		try { killTree(child, value, true); return true; }
+		catch (error) { cleanupError ??= error; return false; }
+	};
 	return {
 		spawn: options => {
+			if (cleanupError) throw cleanupError;
+			if (closed) throw new Error("Claude SDK process scope closed");
+			assertTreeIdentityReadable();
 			// spawn is synchronous: the child inherits 077, then the parent immediately restores its mask.
 			// No shell shim, executable rewrite, token argv or asynchronous work in this critical section.
+			const tree = { ...treeSpawnOptions(options.env), detached: true };
 			const mask = process.umask(0o077);
 			let child: ReturnType<typeof spawn>;
-			try { child = spawn(options.command, options.args, { cwd: options.cwd, env: options.env,
-				detached: true, stdio: ["pipe", "pipe", "pipe"] }); }
+			try { child = spawn(options.command, options.args, { ...tree, cwd: options.cwd,
+				stdio: ["pipe", "pipe", "pipe"] }); }
 			finally { process.umask(mask); }
-			if (child.pid) groups.add(child.pid);
+			trackTree(child, true, tree.env[TREE_TOKEN], { requireIdentity: true });
+			children.add(child);
 			// Never forward raw stderr: it may contain credentials or request content.
 			child.stderr!.resume();
-			const kill = () => { if (child.pid) { try { process.kill(-child.pid, "SIGTERM"); } catch {} } };
+			const kill = () => signal(child, "SIGTERM");
 			options.signal.addEventListener("abort", kill, { once: true });
-			child.once("exit", () => options.signal.removeEventListener("abort", kill));
-			return Object.assign(child, { stdin: child.stdin!, stdout: child.stdout! });
+			// Keep handles even after close: orphan discovery and sticky failures
+			// remain owned until explicit scope cleanup (one query's bounded set).
+			child.once("close", () => { options.signal.removeEventListener("abort", kill); });
+			if (options.signal.aborted) kill();
+			// SDK transport/exit observers also call kill directly. Do not expose
+			// ChildProcess.kill, including to delayed callbacks after scope close.
+			return {
+				stdin: child.stdin!, stdout: child.stdout!,
+				get killed() { return child.killed; },
+				get exitCode() { return child.exitCode; },
+				get signalCode() { return child.signalCode; },
+				kill: value => signal(child, value),
+				on: child.on.bind(child), once: child.once.bind(child), off: child.off.bind(child),
+			};
 		},
 		close: async () => {
-			for (const pid of groups) { try { process.kill(-pid, "SIGTERM"); } catch {} }
-			if (groups.size) await new Promise(resolve => setTimeout(resolve, 100));
-			for (const pid of groups) { try { process.kill(-pid, "SIGKILL"); } catch {} }
-			groups.clear();
+			closed = true;
+			const owned = [...children];
+			for (const child of owned) signal(child, "SIGTERM");
+			if (owned.length) await new Promise(resolve => setTimeout(resolve, 100));
+			// Revalidate ownership even if TERM closed the leader's pipes meanwhile.
+			for (const child of owned) signal(child, "SIGKILL");
+			for (const child of owned) {
+				try { releaseTree(child); children.delete(child); } catch (error) { cleanupError ??= error; }
+			}
+			if (cleanupError) throw cleanupError;
 		},
 	};
 }
