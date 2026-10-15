@@ -6,12 +6,13 @@ export default async function claudeSdk(pi: ExtensionAPI): Promise<void> {
 	const config = launchConfig(process.env, process.cwd());
 	if (!config) return;
 	const { createClaudeSdkRuntime } = await import("./provider.ts");
-	let runtime = createClaudeSdkRuntime(config);
+	const replayProtection = new Set<string>();
+	let runtime = createClaudeSdkRuntime(config, { replayProtection });
 	pi.registerProvider(runtime.provider);
 	// Registering is side-effect free. Real resources start at the first model request.
 	const reset = async () => {
 		await runtime.close();
-		runtime = createClaudeSdkRuntime(config);
+		runtime = createClaudeSdkRuntime(config, { replayProtection });
 		pi.registerProvider(runtime.provider);
 	};
 	pi.on("session_shutdown", async () => { await runtime.close(); });

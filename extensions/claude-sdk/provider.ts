@@ -21,6 +21,8 @@ export interface Dependencies {
 	lease?: LeaseSource;
 	validateExecutable?: typeof validateExecutable;
 	now?: () => number;
+	/** Extension-owned across disposable SDK runtimes; contains hashes, not transcripts. */
+	replayProtection?: Set<string>;
 }
 interface Parked {
 	key: string; session?: string; model: string; prefix: Message[]; expected: Message[];
@@ -46,7 +48,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 	const runs = new Set<Promise<void>>();
 	let cleanupError = false;
 	let closing: Promise<void> | undefined;
-	const ambiguous = new Set<string>();
+	const ambiguous = deps.replayProtection ?? new Set<string>();
 	const shutdown = new AbortController();
 	let closed = false;
 	async function cleanupResources(resources: Pick<Parked, "controller" | "dir" | "processes"> & Partial<Pick<Parked, "bridge" | "query">>): Promise<void> {
@@ -275,7 +277,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 		const remaining = [...states.values()];
 		shutdown.abort(); leases.close();
 		closing = (async () => {
-			const settled = await Promise.allSettled([...remaining.map(dispose), ...disposals, ...runs]); ambiguous.clear();
+			const settled = await Promise.allSettled([...remaining.map(dispose), ...disposals, ...runs]);
 			if (cleanupError || settled.some(result => result.status === "rejected")) throw new Error("Claude SDK private-state cleanup failed; operator cleanup required");
 		})();
 		return closing;

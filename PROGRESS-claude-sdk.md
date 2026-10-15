@@ -176,3 +176,8 @@ Unverified rollout gates above remain unchanged. The subsequent empty-cache revi
 - Failed descendant discovery latches the error but does not prevent independently identity-verified root/member cleanup.
 - History conversion now takes the destination model identity: signatures are same-model/provider/API only; cross-model visible reasoning becomes text, opaque/empty assistant frames are omitted from SDK seed only.
 - Typecheck and focused provider/ownership regressions passed. Mixed-tree intermediate gates bg-28/bg-29 are not final evidence. Final-tree Hive snapshot #14328 passed lint and both DB shards on tree2063ccf7; logs prove 738 API/762 store tests exercised Postgres and strengthened SDK lease assertions passed.
+
+### Extension-owned replay protection
+
+- Hash-only replay protection belongs to the extension, not a disposable SDK transport. Runtime close no longer erases it; model-select, tree, compaction and session-start replacements share the same protection.
+- Real provider lifecycle tests prove handoff → reset → exact replay refusal without a second query, while canonical correlated reconstruction remains allowed. Typecheck and 135 provider/loader/lifecycle tests passed.

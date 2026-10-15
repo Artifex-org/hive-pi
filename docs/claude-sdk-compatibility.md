@@ -189,7 +189,10 @@ Disposing an idle handed-off query also quarantines its original result-free
 attempt, including cancellation and parked expiry. Reservation begins at handoff,
 so replacement or a different session ID cannot restart the same result-free attempt. The exact attempt cannot
 restart a potentially side-effecting batch; canonical correlated results still
-permit reconstruction.
+permit reconstruction. The extension owns hash-only replay protection across runtime
+replacement on model selection, session tree navigation, compaction and session
+start; closing a disposable SDK runtime does not erase it. No transcript or token
+is persisted as transport recovery state.
 SDK history tool-use IDs and both historical/following result IDs share an SDK-only
 conversion: valid `[a-zA-Z0-9_-]` IDs of 1–64 characters remain unchanged; others
 use the existing SHA-256 fingerprint. Settlement validates uniqueness of converted
