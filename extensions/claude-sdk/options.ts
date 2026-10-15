@@ -1,8 +1,6 @@
-/**
- * Non-serving compatibility contract. No credential acquisition, query(), file
- * writes or provider registration. See docs/claude-sdk-compatibility.md.
- */
+/** Pinned SDK isolation contract. No credential lookup or inference in this module. */
 import { isAbsolute } from "node:path";
+import { getSupportedThinkingLevels, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { McpSdkServerConfigWithInstance, Options, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 export const CREDENTIAL_PROVIDER = "anthropic";
@@ -50,8 +48,8 @@ export interface IsolatedRequest {
 }
 
 /**
- * Builds actual pinned SDK Options without starting the SDK. Callers would have
- * to provision/authorize privateRoot and the executable separately. No ambient
+ * Builds pinned SDK Options without starting the SDK. The runtime provisions
+ * privateRoot and validates the trusted executable separately. No ambient
  * login, gateway or API key is consulted. Token-bearing options must not be logged.
  */
 export function isolatedOptions(request: IsolatedRequest): Options {
@@ -91,7 +89,7 @@ export function isolatedOptions(request: IsolatedRequest): Options {
 			XDG_CONFIG_HOME: privateRoot,
 			CLAUDE_CONFIG_DIR: privateRoot,
 			CLAUDE_CODE_OAUTH_TOKEN: lease.access_token,
-			CLAUDE_AGENT_SDK_CLIENT_APP: "hive-pi/claude-sdk-compatibility",
+			CLAUDE_AGENT_SDK_CLIENT_APP: "hive-pi/claude-sdk",
 			ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 			DISABLE_AUTO_COMPACT: "1",
 			DISABLE_COMPACT: "1",
@@ -102,6 +100,35 @@ export function isolatedOptions(request: IsolatedRequest): Options {
 			DISABLE_ERROR_REPORTING: "1",
 		},
 	};
+}
+
+/** Translate catalog capabilities only; no native Anthropic transport/auth/conversion. */
+export function reasoningOptions(model: Model<"anthropic-messages">, options: SimpleStreamOptions): Pick<Options, "thinking" | "effort"> {
+	const supported = getSupportedThinkingLevels(model);
+	const level = options.reasoning ?? (supported.includes("off") ? "off" : "high");
+	if (!supported.includes(level)) throw new Error(`Unsupported Claude SDK thinking level: ${level}`);
+	const adaptive = model.compat?.forceAdaptiveThinking === true;
+	if (options.thinkingBudgets && (adaptive || level === "off")) {
+		throw new Error("Claude SDK thinking budgets require budget-based reasoning");
+	}
+	if (level === "off") return { thinking: { type: "disabled" } };
+	if (adaptive) {
+		const effort = model.thinkingLevelMap?.[level] ?? (level === "minimal" ? "low" : level);
+		if (effort !== "low" && effort !== "medium" && effort !== "high" && effort !== "xhigh" && effort !== "max") {
+			throw new Error("Unsupported Claude SDK effort mapping");
+		}
+		return { thinking: { type: "adaptive" }, effort };
+	}
+	const budgets = { minimal: 1024, low: 2048, medium: 8192, high: 16384, ...options.thinkingBudgets };
+	if (options.thinkingBudgets && Object.entries(options.thinkingBudgets).some(([key, value]) =>
+		!supported.includes(key as typeof level) || !Number.isSafeInteger(value) || value < 1024)) {
+		throw new Error("Unsupported Claude SDK thinking budget");
+	}
+	const budgetTokens = budgets[level as keyof typeof budgets];
+	if (!Number.isSafeInteger(budgetTokens) || budgetTokens < 1024 || budgetTokens >= (options.maxTokens ?? model.maxTokens)) {
+		throw new Error("Claude SDK thinking budget must fit within the output token limit");
+	}
+	return { thinking: { type: "enabled", budgetTokens } };
 }
 
 /** No slash-command or @file expansion; Pi already composed this message. */

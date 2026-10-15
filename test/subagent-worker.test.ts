@@ -118,7 +118,8 @@ describe("subagent worker invocation", () => {
 		// single session_start hook is pinned below.
 		// Raised 6 -> 7 for public-fetch/index.ts: hook-free, broker-only transport,
 		// with real SDK role-grant coverage in public-fetch-worker.test.ts.
-		expect(workerExtensionPaths().length).toBeLessThanOrEqual(7);
+		// One launch-gated transport added; its exact lifecycle-only surface is pinned below.
+		expect(workerExtensionPaths().length).toBeLessThanOrEqual(8);
 	});
 
 	it("loads the fast worker module, with its one hook and no tools or commands", () => {
@@ -156,6 +157,16 @@ describe("subagent worker invocation", () => {
 		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map((m) => m[1])).toEqual(["tool_call", "before_agent_start"]);
 	});
 
+	it("pins the Claude SDK provider to launch-gated lifecycle cleanup only", () => {
+		const provider = workerExtensionPaths().find(path => path.endsWith("/extensions/claude-sdk/index.ts"));
+		expect(provider).toBeDefined();
+		const source = readFileSync(provider!, "utf8");
+		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map(m => m[1])).toEqual([
+			"session_shutdown", "session_start", "session_compact", "session_tree", "model_select",
+		]);
+		expect(source).not.toMatch(/\bregisterTool\(|\bregisterCommand\(|\bregisterFlag\(/);
+	});
+
 	it("only reviewed protocol extensions register worker event hooks", () => {
 		// `workflow/index.ts` was the second entry until HIV-2904 merged that
 		// document into the plan. It is deliberately NOT replaced by
@@ -165,7 +176,7 @@ describe("subagent worker invocation", () => {
 		// `loadout/index.ts` appends the on-demand tool index to the system prompt
 		// and nothing else (pinned below): without it a worker spawned with no
 		// `--tools` list could not reach any deferred harness tool.
-		const allowedHooks = new Set(["opmode/index.ts", "fast/worker.ts", "loadout/index.ts"]);
+		const allowedHooks = new Set(["opmode/index.ts", "fast/worker.ts", "loadout/index.ts", "claude-sdk/index.ts"]);
 		const ours = workerExtensionPaths().filter((path) => path.includes("/extensions/"));
 		expect(ours.length, "expected at least one in-repo worker extension").toBeGreaterThan(0);
 		for (const path of ours) {

@@ -5,7 +5,7 @@
  * and a fake Hive catalog.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -100,9 +100,65 @@ describe("mcp protocol", () => {
 describe("static chart tool", () => {
 	it("ships its eager schema dependency in production installs", () => {
 		const manifest = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
-		expect(manifest.dependencies.typebox).toBeDefined();
+		expect(manifest.peerDependencies.typebox).toBe("*");
 		expect(manifest.peerDependenciesMeta.typebox?.optional).not.toBe(true);
+		expect(manifest.devDependencies.typebox).toBe("1.3.7");
+		expect(manifest.dependencies.typebox).toBeUndefined(); // Pi's loader requires shared peer identity.
 	});
+	it("resolves the eager native MCP schema import in an offline production package install", () => {
+		const root = mkdtempSync(join(tmpdir(), "hive-pi-production-"));
+		const env = { ...process.env, npm_config_cache: join(root, "cache"), npm_config_userconfig: join(root, "empty-user.npmrc"), npm_config_globalconfig: join(root, "empty-global.npmrc") };
+		try {
+			const packed = JSON.parse(execFileSync("npm", ["pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", root],
+				{ cwd: REPO, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+			const typebox = JSON.parse(execFileSync("npm", ["pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", root],
+				{ cwd: join(REPO, "node_modules", "typebox"), env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+			// Focus this hermetic fixture on the real packaged chart sources and required
+			// schema peer. Full-package consumer installation is measured separately;
+			// unrelated registry dependencies must not require an ambient npm cache here.
+			const fixture = join(root, "package");
+			execFileSync("tar", ["-xzf", join(root, packed[0].filename), "-C", root], { stdio: "pipe" });
+			const manifest = JSON.parse(readFileSync(join(fixture, "package.json"), "utf8"));
+			writeFileSync(join(fixture, "package.json"), JSON.stringify({
+				name: manifest.name, version: manifest.version, type: manifest.type,
+				peerDependencies: { typebox: manifest.peerDependencies.typebox },
+				peerDependenciesMeta: { typebox: manifest.peerDependenciesMeta.typebox ?? {} },
+			}));
+			const focused = JSON.parse(execFileSync("npm", ["pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", root],
+				{ cwd: fixture, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+			writeFileSync(join(root, "package.json"), JSON.stringify({
+				private: true,
+				dependencies: { "@artifex/hive-pi": `file:./${focused[0].filename}` },
+				// Not a direct dependency: npm must auto-install the package's required peer.
+				overrides: { typebox: `file:${join(root, typebox[0].filename)}` },
+			}));
+			execFileSync("npm", ["install", "--omit=dev", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"],
+				{ cwd: root, env, stdio: "pipe" });
+			const output = execFileSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", `
+				import { createRequire, registerHooks, stripTypeScriptTypes } from "node:module";
+				import { readFileSync } from "node:fs";
+				import { pathToFileURL } from "node:url";
+				// Node refuses built-in stripping under node_modules; supply a TS loader as Pi does.
+				registerHooks({ load(url, context, next) {
+					if (url.endsWith(".ts")) return { format: "module", shortCircuit: true,
+						source: stripTypeScriptTypes(readFileSync(new URL(url), "utf8"), { mode: "transform" }) };
+					return next(url, context);
+				} });
+				import assert from "node:assert/strict";
+				const require = createRequire(import.meta.resolve("@artifex/hive-pi/package.json"));
+				const { Type } = await import(pathToFileURL(require.resolve("typebox")));
+				assert.equal(Type.String().type, "string");
+				const chart = await import(pathToFileURL(require.resolve("@artifex/hive-pi/claude/mcp/chart-tool.ts")));
+				assert.equal(chart.RENDER_CHART_TOOL.name, "render_chart");
+				const nativeChart = await import(pathToFileURL(require.resolve("@artifex/hive-pi/extensions/inline-charts/tool.ts")));
+				assert.equal(nativeChart.chartParameters.type, "object");
+				assert.equal(nativeChart.createChartTool().name, "render_chart");
+				assert.throws(() => require.resolve("vitest"));
+				console.log("production typebox and native MCP chart import resolved; dev tools omitted");
+			`], { cwd: root, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+			expect(output).toContain("production typebox and native MCP chart import resolved; dev tools omitted");
+		} finally { rmSync(root, { recursive: true, force: true }); }
+	}, 30_000);
 	it("is model-free, returns final details, and rejects malformed or live-feed parameters", async () => {
 		const modelFreeEnv = { ...launch.env };
 		delete modelFreeEnv.ANTHROPIC_API_KEY;

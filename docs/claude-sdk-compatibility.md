@@ -1,121 +1,242 @@
-# Claude subscription transport: offline compatibility slice
+# Claude SDK provider: offline implementation and rollout boundary
 
-Status: **non-serving prototype**. This does not add a selectable model, enable
-subscription access in Pi, or establish subscription billing/eligibility.
+Status: **opt-in runtime implemented and offline-tested**, not live acceptance.
+This does not establish Anthropic subscription eligibility, billing classification,
+Extra Usage behavior, real token renewal, or native CLI enforcement. No live
+inference or credential access is part of these tests. Hive server admission is a
+separate change; an older server correctly returns 403 for Pi launches.
 
-## What this slice proves
+## Enablement contract
 
-`prototypes/claude-sdk/` is outside the package's auto-discovered `extensions/`
-root and is not imported by a runtime extension. The SDK and MCP packages are
-**development dependencies only**, pinned to 0.3.289 and 1.32.0 in both lockfiles.
-No SDK binary is started by the tests.
+The package's normal `./extensions` entry discovers `extensions/claude-sdk/index.ts`.
+It registers a native Pi AI `Provider`, with `claude-sdk/<model>` names, **only**
+when `HIVE_CLAUDE_SDK=1`. Disabled discovery does not import the SDK or register
+models, read credentials, start processes or make network requests.
 
-- `options.ts` compiles against the real SDK 0.3.289 `Options` and
-  `SDKUserMessage` declarations. It constructs explicit isolated options and
-  preserves supplied system/user text, with `verbatimPrompts` and
-  `client_composed`. It does not call `query()`.
-- `accessLease` checks the existing Hive access-only response's exact shape
-  (`access_token`, `expires_at`, `credential`, `slot`) and bounded future
-  expiry. It rejects full auth documents/refresh tokens and never includes input
-  values in validation errors. **It does not authorize the caller, establish
-  account identity, or make the upstream bearer token session-scoped.**
-- The child environment is built from an allowlist, never `process.env`.
-  SDK 0.3.289 documents that supplying `env` replaces the child environment.
-  Options disable built-in tools, filesystem settings, hooks, plugins, skills,
-  cloud MCP discovery, memory and compaction. Only named Pi MCP tools are
-  preapproved; unexpected permission requests are denied. These assertions test
-  option construction, not the native executable's enforcement.
-- `tool-bridge.ts` uses the real MCP server/client protocol over in-memory
-  transports. It accepts only stream-registered tool-use IDs with matching names
-  and arguments. Calls remain parked until Pi supplies a result; parallel/early
-  results, guard-error results, images, duplicate IDs/results, individual request
-  cancellation/timeouts, transport disconnects and whole-bridge abort cleanup are tested. It has no tool execution callback and does not execute files or
-  shell commands. The fixture is limited to 256 calls and is not a persistent
-  session manager.
-- The bridge accepts Pi 1.0.2 `Tool` and `ToolResultMessage` types. The tests
-  supply synthetic results; they do **not** prove the full Pi agent loop or its
-  real hook pipeline. Supplying a result is the future provider's trusted
-  responsibility after Pi checks and executes (or denies) the call.
+Hive's node also passes the certified provider file through `--extension`.
+Pi deduplicates canonical paths, so manifest plus CLI discovery registers one
+provider; project package filters cannot remove that explicit CLI entry.
+Offline integration tests cover both ordinary and project-filtered loading.
+`typebox` is a **required** `"*"` peer (with development pin 1.3.7), not an
+optional peer or second runtime dependency bypassing Pi's shared module identity.
+A production consumer install (`npm install --omit=dev`) installs that peer for
+the standalone native MCP's eager schema import; this was measured separately.
+The hermetic regression uses the real packed chart sources and peer declaration
+in a focused consumer fixture, with locally packed TypeBox and an empty cache.
+It verifies automatic peer installation, chart imports and absent dev tools;
+it does not install the full package's unrelated dependency graph.
+The workstation updater (`workstation/.local/bin/hive-pi-update:302`) runs plain
+`npm ci --ignore-scripts --no-audit --no-fund`, retaining the development pin.
+Running `npm ci --omit=dev` in this repository itself is different: npm omits
+its root development pin, so that checkout lacks standalone TypeBox availability.
 
-Run the local gate with:
+An enabled launch requires all of:
 
-```sh
-npm ci --ignore-scripts
+- `HIVE_CLAUDE_SDK_EXECUTABLE`: absolute path to the provisioned, unchanged,
+  pinned native Claude Code **2.1.286** executable. No downloaded replacement,
+  patched executable, prompt wrapper or synthetic Claude implementation. Runtime
+  checks ownership-safe file permissions, executable access and exact `--version`;
+  trusted workstation provisioning, not version text alone, establishes provenance.
+- `HIVE_CLAUDE_SDK_STATE_DIR`: canonical absolute path to an owned, non-symlink,
+  **0700** private root. Existing unsafe directories are refused, not chmodded.
+- `HIVE_URL`, `HIVE_TOKEN`, `HIVE_LAUNCH_ID`: scoped launch connection details.
+  HTTPS is required except for loopback test servers. Tokens are never put on argv.
+
+These variables configure transport; **they are not authorization**. Every model
+request obtains an access-only lease using:
+
+```
+GET /api/v1/agent-launches/{id}/claude-auth
+Authorization: Bearer <scoped Hive token>
+```
+
+The exact response contains `access_token`, `expires_at`, `credential`, `slot`
+only. Full Pi auth documents, refresh tokens, extra keys, invalid identifiers and
+unbounded/expired lifetimes are rejected without reflecting response values.
+Server acceptance must independently validate the explicit owner allowlist,
+workstation Pi model lane, active launch, tenant and assigned account on **every**
+lease. Ordinary Pi, forged selections, unauthorized workers and revoked launches
+must be denied server-side. This repository cannot implement that server policy.
+Factory/cloud principals require separate admission; a worker inheriting env does
+not gain authorization by doing so.
+
+The lane has no `/login`, Pi auth-store import/export, native-login fallback,
+refresh-token writer, Console/API fallback, or token persistence. Native provider
+auth returns an opaque admission marker after a lease, never the access token.
+The separate `anthropic-api` lane remains explicitly separate.
+
+## Ownership and request isolation
+
+Pi **1.0.2** owns prompt composition, literal user input, transcript/session,
+compaction, branching, hooks, argument validation and tool execution. SDK
+**0.3.289** and MCP **1.32.0** are pinned runtime dependencies. The original
+prototype implementation moved to `extensions/claude-sdk/`; there is no second
+implementation or compatibility shim.
+
+`isolatedOptions()` supplies verbatim prompts and `client_composed` user messages.
+It disables SDK builtins, settings sources, hooks, plugins, skills, ambient MCP
+and cloud discovery, memory, CLAUDE.md discovery and SDK compaction. Unexpected
+permission requests are denied. The only MCP server is the in-process Pi bridge;
+only its named tools are preapproved. The child's environment is an allowlist,
+not a merge of `process.env`: no Hive token, ambient API keys, gateway, auth.json,
+login directory, user settings or inherited proxy reaches it.
+
+A model tool batch ends the Pi assistant stream with `toolUse`, leaving the SDK
+iterator and MCP requests parked. Pi executes or denies the tools normally. The
+next request must present the exact expected transcript plus one correlated result
+per call. The bridge checks Pi names, stream-observed IDs and JSON arguments;
+parallel/out-of-order/early results, images and error results remain correlated.
+It has no execution callback. SDK dispatch that overtakes an awaited stream
+observer waits for registration for at most ten seconds, then fails closed.
+Failed registration IDs (including cancelled/timed-out requests) remain tombstoned:
+late stream registration cannot expose them to Pi execution. A query admits at most
+256 IDs across calls, failed registrations and waiters; exhaustion closes the bridge
+rather than evicting safety state.
+
+The query requires `includePartialMessages:true`: partial `message_start` through
+`message_stop` frames are authoritative for response boundaries, stop reason and
+usage. Pinned SDK 0.3.289 documents canonical `assistant` frames **per completed
+content block**, sharing `message.id`, with null stop reason and nonfinal usage.
+Those frames, interleaved with partials or arriving on the following Pi turn, are
+ignored once the partial stream has registered their message ID, not executed
+again. An unknown-ID canonical frame with null or missing `stop_reason` fails
+closed as missing partials/no complete response; canonical-only block aggregation
+is unsupported. Full-assistant fallback is retained only for an explicit nonnull
+stop reason proving a complete response, with `max_tokens` still taking priority.
+This contract is covered offline, not verified against live inference.
+Before exposing `toolUse`, the complete batch is revalidated after stream observers:
+a registered call cancelled or timed out during observation rejects the entire
+batch, including otherwise valid siblings. Cancelled calls retain bounded query
+state, not reusable IDs. Native `max_tokens` takes precedence over tool blocks;
+Pi receives `length` and supplies error results instead of executing those calls.
+
+Streaming preserves text, thinking/signatures, redacted thinking, tool blocks,
+stop/length/error/abort and uncached/output/cache-read/cache-write token counts.
+Subscription models report zero monetary cost: this is **not** evidence of free
+inference or a billing determination. SDK errors are redacted at the transport
+boundary; no token-bearing options or raw stderr are logged.
+
+## Reasoning capabilities
+
+Reasoning translation reads the pinned Pi catalog's public capability metadata,
+not model-name regexes or native Anthropic transport/auth/prompt conversion.
+Adaptive models use SDK `thinking: { type: "adaptive" }` and their mapped effort;
+`xhigh` remains distinct from `max` on Opus 4.7 and other models advertising it.
+Sonnet 5 and Fable 5 follow the same adaptive metadata. Older budget-based models
+use explicit token budgets. Omitted reasoning disables thinking only when the
+model advertises off; otherwise the default is adaptive/high. Unsupported levels
+and budget knobs on adaptive/off requests are rejected, not silently converted.
+Budget-based requests require safe integer budgets of at least 1024 tokens,
+strictly below the output token limit.
+
+Pinned Pi's `ToolChoice` is `"auto" | "none"`. Both are supported (`none` exposes
+no tools); runtime values such as `required` or a specific tool selection are
+rejected before creating or resuming a query, never silently treated as `auto`.
+
+## Canonical history and lifecycle
+
+Each new query gets a unique 0700 directory. Canonical Pi history is converted to
+a 0600 pinned-CLI JSONL resume chain; the final literal user message (or correlated
+native tool-result batch) is the sole input, never a replay of historical prompts.
+The SDK uses `persistSession:false`. The native child inherits umask 077 (the
+parent mask is immediately restored around synchronous spawn); private state and
+SDK-created files cannot default to public modes. No lease or auth document is
+written. Native subprocess behavior remains a separately unverified rollout gate.
+
+A parked iterator is reused only for exact context/model/session/account/slot,
+unchanged tools, the same access token, and equal normalized effective query
+options (thinking/effort or token budget, output-token limit, tool choice and system
+prompt). Changed query options rebuild only after correlated Pi results have
+settled; historical tools are not replayed. Edits, compaction, fork/tree navigation,
+provider switch, account/token rotation or process loss rebuild from Pi's canonical
+history in fresh private state. Recorded tools are loaded as history, never sent
+to the bridge for re-execution. Unresolved historical calls and ambiguous failed
+attempts require reconciliation; there is no automatic crash-after-side-effect
+replay. Completed results allow a new account-bound history rebuild.
+
+Concurrent anonymous helpers receive separate queries/directories. Named sessions
+reject overlapping requests. The common subagent/brief worker extension allowlist
+explicitly loads this launch-gated provider. Advisor, subagent and helper model
+lookups discover native `claude-sdk` models through Pi's registry, with no new
+provider-name fallback or bare-model substitution.
+
+Abort (including after `toolUse`), shutdown and lifecycle reset settle pending MCP
+calls, close the SDK, terminate the native process group, escalate to SIGKILL and
+remove private directories. Shutdown awaits in-flight setup and disposals and is
+idempotent. Parked queries expire after at most five minutes or lease expiry.
+A SIGKILL of the entire parent cannot run cleanup: the provisioner owns root
+retention/sweeping after verifying the launch/process is dead. Never use leftover
+SDK state as a source of truth or automatically resume it.
+
+Leases are memory-only, coalesced only while a GET is in flight, and reauthorized
+on each request. Acquisition is bounded to ten seconds and supports independent
+waiter cancellation. Leases with less than sixty seconds remaining are refused;
+authd is the sole refresh writer. The provider does not restart-loop on a near-
+expiry response containing the same token. A changed token/account rebuilds
+settled history instead of updating a running child's identity. Active inference
+is stopped at expiry; failure is visible and ambiguous effects require
+reconciliation. Real expiry/renewal acceptance has **not** been measured.
+
+## Instrumentation contract
+
+- `onPayload` observes a **structured SDK request envelope**, including explicit
+  capability flags, unchanged prompt/history and tool definitions. Returning a
+  changed payload, or mutating the observation in place, is rejected explicitly.
+  Pi context hooks are the supported place to change the canonical transcript.
+- `onProviderStreamEvent` is awaited for each parsed SDK event, before conversion;
+  observers receive a clone so they cannot corrupt normalization.
+- Observer waits race cancellation: payload observation uses request/shutdown
+  signals, while event observation also uses the active query/lease-expiry signal.
+  Abort/shutdown never waits for a blocked observer, and eventual observer
+  rejections remain handled.
+- The Agent SDK does not expose its inference HTTP body/headers/response. Custom
+  `fetch`, nonempty HTTP `headers`, arbitrary child `env`, API-key overrides,
+  sampling mutation and deferred requests are rejected. `onResponse` is not
+  invoked: no fake status, headers or response is manufactured. Pi installs this
+  observer even for non-HTTP adapters, so its presence alone is not a request error.
+
+## Offline evidence and commands
+
+```
 npm run check
+npx --no-install vitest run test/claude-sdk-*.test.ts test/subagent-worker.test.ts
 ```
 
-Focused checks:
+When testing from a delegated harness, remove inherited **worker-only execution
+flags**, not tests or assertions:
 
-```sh
-npm run typecheck
-npx --no-install vitest run test/claude-sdk-options.test.ts test/claude-sdk-tool-bridge.test.ts
+```
+env -u PI_AGENDA_WORKER -u PI_SUBAGENT_FAST npm run check
 ```
 
-All credential fixtures are synthetic. No test reads a login, calls authd/Hive
-credential endpoints, performs an SDK query, or accesses Anthropic inference.
+Tests use injectable synthetic SDK/leases and real MCP transports. They cover the
+real Pi agent loop with multi-tool turns and a Pi guard denial, next-turn history,
+stream conversion, duplicate/event ordering, cancellation, private state,
+account rotation, concurrent helpers, native model/helper discovery, actual Pi
+extension loading, disabled discovery, strict lease shape and bounded renewal.
+No test obtains a real token or starts Claude for inference.
 
-## Existing authd compatibility and the next gate
+## Still required before rollout
 
-Reuse registered credential provider **anthropic** and its existing assigned
-account chain. A future Pi model prefix `claude-sdk/` would map explicitly to
-that provider; it would not create another login or subscription registration.
-Keep the separate **anthropic-api** Console-credit lane explicit, without an
-automatic paid fallback.
+1. Deploy separately reviewed server-side admission with explicit owner/account
+   scope and negative authorization tests; do not impersonate another harness.
+2. With separately authorized named-account scope and bounded live-turn budget,
+   test the **unchanged actual Hive/Pi prompt and tools** through this provider,
+   using the pinned native CLI and Extra Usage disabled.
+3. Verify real native enforcement, resume-chain acceptance, file modes, process
+   teardown, token expiry/renewal, cancellation and no ambient/API fallback.
+4. Establish subscription/billing/credential-intermediation eligibility with the
+   appropriate provider policy. Technical authentication success alone does not.
 
-Current Hive source deliberately excludes Anthropic from Pi's full-document
-leases (`internal/pilease/provider.go`). Its access-only
-`GET /api/v1/agent-launches/{id}/claude-auth` route currently permits only
-`claude-code` launches. This slice changes neither restriction.
+If the unchanged prompt/tool shape is ineligible, stop this lane. Never rewrite
+identity/instructions to defeat checks or silently fall back to paid API billing.
 
-Before implementing a serving provider, obtain a separately authorized account
-scope and bounded live-turn budget, then test the **unchanged actual Hive/Pi
-prompt** and intended MCP tool shape through a legitimate access-only test path,
-with Extra Usage disabled. Do not impersonate another harness to obtain a token.
-A historical successful native-Claude-driver probe is not proof for this bridge.
-If this prompt/tool combination is ineligible, stop this lane; do not rewrite
-identity/instructions to defeat billing checks or fall back to API billing.
+## References
 
-Anthropic's current legal guidance also leaves shared personal-account and
-third-party credential intermediation eligibility as a rollout question.
-Technical authentication success does not resolve that question.
-
-## Deferred implementation and acceptance
-
-After the feasibility gate, the remaining work is:
-
-1. Narrow server-authorized admission for SDK-backed Pi launches, with existing
-   tenant/owner/account assignments; ordinary Pi, forged provider selections,
-   revoked assignments and unauthorized workers must still be refused.
-2. Access-only credential acquisition and bounded renewal. Authd remains the
-   only refresh-token writer. Its current expired-only refresh means a near-expiry
-   GET can return the same token: do not restart-loop or assume renewed validity.
-   Add server-bounded/coalesced minimum validity only if measurements require it.
-3. Real provider registration and SDK-to-Pi event conversion, usage accounting,
-   SDK-boundary instrumentation, dynamic tools and explicit worker loading.
-   Raw HTTP body/response hooks are not supplied by this prototype; do not
-   silently discard mutations or fabricate response headers.
-4. Authorized private state provisioning/retention, native CLI enforcement,
-   process-tree cleanup, account-bound resume, compaction, branching, provider
-   switching and concurrent helpers. Never replay recorded completed tools;
-   ambiguous crash-after-side-effect outcomes require reconciliation.
-5. Actual Pi extension-loader/agent-loop tests, final-head CI and separately
-   authorized billing/expiry/no-ambient-fallback tests. SDK 0.3.289 import and
-   declarations alone do not prove behavior with Hive's pinned CLI 2.1.286.
-   Factory/cloud need their own principal-scoped delivery/runtime admission.
-
-## Research references
-
-- [Anthropic: Agent SDK with Claude plans](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+- [Agent SDK with Claude plans](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
 - [Agent SDK vs API client SDK](https://platform.claude.com/docs/en/agent-sdk/overview)
-- [Public SDK TypeScript options](https://code.claude.com/docs/en/agent-sdk/typescript)
-- [Authentication/credential-use conditions](https://code.claude.com/docs/en/legal-and-compliance)
-- [pi-claude-subscription source reference](https://github.com/jkeskikangas/pi-claude-subscription/tree/1ed9e15b5f0e53ba906ad0df7a07ed86225e5163):
-  parked MCP-call design; local-login/global-state/prompt-replacement behavior
-  is not adopted here.
-- [pi-claude-agent-sdk source reference](https://github.com/pi-pod/pi-claude-agent-sdk/tree/36a20bcb28e23bbd948f47fd0661120556e2620c):
-  OAuth injection and lifecycle comparison; its Pi-auth-store assumption does
-  not fit Hive's current boundary.
-- [Pi community billing-classification report](https://github.com/earendil-works/pi/issues/6888):
-  evidence for the early unchanged-prompt test, not an eligibility guarantee.
+- [SDK TypeScript options](https://code.claude.com/docs/en/agent-sdk/typescript)
+- [Credential-use conditions](https://code.claude.com/docs/en/legal-and-compliance)
+- [Pi community billing report](https://github.com/earendil-works/pi/issues/6888)
 
-No third-party adapter code is vendored in this compatibility slice.
+No third-party provider adapter is vendored.

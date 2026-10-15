@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
-import { accessLease, CREDENTIAL_PROVIDER, isolatedOptions, literalUserMessage, SDK_VERSION } from "../prototypes/claude-sdk/options.ts";
-import { PiToolBridge } from "../prototypes/claude-sdk/tool-bridge.ts";
+import { accessLease, CREDENTIAL_PROVIDER, isolatedOptions, literalUserMessage, SDK_VERSION } from "../extensions/claude-sdk/options.ts";
+import { PiToolBridge } from "../extensions/claude-sdk/tool-bridge.ts";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
 const synthetic = { access_token: "synthetic-access-NOT-A-REAL-CREDENTIAL",
@@ -71,7 +71,7 @@ describe("typed SDK options, never dispatched", () => {
 			expect(options.permissionMode).toBe("default");
 			expect(options.env).toMatchObject({ HOME: "/private/session/account",
 				CLAUDE_CONFIG_DIR: "/private/session/account", CLAUDE_CODE_OAUTH_TOKEN: synthetic.access_token,
-				CLAUDE_AGENT_SDK_CLIENT_APP: "hive-pi/claude-sdk-compatibility", ENABLE_CLAUDEAI_MCP_SERVERS: "0" });
+				CLAUDE_AGENT_SDK_CLIENT_APP: "hive-pi/claude-sdk", ENABLE_CLAUDEAI_MCP_SERVERS: "0" });
 			expect(Object.values(options.env ?? {})).not.toContain("ambient-value-must-not-leak");
 			expect(options.env).not.toHaveProperty("ANTHROPIC_API_KEY");
 			expect(options.env).not.toHaveProperty("ANTHROPIC_BASE_URL");
