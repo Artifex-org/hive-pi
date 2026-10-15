@@ -55,7 +55,7 @@ describe("canonical plan introduction", () => {
     await tool(fake, "session_context", { goal: "Refined task", approach: "Use the existing plan" });
     expect(identity(fake).revision).toBe(before + 1);
   });
-  it.each(["Operator name", "Operator **exact** title " + "a".repeat(65), "🧭"])("pins %s verbatim without mistaking canonical updates for renames", async manualTitle => {
+  it.each(["Operator name", "Operator **exact** title " + "a".repeat(65), "🧭", "a".repeat(120), "🧭".repeat(30)])("pins %s verbatim without mistaking canonical updates for renames", async manualTitle => {
     const fake = createFakePi(); sessionIdentity(fake.api);
     await fake.emit({ type: "session_start", reason: "new" });
     fake.api.events.emit(SESSION_IDENTITY_INITIAL_CHANNEL, { title: "Starting task", prompt: "Inspect the starting task" });
@@ -74,6 +74,17 @@ describe("canonical plan introduction", () => {
     fake.api.events.emit(SESSION_IDENTITY_CHANNEL, { canonical: { title: "Server objective", description: "Canonical context.", provisional: false, revision: 9, titlePinned: false } });
     fake.api.setSessionName("Server objective"); await fake.emit({ type: "session_info_changed" });
     expect(identity(fake).titlePinned).toBe(false);
+  });
+  it("reports an oversized manual name instead of pinning or publishing it", async () => {
+    const fake = createFakePi(); sessionIdentity(fake.api);
+    await fake.emit({ type: "session_start", reason: "new" });
+    fake.api.events.emit(SESSION_IDENTITY_INITIAL_CHANNEL, { title: "Starting task", prompt: "Inspect the starting task" });
+    fake.api.setSessionName("a".repeat(121)); await fake.emit({ type: "session_info_changed" });
+    expect(fake.notifications).toContainEqual({ message: expect.stringContaining("120 UTF-8 bytes"), type: "error" });
+    expect(identity(fake).titlePinned).not.toBe(true);
+    expect(fake.busEvents.filter(e => e.name === SESSION_MANUAL_TITLE_CHANNEL)).toEqual([]);
+    await tool(fake, "session_context", { goal: "Continue", approach: "Publish valid context" });
+    expect(identity(fake).title).toBe("Starting task");
   });
   it("honors a /name gesture before the first kickoff context exists", async () => {
     const fake = createFakePi(); sessionIdentity(fake.api);

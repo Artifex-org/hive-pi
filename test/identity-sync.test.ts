@@ -22,6 +22,33 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("persisted identity outbox", () => {
+  it.each(["a".repeat(121), "🚀".repeat(31)])("rejects an invalid manual name without blocking later context: %s", async title => {
+    const f = fixture();
+    const rename = vi.fn(async (): Promise<RequestResult<void>> => ({ ok: true, status: 204, authFailed: false, permanent: false, retryAfterMs: null }));
+    f.sync.attach(true, { ...f, rename }); await settle();
+    f.sync.rename(title);
+    expect(f.notice).toHaveBeenCalledWith(expect.stringContaining("120 UTF-8 bytes"));
+    f.sync.update(update("Valid context", "initial")); await settle();
+    f.sync.detach(); f.sync.attach(true, { ...f, rename }); await settle();
+    expect(rename).not.toHaveBeenCalled();
+    expect(f.put).toHaveBeenCalledTimes(1);
+    expect(f.persisted.at(-1)?.manualTitle).toBeUndefined();
+    expect(f.persisted.at(-1)?.queue).toEqual([]);
+  });
+  it("recovers an invalid persisted manual pin without dropping queued context", async () => {
+    const f = fixture();
+    const rename = vi.fn(async (): Promise<RequestResult<void>> => ({ ok: true, status: 204, authFailed: false, permanent: false, retryAfterMs: null }));
+    f.sync.restore([{ customType: IDENTITY_SYNC_ENTRY, data: {
+      remoteRevision: 0, manualTitle: "a".repeat(121), queue: [{ update: update("Pending context", "initial") }],
+    } }]);
+    f.sync.attach(true, { ...f, rename }); await settle();
+    expect(f.notice).toHaveBeenCalledWith(expect.stringContaining("120 UTF-8 bytes"));
+    expect(rename).not.toHaveBeenCalled();
+    expect(f.put).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ description: "Pending context" }));
+    expect(f.persisted.at(-1)?.manualTitle).toBeUndefined();
+    expect(f.persisted.at(-1)?.queue).toEqual([]);
+  });
+
   it("never contacts an old server without a positive capability", async () => {
     const f = fixture();
     f.sync.update(update("Local paragraph"));

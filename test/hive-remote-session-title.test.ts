@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { registerSessionTitleTool } from "../extensions/hive-remote/sessionTitle.ts";
+import sessionIdentity from "../extensions/hive-remote/sessionIdentity.ts";
 import { MAX_SESSION_TITLE, normalizeSessionTitle } from "../extensions/hive-remote/sessionTitleText.ts";
 import { exposureFor } from "../extensions/loadout/policy.ts";
 import { createFakePi } from "./fake-pi.ts";
@@ -26,6 +27,14 @@ describe("session_title", () => {
 		}));
 	});
 
+	it("rejects a pivot whose bounded prefix has no title content before emitting it", async () => {
+		const { pi, run } = setup();
+		sessionIdentity(pi.api);
+		await expect(run("🚀".repeat(30) + "Fix")).rejects.toThrow(/pivot requires/);
+		expect(pi.busEvents).toEqual([]);
+		expect(pi.entries).toEqual([]);
+	});
+
 	it("refuses a blank title", async () => {
 		const { pi, run } = setup();
 		await expect(run(" ** ")).rejects.toThrow();
@@ -48,6 +57,8 @@ describe("normalizeSessionTitle", () => {
 	it("bounds Unicode titles by code point without splitting an astral character", () => {
 		expect(normalizeSessionTitle("a".repeat(70) + "🚀x")).toBe("a".repeat(70) + "🚀x");
 		expect(normalizeSessionTitle("a".repeat(70) + "🚀xy")).toBe("a".repeat(70) + "🚀…");
+		expect(normalizeSessionTitle("a".repeat(39) + "🚀".repeat(26))).toBe("a".repeat(39) + "🚀".repeat(19) + "…");
+		expect(normalizeSessionTitle("🚀".repeat(30) + "Fix")).toBeNull();
 	});
 	it("keeps characters that are content: PR numbers, snake_case, arrows", () => {
 		expect(normalizeSessionTitle("Fix feature_flag -> PR #8123")).toBe("Fix feature_flag -> PR #8123");
