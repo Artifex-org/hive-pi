@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import planExtension from "../extensions/plan/index.ts";
 import sessionIdentity, { SESSION_IDENTITY_ENTRY } from "../extensions/hive-remote/sessionIdentity.ts";
-import { SESSION_IDENTITY_CHANNEL, SESSION_IDENTITY_INITIAL_CHANNEL } from "../extensions/hive-remote/sessionIdentityBus.ts";
+import { SESSION_IDENTITY_CHANNEL, SESSION_IDENTITY_INITIAL_CHANNEL, SESSION_MANUAL_TITLE_CHANNEL, SESSION_PLAN_INTRO_CHANNEL } from "../extensions/hive-remote/sessionIdentityBus.ts";
 import { planIntroduction, introductionOps } from "../extensions/plan/introduction.ts";
 import { applyOps, emptyPlan, toEntry, PLAN_ENTRY_TYPE, rehydratePlan, type PlanDoc } from "../extensions/plan/state.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
@@ -55,18 +55,22 @@ describe("canonical plan introduction", () => {
     await tool(fake, "session_context", { goal: "Refined task", approach: "Use the existing plan" });
     expect(identity(fake).revision).toBe(before + 1);
   });
-  it("pins a manual name, but agent and server canonical updates are not manual renames", async () => {
+  it.each(["Operator name", "Operator **exact** title " + "a".repeat(65), "🧭"])("pins %s verbatim without mistaking canonical updates for renames", async manualTitle => {
     const fake = createFakePi(); sessionIdentity(fake.api);
     await fake.emit({ type: "session_start", reason: "new" });
     fake.api.events.emit(SESSION_IDENTITY_INITIAL_CHANNEL, { title: "Starting task", prompt: "Inspect the starting task" });
     fake.api.setSessionName("Starting task"); await fake.emit({ type: "session_info_changed" });
     expect(identity(fake).titlePinned).not.toBe(true);
-    fake.api.setSessionName("Operator name"); await fake.emit({ type: "session_info_changed" });
-    expect(identity(fake)).toMatchObject({ title: "Operator name", titlePinned: true });
+    fake.api.setSessionName(manualTitle); await fake.emit({ type: "session_info_changed" });
+    expect(identity(fake)).toMatchObject({ title: manualTitle, titlePinned: true });
+    expect(fake.busEvents.filter(e => e.name === SESSION_MANUAL_TITLE_CHANNEL).map(e => e.payload)).toEqual([{ title: manualTitle }]);
     fake.api.events.emit(SESSION_IDENTITY_CHANNEL, { source: "pivot", title: "New objective", description: "Goal: a changed task. Approach: verify.", reason: "Operator changed scope" });
-    expect(fake.sessionName).toBe("Operator name");
-    expect(identity(fake).title).toBe("Operator name");
+    expect(fake.sessionName).toBe(manualTitle);
+    expect(identity(fake).title).toBe(manualTitle);
     expect(fake.busEvents.filter(e => e.name === SESSION_IDENTITY_CHANNEL).at(-1)?.payload).toMatchObject({ title: "New objective", source: "pivot" });
+    await tool(fake, "session_context", { goal: "Refine context", approach: "Preserve the manual name" });
+    fake.api.events.emit(SESSION_PLAN_INTRO_CHANNEL, { description: "Goal: verify. Approach: use the plan introduction." });
+    expect(identity(fake)).toMatchObject({ title: manualTitle, titlePinned: true });
     fake.api.events.emit(SESSION_IDENTITY_CHANNEL, { canonical: { title: "Server objective", description: "Canonical context.", provisional: false, revision: 9, titlePinned: false } });
     fake.api.setSessionName("Server objective"); await fake.emit({ type: "session_info_changed" });
     expect(identity(fake).titlePinned).toBe(false);

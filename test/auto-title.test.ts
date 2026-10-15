@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import autoTitle, { deriveTitle } from "../extensions/auto-title.ts";
 import sessionIdentity from "../extensions/hive-remote/sessionIdentity.ts";
-import { REMOTE_OPENING_INPUT_CHANNEL } from "../extensions/hive-remote/sessionIdentityBus.ts";
+import { REMOTE_OPENING_INPUT_CHANNEL, SESSION_IDENTITY_CHANNEL } from "../extensions/hive-remote/sessionIdentityBus.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 describe("deriveTitle", () => {
@@ -51,19 +51,21 @@ describe("auto-title extension", () => {
 		expect(fake.sessionNames).toEqual(["Review attached image"]);
 	});
 
-	it("commits automatic title provenance before the SDK name event, never pinning it", async () => {
+	it.each(["Review the attached image", "*Investigate* regression", "```npm test``` fails", "a".repeat(70) + "🚀x"])("does not pin automatic title %s as a manual name", async prompt => {
 		const fake = createFakePi();
 		sessionIdentity(fake.api);
 		autoTitle(fake.api);
 
 		await fake.emit({ type: "session_start", reason: "startup" });
-		await fake.emit({ type: "input", text: "Review the attached image", source: "interactive" });
+		await fake.emit({ type: "input", text: prompt, source: "interactive" });
 		await fake.emit({ type: "session_info_changed" });
 
 		expect(fake.busEvents.map(event => event.name)).not.toContain("session-identity:manual-title");
 		const identity = fake.entries.filter(entry => entry.customType === "session-identity").at(-1)?.data as { title?: string; titlePinned?: boolean };
-		expect(identity.title).toBe("Review the attached image");
+		expect(identity.title).toBe(fake.sessionName);
 		expect(identity.titlePinned).not.toBe(true);
+		fake.api.events.emit(SESSION_IDENTITY_CHANNEL, { title: "New objective", description: "Goal: pivot. Approach: verify.", source: "pivot", reason: "Changed task" });
+		expect(fake.sessionName).toBe("New objective");
 	});
 
 	it("titles a trusted remote opening input but ignores unmatched synthetic extension input", async () => {

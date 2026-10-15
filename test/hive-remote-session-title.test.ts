@@ -45,6 +45,10 @@ describe("session_title", () => {
 });
 
 describe("normalizeSessionTitle", () => {
+	it("bounds Unicode titles by code point without splitting an astral character", () => {
+		expect(normalizeSessionTitle("a".repeat(70) + "🚀x")).toBe("a".repeat(70) + "🚀x");
+		expect(normalizeSessionTitle("a".repeat(70) + "🚀xy")).toBe("a".repeat(70) + "🚀…");
+	});
 	it("keeps characters that are content: PR numbers, snake_case, arrows", () => {
 		expect(normalizeSessionTitle("Fix feature_flag -> PR #8123")).toBe("Fix feature_flag -> PR #8123");
 	});

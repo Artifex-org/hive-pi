@@ -7,6 +7,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { REMOTE_OPENING_INPUT_CHANNEL, SESSION_IDENTITY_INITIAL_CHANNEL } from "./hive-remote/sessionIdentityBus.ts";
+import { normalizeSessionTitle } from "./hive-remote/sessionTitleText.ts";
 
 const MAX_TITLE_LENGTH = 72;
 const ENTRY_TYPE = "auto-title";
@@ -80,7 +81,9 @@ export default function (pi: ExtensionAPI) {
 		if (trustedRemoteOpening) announcedOpening = undefined;
 		if (assigned || (event.source === "extension" && !trustedRemoteOpening)) return;
 		const opening = event.text.trim() ? event.text : event.images?.length ? "Review attached image" : event.text;
-		const title = deriveTitle(opening);
+		// Publish and apply the same normalized automatic title. Otherwise the
+		// SDK name event could look like a manual rename to canonical identity.
+		const title = normalizeSessionTitle(deriveTitle(opening) ?? "");
 		if (!title) return;
 
 		// Setting the Pi title emits session_info_changed. Hive Remote listens for

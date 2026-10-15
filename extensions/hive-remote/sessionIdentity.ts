@@ -44,7 +44,10 @@ export default function (pi: ExtensionAPI) {
 	let manualTitle: string | undefined;
 	let injectKickoff = false;
 	const commit = (next: Omit<SessionIdentity, "revision">, source: SessionIdentityUpdate["source"], reason?: string) => {
-		const requestedTitle = normalizeSessionTitle(next.title);
+		// Opening writers normalize before publishing provenance; paragraph edits
+		// carry an accepted title, possibly an emoji-only manual name. Do not
+		// normalize either again: markup cleanup is not idempotent.
+		const requestedTitle = source === "pivot" ? normalizeSessionTitle(next.title) : next.title;
 		const title = manualTitle ?? (identity?.titlePinned ? identity.title : requestedTitle);
 		const description = cleanDescription(next.description);
 		if (!requestedTitle || !title || !description) throw new Error("Session identity requires a title and description.");
@@ -72,7 +75,10 @@ export default function (pi: ExtensionAPI) {
 		injectKickoff = true;
 	});
 	pi.on("session_info_changed", () => {
-		const name = normalizeSessionTitle(pi.getSessionName() ?? "");
+		// Manual names are operator-owned text, not model-generated headlines.
+		// Auto-title cleanup here would pin a different name and the next
+		// canonical response would overwrite the operator's exact choice.
+		const name = pi.getSessionName();
 		// Agent writers commit canonical identity before naming. Any other change
 		// is an operator /name gesture, which must stay pinned on reconnect.
 		if (!name || name === identity?.title) return;
