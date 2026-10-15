@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -242,6 +242,34 @@ describe("automatic gate attempts, not cached green verification", () => {
 		} finally { controller.abort(); await active; await one?.release(); await two?.release(); }
 	});
 
+	it.each(process.platform === "win32" ? ["busy"] : ["busy", "unsafe"])("bounds explicit unverified warnings when coordination is %s", async mode => {
+		const { root, dir, log } = fixture(), directory = join(dir, "leases"), end = Date.now() + 5_000;
+		const leaseOptions = { directory };
+		const held = mode === "busy" ? await acquireGateLease(root, () => end, undefined, { ...leaseOptions, deferSlot: true }) : null;
+		if (mode === "unsafe") { mkdirSync(directory, { mode: 0o700 }); chmodSync(directory, 0o777); }
+		let ledger = emptyLedger;
+		const settle = () => createGatePolicy(undefined, { leaseOptions }).decide({ cwd: root, ledger, transcript: "", lastAssistantText: undefined })!.run();
+		try {
+			for (let i = 0; i < 3; i++) {
+				const warning = await settle();
+				expect(warning.inject).toContain("INCOMPLETE"); expect(warning.inject).toContain("No check was executed");
+				ledger = warning.ledger!(ledger);
+			}
+			expect((await settle()).inject).toBeUndefined(); expect(existsSync(log)).toBe(false);
+		} finally { await held?.release(); }
+	});
+
+	it("requires explicit verification after a transient post-run identity failure without repeating unchanged work", async () => {
+		const { root, log, dir } = fixture(), input = await verification.treeStamp(root, "commit");
+		expect(input).not.toBeNull();
+		vi.spyOn(verification, "treeStamp").mockResolvedValue(input).mockResolvedValueOnce(input).mockResolvedValueOnce(input).mockResolvedValueOnce(null);
+		const options = { leaseOptions: { directory: join(dir, "leases") } };
+		const first = await run(root, options);
+		expect(first.metric.outcome).toBe("skip"); expect(first.inject).toContain("Run quality_gate explicitly for unchanged input");
+		expect((await run(root, options)).metric.outcome).toBe("skip");
+		expect(readFileSync(log, "utf8")).toBe("x");
+	});
+
 	it("does not accept a successful check as verification of input changed during execution", async () => {
 		const { root, dir, log, check } = fixture();
 		const release = join(dir, "release-check");
@@ -284,6 +312,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 			try { await closed; } finally { clearTimeout(force); }
 			await one?.release(); await two?.release();
 		}
+		expect(child.signalCode, "shutdown must not need the forced SIGKILL").toBe("SIGTERM");
 		const recovered = await run(root, { leaseOptions });
 		expect(recovered.inject).toContain("was interrupted");
 		expect(recovered.inject).toContain("NOT verified");

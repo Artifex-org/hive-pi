@@ -16,6 +16,8 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { hostRequire } from "./host-dependencies.ts";
 
 export const HELPER_MARKER = "HIVE_PI_HELPER_CHILD";
 export const TREE_TOKEN = "HIVE_PI_TREE_TOKENS";
@@ -26,14 +28,31 @@ export function isClaudeHelper(env: Record<string, string | undefined> = process
 
 /** Merge the caller's final child env BEFORE calling this, not after it. */
 export function treeSpawnOptions(env: NodeJS.ProcessEnv = process.env): { detached: boolean; env: NodeJS.ProcessEnv } {
+	installShutdownCleanup();
 	const inherited = env[TREE_TOKEN]?.split(",").filter(Boolean) ?? [];
 	return { detached: isClaudeHelper(env), env: { ...env, [TREE_TOKEN]: [...inherited, randomUUID()].join(",") } };
 }
 
 type Identity = { pid: number; start: string; state: string; ppid: number; pgid: number };
 type Tree = { child: ChildProcess; grouped: boolean; token?: string; root?: Identity; members: Map<number, Identity> };
-const live = new Set<Tree>();
-const byChild = new WeakMap<ChildProcess, Tree>();
+// Pi evaluates extension graphs with separate module caches. Ownership and
+// signal installation must still be process-wide, not one copy per extension.
+const OWNERS = Symbol.for("hive-pi.child-tree.owners");
+type Owners = { live: Set<Tree>; byChild: WeakMap<ChildProcess, Tree>; shutdownInstalled: boolean };
+const host = globalThis as typeof globalThis & { [OWNERS]?: Owners };
+const owners = host[OWNERS] ??= { live: new Set<Tree>(), byChild: new WeakMap<ChildProcess, Tree>(), shutdownInstalled: false };
+const { live, byChild } = owners;
+
+function installShutdownCleanup(): void {
+	if (owners.shutdownInstalled) return;
+	// Use the SAME signal-exit 3 observer as pinned proper-lockfile 4.1.2.
+	// Counting other signal listeners mistakes cleanup observers for handlers
+	// and suppresses default termination (and lockfile release).
+	const dependency = createRequire(hostRequire().resolve("proper-lockfile"));
+	const onExit: (callback: () => void) => () => void = dependency("signal-exit");
+	onExit(() => killAllTrees("SIGKILL"));
+	owners.shutdownInstalled = true;
+}
 
 function identity(pid: number): Identity | undefined {
 	try {
@@ -126,6 +145,7 @@ export function killTree(child: ChildProcess, signal: NodeJS.Signals, grouped: b
 
 /** Pass the token-bearing child env's TREE_TOKEN value, not the parent's env. */
 export function trackTree(child: ChildProcess, grouped: boolean, tokens?: string): void {
+	installShutdownCleanup();
 	const existing = byChild.get(child);
 	if (existing) return;
 	const entry: Tree = { child, grouped, token: tokens?.split(",").at(-1), root: child.pid === undefined ? undefined : identity(child.pid), members: new Map() };

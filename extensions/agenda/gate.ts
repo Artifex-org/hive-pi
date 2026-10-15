@@ -20,10 +20,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { treeStamp, type StampOptions } from "../harness/verify.ts";
 import { killTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
-import { acquireGateLease, type GateLeaseOptions } from "./gate-lease.ts";
+import { acquireGateLease, type GateLease, type GateLeaseOptions } from "./gate-lease.ts";
 import { repoRoot } from "../hive-common/git.ts";
 import { atCap, clear, record, remaining } from "./ledger.ts";
-import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
+import type { Policy, PolicyContext, PolicyOutcome, PolicyWork } from "./policy.ts";
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_INJECTIONS = 3;
@@ -93,6 +93,10 @@ function bashAvailable(): boolean {
 	return path
 		.split(delimiter)
 		.some((dir) => dir && existsSync(join(dir, "bash")));
+}
+
+async function withGateLease(lease: GateLease, run: () => Promise<PolicyOutcome>): Promise<PolicyOutcome> {
+	try { return await run(); } finally { await lease.release(); }
 }
 
 export function runCheck(command: string, cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<CheckResult> {
@@ -239,8 +243,19 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 				// Admission is mandatory even when Git cannot fingerprint the input
 				// (e.g. an unborn HEAD). Only receipt reuse is optional.
 				const leaseOptions = { ...options.leaseOptions, deferSlot: true };
-				const lease = await acquireGateLease(root, deadline, signal, leaseOptions);
-				if (!lease) return skipped();
+				let executed = false;
+				const unavailable = (reason: string) => {
+					if (capped || signal?.aborted) return skipped();
+					const left = remaining(record(ledger, id), id, max);
+					return { ...skipped(), inject: `The automatic project gate \`${command}\` is INCOMPLETE: ${reason}. ${executed ? "The command may have run, but no complete current-input verdict is available." : "No check was executed."} This input is NOT verified. Use explicit quality_gate or bounded background verification; do not treat this skip as a pass. ${left > 0 ? `${left} automatic warning(s) remain.` : "This is the final automatic warning; stop and summarize what remains unverified."}`,
+						ledger: (state: typeof ledger) => record(state, id) };
+				};
+				let acquired: GateLease | null;
+				try { acquired = await acquireGateLease(root, deadline, signal, leaseOptions); }
+				catch (error) { return unavailable(`coordination could not be established: ${String(error)}`); }
+				const lease = acquired;
+				if (!lease) return unavailable("worktree admission was unavailable before the deadline; another automatic attempt may own it");
+				const cancelled = () => signal?.aborted ? skipped() : unavailable("automatic coordination was lost");
 				const preparationDeadline = () => Math.min(hostDeadline, lease.waitedForSlot ? admissionDeadline : Infinity, Date.now() + Math.max(0, options.timeoutCapMs?.() ?? Infinity));
 				const fingerprint = () => {
 					const end = preparationDeadline();
@@ -290,7 +305,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						console.error("hive-pi: gate warning delivered but acknowledgement failed; it may replay:", String(error));
 					}
 				};
-				try {
+				return withGateLease(lease, async () => {
 					// Unbound delivery/liveness state never identifies or suppresses an
 					// attempt. Recover it even at the positive continuation cap.
 					const pending = await lease.readNotice();
@@ -332,12 +347,12 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					await publishRunning();
 					admissionDeadline = Date.now() + timeoutMs;
 					if (!await lease.admit()) {
-						if (signal?.aborted || lease.signal.aborted) return skipped();
+						if (signal?.aborted || lease.signal.aborted) return cancelled();
 						return await admissionIncomplete();
 					}
 					if (!sameConfiguration()) return await admissionIncomplete("the gate configuration changed while queued; settle again to use the current configuration");
 					const refreshed = await fingerprint();
-					if (signal?.aborted || lease.signal.aborted) return skipped();
+					if (signal?.aborted || lease.signal.aborted) return cancelled();
 					if (Date.now() >= preparationDeadline()) return await admissionIncomplete();
 					if (input !== null && refreshed === null) return await admissionIncomplete("input identity could not be revalidated before execution");
 					input = refreshed;
@@ -348,9 +363,10 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					const executionBudget = lease.waitedForSlot ? admissionDeadline - now : timeoutMs;
 					const effectiveTimeoutMs = Math.max(0, Math.min(executionBudget, hostDeadline - now, options.timeoutCapMs?.() ?? Infinity));
 					if (effectiveTimeoutMs <= 0) return await admissionIncomplete();
+					executed = true;
 					const result = await runCheck(command, root, effectiveTimeoutMs, lease.signal);
 					// Cancellation leaves a running receipt for recovery. It is never green.
-					if (result.cancelled) return skipped();
+					if (result.cancelled) return cancelled();
 					const configurationChanged = !sameConfiguration();
 					const afterInput = input !== null && !configurationChanged ? await fingerprint() : null;
 					const inputChanged = configurationChanged || (input !== null && afterInput !== null && afterInput !== input);
@@ -363,7 +379,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						return { metric: { outcome: "pass", value: elapsed }, ledger: (state) => clear(state, id) };
 					}
 					const header = inputChanged || (unvalidated && Date.now() < preparationDeadline())
-						? `The automatic project gate \`${command}\` is INCOMPLETE: its input changed or could not be revalidated after execution. This result does NOT verify the current input. This is NOT successful verification. Settle again to check changed input; if input identity is unavailable, use quality_gate explicitly.`
+						? `The automatic project gate \`${command}\` is INCOMPLETE: its input changed or could not be revalidated after execution. This result does NOT verify the current input. This is NOT successful verification. Changed input can be eligible within the configured budgets; this unchanged attempt will not be restarted automatically. Use explicit quality_gate if identity cannot be revalidated.`
 						: incomplete
 						? `The automatic project gate \`${command}\` is INCOMPLETE: the host/admission budget ended before a verdict. This is NOT successful verification. Run quality_gate or a bounded background check with enough time; the Stop hook will not restart unchanged input.`
 						: result.timedOut
@@ -376,7 +392,9 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 				const left = remaining(charged, id, max);
 				const footer =
 					left > 0
-						? `Fix the cause and the gate will re-run when you settle again (${left} attempt(s) left before this stops and hands back to the user).`
+						? incomplete
+							? `This attempt is not reusable verification. Run quality_gate explicitly for unchanged input; changed input remains eligible (${left} attempt(s) left).`
+							: `Fix the cause and the gate will re-run when you settle again (${left} attempt(s) left before this stops and hands back to the user).`
 						: `This was the final automatic attempt — stop, summarize what is still failing, and hand back to the user.`;
 
 				const notice = `${header}\n\nOutput (tail):\n\`\`\`\n${result.output.trim()}\n\`\`\`\n\n${footer}`;
@@ -387,7 +405,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					delivered: acknowledge(input, notice, noticeId),
 					ledger: (state) => record(state, id),
 				};
-				} finally { await lease.release(); }
+				}).catch(error => unavailable(`verification could not complete safely: ${String(error)}`));
 			},
 		};
 	},

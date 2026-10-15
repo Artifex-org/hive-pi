@@ -46,6 +46,12 @@ describe.runIf(hasGit)("treeStamp — the writer guard's stamp", () => {
 		expect(await guardSaysNoChange(cwd, () => writeFileSync(join(cwd, "code.ts"), "three\n"))).toBe(false);
 	});
 
+	it("sees another edit to an already-modified tracked binary", async () => {
+		const cwd = repoWith("asset.bin", "\0one");
+		writeFileSync(join(cwd, "asset.bin"), "\0two");
+		expect(await guardSaysNoChange(cwd, () => writeFileSync(join(cwd, "asset.bin"), "\0three"))).toBe(false);
+	});
+
 	it("sees an edit to an ALREADY-UNTRACKED file", async () => {
 		const cwd = repoWith("code.ts", "one\n");
 		writeFileSync(join(cwd, "window_materials.py"), "def a(): pass\n");

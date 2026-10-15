@@ -5,9 +5,8 @@
  * Heartbeats recover crashed owners without trusting namespace-local PIDs.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { hostRequire } from "../hive-common/host-dependencies.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -56,7 +55,7 @@ export async function acquireGateLease(
 	// proper-lockfile 4.1.2 from the launch-pinned pi's DIRECT dependencies.
 	// pi/npm consumers without a Claude pin use this installed package's deps.
 	// A supplied but invalid pin must fail, never silently use another runtime.
-	const require = createRequire(process.env.HIVE_PI_BIN ? realpathSync(process.env.HIVE_PI_BIN) : import.meta.url);
+	const require = hostRequire();
 	const lockfile: typeof import("proper-lockfile") = require("proper-lockfile");
 	// POSIX helpers must share the SAME location even when their TMPDIR differs.
 	// This coordinates a shared filesystem/mount namespace, not isolated hosts.

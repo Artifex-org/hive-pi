@@ -33,8 +33,10 @@ function exhausted(options: StampOptions): boolean {
 	return Boolean(options.signal?.aborted) || Date.now() >= (options.deadline ?? Infinity);
 }
 
-/** One git invocation's stdout, or null when it could not run. */
-function gitOutput(cwd: string, args: string[], options: StampOptions = {}): Promise<string | null> {
+interface StreamDigest { write(data: string): void; finish(): string }
+
+/** Scalar stdout or a streaming digest; null when the invocation could not run. */
+function gitOutput(cwd: string, args: string[], options: StampOptions = {}, stream?: StreamDigest): Promise<string | null> {
 	if (exhausted(options)) return Promise.resolve(null);
 	return new Promise((resolve) => {
 		let out = "", settled = false;
@@ -63,10 +65,16 @@ function gitOutput(cwd: string, args: string[], options: StampOptions = {}): Pro
 			child.stdout.setEncoding("utf8");
 			child.stdout.on("data", (data: string) => {
 				if (settled) return;
-				out += data;
-				if (out.length > GIT_OUTPUT_LIMIT) terminate();
+				try {
+					if (exhausted(options)) return terminate();
+					if (stream) stream.write(data);
+					else { out += data; if (out.length > GIT_OUTPUT_LIMIT) terminate(); }
+				} catch { terminate(); }
 			});
-			child.on("close", code => finish(code === 0 && !exhausted(options) ? out : null));
+			child.on("close", code => {
+				try { finish(code === 0 && !exhausted(options) ? stream ? stream.finish() : out : null); }
+				catch { finish(null); }
+			});
 			child.on("error", () => finish(null));
 			if (options.signal?.aborted) terminate();
 		} catch { finish(null); }
@@ -125,42 +133,52 @@ export function diffStamp(cwd: string): Promise<string | null> {
  */
 export async function treeStamp(cwd: string, identity: "tree" | "commit" = "tree", options: StampOptions = {}): Promise<string | null> {
 	if (exhausted(options)) return null;
-	const [status, diff, root, head] = await Promise.all([
-		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"], options),
-		// `diff-index`, never `diff HEAD`: the latter rewrites a stat-dirty
-		// index even under --no-optional-locks. diff-index reads the index and
-		// the working tree and writes nothing (a stat-only change patches empty).
-		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"], options),
-		// Porcelain paths are relative to the repo ROOT, not to cwd.
+	// Resolve the root before streaming untracked stats: porcelain paths are
+	// root-relative even when the caller is in a subdirectory.
+	const [root, head] = await Promise.all([
 		gitOutput(cwd, [LOCK_FREE, "rev-parse", "--show-toplevel"], options),
-		// Writers must change CONTENT, not just make an empty/amended commit.
-		// Gate receipts additionally invalidate on commit identity.
 		gitOutput(cwd, [LOCK_FREE, "rev-parse", identity === "commit" ? "HEAD" : "HEAD^{tree}"], options),
 	]);
-	if (status === null || diff === null || root === null || head === null || exhausted(options)) return null;
-	const untracked = untrackedFingerprint(root.trim(), status, options);
-	if (untracked === null || exhausted(options)) return null;
-	const hash = createHash("sha256").update(head).update("\0").update(diff).update("\0").update(untracked).digest("hex");
-	return exhausted(options) ? null : `${status}\n#content:${hash}`;
+	if (root === null || head === null || exhausted(options)) return null;
+	const diffHash = createHash("sha256");
+	const [status, diff] = await Promise.all([
+		gitOutput(cwd, [LOCK_FREE, "status", "--porcelain", "-z", "--untracked-files=all"], options, statusDigest(root.trim(), options)),
+		// diff-index reads the index without refreshing/writing it.
+		gitOutput(cwd, [LOCK_FREE, "diff-index", "-p", "HEAD"], options, { write: data => { diffHash.update(data); }, finish: () => diffHash.digest("hex") }),
+	]);
+	if (status === null || diff === null || exhausted(options)) return null;
+	return createHash("sha256").update(head).update("\0").update(status).update("\0").update(diff).digest("hex");
 }
 
-/**
- * `path size mtime` for each `??` entry of a `-z` porcelain listing. A file
- * that vanished between the listing and the stat is recorded as gone — that
- * is itself a change.
- */
-function untrackedFingerprint(root: string, porcelainZ: string, options: StampOptions): string | null {
-	const rows: string[] = [];
-	for (const entry of porcelainZ.split("\0")) {
-		if (exhausted(options)) return null;
-		if (!entry.startsWith("?? ")) continue;
-		const rel = entry.slice(3);
-		try {
-			const stats = statSync(join(root, rel));
-			rows.push(`${rel} ${stats.size} ${stats.mtimeMs}`);
-		} catch { rows.push(`${rel} gone`); }
-	}
-	return rows.join("\n");
+/** Hash arbitrary-size status output, retaining only one NUL-delimited path. */
+function statusDigest(root: string, options: StampOptions): StreamDigest {
+	const listing = createHash("sha256"), metadata = createHash("sha256");
+	let pending = "", renameSource = false;
+	return {
+		write(data) {
+			listing.update(data); pending += data;
+			let end: number;
+			while ((end = pending.indexOf("\0")) !== -1) {
+				if (exhausted(options)) throw new Error("Fingerprint deadline exhausted");
+				const entry = pending.slice(0, end); pending = pending.slice(end + 1);
+				if (renameSource) { renameSource = false; continue; }
+				renameSource = /^[RC]|^.[RC]/.test(entry);
+				if (!entry.startsWith("?? ")) continue;
+				const rel = entry.slice(3); metadata.update(rel).update("\0");
+				try {
+					const stats = statSync(join(root, rel));
+					metadata.update(`${stats.size} ${stats.mtimeMs}\0`);
+				} catch { metadata.update("gone\0"); }
+			}
+			// Valid filesystem paths fit well below this; reject malformed output,
+			// not a valid listing merely because its total size exceeds 32MiB.
+			if (pending.length > 1024 * 1024) throw new Error("Invalid status record");
+		},
+		finish() {
+			if (pending || renameSource) throw new Error("Incomplete status listing");
+			return `${listing.digest("hex")}:${metadata.digest("hex")}`;
+		},
+	};
 }
 
 export const NO_CHANGE_ERROR =

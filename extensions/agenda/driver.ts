@@ -177,6 +177,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	let pendingDeliveries: { text: string; id: string; delivered: () => Promise<void> }[] = [];
 	let inSettle = false;
 	let generation = 0;
+	let sessionAbort = new AbortController();
 	let blockedOnUser = false;
 	// The most recent ctx, kept so a TIMER has one to work through. It goes
 	// stale on session replacement, which every read below is guarded against.
@@ -228,7 +229,14 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	// a registration gated on state can never be un-gated by a later command —
 	// that is the bug that shipped on 2026-08-05, where telemetry reported "on"
 	// and recorded nothing for the rest of the session's life.
+	pi.on("session_shutdown", () => {
+		generation++;
+		sessionAbort.abort();
+		heldCtx = null;
+	});
 	pi.on("session_start", (_event, ctx) => {
+		sessionAbort.abort();
+		sessionAbort = new AbortController();
 		generation++;
 		pendingDeliveries = [];
 		inSettle = false;
@@ -246,7 +254,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 	});
 
 	async function runChain(ctx: ExtensionContext, boundary: "settle" | "turn" | null = null, policies = options.policies): Promise<{ content: string; details?: { agendaNotice: string } } | undefined> {
-		if (options.isWorker) return;
+		if (options.isWorker || sessionAbort.signal.aborted) return;
 		if (inSettle) return; // our own injected turn settling — never recurse
 
 		// --- everything off ctx BEFORE the first await; ctx throws once stale ---
@@ -340,6 +348,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 		if (eligible.length === 0) return;
 
 		const gen = generation;
+		const policySignal = ctx.signal ? AbortSignal.any([ctx.signal, sessionAbort.signal]) : sessionAbort.signal;
 		const adviceBefore = count(ledger, ADVISE_LEDGER_ID);
 		let injectionAccepted = false;
 		const acceptInjection = () => {
@@ -366,9 +375,9 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 			// generation and abort checks, the idle/claim check, the bus.
 			const injection = await walkChain(
 				eligible,
-				{ cwd, lastAssistantText: assistantText, transcript, signals, signal: ctx.signal },
+				{ cwd, lastAssistantText: assistantText, transcript, signals, signal: policySignal },
 				{
-					stillCurrent: () => gen === generation && !ctx.signal?.aborted,
+					stillCurrent: () => gen === generation && !policySignal.aborted,
 					// Injecting while the user typed during a slow policy would cut
 					// into their turn.
 					mayInject: () => isIdle() && !settleClaims.claimedBy(),
@@ -434,7 +443,7 @@ export function installDriver(pi: ExtensionAPI, options: DriverOptions): DriverH
 				ledger = { ...ledger, iterations };
 				advicePending = false;
 			}
-			inSettle = false;
+			if (gen === generation) inSettle = false;
 		}
 	}
 

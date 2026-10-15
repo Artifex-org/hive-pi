@@ -127,6 +127,13 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   private mount namespaces do not share these locks. Preparation and waiting
   spend the same hook budget; Git subprocesses are terminated at that deadline.
   Synchronous filesystem/kernel stalls and cleanup are not hard OS containment.
+  Large diff/status output is streamed into fingerprints rather than silently
+  disabling identity at a size cutoff. Session shutdown/replacement aborts only
+  that driver's policy work. Process exit/signal cleanup owns all tracked trees
+  across extension-module replicas, using the pinned exit observer without
+  suppressing default termination or lock release. Owner SIGKILL cannot run it.
+  Coordination contention/errors produce bounded explicit unverified notices;
+  no durable notice can be stored while its coordination store is unavailable.
   A queued configuration change is discarded; execution and source identity are
   revalidated before reporting a current-input result. Input identity
   includes HEAD, tracked/untracked changes, command, timeout and Node/PATH;

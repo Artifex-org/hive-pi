@@ -260,24 +260,29 @@ describe("driver — re-entrancy", () => {
 });
 
 describe("driver — session replacement", () => {
-	it("drops in-flight work when the session is replaced mid-await", async () => {
+	it.each(["session_start", "session_shutdown"] as const)("cancels only its in-flight policy work on %s", async event => {
+		let observedSignal: AbortSignal | undefined, peerSignal: AbortSignal | undefined;
+		const peer = createFakePi();
+		installDriver(peer.api, { policies: [{ name: "peer", decide: ({ signal }) => {
+			peerSignal = signal;
+			return { name: "peer", status: "", run: async () => ({ metric: { outcome: "skip", value: 0 } }) };
+		} }] });
+		await peer.emit({ type: "agent_before_settle" });
 		const slow: Policy = {
 			name: "slow",
-			decide: (): PolicyWork => ({
-				name: "slow",
-				status: "",
-				run: async () => {
-					// The session turns over while this policy is working.
-					await pi.emit({ type: "session_start", reason: "new" });
+			decide: ({ signal }): PolicyWork => {
+				observedSignal = signal;
+				return { name: "slow", status: "", run: async () => {
+					await pi.emit(event === "session_start" ? { type: "session_start", reason: "new" } : { type: "session_shutdown" });
 					return { metric: { outcome: "fail", value: 1 }, inject: "stale result" };
-				},
-			}),
+				} };
+			},
 		};
-
 		installDriver(pi.api, { policies: [slow] });
 		await pi.emit({ type: "agent_before_settle" });
-
-		// The generation moved, so the result belongs to a session that is gone.
+		expect(observedSignal?.aborted).toBe(true);
+		expect(peerSignal?.aborted).toBe(false);
+		expect(metricEvents()).toHaveLength(0);
 		expect(pi.messages).toHaveLength(0);
 	});
 
