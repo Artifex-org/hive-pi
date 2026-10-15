@@ -20,6 +20,7 @@ export function normalizeSessionTitle(raw: string): string | null {
 		.trim();
 	// A title must name something: one made only of markup is no title.
 	if (!/[\p{L}\p{N}]/u.test(flat)) return null;
-	if (flat.length <= MAX_SESSION_TITLE) return flat;
-	return flat.slice(0, MAX_SESSION_TITLE - 1).trimEnd() + "…";
+	const chars = Array.from(flat);
+	if (chars.length <= MAX_SESSION_TITLE) return flat;
+	return chars.slice(0, MAX_SESSION_TITLE - 1).join("").trimEnd() + "…";
 }
