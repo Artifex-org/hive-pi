@@ -293,7 +293,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						await unboundNotice(`The previous automatic project gate \`${command}\` was interrupted before a verdict. Input identity is unavailable. This is NOT successful verification. Run quality_gate or a bounded background check; automatic warning continuations are bounded by maxInjections.`);
 					}
 				};
-				const acknowledge = (fingerprint: string | null, notice: string, noticeId: string) => async () => {
+				const acknowledge = (fingerprint: string | null, notice: string, noticeId: string, noticeConfiguration = configuration) => async () => {
 					stamps?.set(id, fingerprint ?? undefined);
 					try {
 						const ackDeadline = Date.now() + 1_000;
@@ -302,7 +302,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 						try {
 							if (fingerprint === null) {
 								const current = await ack.readNotice();
-								if (current?.id === noticeId && current.configuration === configuration && current.content === notice) await ack.writeNotice(undefined);
+								if (current?.id === noticeId && current.configuration === noticeConfiguration && current.content === notice) await ack.writeNotice(undefined);
 							} else {
 								const current = await ack.read();
 								if (current?.noticeId === noticeId && current.input === fingerprint && current.notice === notice) await ack.write({ input: fingerprint, outcome: current.outcome });
@@ -318,14 +318,19 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 					// Unbound delivery/liveness state never identifies or suppresses an
 					// attempt. Recover it even at the positive continuation cap.
 					const pending = await lease.readNotice();
-					if (pending?.configuration === configuration) {
-						return { ...skipped(), inject: `Previous automatic gate attempt (source identity was unavailable):\n${pending.content}`, delivered: acknowledge(null, pending.content, pending.id),
+					if (pending) {
+						return { ...skipped(), inject: `Previous automatic gate attempt (source identity was unavailable):\n${pending.content}`, delivered: acknowledge(null, pending.content, pending.id, pending.configuration),
 							...(!capped && !ledger.noticeCharges?.[id]?.includes(pending.id) ? { ledger: (state: typeof ledger) => recordNotice(state, id, pending.id) } : {}) };
 					}
-					if (pending) await lease.writeNotice(undefined); // obsolete configuration
+					// Recover completed charges BEFORE source/configuration eligibility:
+					// an edit cannot erase an uncommitted ledger debit or its warning.
+					const previous = await lease.read();
+					if (previous?.notice && previous.charge) return { ...skipped(),
+						inject: `Recovered previous automatic gate attempt (not current-input verification):\n${previous.notice}`,
+						delivered: acknowledge(previous.input, previous.notice, previous.noticeId),
+						...(!capped && !ledger.noticeCharges?.[id]?.includes(previous.noticeId) ? { ledger: (state: typeof ledger) => recordNotice(state, id, previous.noticeId!) } : {}) };
 					// Deduplicate before waiting for execution capacity.
 					input = await fingerprint();
-					const previous = await lease.read();
 					if (input !== null && previous?.input === input) {
 						let notice = previous.notice;
 						let noticeId = previous.noticeId;
@@ -333,10 +338,7 @@ export function createGatePolicy(stamps?: GateStampStore, options: GatePolicyOpt
 							notice = `The previous automatic project gate \`${command}\` was interrupted. This input is NOT verified. Run quality_gate or a bounded background check to obtain a verdict; the Stop hook will not repeatedly restart this unchanged input.`;
 							noticeId = await saveNotice("incomplete", notice);
 						}
-						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice, noticeId!),
-							// Completed failures carry a recoverable charge; admission-only
-							// notices do not. The host publishes IDs with its ledger atomically.
-							...(previous.charge && !capped && !ledger.noticeCharges?.[id]?.includes(noticeId!) ? { ledger: (state: typeof ledger) => recordNotice(state, id, noticeId!) } : {}) }; // read() validates paired identity
+						if (notice) return { ...skipped(), inject: notice, delivered: acknowledge(input, notice, noticeId!) }; // admission-only notice, no execution charge
 						if (stamps?.get(id) !== input) stamps?.set(id, input);
 						return skipped(); // an acknowledged attempt, never cached green evidence
 					}

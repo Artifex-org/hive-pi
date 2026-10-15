@@ -151,6 +151,8 @@ the judge's confirming pass uses the evaluator mode's level, else `low`.
   and completed known-input failure charges are idempotent by notice ID in the persisted session ledger;
   no sidecar flag acknowledges a charge before the ledger is durable. IDs are
   retained only for the current capped budget cycle and cleared on resolution.
+  Chargeable notices are recovered before new input/configuration eligibility:
+  edits cannot erase a debt, and a historical warning does not verify new input.
   Native locks are not cgroups: helpers escaping after all lockholders close
   their descriptors still require OS containment. A skip
   is **not** cached green evidence. Receipt lookup takes only the

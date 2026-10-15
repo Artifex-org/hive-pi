@@ -134,7 +134,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 		expect(first.inject).toContain("FAILED");
 		const ledger = first.ledger!(emptyLedger); // host saved its ledger, then died BEFORE delivery
 		const replay = await createGatePolicy().decide({ cwd: root, ledger, transcript: "", lastAssistantText: undefined })!.run();
-		expect(replay.inject).toBe(first.inject);
+		expect(replay.inject).toBe(`Recovered previous automatic gate attempt (not current-input verification):\n${first.inject}`);
 		expect(replay.metric.outcome).toBe("skip");
 		expect(replay.ledger).toBeUndefined(); // replay is not another attempt
 		await replay.delivered?.();
@@ -157,7 +157,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 		writeFileSync(unavailable, "down");
 		const failed = await run(root, {}, undefined, false); // B dies before delivering
 		expect(failed.inject).toContain("FAILED");
-		expect((await sessionA()).inject).toBe(failed.inject);
+		expect((await sessionA()).inject).toBe(`Recovered previous automatic gate attempt (not current-input verification):\n${failed.inject}`);
 		expect(readFileSync(log, "utf8")).toBe("xxx"); // no fourth execution
 	});
 
@@ -204,7 +204,7 @@ describe("automatic gate attempts, not cached green verification", () => {
 		} finally { await one?.release(); await two?.release(); }
 	});
 
-	it.each([false, true].flatMap(known => [false, true].map(published => ({ known, published }))))("charges a completed failure once: known=$known, published=$published", async ({ known, published }) => {
+	it.each([false, true].flatMap(known => [false, true].flatMap(published => ["none", "source", "configuration"].map(change => ({ known, published, change })))))("charges a completed failure once: known=$known, published=$published, change=$change", async ({ known, published, change }) => {
 		const { root, dir, check, log } = fixture(undefined, known);
 		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check}; exit 1`, maxInjections: 1 }));
 		const options = { leaseOptions: { directory: join(dir, "leases") } };
@@ -212,7 +212,10 @@ describe("automatic gate attempts, not cached green verification", () => {
 		const stateDir = join(dir, "state"); mkdirSync(stateDir);
 		writeAgendaState(stateDir, { ledger: published ? first.ledger!(emptyLedger) : emptyLedger, driftSettles: 0, gateStamps: {} });
 		let ledger = readAgendaState(stateDir).ledger;
+		if (change === "source") writeFileSync(join(root, "code.txt"), "edited before recovery");
+		if (change === "configuration") writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `${check.replace("printf x", "printf y")}; exit 1`, maxInjections: 1 }));
 		const replay = await createGatePolicy(undefined, options).decide({ cwd: root, ledger, transcript: "", lastAssistantText: undefined })!.run();
+		expect(replay.inject).toContain(first.inject!);
 		if (published) expect(replay.ledger).toBeUndefined();
 		else {
 			expect(replay.ledger).toBeTypeOf("function"); ledger = replay.ledger!(ledger);
