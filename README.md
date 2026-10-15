@@ -127,8 +127,9 @@ names go.
 Manual `/name` choices are pinned against subsequent agent title changes and
 reconnects. They are preserved verbatim: the markup cleanup and 72-character cap
 for agent-generated titles do not apply to operator names. Hive still enforces
-its existing manual-title limit. Clearing the name in the Hive workspace releases
-the server-side pin.
+its 120-byte UTF-8 manual-title limit; oversized names are reported, not truncated
+or pinned, and cannot block later context updates. Clearing the name in the Hive
+workspace releases the server-side pin.
 
 ## Development
 

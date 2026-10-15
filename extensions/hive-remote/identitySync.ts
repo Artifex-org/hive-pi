@@ -1,6 +1,7 @@
 import type { RequestResult } from "../hive-common/http.ts";
 import type { RemoteSessionIdentity } from "./client.ts";
 import type { SessionIdentityUpdate } from "./sessionIdentityBus.ts";
+import { manualTitleError } from "./sessionTitleText.ts";
 
 export const IDENTITY_SYNC_ENTRY = "session-identity-sync";
 type QueuedIdentity = { update: SessionIdentityUpdate; wireRevision?: number };
@@ -38,6 +39,14 @@ export class IdentitySync {
 			}
 			break;
 		}
+		// Older clients could persist an invalid pin. Discard only that rename,
+		// never the queued context waiting behind it.
+		const error = this.state.manualTitle === undefined ? undefined : manualTitleError(this.state.manualTitle);
+		if (error) {
+			delete this.state.manualTitle;
+			this.save();
+			this.deps.notice(error);
+		}
 	}
 
 	update(update: SessionIdentityUpdate): void {
@@ -55,6 +64,8 @@ export class IdentitySync {
 	}
 
 	rename(title: string): void {
+		const error = manualTitleError(title);
+		if (error) { this.deps.notice(error); return; }
 		this.state.manualTitle = title;
 		this.attempts = 0;
 		this.blocked = false;

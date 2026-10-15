@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerGuardedTool } from "../guards-common/capability.ts";
-import { normalizeSessionTitle } from "./sessionTitleText.ts";
+import { manualTitleError, normalizeSessionTitle } from "./sessionTitleText.ts";
 import { SESSION_IDENTITY_CHANNEL, SESSION_IDENTITY_INITIAL_CHANNEL, SESSION_PLAN_INTRO_CHANNEL, SESSION_MANUAL_TITLE_CHANNEL, type SessionIdentityUpdate } from "./sessionIdentityBus.ts";
 
 export const SESSION_IDENTITY_ENTRY = "session-identity";
@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI) {
 		manualTitle = identity?.titlePinned ? identity.title : undefined;
 		injectKickoff = true;
 	});
-	pi.on("session_info_changed", () => {
+	pi.on("session_info_changed", (_event, ctx) => {
 		// Manual names are operator-owned text, not model-generated headlines.
 		// Auto-title cleanup here would pin a different name and the next
 		// canonical response would overwrite the operator's exact choice.
@@ -82,6 +82,8 @@ export default function (pi: ExtensionAPI) {
 		// Agent writers commit canonical identity before naming. Any other change
 		// is an operator /name gesture, which must stay pinned on reconnect.
 		if (!name || name === identity?.title) return;
+		const error = manualTitleError(name);
+		if (error) { ctx.ui.notify(error, "error"); return; }
 		manualTitle = name;
 		if (identity) {
 			identity = { ...identity, title: name, titlePinned: true };
