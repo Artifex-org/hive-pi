@@ -14,15 +14,29 @@ const fake = vi.hoisted(() => ({ query: undefined as QueryFactory | undefined, l
 	setupWrite: undefined as ((data: unknown) => Promise<void>) | undefined,
 	reportWrite: undefined as (() => Promise<void>) | undefined,
 	writeStarted: undefined as ((work: Promise<void>) => void) | undefined,
+	latchSync: undefined as (() => Promise<void>) | undefined,
+	latchOpen: undefined as (() => Promise<void>) | undefined,
+	latchClosed: undefined as (() => void) | undefined,
+	runtimeRemove: undefined as (() => Promise<void>) | undefined,
 	shutdownDone: undefined as ((done: Promise<void>) => void) | undefined,
 	barrierQueued: undefined as (() => void) | undefined, resetStarted: undefined as (() => void) | undefined, resets: 0 }));
 vi.mock("node:fs/promises", async original => {
 	const actual = await original<typeof import("node:fs/promises")>();
-	return { ...actual, writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+	return { ...actual, rm: async (...args: Parameters<typeof actual.rm>) => {
+		if (typeof args[0] === "string" && args[0].split("/").at(-1)?.startsWith("query-")) await fake.runtimeRemove?.();
+		return actual.rm(...args);
+	}, writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
 		if (typeof args[0] === "string" && args[0].endsWith("pilot-result.json")) await fake.reportWrite?.();
 		return actual.writeFile(...args);
 	}, open: async (...args: Parameters<typeof actual.open>) => {
-		const file = await actual.open(...args), report = fake.reportWrite;
+		const isLatch = typeof args[0] === "string" && args[0].endsWith(".attempt");
+		if (isLatch) await fake.latchOpen?.();
+		const file = await actual.open(...args), report = fake.reportWrite, latch = fake.latchSync, closed = fake.latchClosed;
+		if (isLatch && closed) { const close = file.close.bind(file); file.close = async () => { await close(); closed(); }; }
+		if (typeof args[0] === "string" && args[0].endsWith(".attempt") && latch) {
+			const sync = file.sync.bind(file);
+			file.sync = async () => { await latch(); await sync(); };
+		}
 		const pause = typeof args[0] !== "string" ? undefined : args[0].endsWith("pilot-fixture.txt") ? fake.setupWrite :
 			args[0].endsWith("pilot-result.json") && report ? () => report() : undefined;
 		if (pause) {
@@ -74,13 +88,14 @@ function* response(id: string, content: unknown[], stop: string) {
 	yield frame({ type: "message_stop" });
 }
 const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { fake.setupWrite = undefined; fake.reportWrite = undefined; fake.writeStarted = undefined; fake.shutdownDone = undefined; fake.barrierQueued = undefined; fake.resetStarted = undefined; for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "setup-deadline", "report-deadline", "settlement-first", "settlement-recall", "settlement-reload", "control-intercept", "deadline", "cleanup-failure", "fixture-change", "setup-reload", "unknown-slash", "positional"] as const)("real AgentSession pilot protocol and unarmed startup refusal: %s", async mode => {
+afterEach(async () => { fake.setupWrite = undefined; fake.reportWrite = undefined; fake.writeStarted = undefined; fake.latchSync = undefined; fake.latchOpen = undefined; fake.latchClosed = undefined; fake.runtimeRemove = undefined; fake.shutdownDone = undefined; fake.barrierQueued = undefined; fake.resetStarted = undefined; for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "setup-deadline", "report-deadline", "latch-sync-deadline", "latch-sync-reject", "latch-open-deadline", "runtime-cleanup-deadline", "settlement-first", "settlement-recall", "settlement-reload", "control-intercept", "deadline", "cleanup-failure", "fixture-change", "setup-reload", "unknown-slash", "positional"] as const)("real AgentSession pilot protocol and unarmed startup refusal: %s", async mode => {
 	const root = await mkdtemp(join(tmpdir(), "sdk-real-session-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
 	for (const [name, value] of Object.entries({ HIVE_CLAUDE_SDK: "1", HIVE_CLAUDE_SDK_PILOT: "1",
 		HIVE_CLAUDE_SDK_EXECUTABLE: "/offline/claude", HIVE_CLAUDE_SDK_STATE_DIR: root,
 		HIVE_URL: "https://offline.invalid", HIVE_TOKEN: "offline", HIVE_LAUNCH_ID: "offline-pilot" })) vi.stubEnv(name, value);
-	let queries = 0; fake.leases = 0; fake.closes = 0; fake.resets = 0; fake.deadlineMs = mode === "deadline" || mode === "setup-deadline" ? 50 : mode === "report-deadline" ? 1_000 : 180_000; let readNonce = "";
+	let queries = 0; fake.leases = 0; fake.closes = 0; fake.resets = 0; fake.deadlineMs = mode === "deadline" || mode === "setup-deadline" || mode === "latch-sync-deadline" || mode === "latch-open-deadline" ? 50 :
+		mode === "report-deadline" ? 1_000 : mode === "runtime-cleanup-deadline" ? 500 : 180_000; let readNonce = "";
 	const heldStage = mode === "settlement-first" || mode === "settlement-reload" ? 1 : mode === "settlement-recall" ? 2 : 0;
 	const listenerEntered = deferred(), releaseListener = deferred(), controlQueued = deferred(), resetStarted = deferred();
 	const intercepted = deferred(), rawSettlement = deferred();
@@ -171,6 +186,74 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 		await session.prompt(mode === "unknown-slash" ? "/unknown-sdk-pilot" : "unarmed positional input");
 		expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: expect.stringContaining("claude_sdk_pilot_not_armed") });
 		expect(queries).toBe(0); expect(fake.leases).toBe(0);
+		return;
+	}
+	if (mode === "latch-open-deadline") {
+		const release = deferred(), entered = deferred();
+		let closed = 0;
+		fake.latchOpen = async () => { entered.resolve(); await release.promise; };
+		fake.latchClosed = () => { closed++; };
+		const prompt = session.prompt("/claude-sdk-pilot --exclude claude-7");
+		const timers: ReturnType<typeof setTimeout>[] = [];
+		const bounded = <T,>(task: Promise<T>) => Promise.race([task, new Promise<"stalled">(r => {
+			timers.push(setTimeout(() => r("stalled"), 1_000));
+		})]);
+		try {
+			await entered.promise;
+			expect(await bounded(prompt.then(() => "returned"))).toBe("returned");
+			expect(await bounded(session.extensionRunner.emit({ type: "session_shutdown", reason: "reload" }).then(() => "shutdown"))).toBe("shutdown");
+			expect(sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "claude-sdk-pilot-result")).toHaveLength(0);
+			release.resolve();
+			const outcome = await bounded(reported);
+			expect(outcome).toMatchObject({ status: "failed", category: "deadline", reserved_sdk_turns: 0, observed_sdk_turns: 0 });
+			expect(closed).toBe(1);
+			expect(queries).toBe(0); expect(fake.leases).toBe(0);
+			expect(sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "claude-sdk-pilot-result")).toHaveLength(1);
+			await session.reload();
+			await session.prompt("/claude-sdk-pilot --exclude claude-7");
+			expect(queries).toBe(0); expect(fake.leases).toBe(0);
+			expect(sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "claude-sdk-pilot-result")).toHaveLength(1);
+		} finally { for (const timer of timers) clearTimeout(timer); release.resolve(); await prompt; }
+		return;
+	}
+	if (mode === "latch-sync-deadline" || mode === "latch-sync-reject" || mode === "runtime-cleanup-deadline") {
+		const release = deferred(), entered = deferred();
+		if (mode === "runtime-cleanup-deadline") fake.runtimeRemove = async () => { entered.resolve(); await release.promise; };
+		else fake.latchSync = async () => {
+			entered.resolve();
+			if (mode === "latch-sync-reject") throw new Error("OFFLINE_SECRET_LATCH_SYNC_ERROR");
+			await release.promise;
+		};
+		const prompt = session.prompt("/claude-sdk-pilot --exclude claude-7");
+		let watchdog: ReturnType<typeof setTimeout> | undefined, shutdownWatchdog: ReturnType<typeof setTimeout> | undefined;
+		let shutdown: Promise<unknown> | undefined;
+		try {
+			const outcome = await Promise.race([reported, new Promise<"unreported">(r => {
+				watchdog = setTimeout(() => r("unreported"), 2_500);
+			})]);
+			expect(outcome).not.toBe("unreported");
+			expect(outcome).toMatchObject(mode === "runtime-cleanup-deadline" ? {
+				status: "failed", query_cleanup: "failed", fixture_cleanup: "passed",
+				reserved_sdk_turns: 2, observed_sdk_turns: 2,
+			} : {
+				status: "failed", category: mode === "latch-sync-deadline" ? "deadline" : "configuration",
+				reserved_sdk_turns: 0, observed_sdk_turns: 0, query_cleanup: "passed",
+			});
+			await entered.promise;
+			// Exercise the actual runner/handler while runtime disposal is held;
+			// this is not a claim that Core's entire reload can ignore active I/O.
+			shutdown = session.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
+			expect(await Promise.race([shutdown.then(() => "shutdown"), new Promise<"stalled">(r => {
+				shutdownWatchdog = setTimeout(() => r("stalled"), 1_000);
+			})])).toBe("shutdown");
+			expect(queries).toBe(mode === "runtime-cleanup-deadline" ? 1 : 0);
+			expect(fake.leases).toBe(mode === "runtime-cleanup-deadline" ? 2 : 0);
+			expect(sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "claude-sdk-pilot-result")).toHaveLength(1);
+			expect(JSON.stringify(outcome)).not.toContain("OFFLINE_SECRET");
+		} finally {
+			clearTimeout(watchdog); clearTimeout(shutdownWatchdog); release.resolve();
+			await prompt; await shutdown; await session.abort();
+		}
 		return;
 	}
 	if (mode === "setup-deadline" || mode === "report-deadline") {

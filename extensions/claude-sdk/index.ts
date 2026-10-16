@@ -26,7 +26,8 @@ export default async function claudeSdk(pi: ExtensionAPI): Promise<void> {
 	const protocol = pilot ? (await import("./pilot.ts")).registerPilot(pi, config, pilot, reset, close) : undefined;
 	pi.on("session_shutdown", async () => {
 		protocol?.cancel(); pilot?.close();
-		const outcomes = await Promise.allSettled([close(), protocol?.done()]);
+		const closing = close();
+		const outcomes = await Promise.allSettled([protocol ? protocol.observeCleanup(closing) : closing, protocol?.done()]);
 		if (outcomes.some(result => result.status === "rejected")) throw new Error("Claude SDK lifecycle cleanup failed");
 	});
 	pi.on("session_start", reset);

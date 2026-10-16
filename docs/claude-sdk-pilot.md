@@ -10,6 +10,8 @@ Its persistent launch-private attempt latch is acquired before arming and is
 never removed or refunded. Reusing the same state root across extension reloads
 or process restarts cannot replenish the attempt. The node must preserve that
 root for the owned runtime; deleting it is not a supported retry mechanism.
+Exclusive creation consumes the latch before write/sync/close. Those subsequent
+operations must all succeed before arming; a failure still owns a failed outcome.
 
 The first SDK query reserves two agentic turns. Normal Pi filesystem tools must
 produce a successful nonce read and an actual guard-denied write, with matching
@@ -50,8 +52,16 @@ operations retain their settlement handlers and ownership: late exclusive opens
 are closed/removed without starting a write; already-open writes retain independent
 close/removal attempts. Unconfirmed cleanup is reported failed, not passed. The
 one-use latch is never refunded, including after timeout/reload. A stale UI abort
-cannot suppress independent cleanup attempts. A refused reload cannot publish
-over an earlier attempt's report.
+cannot suppress independent cleanup attempts. Filesystem confirmation includes
+latch completion as well as fixture cleanup. Shutdown bounds its observation of
+the cached runtime close instead of waiting on it indefinitely a second time.
+A refused reload cannot publish over an earlier attempt's report.
+
+If exclusive open itself is still unresolved at expiry, bounded command/shutdown
+observation may finish before ownership is known. A later successful open closes
+its handle and owns exactly one failed outcome, never another query. A previously
+returned `done()` promise does not establish that this late outcome was delivered;
+missing durable owner receipt remains failure/unverified, not a retry grant.
 
 Cleanup and reporting are separate outcomes. Reports contain fixed categories,
 statuses and counts only, including unmeasured HTTP attempts. Artifact, canonical

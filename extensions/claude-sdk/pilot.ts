@@ -46,6 +46,8 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 	let context: ExtensionContext | undefined;
 	let fixture = "";
 	let fixtureFile: OwnedPilotFile | undefined;
+	let latchWork: Promise<void> | undefined;
+	let finalization: Promise<void> | undefined;
 	let nonce = "";
 	let category: Category = "none";
 	let done: Promise<void> = Promise.resolve();
@@ -183,7 +185,8 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 		} catch { fail(category === "none" ? "protocol" : category); }
 		finally { await finish(); }
 	}
-	async function finish(): Promise<void> {
+	function finish(): Promise<void> { return finalization ??= finalize(); }
+	async function finalize(): Promise<void> {
 		budget.close(); abort();
 		let cleanup = !abortFailed;
 		let fixtureCleanup = true;
@@ -193,7 +196,10 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 		// shared observation deadline must not prevent the other attempt.
 		const [queryResult, fixtureResult] = await Promise.allSettled([
 			cleanupOperations.wait(close, true),
-			cleanupOperations.wait(() => fixtureFile ? fixtureFile.cleanup() : Promise.resolve(), true),
+			cleanupOperations.wait(async () => {
+				const filesystem = await Promise.allSettled([latchWork, fixtureFile?.cleanup()]);
+				if (filesystem.some(result => result.status === "rejected")) throw new Error("Pilot filesystem completion unconfirmed");
+			}, true),
 		]);
 		cleanupOperations.stop();
 		if (queryResult.status === "rejected") { cleanup = false; category = "cleanup"; }
@@ -258,10 +264,18 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			// The command itself still returns before its nested prompt starts.
 			done = setup.then(() => work);
 			void done.catch(() => { fail("cleanup"); running = false; });
-			let claimed = false;
+			let claimed = false, setupFailed = false;
 			try {
-				await attempt.wait(() => claimPilotAttempt(config));
-				claimed = true;
+				latchWork = claimPilotAttempt(config, () => {
+					claimed = true;
+					if (setupFailed) {
+						// A late exclusive open still owns one failed outcome, not
+						// permission to resume setup or issue a query.
+						work = finish(); done = work;
+						void work.catch(() => { fail("cleanup"); running = false; });
+					}
+				}, attempt.signal);
+				await attempt.wait(() => latchWork!);
 				if (category !== "none") throw new Error("Pilot configuration refused");
 				if (args.trim() !== "--exclude claude-7" || ctx.model?.provider !== "claude-sdk" || !ctx.isIdle() || ctx.hasPendingMessages() ||
 					messages(ctx).some(message => message.role === "user" || message.role === "assistant" || message.role === "toolResult"))
@@ -277,6 +291,7 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 				// Return the slash command before entering another prompt; never await a nested prompt.
 				work = new Promise<void>(resolve => setImmediate(resolve)).then(() => run(ctx));
 			} catch {
+				setupFailed = true;
 				fail("configuration");
 				// Only the latch owner may publish this attempt. A reload refusal
 				// must not replace an earlier report or remove its fixture.
@@ -287,5 +302,9 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			} finally { releaseSetup(); }
 		},
 	});
-	return { cancel: () => { if (running) fail(); }, done: () => done };
+	return { cancel: () => { if (running) fail(); }, done: () => done,
+		observeCleanup: async (cleanup: Promise<void>) => {
+			const observation = new PilotOperations(Math.min(deadlineMs, 5_000), () => {});
+			try { await observation.wait(() => cleanup, true); } finally { observation.stop(); }
+		} };
 }
