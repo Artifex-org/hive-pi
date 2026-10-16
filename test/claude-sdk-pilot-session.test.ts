@@ -13,6 +13,7 @@ import type { PilotReport } from "../extensions/claude-sdk/pilot.ts";
 const fake = vi.hoisted(() => ({ query: undefined as QueryFactory | undefined, leases: 0, closes: 0, deadlineMs: 180_000,
 	setupWrite: undefined as ((data: unknown) => Promise<void>) | undefined,
 	reportWrite: undefined as (() => Promise<void>) | undefined,
+	writeStarted: undefined as ((work: Promise<void>) => void) | undefined,
 	shutdownDone: undefined as ((done: Promise<void>) => void) | undefined,
 	barrierQueued: undefined as (() => void) | undefined, resetStarted: undefined as (() => void) | undefined, resets: 0 }));
 vi.mock("node:fs/promises", async original => {
@@ -21,10 +22,16 @@ vi.mock("node:fs/promises", async original => {
 		if (typeof args[0] === "string" && args[0].endsWith("pilot-result.json")) await fake.reportWrite?.();
 		return actual.writeFile(...args);
 	}, open: async (...args: Parameters<typeof actual.open>) => {
-		const file = await actual.open(...args), pause = fake.setupWrite;
-		if (typeof args[0] === "string" && args[0].endsWith("pilot-fixture.txt") && pause) {
+		const file = await actual.open(...args), report = fake.reportWrite;
+		const pause = typeof args[0] !== "string" ? undefined : args[0].endsWith("pilot-fixture.txt") ? fake.setupWrite :
+			args[0].endsWith("pilot-result.json") && report ? () => report() : undefined;
+		if (pause) {
 			const write = file.writeFile.bind(file);
-			file.writeFile = async (...values: Parameters<typeof write>) => { await pause(values[0]); await write(...values); };
+			file.writeFile = (...values: Parameters<typeof write>) => {
+				const work = (async () => { await pause(values[0]); await write(...values); })();
+				fake.writeStarted?.(work);
+				return work;
+			};
 		}
 		return file;
 	} };
@@ -67,13 +74,13 @@ function* response(id: string, content: unknown[], stop: string) {
 	yield frame({ type: "message_stop" });
 }
 const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { fake.setupWrite = undefined; fake.reportWrite = undefined; fake.shutdownDone = undefined; fake.barrierQueued = undefined; fake.resetStarted = undefined; for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "settlement-first", "settlement-recall", "settlement-reload", "control-intercept", "deadline", "cleanup-failure", "fixture-change", "setup-reload", "unknown-slash", "positional"] as const)("real AgentSession pilot protocol and unarmed startup refusal: %s", async mode => {
+afterEach(async () => { fake.setupWrite = undefined; fake.reportWrite = undefined; fake.writeStarted = undefined; fake.shutdownDone = undefined; fake.barrierQueued = undefined; fake.resetStarted = undefined; for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "setup-deadline", "report-deadline", "settlement-first", "settlement-recall", "settlement-reload", "control-intercept", "deadline", "cleanup-failure", "fixture-change", "setup-reload", "unknown-slash", "positional"] as const)("real AgentSession pilot protocol and unarmed startup refusal: %s", async mode => {
 	const root = await mkdtemp(join(tmpdir(), "sdk-real-session-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
 	for (const [name, value] of Object.entries({ HIVE_CLAUDE_SDK: "1", HIVE_CLAUDE_SDK_PILOT: "1",
 		HIVE_CLAUDE_SDK_EXECUTABLE: "/offline/claude", HIVE_CLAUDE_SDK_STATE_DIR: root,
 		HIVE_URL: "https://offline.invalid", HIVE_TOKEN: "offline", HIVE_LAUNCH_ID: "offline-pilot" })) vi.stubEnv(name, value);
-	let queries = 0; fake.leases = 0; fake.closes = 0; fake.resets = 0; fake.deadlineMs = mode === "deadline" ? 50 : 180_000; let readNonce = "";
+	let queries = 0; fake.leases = 0; fake.closes = 0; fake.resets = 0; fake.deadlineMs = mode === "deadline" || mode === "setup-deadline" ? 50 : mode === "report-deadline" ? 1_000 : 180_000; let readNonce = "";
 	const heldStage = mode === "settlement-first" || mode === "settlement-reload" ? 1 : mode === "settlement-recall" ? 2 : 0;
 	const listenerEntered = deferred(), releaseListener = deferred(), controlQueued = deferred(), resetStarted = deferred();
 	const intercepted = deferred(), rawSettlement = deferred();
@@ -157,12 +164,63 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 	cleanups.push(async () => { await session.abort(); session.dispose(); });
 	const unsubscribe = session.subscribe(event => { if (event.type === "agent_settled") rawSettlement.resolve(); });
 	cleanups.push(async () => { unsubscribe(); });
-	await session.bindExtensions({ mode: "json" });
+	const extensionErrors: unknown[] = [];
+	await session.bindExtensions({ mode: "json", onError: error => { extensionErrors.push(error); } });
 	expect(fake.leases).toBe(0);
 	if (mode === "unknown-slash" || mode === "positional") {
 		await session.prompt(mode === "unknown-slash" ? "/unknown-sdk-pilot" : "unarmed positional input");
 		expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: expect.stringContaining("claude_sdk_pilot_not_armed") });
 		expect(queries).toBe(0); expect(fake.leases).toBe(0);
+		return;
+	}
+	if (mode === "setup-deadline" || mode === "report-deadline") {
+		const release = deferred();
+		let heldWrite: Promise<void> | undefined;
+		fake.writeStarted = work => { heldWrite = work; };
+		if (mode === "setup-deadline") fake.setupWrite = async () => { await release.promise; };
+		else fake.reportWrite = async () => { await release.promise; };
+		let commandError: unknown;
+		const prompt = session.prompt("/claude-sdk-pilot --exclude claude-7").catch(error => { commandError = error; });
+		let watchdog: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const outcome = await Promise.race([reported, new Promise<"unreported">(r => {
+				watchdog = setTimeout(() => r("unreported"), 2_500);
+			})]);
+			expect(outcome).not.toBe("unreported");
+			expect(outcome).toMatchObject(mode === "setup-deadline" ? {
+				status: "failed", category: "deadline", reserved_sdk_turns: 0, observed_sdk_turns: 0,
+				fixture_cleanup: "failed", query_cleanup: "passed",
+			} : {
+				status: "failed", category: "reporting", report_publication_failures: 1,
+				reserved_sdk_turns: 3, observed_sdk_turns: 3, fixture_cleanup: "passed", query_cleanup: "passed",
+			});
+			// Neither held operation is released until bounded completion and
+			// real extension shutdown have both been observed.
+			await prompt;
+			await session.reload();
+			expect(queries).toBe(mode === "setup-deadline" ? 0 : 2);
+			expect(fake.leases).toBe(mode === "setup-deadline" ? 0 : 3);
+			// Core emits known-command errors and resolves prompt(), rather
+			// than rejecting it. Verify that actual error-delivery boundary.
+			expect(commandError).toBeUndefined();
+			if (mode === "setup-deadline") expect(extensionErrors).toContainEqual({
+				extensionPath: "command:claude-sdk-pilot", event: "command",
+				error: "Claude SDK pilot configuration refused; attempt consumed",
+			});
+			const entries = JSON.stringify(sessionManager.getEntries());
+			await session.prompt("/claude-sdk-pilot --exclude claude-7");
+			expect(queries).toBe(mode === "setup-deadline" ? 0 : 2);
+			expect(fake.leases).toBe(mode === "setup-deadline" ? 0 : 3);
+			expect(JSON.stringify(sessionManager.getEntries())).toBe(entries);
+			expect(heldWrite).toBeDefined();
+			release.resolve();
+			await Promise.allSettled([heldWrite!]);
+			expect(await readdir(root)).not.toContain("pilot-fixture.txt");
+			if (mode === "report-deadline") expect(await readdir(root)).not.toContain("pilot-result.json");
+		} finally {
+			clearTimeout(watchdog); release.resolve();
+			await prompt; await session.reload();
+		}
 		return;
 	}
 	if (mode === "setup-reload") {

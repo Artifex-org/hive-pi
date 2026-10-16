@@ -38,9 +38,20 @@ responsible. Native hooks, memory and compaction remain disabled by SDK options;
 Pi compaction is refused during the pilot. SDK models do not advertise a prompt
 cache TTL, so the core cache warmer has no eligible SDK model.
 
-Shutdown tracks in-flight fixture setup as well as the scheduled protocol. A
-stale UI abort cannot suppress filesystem or query cleanup attempts. A refused
-reload cannot publish over an earlier attempt's report.
+The attempt deadline starts before latch/fixture setup, not after it. Expiry
+closes admission and fences late setup/read/reset completions from advancing the
+protocol. Query and fixture cleanup start independently with a shared observation
+window of at most five seconds (or the shorter configured attempt duration).
+Artifact publication has its own equally bounded observation window, so a stalled
+write cannot suppress subsequent channels or keep `done()` pending indefinitely.
+
+Bounded observation is not OS cancellation or confirmed cleanup. Outstanding
+operations retain their settlement handlers and ownership: late exclusive opens
+are closed/removed without starting a write; already-open writes retain independent
+close/removal attempts. Unconfirmed cleanup is reported failed, not passed. The
+one-use latch is never refunded, including after timeout/reload. A stale UI abort
+cannot suppress independent cleanup attempts. A refused reload cannot publish
+over an earlier attempt's report.
 
 Cleanup and reporting are separate outcomes. Reports contain fixed categories,
 statuses and counts only, including unmeasured HTTP attempts. Artifact, canonical
@@ -51,8 +62,17 @@ channels; an earlier stored copy can therefore precede a later failed result. Th
 message API is checked against actual canonical custom-message insertion, not
 invocation alone; this does not acknowledge UI rendering or post-insertion
 listeners. This is not an atomic multi-channel commit. Earlier artifacts can
-precede a later channel's failure; consume the final event as well. Missing or
-incomplete evidence is not success.
+precede a later channel's failure; an artifact alone is not final proof. A timed-out
+artifact channel is failed and its owned work retains cleanup attempts; late work
+cannot advance the protocol or publish a later successful canonical status.
+Missing or incomplete evidence is not success.
+
+The event is local: a production EventBus consumer and custom-message remote
+folding are not established. Existing ended-session JSONL upload is best-effort,
+and fresh-profile transcript retention through private-config teardown still
+requires verification. Before live admission, the controller must establish
+owner-readable retrieval of the final sanitized outcome; local emission or a
+successful upload on an unrelated path is insufficient.
 
 Offline integration tests use real AgentSession, builtin filesystem tools and
 MCP transport, with a fake SDK, lease and CLI and an isolated extension loader.

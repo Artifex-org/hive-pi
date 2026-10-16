@@ -1,11 +1,12 @@
 /** Owner-invoked bounded protocol. Uses real Pi messages, tools and settlement. */
 import { randomBytes } from "node:crypto";
-import { open, readFile, unlink, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { PilotQueryBudget } from "./pilot-budget.ts";
 import { claimPilotAttempt } from "./pilot-latch.ts";
+import { OwnedPilotFile, PilotOperations } from "./pilot-operations.ts";
 import type { LaunchConfig } from "./runtime.ts";
 
 const DENIED = "Claude SDK pilot write denied";
@@ -44,11 +45,11 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 	let settlement: (Pick<Waiting, "session" | "leaf"> & { token: string; resolve: () => void; reject: () => void }) | undefined;
 	let context: ExtensionContext | undefined;
 	let fixture = "";
-	let ownsFixture = false;
+	let fixtureFile: OwnedPilotFile | undefined;
 	let nonce = "";
 	let category: Category = "none";
 	let done: Promise<void> = Promise.resolve();
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	let operations: PilotOperations | undefined;
 	let blockedWrite: string | undefined;
 	let authority = false;
 	let recall = false;
@@ -58,7 +59,7 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 	const abort = () => { try { context?.abort(); } catch { abortFailed = true; } };
 	const fail = (reason: Category = "protocol") => {
 		if (category === "none") category = reason;
-		budget.close(); waiting?.reject(); settlement?.reject(); settlement = undefined; abort();
+		budget.close(); operations?.cancel(); waiting?.reject(); settlement?.reject(); settlement = undefined; abort();
 	};
 	const sameBranch = (ctx: ExtensionContext, owned: Pick<Waiting, "session" | "leaf">) => ctx.sessionManager.getSessionId() === owned.session &&
 		(owned.leaf === null || ctx.sessionManager.getBranch().some(entry => entry.id === owned.leaf));
@@ -154,6 +155,8 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 	}
 	async function run(ctx: ExtensionCommandContext): Promise<void> {
 		try {
+			const attempt = operations;
+			if (!attempt || attempt.expired) throw new Error("Pilot deadline reached");
 			budget.arm(["claude-7"]);
 			const first = await dispatch("authority", [
 				"Hive SDK pilot: in ONE tool batch call read with exactly {path: " + JSON.stringify(fixture) + "}",
@@ -163,9 +166,9 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			// Correlate completion, then acknowledge core's post-listener queue.
 			await afterSettlement(ctx);
 			verifyAuthority(first);
-			if (await readFile(fixture, "utf8") !== nonce) throw new Error("Pilot protocol failed");
+			if (await attempt.wait(() => readFile(fixture, "utf8")) !== nonce) throw new Error("Pilot protocol failed");
 			authority = true;
-			await reset(); resets++;
+			await attempt.wait(reset); resets++;
 			budget.allowRecall();
 			const second = await dispatch("recall",
 				"From the earlier successful read result in this conversation, recall the fixture's exact contents. " +
@@ -174,19 +177,27 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			const assistants = second.filter(message => message.role === "assistant");
 			if (second.filter(message => message.role === "user").length !== 1 || assistants.length !== 1 ||
 				assistants[0].stopReason !== "stop" || assistants[0].content.some(block => block.type === "toolCall") ||
-				text(assistants[0]).trim() !== nonce || await readFile(fixture, "utf8") !== nonce ||
+				text(assistants[0]).trim() !== nonce || await attempt.wait(() => readFile(fixture, "utf8")) !== nonce ||
 				budget.reservedTurns !== 3 || budget.observedTurns > 3) throw new Error("Pilot protocol failed");
 			recall = true;
 		} catch { fail(category === "none" ? "protocol" : category); }
 		finally { await finish(); }
 	}
 	async function finish(): Promise<void> {
-		clearTimeout(timer); budget.close(); abort();
+		budget.close(); abort();
 		let cleanup = !abortFailed;
 		let fixtureCleanup = true;
 		if (abortFailed) category = "cleanup";
-		try { await close(); } catch { cleanup = false; category = "cleanup"; }
-		try { if (ownsFixture) { await unlink(fixture); ownsFixture = false; } } catch { fixtureCleanup = false; category = "cleanup"; }
+		const cleanupOperations = new PilotOperations(Math.min(deadlineMs, 5_000), () => {});
+		// Start both owned cleanup attempts even if either one stalls. A
+		// shared observation deadline must not prevent the other attempt.
+		const [queryResult, fixtureResult] = await Promise.allSettled([
+			cleanupOperations.wait(close, true),
+			cleanupOperations.wait(() => fixtureFile ? fixtureFile.cleanup() : Promise.resolve(), true),
+		]);
+		cleanupOperations.stop();
+		if (queryResult.status === "rejected") { cleanup = false; category = "cleanup"; }
+		if (fixtureResult.status === "rejected") { fixtureCleanup = false; if (category === "none") category = "cleanup"; }
 		const report: PilotReport = { protocol: 1, status: authority && recall && cleanup && fixtureCleanup && category === "none" ? "passed" : "failed",
 			category, reserved_sdk_turns: budget.reservedTurns, observed_sdk_turns: budget.observedTurns,
 			tool_authority: authority ? "passed" : "not_verified", history_recall: recall ? "passed" : "not_verified",
@@ -194,16 +205,25 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			explicit_resets: resets, http_attempts: "unmeasured", report_publication_failures: 0 };
 		// Fixed statuses/counts only: never persist errors, nonce, account or SDK payloads here.
 		const publicationFailed = () => { report.status = "failed"; report.category = "reporting"; report.report_publication_failures++; };
-		try { await writeFile(join(config.stateRoot, "pilot-result.json"), JSON.stringify(report) + "\n", { mode: 0o600, flag: "wx" }); }
-		catch { publicationFailed(); }
+		const publicationOperations = new PilotOperations(Math.min(deadlineMs, 5_000), () => {});
+		const artifact = new OwnedPilotFile(join(config.stateRoot, "pilot-result.json"));
+		try { await publicationOperations.wait(() => artifact.write(JSON.stringify(report) + "\n", publicationOperations)); }
+		catch {
+			publicationFailed();
+			// The channel is already failed. Retain cleanup of late creation or
+			// writes without blocking the remaining reporting channels.
+			void artifact.cleanup().catch(() => { report.status = "failed"; report.category = "reporting"; });
+		} finally { publicationOperations.stop(); }
 		// Cancellation can arrive during the awaited artifact write. Reconcile
 		// before ending the cancellable phase and publishing subsequent copies.
+		// Checking the clock also fences a delayed timer callback.
+		void operations?.expired;
 		if (abortFailed) { report.query_cleanup = "failed"; category = "cleanup"; }
 		if (category !== "none") {
 			report.status = "failed";
 			if (report.report_publication_failures === 0) report.category = category;
 		}
-		running = false;
+		operations?.stop(); running = false;
 		// Each channel is independent: a failed artifact must not suppress the
 		// canonical entry, displayed status or event. Later channels observe
 		// earlier publication failures; this is not an atomic multi-channel commit.
@@ -229,6 +249,8 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 		handler: async (args, ctx) => {
 			if (attempted) throw new Error("Claude SDK pilot attempt already consumed");
 			attempted = true; running = true; context = ctx;
+			const attempt = new PilotOperations(deadlineMs, () => fail("deadline"));
+			operations = attempt;
 			let releaseSetup!: () => void;
 			const setup = new Promise<void>(resolve => { releaseSetup = resolve; });
 			let work = Promise.resolve();
@@ -238,7 +260,7 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			void done.catch(() => { fail("cleanup"); running = false; });
 			let claimed = false;
 			try {
-				await claimPilotAttempt(config);
+				await attempt.wait(() => claimPilotAttempt(config));
 				claimed = true;
 				if (category !== "none") throw new Error("Pilot configuration refused");
 				if (args.trim() !== "--exclude claude-7" || ctx.model?.provider !== "claude-sdk" || !ctx.isIdle() || ctx.hasPendingMessages() ||
@@ -248,12 +270,10 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 				if (!activeTools.includes("read") || !activeTools.includes("write")) throw new Error("Pilot configuration refused");
 				nonce = randomBytes(24).toString("hex");
 				fixture = join(config.stateRoot, "pilot-fixture.txt");
-				const file = await open(fixture, "wx", 0o600);
-				ownsFixture = true;
-				try { await file.writeFile(nonce); } finally { await file.close(); }
+				fixtureFile = new OwnedPilotFile(fixture);
+				await attempt.wait(() => fixtureFile!.write(nonce, attempt));
 				if (category !== "none") throw new Error("Pilot configuration refused");
 				pi.setThinkingLevel("off");
-				timer = setTimeout(() => fail("deadline"), deadlineMs);
 				// Return the slash command before entering another prompt; never await a nested prompt.
 				work = new Promise<void>(resolve => setImmediate(resolve)).then(() => run(ctx));
 			} catch {
@@ -261,6 +281,7 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 				// Only the latch owner may publish this attempt. A reload refusal
 				// must not replace an earlier report or remove its fixture.
 				if (claimed) await finish();
+				else attempt.stop();
 				running = false;
 				throw new Error("Claude SDK pilot configuration refused; attempt consumed");
 			} finally { releaseSetup(); }
