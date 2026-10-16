@@ -31,7 +31,7 @@
 	"scripts": {
 		"typecheck": "tsc --noEmit",
 		"test": "vitest run",
-		"check": "npm run typecheck && npm run test",
+		"check": "npm run typecheck && npm run test --",
 		"eval": "node evals/runner/run.ts",
 		"eval:compare": "EVAL_MODE=compare node evals/runner/run.ts"
 	},
