@@ -7,17 +7,31 @@ export default async function claudeSdk(pi: ExtensionAPI): Promise<void> {
 	if (!config) return;
 	const { createClaudeSdkRuntime } = await import("./provider.ts");
 	const replayProtection = new Set<string>();
-	let runtime = createClaudeSdkRuntime(config, { replayProtection });
+	const pilot = config.pilot ? new (await import("./pilot-budget.ts")).PilotQueryBudget() : undefined;
+	let runtime = createClaudeSdkRuntime(config, { replayProtection, pilot });
 	pi.registerProvider(runtime.provider);
-	// Registering is side-effect free. Real resources start at the first model request.
-	const reset = async () => {
-		await runtime.close();
-		runtime = createClaudeSdkRuntime(config, { replayProtection });
-		pi.registerProvider(runtime.provider);
+	let terminal = false;
+	let transitions: Promise<void> = Promise.resolve();
+	const reset = () => {
+		const operation = transitions.then(async () => {
+			if (terminal) throw new Error("Claude SDK lifecycle closed");
+			await runtime.close();
+			runtime = createClaudeSdkRuntime(config, { replayProtection, pilot });
+			pi.registerProvider(runtime.provider);
+		});
+		transitions = operation.catch(() => { terminal = true; pilot?.close(); });
+		return operation;
 	};
-	pi.on("session_shutdown", async () => { await runtime.close(); });
+	const close = async () => { terminal = true; await transitions; await runtime.close(); };
+	const protocol = pilot ? (await import("./pilot.ts")).registerPilot(pi, config, pilot, reset, close) : undefined;
+	pi.on("session_shutdown", async () => {
+		protocol?.cancel(); pilot?.close();
+		const outcomes = await Promise.allSettled([close(), protocol?.done()]);
+		if (outcomes.some(result => result.status === "rejected")) throw new Error("Claude SDK lifecycle cleanup failed");
+	});
 	pi.on("session_start", reset);
-	pi.on("session_compact", reset);
-	pi.on("session_tree", reset);
-	pi.on("model_select", reset);
+	const changed = async () => { protocol?.cancel(); await reset(); };
+	pi.on("session_compact", changed);
+	pi.on("session_tree", changed);
+	pi.on("model_select", changed);
 }

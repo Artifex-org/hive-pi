@@ -75,9 +75,22 @@ beforeEach(() => {
 
 afterEach(() => {
 	process.env = { ...savedEnv };
+	vi.unstubAllEnvs();
 });
 
 describe("the automatic path", () => {
+	it("keeps commands and the original prompt but skips automatic pilot inference", async () => {
+		vi.stubEnv("HIVE_CLAUDE_SDK_PILOT", "1");
+		brieferReturns(); brief(pi.api);
+		await pi.runCommand("brief", "status");
+		const results = await pi.emit({ type: "before_agent_start", prompt: TASK });
+		expect(results.every(result => result === undefined)).toBe(true);
+		expect(runBriefer).not.toHaveBeenCalled();
+		vi.stubEnv("HIVE_CLAUDE_SDK_PILOT", "0");
+		await pi.emit({ type: "before_agent_start", prompt: TASK });
+		expect(runBriefer).toHaveBeenCalledTimes(1);
+	});
+
 	it("injects a brief before the first task-like turn", async () => {
 		brieferReturns();
 		brief(pi.api);

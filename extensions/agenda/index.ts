@@ -148,6 +148,7 @@ import { DurableRunRegistry, type DurableRunResult } from "./run-registry.ts";
 import { nodeResultText, pageText, renderRunResults, RESULT_PAGE_CHARS, selectableNodes } from "./run-output.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
 import { exposureFor, LOAD_TOOL } from "../loadout/policy.ts";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 
 /**
  * Set in a spawned worker so a child never re-enters its own loop. Read once at
@@ -606,7 +607,7 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		const activeRecap = liveRecap(asksQuestion);
-		const changedTranscript = transcript.length >= MIN_TRANSCRIPT_CHARS && transcript !== lastRecapTail;
+		const changedTranscript = !isSdkPilotEnv(process.env) && transcript.length >= MIN_TRANSCRIPT_CHARS && transcript !== lastRecapTail;
 		// Even an identical settle invalidates the old status revision. Queue
 		// the latest context whenever that happens; reset the attempted tail so
 		// a discarded result cannot permanently suppress the same transcript.

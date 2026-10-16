@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -133,6 +134,8 @@ export interface OneShotOptions {
  * different — and unbounded — question from the one being asked.
  */
 export function runOneShot(options: OneShotOptions): Promise<OneShotResult> {
+	if (isSdkPilotEnv(process.env)) return Promise.resolve({ text: "", tokens: 0,
+		usage: emptyUsage(), exitCode: 1, timedOut: false, stderr: "Helper inference disabled for bounded SDK pilot" });
 	const args = ["--mode", "json", "-p", "--no-session", "--no-tools"];
 	// A Claude helper's one-shot reads the LEASED store as its agent dir (the
 	// only one Hive's node accepts), so the no-server mirror is not available —

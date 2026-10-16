@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "./claude-sdk-test-deferred.ts";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { createModels, normalizeContext, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
@@ -505,6 +506,67 @@ describe("stream and lifecycle edge cases", () => {
 		const outputs = await Promise.all([provider.streamSimple(model, context()).result(), provider.streamSimple(model, context()).result()]);
 		expect(outputs.map(output => output.stopReason)).toEqual(["stop", "stop"]);
 		expect(requests[0].options.env!.HOME).not.toBe(requests[1].options.env!.HOME);
+	});
+	it("claims an anonymous continuation before admission so a loser cannot dispose it", async () => {
+		const admission = deferred(), admitted = deferred();
+		const sdk = deferred(), continuing = deferred();
+		const thirdLease = deferred();
+		const originalGet = LeaseManager.prototype.get; let gets = 0;
+		const get = vi.spyOn(LeaseManager.prototype, "get").mockImplementation(function (this: LeaseManager, ...args) {
+			if (++gets === 3) thirdLease.resolve();
+			return originalGet.apply(this, args);
+		});
+		const close = vi.fn(() => sdk.resolve()); let leases = 0;
+		const stable = lease();
+		const f = await fixture(() => ({ close, [Symbol.asyncIterator]: () => (async function* () {
+			yield* tools(["owned-call"]); continuing.resolve(); await sdk.promise; yield* text("owned continuation");
+		})() }), vi.fn(async () => {
+			if (++leases > 1) { admitted.resolve(); await admission.promise; }
+			return stable;
+		}));
+		let winner: Promise<AssistantMessage> | undefined;
+		try {
+			const ctx = context(), first = await f.provider.streamSimple(f.model, ctx).result();
+			expect(first.stopReason).toBe("toolUse"); ctx.messages.push(first, ...correlated(first));
+			winner = f.provider.streamSimple(f.model, ctx).result(); await admitted.promise;
+			const loser = f.provider.streamSimple(f.model, ctx).result();
+			// Observing either the rejection or an incorrect third admission is
+			// deterministic; the old race cannot hide behind a pending lease.
+			const observed = await Promise.race([loser.then(output => ({ kind: "rejected", output })),
+				thirdLease.promise.then(() => ({ kind: "admission", output: undefined }))]);
+			expect(observed.kind).toBe("rejected");
+			expect(observed.output).toMatchObject({ stopReason: "error", errorMessage: "SDK continuation already active" });
+			expect(gets).toBe(2); expect(close).not.toHaveBeenCalled();
+			admission.resolve(); await continuing.promise;
+			expect(close).not.toHaveBeenCalled();
+			sdk.resolve(); expect((await winner).stopReason).toBe("stop");
+			expect(close).toHaveBeenCalledOnce();
+		} finally { admission.resolve(); sdk.resolve(); await winner; get.mockRestore(); }
+	});
+	it("keeps an owned parked continuation alive while admission crosses its former timeout", async () => {
+		vi.useFakeTimers();
+		const admission = deferred(), admitted = deferred();
+		const close = vi.fn(); let leases = 0, queries = 0;
+		try {
+			const stable = lease();
+			const f = await fixture(() => {
+				queries++;
+				return { close, [Symbol.asyncIterator]: () => (async function* () {
+					yield* tools(["expiring-call"]); yield* text("continued");
+				})() };
+			}, vi.fn(async () => {
+				if (++leases > 1) { admitted.resolve(); await admission.promise; }
+				return stable;
+			}));
+			const ctx = context(), first = await f.provider.streamSimple(f.model, ctx).result();
+			expect(first.stopReason).toBe("toolUse"); ctx.messages.push(first, ...correlated(first));
+			await vi.advanceTimersByTimeAsync(299_000);
+			const continuation = f.provider.streamSimple(f.model, ctx).result(); await admitted.promise;
+			await vi.advanceTimersByTimeAsync(1_001);
+			expect(close).not.toHaveBeenCalled();
+			admission.resolve(); expect((await continuation).stopReason).toBe("stop");
+			expect(queries).toBe(1); expect(close).toHaveBeenCalledOnce();
+		} finally { admission.resolve(); vi.useRealTimers(); }
 	});
 	it("rebuilds a completed tool batch under a rotated account without reissuing the calls", async () => {
 		let account = "account-a"; const seen: unknown[] = []; const closes = vi.fn(); let queries = 0;

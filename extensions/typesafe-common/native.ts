@@ -4,6 +4,7 @@
 import type { ClassifierApi, ClassifierModel, ClassifierQuestion, ClassifierResult, JsonObject, JsonValue } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { redact, withTimeout } from "../hive-common/http.ts";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 import {
 	decodeEnvelope, validateRequest,
 	type AnswersFor, type ClassifierClient, type JevState, type Outcome, type Question,
@@ -18,10 +19,10 @@ export interface ClassifierRegistry {
 export function nativeClassifier(config: TypesafeConfig, registry: () => ClassifierRegistry | null, currentSignal: () => AbortSignal | undefined = () => undefined): ClassifierClient {
 	return {
 		get live() {
-			return config.enabled && config.endpoint === DEFAULT_ENDPOINT && registry()?.findOfType("classifier", config.provider, config.model) !== undefined;
+			return !isSdkPilotEnv(process.env) && config.enabled && config.endpoint === DEFAULT_ENDPOINT && registry()?.findOfType("classifier", config.provider, config.model) !== undefined;
 		},
 		async ask<QS extends Record<string, Question>>(state: JevState, questions: QS): Promise<Outcome<AnswersFor<QS>>> {
-			if (!config.enabled) return { kind: "disabled", reason: "config" };
+			if (isSdkPilotEnv(process.env) || !config.enabled) return { kind: "disabled", reason: "config" };
 			// Custom endpoints must be configured on the native provider. Never
 			// silently send a formerly proxy-bound transcript to the default host.
 			if (config.endpoint !== DEFAULT_ENDPOINT) {

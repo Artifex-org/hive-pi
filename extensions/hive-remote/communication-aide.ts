@@ -3,6 +3,7 @@
  * Originals are custom entries (outside LLM context); only escalations and an
  * explicitly requested digest enter the lead's context. */
 import { randomUUID } from "node:crypto";
+import { assertHelperInferenceAllowed, isSdkPilotEnv } from "../fast/policy.ts";
 import { existsSync } from "node:fs";
 import { Type } from "typebox";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -49,6 +50,7 @@ export const aideDeps: AideDeps = {
 		return Boolean(file && existsSync(file));
 	},
 	async select(ctx, tier) {
+		assertHelperInferenceAllowed(process.env);
 		const registry = ctx.modelRegistry;
 		const auth = resolveAuth();
 		if (!auth) throw new Error("Log in to Hive to select the aide's low/medium catalog model.");
@@ -62,6 +64,7 @@ export const aideDeps: AideDeps = {
 		return spec;
 	},
 	async complete(ctx, spec, request, signal) {
+		assertHelperInferenceAllowed(process.env);
 		const registry = ctx.modelRegistry;
 		const at = spec.indexOf("/");
 		const model = registry.find(spec.slice(0, at), spec.slice(at + 1));
@@ -185,7 +188,7 @@ export function registerCommunicationAide(pi: ExtensionAPI, deliver: (notice: No
 		paint(); return true;
 	};
 	async function run() {
-		if (!ctx || !settings.enabled || active || !pending.length) return;
+		if (isSdkPilotEnv(process.env) || !ctx || !settings.enabled || active || !pending.length) return;
 		if (batches >= MAX_BATCHES || cost >= MAX_COST) { failOpen("budget reached; mode disabled"); return; }
 		let chars = 0;
 		const batch: Item[] = [];
@@ -287,6 +290,7 @@ export function registerCommunicationAide(pi: ExtensionAPI, deliver: (notice: No
 		ctx = next;
 		if (action === "on") {
 			if (next.mode !== "tui" && next.mode !== "rpc") throw new Error("Orchestrator mode needs a persistent TUI/RPC session.");
+			assertHelperInferenceAllowed(process.env);
 			if (process.env.PI_AGENDA_WORKER === "1") throw new Error("A delegated worker cannot start its own aide.");
 			const epoch = generation;
 			const model = await deps.select(next, tier);
@@ -361,6 +365,9 @@ export function registerCommunicationAide(pi: ExtensionAPI, deliver: (notice: No
 	});
 	return {
 		receive(id: string, message: TeamMessage): boolean {
+			// Decline interception even when enabled settings were restored. The
+			// normal delivery seam must retain responsibility during the pilot.
+			if (isSdkPilotEnv(process.env)) return false;
 			if (!settings.enabled || !ctx || message.category !== "message" || !message.fromSessionID) return false;
 			if (!deps.archiveReady(ctx)) return false;
 			const busy = aideUsageMailbox().requests.get(ctx.sessionManager.getSessionId());

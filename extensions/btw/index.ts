@@ -28,6 +28,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { assertHelperInferenceAllowed } from "../fast/policy.ts";
 
 import { buildSessionContext, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -125,6 +126,7 @@ async function defaultComplete(
 	request: SideRequest,
 	timeoutMs: number,
 ): Promise<AssistantMessage> {
+	assertHelperInferenceAllowed(process.env);
 	// Read off ctx BEFORE the first await: it goes stale the moment the session is
 	// replaced, and this call is the long one (advisor/index.ts, agenda/goal.ts).
 	const registry = ctx.modelRegistry;

@@ -34,6 +34,7 @@ import { laneInstruction, laneIsRunnable, laneTools, mergeDrafts, planLanes, typ
 import { collectProvenance } from "./provenance.ts";
 import { resolveBriefModel, type BriefModelHost } from "./model.ts";
 import { ticketKeys } from "./detect.ts";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 
 export const BRIEFER_ROLE = "briefer";
 
@@ -119,6 +120,7 @@ export async function runBriefer(options: RunBriefOptions): Promise<BriefRunResu
 		timedOut: lanes.length > 0 && lanes.every((l) => l.timedOut),
 	});
 
+	if (isSdkPilotEnv(process.env)) return empty("Helper inference disabled for bounded SDK pilot");
 	const { agents } = discoverAgentsWith(options.cwd, "user", options.roles);
 	const role = resolveAgent(agents, BRIEFER_ROLE);
 	if (!role) return empty(`role "${BRIEFER_ROLE}" is not installed`);

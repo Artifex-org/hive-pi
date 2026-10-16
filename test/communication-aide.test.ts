@@ -42,6 +42,35 @@ afterEach(() => {
 });
 
 describe("orchestrator communications aide", () => {
+	it("declines pilot interception after restoring enabled settings, leaving normal delivery responsible", async () => {
+		vi.stubEnv("HIVE_CLAUDE_SDK_PILOT", "0");
+		const { fake, aide, select, requests } = setup();
+		const manager = SessionManager.inMemory();
+		vi.spyOn(fake.api, "appendEntry").mockImplementation((type, data) => { manager.appendCustomEntry(type, data); });
+		await fake.emit({ type: "session_start" }, { sessionManager: manager });
+		await fake.runCommand("orchestrator", "on", { sessionManager: manager });
+		vi.stubEnv("HIVE_CLAUDE_SDK_PILOT", "1");
+		await fake.emit({ type: "session_tree" }, { sessionManager: manager });
+		await fake.runCommand("orchestrator", "status", { sessionManager: manager });
+		expect(fake.notifications.at(-1)?.message).toContain("Enabled");
+		select.mockClear();
+		expect(aide.receive("must-deliver-normally", message("Worker blocked"))).toBe(false);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(select).not.toHaveBeenCalled(); expect(requests).toEqual([]);
+		await fake.emit({ type: "session_shutdown" }, { sessionManager: manager });
+	});
+	it("retains the aide tool but refuses pilot activation before selecting credentials or inferring", async () => {
+		vi.stubEnv("HIVE_CLAUDE_SDK_PILOT", "1");
+		const { fake, aide, select, requests } = setup();
+		await fake.emit({ type: "session_start" });
+		expect(fake.tools.some(t => t.name === "orchestrator_mode")).toBe(true);
+		await expect(fake.runCommand("orchestrator", "on")).rejects.toThrow("Helper inference disabled for bounded SDK pilot");
+		expect(select).not.toHaveBeenCalled(); expect(requests).toEqual([]);
+		expect(aide.receive("offline", message())).toBe(false);
+		await fake.runCommand("orchestrator", "status");
+		await fake.emit({ type: "session_shutdown" });
+	});
+
 	it("does not activate after the tool is canceled during catalog selection", async () => {
 		let resolve!: (model: string) => void;
 		const { fake, aide, select, requests } = setup();
