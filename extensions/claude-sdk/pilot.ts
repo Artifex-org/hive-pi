@@ -10,6 +10,7 @@ import type { LaunchConfig } from "./runtime.ts";
 
 const DENIED = "Claude SDK pilot write denied";
 const WRITE = "SDK_PILOT_WRITE_MUST_BE_BLOCKED";
+const SETTLED = "HIVE_SDK_PILOT_SETTLED:";
 type Stage = "authority" | "recall";
 type Category = "none" | "configuration" | "protocol" | "deadline" | "cleanup" | "reporting";
 export interface PilotReport {
@@ -40,6 +41,7 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 	let attempted = false;
 	let running = false;
 	let waiting: Waiting | undefined;
+	let settlement: (Pick<Waiting, "session" | "leaf"> & { token: string; resolve: () => void; reject: () => void }) | undefined;
 	let context: ExtensionContext | undefined;
 	let fixture = "";
 	let ownsFixture = false;
@@ -56,12 +58,25 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 	const abort = () => { try { context?.abort(); } catch { abortFailed = true; } };
 	const fail = (reason: Category = "protocol") => {
 		if (category === "none") category = reason;
-		budget.close(); waiting?.reject(); abort();
+		budget.close(); waiting?.reject(); settlement?.reject(); settlement = undefined; abort();
 	};
-	const sameBranch = (ctx: ExtensionContext, owned: Waiting) => ctx.sessionManager.getSessionId() === owned.session &&
+	const sameBranch = (ctx: ExtensionContext, owned: Pick<Waiting, "session" | "leaf">) => ctx.sessionManager.getSessionId() === owned.session &&
 		(owned.leaf === null || ctx.sessionManager.getBranch().some(entry => entry.id === owned.leaf));
 
-	pi.on("input", event => {
+	pi.on("input", (event, ctx) => {
+		// Core defers extension input until every settlement listener returns.
+		// Consume our acknowledgment before auth/model execution, including late
+		// controls after cancellation or reload. Never append it to history.
+		if (event.source === "extension" && event.text.startsWith(SETTLED)) {
+			const owned = settlement;
+			if (!running || !owned || event.text !== owned.token || !sameBranch(ctx, owned) ||
+				ctx.model?.provider !== "claude-sdk" || !isDeepStrictEqual(pi.getActiveTools(), activeTools)) {
+				if (running) fail();
+				return { action: "handled" };
+			}
+			settlement = undefined; owned.resolve();
+			return { action: "handled" };
+		}
 		if (running && event.text !== waiting?.prompt) { fail(); return { action: "handled" }; }
 	});
 	pi.on("session_before_compact", () => {
@@ -109,6 +124,17 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			pi.sendUserMessage(prompt);
 		});
 	}
+	function afterSettlement(ctx: ExtensionContext): Promise<void> {
+		return new Promise((resolve, reject) => {
+			if (waiting || settlement || category !== "none") { reject(new Error("Pilot protocol failed")); return; }
+			const token = SETTLED + randomBytes(16).toString("hex");
+			settlement = { token, session: ctx.sessionManager.getSessionId(), leaf: ctx.sessionManager.getLeafId(),
+				resolve, reject: () => reject(new Error("Pilot protocol failed")) };
+			// This void API is not the acknowledgment: the handled input is.
+			// A failed/intercepted delivery remains bounded by the pilot deadline.
+			pi.sendUserMessage(token);
+		});
+	}
 	function verifyAuthority(history: Messages): void {
 		const users = history.filter(message => message.role === "user");
 		const assistants = history.filter(message => message.role === "assistant");
@@ -134,9 +160,8 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 				"and write with exactly {path: " + JSON.stringify(fixture) + ", content: " + JSON.stringify(WRITE) + "}.",
 				"Use these two tools exactly once each, and no others. After their results, reply exactly ACK.",
 			].join("\n"), ctx);
-			// The correlated settlement is the completion barrier. Also wait for
-			// its remaining listeners before dispatching a new prompt.
-			await ctx.waitForIdle();
+			// Correlate completion, then acknowledge core's post-listener queue.
+			await afterSettlement(ctx);
 			verifyAuthority(first);
 			if (await readFile(fixture, "utf8") !== nonce) throw new Error("Pilot protocol failed");
 			authority = true;
@@ -145,7 +170,7 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 			const second = await dispatch("recall",
 				"From the earlier successful read result in this conversation, recall the fixture's exact contents. " +
 				"Reply only with those contents. Do not call any tool.", ctx);
-			await ctx.waitForIdle();
+			await afterSettlement(ctx);
 			const assistants = second.filter(message => message.role === "assistant");
 			if (second.filter(message => message.role === "user").length !== 1 || assistants.length !== 1 ||
 				assistants[0].stopReason !== "stop" || assistants[0].content.some(block => block.type === "toolCall") ||
@@ -171,13 +196,31 @@ export function registerPilot(pi: ExtensionAPI, config: LaunchConfig, budget: Pi
 		const publicationFailed = () => { report.status = "failed"; report.category = "reporting"; report.report_publication_failures++; };
 		try { await writeFile(join(config.stateRoot, "pilot-result.json"), JSON.stringify(report) + "\n", { mode: 0o600, flag: "wx" }); }
 		catch { publicationFailed(); }
+		// Cancellation can arrive during the awaited artifact write. Reconcile
+		// before ending the cancellable phase and publishing subsequent copies.
+		if (abortFailed) { report.query_cleanup = "failed"; category = "cleanup"; }
+		if (category !== "none") {
+			report.status = "failed";
+			if (report.report_publication_failures === 0) report.category = category;
+		}
 		running = false;
 		// Each channel is independent: a failed artifact must not suppress the
 		// canonical entry, displayed status or event. Later channels observe
 		// earlier publication failures; this is not an atomic multi-channel commit.
 		for (const publish of [
 			() => pi.appendEntry("claude-sdk-pilot-result", report),
-			() => pi.sendMessage({ customType: "claude-sdk-pilot-result", content: JSON.stringify(report), display: true }, { triggerTurn: false }),
+			() => {
+				if (!context) throw new Error("Pilot reporting context unavailable");
+				const before = new Set(context.sessionManager.getBranch().map(entry => entry.id));
+				const content = JSON.stringify(report);
+				pi.sendMessage({ customType: "claude-sdk-pilot-result", content, display: true }, { triggerTurn: false });
+				// The void API hides rejected delivery promises. Confirm the actual
+				// canonical message insertion, not UI rendering or API invocation.
+				if (!context.sessionManager.getBranch().some(entry => !before.has(entry.id) && entry.type === "custom_message" &&
+					entry.customType === "claude-sdk-pilot-result" && entry.content === content && entry.display)) {
+					throw new Error("Pilot report message not recorded");
+				}
+			},
 			() => pi.events.emit("hive.claude-sdk-pilot.result", report),
 		]) { try { publish(); } catch { publicationFailed(); } }
 	}

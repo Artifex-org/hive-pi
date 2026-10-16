@@ -13,9 +13,14 @@ root for the owned runtime; deleting it is not a supported retry mechanism.
 
 The first SDK query reserves two agentic turns. Normal Pi filesystem tools must
 produce a successful nonce read and an actual guard-denied write, with matching
-canonical tool results and an unchanged fixture. Correlated `agent_settled`,
-followed by completion of its listeners, is the barrier. After strict runtime
-reset, one fresh SDK query reserves the final turn and recalls the nonce from
+canonical tool results and an unchanged fixture. After correlated `agent_settled`,
+a private extension input is queued: pinned Pi defers it until every settlement
+listener returns. The pilot acknowledges and consumes it before authentication,
+history insertion or model execution. The idle flag alone is not a barrier.
+Intercepted or failed acknowledgments cannot advance the protocol; cancellation
+or the deadline closes the attempt. Late reserved controls after reload are
+consumed without inference. After strict runtime reset, one fresh SDK query
+reserves the final turn and recalls the nonce from
 canonical history without tools. Neither the recall prompt nor report contains
 the nonce. Query output is capped at 512 tokens.
 
@@ -40,8 +45,14 @@ reload cannot publish over an earlier attempt's report.
 Cleanup and reporting are separate outcomes. Reports contain fixed categories,
 statuses and counts only, including unmeasured HTTP attempts. Artifact, canonical
 entry, displayed status and event publication are attempted independently;
-publication failure marks later reports failed and is counted. This is not an
-atomic multi-channel commit. Missing or incomplete evidence is not success.
+detected publication failure marks later reports failed and is counted.
+Cancellation during the awaited artifact write is reconciled before subsequent
+channels; an earlier stored copy can therefore precede a later failed result. The void
+message API is checked against actual canonical custom-message insertion, not
+invocation alone; this does not acknowledge UI rendering or post-insertion
+listeners. This is not an atomic multi-channel commit. Earlier artifacts can
+precede a later channel's failure; consume the final event as well. Missing or
+incomplete evidence is not success.
 
 Offline integration tests use real AgentSession, builtin filesystem tools and
 MCP transport, with a fake SDK, lease and CLI and an isolated extension loader.
