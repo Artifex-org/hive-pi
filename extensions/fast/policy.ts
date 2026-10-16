@@ -47,6 +47,16 @@ export interface FastModel {
 	api: string;
 }
 
+/** One-way pilot restriction, not worker identity or SDK admission. */
+export function isSdkPilotEnv(env: NodeJS.ProcessEnv): boolean {
+	return env.HIVE_CLAUDE_SDK_PILOT === "1";
+}
+
+/** Refuse optional model work before credential lookup or spawning. */
+export function assertHelperInferenceAllowed(env: NodeJS.ProcessEnv): void {
+	if (isSdkPilotEnv(env)) throw new Error("Helper inference disabled for bounded SDK pilot");
+}
+
 /**
  * Whether this process is a delegated WORKER: a subagent, a briefer, or a
  * one-shot helper (recap, drift check, judge, advisor-watch). Every spawner in

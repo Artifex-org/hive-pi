@@ -8,8 +8,9 @@ import { createAssistantMessageEventStream, createProvider, collapseSystemMessag
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
+import type { PilotQueryBudget } from "./pilot-budget.ts";
 import { EventConverter, emptyUsage, SdkAssistantFailure } from "./events.ts";
-import { fingerprint, seedHistory, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
+import { assertSettledHistory, fingerprint, seedHistory, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
 import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
 
@@ -23,6 +24,8 @@ export interface Dependencies {
 	now?: () => number;
 	/** Extension-owned across disposable SDK runtimes; contains hashes, not transcripts. */
 	replayProtection?: Set<string>;
+	/** Restrictive pilot policy; ordinary SDK requests have no pilot override. */
+	pilot?: PilotQueryBudget;
 }
 interface Parked {
 	key: string; session?: string; model: string; prefix: Message[]; expected: Message[];
@@ -41,7 +44,7 @@ export function claudeSdkModels(): Model<string>[] {
 
 export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies = {}): { provider: Provider; close: () => Promise<void> } {
 	const now = deps.now ?? Date.now;
-	const leases = new LeaseManager(deps.lease ?? hiveLease(config), now);
+	const leases = new LeaseManager(deps.lease ?? hiveLease(config, fetch, () => deps.pilot?.excludedAccounts ?? []), now);
 	const states = new Map<string, Parked>();
 	const reservations = new Set<string>();
 	const disposals = new Set<Promise<void>>();
@@ -51,6 +54,12 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 	const ambiguous = deps.replayProtection ?? new Set<string>();
 	const shutdown = new AbortController();
 	let closed = false;
+	async function getLease(signal: AbortSignal): Promise<AccessLease> {
+		deps.pilot?.assertRequestAllowed();
+		const lease = await leases.get(signal);
+		deps.pilot?.checkAccount({ credential: lease.credential, slot: lease.slot });
+		return lease;
+	}
 	async function cleanupResources(resources: Pick<Parked, "controller" | "dir" | "processes"> & Partial<Pick<Parked, "bridge" | "query">>): Promise<void> {
 		let failed = false;
 		// Every resource gets its cleanup attempt, even when an earlier owner fails.
@@ -88,6 +97,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 			let state: Parked | undefined;
 			let reservation: string | undefined;
 			let sdkStarted = false;
+			let pilotRequest = false;
 			let attemptedPrefix: Message[] | undefined;
 			const signal = AbortSignal.any([options.signal ?? new AbortController().signal, shutdown.signal]);
 			let abortParked: (() => void) | undefined;
@@ -123,20 +133,16 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				if (reservations.has(key)) throw new Error("Concurrent Claude SDK requests require isolated sessions");
 				reservations.add(key);
 				reservation = key;
-				const lease = await leases.get(signal);
 				const candidates = [...states.values()].filter(s => s.session === options.sessionId &&
 					s.model === model.id && s.expected.length > 0 && isDeepStrictEqual(context.messages.slice(0, s.expected.length), s.expected));
 				if (candidates.length > 1) throw new Error("Ambiguous SDK tool continuation");
 				if (candidates[0]?.busy) throw new Error("SDK continuation already active");
 				state = candidates[0];
-				// Same named session but edited/compacted/forked transcript: discard SDK cache, never Pi history.
-				for (const old of [...states.values()]) if (old !== state && options.sessionId && old.session === options.sessionId) await dispose(old);
+				const suffix = state ? context.messages.slice(state.expected.length) : [];
+				let resultEnd = 0;
+				while (suffix[resultEnd]?.role === "toolResult") resultEnd++;
+				const results = suffix.slice(0, resultEnd);
 				if (state) {
-					if (state.busy) throw new Error("SDK continuation already active");
-					const suffix = context.messages.slice(state.expected.length);
-					let resultEnd = 0;
-					while (suffix[resultEnd]?.role === "toolResult") resultEnd++;
-					const results = suffix.slice(0, resultEnd);
 					const calls = state.expected.at(-1);
 					if (calls?.role !== "assistant") throw new Error("Invalid parked SDK state");
 					const pending = calls.content.filter(block => block.type === "toolCall");
@@ -144,12 +150,31 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						pending.some(call => results.filter(r => r.role === "toolResult" && r.toolCallId === call.id && r.toolName === call.name).length !== 1)) {
 						throw new Error("Missing correlated Pi tool results; reconcile before continuing");
 					}
+				}
+				assertSettledHistory(context.messages);
+				if (!state && !["user", "toolResult"].includes(context.messages.at(-1)?.role ?? "")) {
+					throw new Error("Claude SDK request requires a user message or correlated tool results");
+				}
+				deps.pilot?.beginRequest(state !== undefined);
+				pilotRequest = deps.pilot !== undefined;
+				// Claim the parked state before admission yields. The losing request
+				// rejects before assigning state; neither it nor the parking timer
+				// may dispose this request's active continuation.
+				if (state) {
+					state.busy = true;
+					clearTimeout(state.timer);
+					state.releaseAbort?.(); state.releaseAbort = undefined;
+				}
+				const lease = await getLease(signal);
+				signal.throwIfAborted();
+				// Same named session but edited/compacted/forked transcript: discard SDK cache, never Pi history.
+				for (const old of [...states.values()]) if (old !== state && options.sessionId && old.session === options.sessionId) await dispose(old);
+				if (state) {
 					// Token rotation/account changes cannot carry the previous CLI state across the boundary.
 					if (!isDeepStrictEqual(queryOptions, state.queryOptions) || resultEnd !== suffix.length || lease.credential !== state.lease.credential || lease.slot !== state.lease.slot || lease.access_token !== state.lease.access_token ||
 						!isDeepStrictEqual(tools, state.bridge.toolNames.map(name => getCurrentTools(state!.prefix).find(t => t.name === name)))) {
 						await dispose(state); state = undefined;
 					} else {
-						clearTimeout(state.timer); state.releaseAbort?.(); state.releaseAbort = undefined; state.busy = true;
 						attemptedPrefix = structuredClone(context.messages);
 						for (const result of results) if (result.role === "toolResult") state.bridge.complete(result);
 						state.prefix = structuredClone(context.messages);
@@ -183,7 +208,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 							bridge: bridge.config, toolNames: bridge.toolNames });
 						sdkOptions.spawnClaudeCodeProcess = processes.spawn;
 						sdkOptions.resume = resume;
-						sdkOptions.env!.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(queryOptions.maxTokens);
+						sdkOptions.env!.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(deps.pilot ? Math.min(queryOptions.maxTokens, deps.pilot.maxOutputTokens) : queryOptions.maxTokens);
 						Object.assign(sdkOptions, reasoning);
 						async function* prompt(): AsyncGenerator<SDKUserMessage> {
 							yield input;
@@ -193,6 +218,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						}
 						signal.throwIfAborted();
 						attemptedPrefix = structuredClone(context.messages);
+						if (deps.pilot) sdkOptions.maxTurns = deps.pilot.reserveQuery();
 						sdkStarted = true;
 						query = deps.query ? deps.query({ prompt: prompt(), options: sdkOptions }) :
 							(await import("@anthropic-ai/claude-agent-sdk")).query({ prompt: prompt(), options: sdkOptions });
@@ -220,6 +246,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 							Promise.resolve().then(() => options.onProviderStreamEvent!(structuredClone(next.value), model)),
 							AbortSignal.any([signal, state.controller.signal]));
 						signal.throwIfAborted(); state.controller.signal.throwIfAborted();
+						if (next.value.type === "result") deps.pilot?.observeResult(next.value.num_turns, next.value.subtype === "success");
 						const action = converter.consume(next.value);
 						if (action === "tools") {
 							// Reserve the result-free attempt at handoff, across session IDs,
@@ -257,6 +284,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					(error instanceof Error ? error.message : "Claude SDK request failed");
 				events.push({ type: "error", reason: output.stopReason, error: output });
 			} finally {
+				if (pilotRequest) deps.pilot?.endRequest();
 				if (abortParked && (!state || state.busy)) signal.removeEventListener("abort", abortParked);
 				if (reservation) reservations.delete(reservation);
 				events.end();
@@ -269,7 +297,12 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 	const provider = createProvider({ id: PROVIDER_ID, name: "Claude SDK (Hive launch)", models: claudeSdkModels(),
 		auth: { apiKey: { name: "Hive access-only launch admission",
 			check: async () => closed ? undefined : { type: "api_key", source: "Hive launch (admission checked per request)" },
-			resolve: async ({ signal }) => { await leases.get(signal); return { auth: { apiKey: "hive-launch-admission" }, source: "Hive launch" }; },
+			resolve: async ({ signal }) => {
+				// Pilot auth preflight must not issue credentials before stream correlation.
+				// The real server admission check remains mandatory in getLease below.
+				if (deps.pilot) deps.pilot.assertRequestAllowed(); else await getLease(signal);
+				return { auth: { apiKey: "hive-launch-admission" }, source: "Hive launch" };
+			},
 		} }, api: { stream, streamSimple: stream } });
 	return { provider, close: () => {
 		if (closing) return closing;

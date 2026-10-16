@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertHelperInferenceAllowed, isSdkPilotEnv } from "../fast/policy.ts";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { assistantText } from "../btw/thread.ts";
@@ -29,6 +30,7 @@ export type Scanner = (ctx: ExtensionContext, request: ScanRequest, signal: Abor
 
 /** A strict cheap-lane pick; never borrow the session or delegation model. */
 export async function resolveYouShouldKnowModel(ctx: ExtensionContext) {
+	assertHelperInferenceAllowed(process.env);
 	const registry = ctx.modelRegistry;
 	let spec = process.env.PI_YOU_SHOULD_KNOW_MODEL?.trim();
 	if (!spec) {
@@ -107,7 +109,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	const save = () => pi.appendEntry(KEY, { ...state, notes: [...state.notes], seen: [...state.seen] });
 	const publishLedger = () => { if (remoteAvailable && policyReady) pi.events.emit(YSK_FINDINGS_CHANNEL, ledger.filter(x => x.serverSessionId === serverSessionId)); };
 	const supported = (ctx: ExtensionContext) => ctx.mode === "tui" || (ctx.mode === "rpc" && remoteAvailable);
-	const eligible = (ctx: ExtensionContext) => state.enabled && supported(ctx) && state.scans < cfg.maxScans;
+	const eligible = (ctx: ExtensionContext) => !isSdkPilotEnv(process.env) && state.enabled && supported(ctx) && state.scans < cfg.maxScans;
 	const paint = (ctx: ExtensionContext) => {
 		latestCtx = ctx;
 		if (!supported(ctx)) { pi.events.emit(YSK_STATE_CHANNEL, undefined); return; }

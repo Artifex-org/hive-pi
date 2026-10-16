@@ -25,6 +25,7 @@ import {
 	isTerminal,
 } from "./goal-state.ts";
 import { runOneShot, type OneShotOptions, type OneShotResult } from "./spawn.ts";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 import { parseVerdict } from "./verdict.ts";
 
 const JUDGE_TIMEOUT_MS = 60_000;
@@ -256,6 +257,7 @@ export function createGoalPolicy(hooks: GoalHooks): Policy {
 		name: "goal",
 
 		decide(context: PolicyContext): PolicyWork | null {
+			if (isSdkPilotEnv(process.env)) return null;
 			const goal = hooks.current();
 			if (!goal) return null;
 			if (goal.state !== "active") return null; // paused or terminal

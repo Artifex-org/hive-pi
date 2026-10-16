@@ -35,6 +35,18 @@ beforeEach(() => { vi.useFakeTimers(); vi.stubEnv("PI_AGENDA_WORKER", ""); vi.st
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 describe("scanner trust boundary", () => {
+	it("retains its commands but starts no pilot scan or prefilter work", async () => {
+		vi.stubEnv("HIVE_CLAUDE_SDK_PILOT", "1");
+		const { fake, scanner } = harness();
+		await fake.emit({ type: "session_start" });
+		await fake.runCommand("you-should-know", "on");
+		await prose(fake);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(scanner).not.toHaveBeenCalled();
+		await fake.runCommand("you-should-know", "status");
+		await fake.emit({ type: "session_shutdown" });
+	});
+
 	it("extracts text, never thinking or tools or failed partial replies", () => {
 		const m = reply(quote);
 		m.content.unshift({ type: "thinking", thinking: "secret" }, { type: "toolCall", id: "1", name: "bash", arguments: { command: "secret" } });

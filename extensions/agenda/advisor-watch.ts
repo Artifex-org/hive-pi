@@ -27,6 +27,7 @@ import { resolveAuth } from "../hive-common/identity.ts";
 import { atCap, record } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
 import { runOneShot } from "./spawn.ts";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 
 /** Settles between probes. Same cadence as drift — cheap enough to be routine,
  *  rare enough that a long session does not double its bill. */
@@ -149,6 +150,7 @@ export function createAdvisorWatchPolicy(hooks: AdvisorWatchHooks): Policy {
 		name: "advisor-watch",
 
 		decide(context: PolicyContext): PolicyWork | null {
+			if (isSdkPilotEnv(process.env)) return null;
 			if (!hooks.enabled()) {
 				settlesSinceProbe = 0;
 				return null;

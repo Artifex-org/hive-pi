@@ -45,6 +45,7 @@ import {
 import { HIVE_METRIC_CHANNEL, type HiveGateMetricEvent, type HiveMetricEvent } from "../hive-telemetry/types.ts";
 import { runBriefer, type BriefLaneOutcome } from "./run.ts";
 import { PI_ROLES_RUNTIME } from "../harness/roles.ts";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 
 const STATUS_KEY = "brief";
 
@@ -125,7 +126,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (!auto) return;
+		if (!auto || isSdkPilotEnv(process.env)) return;
 		const prompt = (event as { prompt?: string }).prompt ?? "";
 		const skip = suppressionReason({
 			prompt,

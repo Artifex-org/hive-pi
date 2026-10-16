@@ -9,9 +9,10 @@ import { accessLease, type AccessLease } from "./options.ts";
 import { assertTreeIdentityReadable, killTree, releaseTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 
 export const CLI_VERSION = "2.1.286";
-export interface LaunchConfig { executable: string; stateRoot: string; url: string; token: string; launch: string; cwd: string }
+export interface LaunchConfig { executable: string; stateRoot: string; url: string; token: string; launch: string; cwd: string; pilot?: boolean }
 export function launchConfig(env: NodeJS.ProcessEnv, cwd: string): LaunchConfig | undefined {
 	if (env.HIVE_CLAUDE_SDK !== "1") return undefined;
+	if (env.HIVE_CLAUDE_SDK_PILOT && !["0", "1"].includes(env.HIVE_CLAUDE_SDK_PILOT)) throw new Error("Invalid Claude SDK pilot restriction");
 	const { HIVE_CLAUDE_SDK_EXECUTABLE: executable, HIVE_CLAUDE_SDK_STATE_DIR: stateRoot,
 		HIVE_URL: url, HIVE_TOKEN: token, HIVE_LAUNCH_ID: launch } = env;
 	if (!executable || !stateRoot || !isAbsolute(executable) || !isAbsolute(stateRoot) || !isAbsolute(cwd) ||
@@ -23,14 +24,18 @@ export function launchConfig(env: NodeJS.ProcessEnv, cwd: string): LaunchConfig 
 		throw new Error("Claude SDK requires HTTPS Hive URL (or loopback)");
 	}
 	if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Invalid Hive URL");
-	return { executable, stateRoot, url: url.replace(/\/$/, ""), token, launch, cwd };
+	return { executable, stateRoot, url: url.replace(/\/$/, ""), token, launch, cwd,
+		...(env.HIVE_CLAUDE_SDK_PILOT === "1" ? { pilot: true } : {}) };
 }
 
 export type LeaseSource = (signal: AbortSignal) => Promise<AccessLease>;
 /** Every GET is independently authorized by Hive. Env availability is NOT admission. */
-export function hiveLease(config: LaunchConfig, fetcher: typeof fetch = fetch): LeaseSource {
+export function hiveLease(config: LaunchConfig, fetcher: typeof fetch = fetch,
+	excludedAccounts: () => readonly string[] = () => []): LeaseSource {
 	return async signal => {
-		const response = await fetcher(`${config.url}/api/v1/agent-launches/${encodeURIComponent(config.launch)}/claude-auth`, {
+		const url = new URL(`${config.url}/api/v1/agent-launches/${encodeURIComponent(config.launch)}/claude-auth`);
+		for (const account of excludedAccounts()) url.searchParams.append("exclude", account);
+		const response = await fetcher(url.href, {
 			method: "GET", headers: { Authorization: `Bearer ${config.token}` }, redirect: "error",
 			signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
 		});
@@ -77,13 +82,17 @@ export function cancellable<T>(promise: Promise<T>, signal: AbortSignal): Promis
 	});
 }
 
-export async function privateDirectory(root: string): Promise<string> {
+export async function validateStateRoot(root: string): Promise<void> {
 	// Do not chmod a potentially shared or attacker-owned existing directory.
 	await mkdir(root, { mode: 0o700, recursive: true });
 	const stat = await lstat(root);
 	if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o700 || stat.uid !== process.getuid?.() || await realpath(root) !== root) {
 		throw new Error("Claude SDK state root must be an owned, non-symlink 0700 directory");
 	}
+}
+
+export async function privateDirectory(root: string): Promise<string> {
+	await validateStateRoot(root);
 	return mkdtemp(join(root, "query-"));
 }
 export async function privateFile(dir: string, name: string, value: unknown): Promise<string> {

@@ -26,6 +26,7 @@ import { type GoalItem } from "./goal-state.ts";
 import { atCap, record } from "./ledger.ts";
 import type { Policy, PolicyContext, PolicyWork } from "./policy.ts";
 import { runOneShot, type OneShotOptions, type OneShotResult } from "./spawn.ts";
+import { isSdkPilotEnv } from "../fast/policy.ts";
 import { parseVerdict } from "./verdict.ts";
 
 export const DRIFT_CHECK_EVERY = 5;
@@ -213,6 +214,7 @@ export function createDriftPolicy(hooks: DriftHooks): Policy {
 		name: "drift",
 
 		decide(context: PolicyContext): PolicyWork | null {
+			if (isSdkPilotEnv(process.env)) return null;
 			const goal = hooks.goal();
 			if (!goal || goal.state !== "active") {
 				if (settles.get() !== 0) settles.set(0);
