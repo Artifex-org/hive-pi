@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { DefaultResourceLoader, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, ExtensionRunner, ModelRegistry, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { workerExtensionPaths } from "../extensions/subagent/worker.ts";
 
 const dirs: string[] = [];
@@ -48,4 +48,47 @@ it.each([false, true])("manifest plus Hive CLI extension loads one provider with
 	expect(loaded.errors).toEqual([]);
 	expect(loaded.runtime.pendingNativeProviderRegistrations.filter(item => item.provider.id === "claude-sdk")).toHaveLength(1);
 	expect(loaded.extensions.filter(extension => extension.path.endsWith("/claude-sdk/index.ts"))).toHaveLength(1);
+});
+
+// This executes only synthetic plugins, never the private profile or SDK.
+// The real pinned loader and runner distinguish discovery, factory execution,
+// deduplication and session lifecycle; presence of an explicit entry proves none
+// of those on its own.
+it.each([false, true])("explicit SDK-shaped entry preserves directory plugins and lifecycle unless discovery is disabled=%s", async noExtensions => {
+	const root = await mkdtemp(join(tmpdir(), "pi-fake-plugin-discovery-")); dirs.push(root);
+	const pkg = join(root, "package"), agentDir = join(root, "agent"), cwd = join(root, "project");
+	await mkdir(join(pkg, "extensions/claude-sdk"), { recursive: true });
+	await mkdir(agentDir); await mkdir(cwd);
+	const markers = join(root, "loader-events.jsonl");
+	for (const [name, file] of [["sdk", "claude-sdk/index.ts"], ["guard", "a-guard.ts"], ["hook", "b-hook.ts"]]) {
+		await writeFile(join(pkg, "extensions", file), `import { appendFileSync } from "node:fs";
+export default async function(pi) {
+  const marker = phase => appendFileSync(${JSON.stringify(markers)}, phase + ":${name}\\n");
+  await Promise.resolve();
+  marker("factory");
+  pi.on("session_start", async () => { await Promise.resolve(); marker("start"); });
+}`);
+	}
+	await writeFile(join(pkg, "package.json"), JSON.stringify({ name: "synthetic-full-directory", version: "0.0.0", pi: { extensions: ["./extensions"] } }));
+	await writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: [pkg] }));
+	const loader = new DefaultResourceLoader({ cwd, agentDir,
+		settingsManager: SettingsManager.create(cwd, agentDir, { projectTrusted: true }),
+		additionalExtensionPaths: [join(pkg, "extensions/claude-sdk/index.ts")], noExtensions,
+		noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+	await loader.reload();
+	const loaded = loader.getExtensions();
+	expect(loaded.errors).toEqual([]);
+	const names = noExtensions ? ["sdk"] : ["sdk", "guard", "hook"];
+	expect(loaded.extensions).toHaveLength(names.length);
+	const lines = async () => (await readFile(markers, "utf8")).trim().split("\n");
+	expect(await lines()).toEqual(names.map(name => `factory:${name}`));
+	const modelRuntime = await ModelRuntime.create({
+		credentials: { read: async () => undefined, list: async () => [], modify: async () => undefined, delete: async () => {} },
+		modelsPath: null, modelsStorePath: join(root, "models.json"), allowModelNetwork: false, refreshOnCreate: false });
+	const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, cwd, SessionManager.inMemory(cwd), new ModelRegistry(modelRuntime));
+	const errors: string[] = [];
+	runner.onError(() => errors.push("extension-error"));
+	await runner.emit({ type: "session_start", reason: "startup" });
+	expect(errors).toEqual([]);
+	expect(await lines()).toEqual([...names.map(name => `factory:${name}`), ...names.map(name => `start:${name}`)]);
 });

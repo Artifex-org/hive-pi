@@ -11,6 +11,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { QueryFactory } from "../extensions/claude-sdk/provider.ts";
 import type { PilotReport } from "../extensions/claude-sdk/pilot.ts";
 const fake = vi.hoisted(() => ({ query: undefined as QueryFactory | undefined, leases: 0, closes: 0, deadlineMs: 180_000,
+	beforeLease: undefined as (() => Promise<void>) | undefined,
 	setupWrite: undefined as ((data: unknown) => Promise<void>) | undefined,
 	reportWrite: undefined as (() => Promise<void>) | undefined,
 	writeStarted: undefined as ((work: Promise<void>) => void) | undefined,
@@ -54,7 +55,7 @@ vi.mock("../extensions/claude-sdk/provider.ts", async original => {
 	const actual = await original<typeof import("../extensions/claude-sdk/provider.ts")>();
 	return { ...actual, createClaudeSdkRuntime: (config: Parameters<typeof actual.createClaudeSdkRuntime>[0], deps: Parameters<typeof actual.createClaudeSdkRuntime>[1]) =>
 		actual.createClaudeSdkRuntime(config, { ...deps, validateExecutable: async () => {},
-			lease: async () => { fake.leases++; return { access_token: "offline", credential: "offline-a", slot: "offline-a", expires_at: new Date(Date.now() + 3600_000).toISOString() }; },
+			lease: async () => { fake.leases++; await fake.beforeLease?.(); return { access_token: "offline", credential: "offline-a", slot: "offline-a", expires_at: new Date(Date.now() + 3600_000).toISOString() }; },
 			query: request => { if (!fake.query) throw new Error("Unexpected offline query"); return fake.query(request); } }) };
 });
 vi.mock("../extensions/claude-sdk/pilot.ts", async original => {
@@ -87,9 +88,31 @@ function* response(id: string, content: unknown[], stop: string) {
 	yield frame({ type: "message_delta", delta: { stop_reason: stop } });
 	yield frame({ type: "message_stop" });
 }
+function expectPersistedPilotOutcome(entries: ReturnType<SessionManager["getEntries"]>, report: PilotReport): void {
+	const outcomes = entries.filter(entry => entry.type === "custom" && entry.customType === "claude-sdk-pilot-result");
+	expect(outcomes).toHaveLength(1);
+	const outcome = outcomes.at(0);
+	if (outcome?.type !== "custom") throw new Error("Missing persisted pilot custom entry");
+	expect(outcome.data, "SDK persisted custom outcome changed").toEqual(report);
+	const messages = entries.filter(entry => entry.type === "custom_message" && entry.customType === "claude-sdk-pilot-result");
+	expect(messages).toHaveLength(1);
+	const message = messages.at(0);
+	if (message?.type !== "custom_message" || typeof message.content !== "string") throw new Error("Missing persisted pilot message");
+	expect(JSON.parse(message.content), "SDK persisted message outcome changed").toEqual(report);
+}
 const cleanups: (() => Promise<unknown>)[] = [];
-afterEach(async () => { fake.setupWrite = undefined; fake.reportWrite = undefined; fake.writeStarted = undefined; fake.latchSync = undefined; fake.latchOpen = undefined; fake.latchClosed = undefined; fake.runtimeRemove = undefined; fake.shutdownDone = undefined; fake.barrierQueued = undefined; fake.resetStarted = undefined; for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "setup-deadline", "report-deadline", "latch-sync-deadline", "latch-sync-reject", "latch-open-deadline", "runtime-cleanup-deadline", "settlement-first", "settlement-recall", "settlement-reload", "control-intercept", "deadline", "cleanup-failure", "fixture-change", "setup-reload", "unknown-slash", "positional"] as const)("real AgentSession pilot protocol and unarmed startup refusal: %s", async mode => {
+afterEach(async () => { fake.beforeLease = undefined; fake.setupWrite = undefined; fake.reportWrite = undefined; fake.writeStarted = undefined; fake.latchSync = undefined; fake.latchOpen = undefined; fake.latchClosed = undefined; fake.runtimeRemove = undefined; fake.shutdownDone = undefined; fake.barrierQueued = undefined; fake.resetStarted = undefined; for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+it("does not mistake fresh custom-only outcomes for a native transcript", async () => {
+	const root = await mkdtemp(join(tmpdir(), "sdk-pilot-custom-only-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
+	const manager = SessionManager.create(root, join(root, "sessions"));
+	manager.appendCustomEntry("claude-sdk-pilot-result", { status: "failed", category: "configuration" });
+	manager.appendCustomMessageEntry("claude-sdk-pilot-result", "SDKpilot/v1/final;status=failed;category=configuration", true);
+	expect(manager.getEntries()).toHaveLength(2);
+	const path = manager.getSessionFile();
+	if (!path) throw new Error("Persistent session has no native file path");
+	await expect(readFile(path, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+});
+it.each(["pilot", "persistent-pilot", "persistent-lease-refusal", "persistent-unarmed", "report-failure", "message-report-failure", "report-cancel", "setup-deadline", "report-deadline", "latch-sync-deadline", "latch-sync-reject", "latch-open-deadline", "runtime-cleanup-deadline", "settlement-first", "settlement-recall", "settlement-reload", "control-intercept", "deadline", "cleanup-failure", "fixture-change", "setup-reload", "unknown-slash", "positional"] as const)("real AgentSession pilot protocol and unarmed startup refusal: %s", async mode => {
 	const root = await mkdtemp(join(tmpdir(), "sdk-real-session-")); cleanups.push(() => rm(root, { recursive: true, force: true }));
 	for (const [name, value] of Object.entries({ HIVE_CLAUDE_SDK: "1", HIVE_CLAUDE_SDK_PILOT: "1",
 		HIVE_CLAUDE_SDK_EXECUTABLE: "/offline/claude", HIVE_CLAUDE_SDK_STATE_DIR: root,
@@ -173,7 +196,20 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 		}] });
 	await loader.reload(); expect(loader.getExtensions().errors).toEqual([]);
 	const model = claudeSdkModels().find(model => model.id.includes("sonnet"))!;
-	const sessionManager = SessionManager.inMemory(root);
+	const persistent = mode.startsWith("persistent-");
+	const sessionManager = persistent ? SessionManager.create(root, join(root, "sessions")) : SessionManager.inMemory(root);
+	const persistedEntries = async () => {
+		const path = sessionManager.getSessionFile();
+		if (!path) throw new Error("Persistent session has no native file path");
+		return SessionManager.open(path).getEntries();
+	};
+	let observedNativeUserBeforeLease = false;
+	if (persistent) fake.beforeLease = async () => {
+		const entries = await persistedEntries();
+		expect(entries.some(entry => entry.type === "message" && entry.message.role === "user")).toBe(true);
+		observedNativeUserBeforeLease = true;
+		if (mode === "persistent-lease-refusal") throw new Error("Offline preparation refused");
+	};
 	const { session } = await createAgentSession({ cwd: root, agentDir: root, modelRuntime: runtime, model,
 		settingsManager: settings, resourceLoader: loader, sessionManager });
 	cleanups.push(async () => { await session.abort(); session.dispose(); });
@@ -182,10 +218,16 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 	const extensionErrors: unknown[] = [];
 	await session.bindExtensions({ mode: "json", onError: error => { extensionErrors.push(error); } });
 	expect(fake.leases).toBe(0);
-	if (mode === "unknown-slash" || mode === "positional") {
+	if (mode === "unknown-slash" || mode === "positional" || mode === "persistent-unarmed") {
 		await session.prompt(mode === "unknown-slash" ? "/unknown-sdk-pilot" : "unarmed positional input");
 		expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: expect.stringContaining("claude_sdk_pilot_not_armed") });
 		expect(queries).toBe(0); expect(fake.leases).toBe(0);
+		if (persistent) {
+			const entries = await persistedEntries();
+			expect(entries.filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
+			expect(entries.filter(entry => entry.type === "message" && entry.message.role === "assistant")).toHaveLength(1);
+			expect(observedNativeUserBeforeLease).toBe(false);
+		}
 		return;
 	}
 	if (mode === "latch-open-deadline") {
@@ -193,15 +235,22 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 		let closed = 0;
 		fake.latchOpen = async () => { entered.resolve(); await release.promise; };
 		fake.latchClosed = () => { closed++; };
+		// Hold the observation clock until the real open has entered. Otherwise
+		// loaded-machine setup can expire before this pending-open case exists.
+		const wallSetTimeout = setTimeout, wallClearTimeout = clearTimeout;
+		vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
 		const prompt = session.prompt("/claude-sdk-pilot --exclude claude-7");
 		const timers: ReturnType<typeof setTimeout>[] = [];
 		const bounded = <T,>(task: Promise<T>) => Promise.race([task, new Promise<"stalled">(r => {
-			timers.push(setTimeout(() => r("stalled"), 1_000));
+			timers.push(wallSetTimeout(() => r("stalled"), 1_000));
 		})]);
 		try {
-			await entered.promise;
+			expect(await bounded(entered.promise.then(() => "entered"))).toBe("entered");
+			await vi.advanceTimersByTimeAsync(fake.deadlineMs);
 			expect(await bounded(prompt.then(() => "returned"))).toBe("returned");
-			expect(await bounded(session.extensionRunner.emit({ type: "session_shutdown", reason: "reload" }).then(() => "shutdown"))).toBe("shutdown");
+			const shutdown = session.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
+			await vi.advanceTimersByTimeAsync(fake.deadlineMs);
+			expect(await bounded(shutdown.then(() => "shutdown"))).toBe("shutdown");
 			expect(sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "claude-sdk-pilot-result")).toHaveLength(0);
 			release.resolve();
 			const outcome = await bounded(reported);
@@ -213,7 +262,15 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 			await session.prompt("/claude-sdk-pilot --exclude claude-7");
 			expect(queries).toBe(0); expect(fake.leases).toBe(0);
 			expect(sessionManager.getEntries().filter(entry => entry.type === "custom" && entry.customType === "claude-sdk-pilot-result")).toHaveLength(1);
-		} finally { for (const timer of timers) clearTimeout(timer); release.resolve(); await prompt; }
+		} finally {
+			try {
+				release.resolve();
+				if (await bounded(vi.advanceTimersByTimeAsync(fake.deadlineMs)) === "stalled" ||
+					await bounded(prompt.then(() => "returned")) === "stalled") {
+					throw new Error("SDK pending-open test cleanup did not settle");
+				}
+			} finally { for (const timer of timers) wallClearTimeout(timer); vi.useRealTimers(); }
+		}
 		return;
 	}
 	if (mode === "latch-sync-deadline" || mode === "latch-sync-reject" || mode === "runtime-cleanup-deadline") {
@@ -373,6 +430,16 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 	}
 	const timeout = setTimeout(() => resolve({ status: "failed", category: "deadline" } as PilotReport), 5_000);
 	const report = await reported; clearTimeout(timeout);
+	if (mode === "persistent-lease-refusal") {
+		expect(report).toMatchObject({ status: "failed", category: "protocol", reserved_sdk_turns: 0, observed_sdk_turns: 0,
+			query_cleanup: "passed", fixture_cleanup: "passed", http_attempts: "unmeasured" });
+		expect(queries).toBe(0); expect(fake.leases).toBe(1); expect(observedNativeUserBeforeLease).toBe(true);
+		const entries = await persistedEntries();
+		expect(entries.filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(1);
+		expectPersistedPilotOutcome(entries, report);
+		expect(await readdir(root)).not.toContain("pilot-fixture.txt");
+		return;
+	}
 	if (mode === "deadline" || mode === "cleanup-failure" || mode === "fixture-change") {
 		expect(report).toMatchObject({ status: "failed", category: mode === "deadline" ? "deadline" : mode === "cleanup-failure" ? "cleanup" : "protocol",
 			history_recall: "not_verified", query_cleanup: mode === "cleanup-failure" ? "failed" : "passed", fixture_cleanup: "passed" });
@@ -400,6 +467,13 @@ it.each(["pilot", "report-failure", "message-report-failure", "report-cancel", "
 	}
 	if (mode === "report-failure") return; // event + canonical status survived the failed artifact
 	const saved = await readFile(join(root, "pilot-result.json"), "utf8");
+	if (persistent) {
+		const entries = await persistedEntries();
+		expect(observedNativeUserBeforeLease).toBe(true);
+		expect(entries.filter(entry => entry.type === "message" && entry.message.role === "user")).toHaveLength(2);
+		expect(entries.filter(entry => entry.type === "message" && entry.message.role === "toolResult")).toHaveLength(2);
+		expectPersistedPilotOutcome(entries, report);
+	}
 	expect(saved).not.toContain(readNonce); expect(saved).not.toContain("offline-a"); expect(saved).not.toContain("OFFLINE_SECRET");
 	const leases = fake.leases;
 	await session.reload();
