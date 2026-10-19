@@ -10,7 +10,7 @@ import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.t
 import { PiToolBridge } from "./tool-bridge.ts";
 import type { PilotQueryBudget } from "./pilot-budget.ts";
 import { EventConverter, emptyUsage, SdkAssistantFailure } from "./events.ts";
-import { assertSettledHistory, fingerprint, seedHistory, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
+import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
 import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
 
@@ -81,7 +81,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 	function dispose(state: Parked): Promise<void> {
 		// An idle handoff may already have executed in Pi. Losing the transport
 		// cannot authorize replay of the original, result-free attempt.
-		if (!state.busy && state.expected.length) ambiguous.add(fingerprint(state.prefix));
+		if (!state.busy && state.expected.length) ambiguous.add(fingerprint(transcript(state.prefix)));
 		if (state.closing) return state.closing;
 		states.delete(state.key); clearTimeout(state.timer); state.releaseAbort?.();
 		state.closing = cleanupResources(state);
@@ -127,14 +127,14 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					if (!isDeepStrictEqual(replacement ?? inspected, payload)) throw new Error("Claude SDK payload mutation unsupported; Pi owns canonical history");
 				}
 				const tools = options.toolChoice === "none" ? [] : getCurrentTools(context.messages);
-				const contextHash = fingerprint(context.messages);
+				const contextHash = fingerprint(transcript(context.messages));
 				if (ambiguous.has(contextHash)) throw new Error("Ambiguous previous SDK attempt; reconcile side effects before retrying");
 				const key = options.sessionId ?? randomUUID();
 				if (reservations.has(key)) throw new Error("Concurrent Claude SDK requests require isolated sessions");
 				reservations.add(key);
 				reservation = key;
 				const candidates = [...states.values()].filter(s => s.session === options.sessionId &&
-					s.model === model.id && s.expected.length > 0 && isDeepStrictEqual(context.messages.slice(0, s.expected.length), s.expected));
+					s.model === model.id && s.expected.length > 0 && isDeepStrictEqual(transcript(context.messages.slice(0, s.expected.length)), transcript(s.expected)));
 				if (candidates.length > 1) throw new Error("Ambiguous SDK tool continuation");
 				if (candidates[0]?.busy) throw new Error("SDK continuation already active");
 				state = candidates[0];
@@ -267,9 +267,9 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				} finally { clearTimeout(expiry); }
 			} catch (error) {
 				let cleanupFailed = cleanupError;
-				if (attemptedPrefix) ambiguous.add(fingerprint(attemptedPrefix));
+				if (attemptedPrefix) ambiguous.add(fingerprint(transcript(attemptedPrefix)));
 				if (state) {
-					ambiguous.add(fingerprint(state.prefix));
+					ambiguous.add(fingerprint(transcript(state.prefix)));
 					try { await dispose(state); } catch { cleanupFailed = true; }
 				}
 				output.stopReason = signal.aborted ? "aborted" : "error";

@@ -16,6 +16,20 @@ export function userMessage(message: UserMessage): SDKUserMessage {
 	return { type: "user", message: { role: "user", content: typeof message.content === "string" ? message.content : message.content.map(imageOrText) },
 		parent_tool_use_id: null, client_composed: true } as SDKUserMessage;
 }
+/**
+ * Transcript identity for continuation matching and ambiguity fingerprints.
+ * Pi's event stream stamps `durationMs` (monotonic response time) on the final
+ * assistant message after this provider emitted it (pi-ai 1.1.0). It is
+ * bookkeeping, not conversation content, so it never distinguishes two
+ * otherwise identical transcripts. Every other field still must match exactly.
+ */
+export function transcript(messages: readonly Message[]): Message[] {
+	return messages.map(message => {
+		if (message.role !== "assistant" || !("durationMs" in message)) return message;
+		const { durationMs: _duration, ...content } = message;
+		return content as Message;
+	});
+}
 /** SDK wire IDs only. Canonical Pi/bridge IDs remain untouched. */
 export function sdkToolCallId(id: string): string {
 	return /^[a-zA-Z0-9_-]{1,64}$/.test(id) ? id : fingerprint(id);

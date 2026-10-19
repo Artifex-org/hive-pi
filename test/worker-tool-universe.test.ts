@@ -22,7 +22,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -52,11 +52,25 @@ let universe: Set<string>;
 function builtinSource(): string {
 	// The package exports no `./package.json`; resolve its entry and walk to dist/.
 	const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-	const root = join(entry.slice(0, entry.lastIndexOf(`${sep}dist${sep}`)), "dist", "extensions");
-	let source = "";
+	const dist = join(entry.slice(0, entry.lastIndexOf(`${sep}dist${sep}`)), "dist");
+	const root = join(dist, "extensions");
+	// Follow each built-in's relative imports inside pi's dist/: since pi 1.1.0
+	// a tool name can live in a shared module (`core/mcp-servers.js` holds
+	// LIST_MCP_RESOURCES_TOOL) rather than in the extension file that registers it.
+	const queue: string[] = [];
 	for (const builtin of WORKER_BUILTIN_MCP_EXTENSIONS) {
 		const dir = join(root, builtin.replace(/^builtin:/, ""));
-		for (const file of readdirSync(dir)) if (file.endsWith(".js")) source += readFileSync(join(dir, file), "utf8");
+		for (const file of readdirSync(dir)) if (file.endsWith(".js")) queue.push(join(dir, file));
+	}
+	const read = new Set<string>();
+	let source = "";
+	while (queue.length) {
+		const file = queue.shift()!;
+		if (read.has(file) || !file.startsWith(dist + sep) || !existsSync(file)) continue;
+		read.add(file);
+		const text = readFileSync(file, "utf8");
+		source += text;
+		for (const [, spec] of text.matchAll(/from\s+"(\.{1,2}\/[^"]+\.js)"/g)) queue.push(join(dirname(file), spec));
 	}
 	return source;
 }
