@@ -205,7 +205,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						const resume = await seedHistory(dir, history, randomUUID(), config.cwd, model, context.messages.slice(split));
 						const sdkOptions = isolatedOptions({ executablePath: config.executable, cwd: config.cwd, privateRoot: dir, model: model.id,
 							systemPrompt: queryOptions.systemPrompt, lease, now: now(), abortController: controller,
-							bridge: bridge.config, toolNames: bridge.toolNames });
+							bridge: bridge.config, toolNames: bridge.toolNames, egress: config.egress });
 						sdkOptions.spawnClaudeCodeProcess = processes.spawn;
 						sdkOptions.resume = resume;
 						sdkOptions.env!.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(deps.pilot ? Math.min(queryOptions.maxTokens, deps.pilot.maxOutputTokens) : queryOptions.maxTokens);

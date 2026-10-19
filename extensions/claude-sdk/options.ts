@@ -33,6 +33,35 @@ export function accessLease(value: unknown, now: number): AccessLease {
 		credential: doc.credential as string, slot: doc.slot as string };
 }
 
+/** The HTTP proxy variables the Claude CLI honors, in both spellings. */
+const EGRESS_KEYS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"];
+/** Hosts that name this machine's own loopback: the Hive URL and the sandbox proxy. */
+export const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
+
+/**
+ * The egress settings of this Pi process. The SDK replaces the Claude CLI's
+ * environment, and inside the sandbox runtime its loopback proxy is the only
+ * network path, so these are handed on; isolatedOptions validates them.
+ */
+export function sandboxEgressEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+	return Object.fromEntries(EGRESS_KEYS.flatMap(key => env[key] ? [[key, env[key]!]] : []));
+}
+
+/** Only the sandbox's own loopback http(s) proxy is forwarded. Refusals name
+ *  the key, never the value: it may carry the proxy's credential. */
+function validatedEgress(egress: Readonly<Record<string, string>>): Record<string, string> {
+	for (const [key, value] of Object.entries(egress)) {
+		if (!EGRESS_KEYS.includes(key)) throw new Error("Only proxy settings are forwarded to Claude");
+		const bad = () => new Error(`Unsupported Claude SDK egress setting ${key}: only the Hive sandbox's loopback proxy is forwarded`);
+		if (typeof value !== "string" || !value || /[\s\p{Cc}]/u.test(value)) throw bad();
+		if (key.toLowerCase() === "no_proxy") continue;
+		const url = URL.canParse(value) ? new URL(value) : undefined;
+		if (!url || !["http:", "https:"].includes(url.protocol) || !LOOPBACK_HOSTS.includes(url.hostname) ||
+			!["", "/"].includes(url.pathname) || url.search || url.hash) throw bad();
+	}
+	return { ...egress };
+}
+
 export interface IsolatedRequest {
 	executablePath: string;
 	cwd: string;
@@ -45,6 +74,8 @@ export interface IsolatedRequest {
 	/** Only the in-process Pi bridge is accepted, never a filesystem/remote MCP. */
 	bridge: McpSdkServerConfigWithInstance;
 	toolNames: readonly string[];
+	/** sandboxEgressEnv output: the sandbox proxy the CLI must use to reach the network, validated here. */
+	egress?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -62,6 +93,7 @@ export function isolatedOptions(request: IsolatedRequest): Options {
 		new Set(request.toolNames).size !== request.toolNames.length) throw new Error("Invalid Pi tool names");
 	if (!request.model.trim()) throw new Error("Claude model required");
 	const lease = accessLease(request.lease, request.now);
+	const egress = validatedEgress(request.egress ?? {});
 	return {
 		pathToClaudeCodeExecutable: executablePath,
 		cwd,
@@ -84,6 +116,7 @@ export function isolatedOptions(request: IsolatedRequest): Options {
 		additionalDirectories: [],
 		env: {
 			// SDK .289 replaces, rather than merges, a supplied environment.
+			...egress,
 			PATH: "/usr/bin:/bin",
 			HOME: privateRoot,
 			XDG_CONFIG_HOME: privateRoot,

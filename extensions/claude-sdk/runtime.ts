@@ -5,11 +5,11 @@ import { isAbsolute, join } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
-import { accessLease, type AccessLease } from "./options.ts";
+import { accessLease, LOOPBACK_HOSTS, sandboxEgressEnv, type AccessLease } from "./options.ts";
 import { assertTreeIdentityReadable, killTree, releaseTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 
 export const CLI_VERSION = "2.1.286";
-export interface LaunchConfig { executable: string; stateRoot: string; url: string; token: string; launch: string; cwd: string; pilot?: boolean }
+export interface LaunchConfig { executable: string; stateRoot: string; url: string; token: string; launch: string; cwd: string; pilot?: boolean; egress?: Record<string, string> }
 export function launchConfig(env: NodeJS.ProcessEnv, cwd: string): LaunchConfig | undefined {
 	if (env.HIVE_CLAUDE_SDK !== "1") return undefined;
 	if (env.HIVE_CLAUDE_SDK_PILOT && !["0", "1"].includes(env.HIVE_CLAUDE_SDK_PILOT)) throw new Error("Invalid Claude SDK pilot restriction");
@@ -20,11 +20,11 @@ export function launchConfig(env: NodeJS.ProcessEnv, cwd: string): LaunchConfig 
 		throw new Error("Claude SDK requires absolute pinned executable/private state and Hive launch configuration");
 	}
 	const endpoint = new URL(url);
-	if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname))) {
+	if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && LOOPBACK_HOSTS.includes(endpoint.hostname))) {
 		throw new Error("Claude SDK requires HTTPS Hive URL (or loopback)");
 	}
 	if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Invalid Hive URL");
-	return { executable, stateRoot, url: url.replace(/\/$/, ""), token, launch, cwd,
+	return { executable, stateRoot, url: url.replace(/\/$/, ""), token, launch, cwd, egress: sandboxEgressEnv(env),
 		...(env.HIVE_CLAUDE_SDK_PILOT === "1" ? { pilot: true } : {}) };
 }
 
