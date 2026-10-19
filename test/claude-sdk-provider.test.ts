@@ -57,10 +57,10 @@ function* interleavedTools(ids = ["call-a", "call-b"]) {
 		}
 	}
 }
-async function fixture(query?: QueryFactory, leaseSource = vi.fn(async () => lease())) {
+async function fixture(query?: QueryFactory, leaseSource = vi.fn(async () => lease()), egress?: Record<string, string>) {
 	const root = await mkdtemp(join(tmpdir(), "claude-sdk-offline-"));
 	cleanups.push(() => rm(root, { force: true, recursive: true }));
-	const config = { executable: "/pinned/claude", stateRoot: root, url: "https://hive.invalid", token: "synthetic-hive", launch: "launch-offline", cwd: process.cwd() };
+	const config = { executable: "/pinned/claude", stateRoot: root, url: "https://hive.invalid", token: "synthetic-hive", launch: "launch-offline", cwd: process.cwd(), egress };
 	const requests: { options: Options; input: unknown }[] = [];
 	const queryImpl: QueryFactory = query ?? (request => {
 		const iterator = (async function* () {
@@ -642,6 +642,27 @@ describe("stream and lifecycle edge cases", () => {
 });
 
 describe("access-only leases and launch isolation", () => {
+	it("collects the launch's proxy egress and hands it to the spawned CLI", async () => {
+		const proxy = "http://sandbox-user:synthetic-proxy-secret@localhost:3128";
+		const env = { HIVE_CLAUDE_SDK: "1", HIVE_CLAUDE_SDK_EXECUTABLE: "/pinned/claude", HIVE_CLAUDE_SDK_STATE_DIR: "/state",
+			HIVE_URL: "https://hive.invalid", HIVE_TOKEN: "synthetic-hive", HIVE_LAUNCH_ID: "launch-offline", HTTPS_PROXY: proxy };
+		expect(launchConfig(env, process.cwd())?.egress).toEqual({ HTTPS_PROXY: proxy });
+		const { provider, model, requests } = await fixture(undefined, undefined, { HTTPS_PROXY: proxy, NO_PROXY: "169.254.0.0/16" });
+		const stream = provider.streamSimple(model, context(), {});
+		for await (const _ of stream) { /* drain */ }
+		expect((await stream.result()).stopReason).toBe("stop");
+		expect(requests[0].options.env).toMatchObject({ HTTPS_PROXY: proxy, NO_PROXY: "169.254.0.0/16" });
+	});
+	it("fails the turn, not the extension, on a proxy that is not the sandbox's", async () => {
+		const { provider, model, requests } = await fixture(undefined, undefined, { HTTPS_PROXY: "http://proxy.corp.example:8080" });
+		const stream = provider.streamSimple(model, context(), {});
+		for await (const _ of stream) { /* drain */ }
+		const output = await stream.result();
+		expect(output.stopReason).toBe("error");
+		expect(output.errorMessage).toMatch(/egress setting HTTPS_PROXY/);
+		expect(output.errorMessage).not.toContain("proxy.corp.example");
+		expect(requests).toEqual([]);
+	});
 	it("is disabled by default and rejects incomplete or unsafe launch config", () => {
 		expect(launchConfig({}, process.cwd())).toBeUndefined();
 		expect(() => launchConfig({ HIVE_CLAUDE_SDK: "1" }, process.cwd())).toThrow(/requires/);

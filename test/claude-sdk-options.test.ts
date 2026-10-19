@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
-import { accessLease, CREDENTIAL_PROVIDER, isolatedOptions, literalUserMessage, SDK_VERSION } from "../extensions/claude-sdk/options.ts";
+import { accessLease, CREDENTIAL_PROVIDER, isolatedOptions, literalUserMessage, sandboxEgressEnv, SDK_VERSION } from "../extensions/claude-sdk/options.ts";
 import { PiToolBridge } from "../extensions/claude-sdk/tool-bridge.ts";
 
 const now = Date.parse("2026-10-15T12:00:00Z");
@@ -111,5 +111,53 @@ describe("typed SDK options, never dispatched", () => {
 			const discovered = resolve(root, path);
 			expect(prototype === discovered || prototype.startsWith(discovered + "/")).toBe(false);
 		}
+	});
+});
+
+describe("sandbox egress for the replaced CLI environment", () => {
+	const proxy = "http://sandbox-user:synthetic-proxy-secret@localhost:3128";
+	const request = (controller: AbortController, bridge: PiToolBridge) => ({ executablePath: "/trusted/claude", cwd: "/worktree",
+		privateRoot: "/private", model: "claude-fixture", systemPrompt: "unaltered", lease: synthetic, now,
+		abortController: controller, bridge: bridge.config, toolNames: [] });
+	it("hands on exactly the HTTP proxy settings, in both spellings", () => {
+		const env = { HTTPS_PROXY: proxy, https_proxy: proxy, HTTP_PROXY: proxy, http_proxy: proxy,
+			ALL_PROXY: "socks5h://localhost:1080", NO_PROXY: "169.254.0.0/16", no_proxy: "169.254.0.0/16",
+			ANTHROPIC_API_KEY: "ambient-value-must-not-leak", NODE_OPTIONS: "--require=unsafe", HIVE_TOKEN: "launch" };
+		expect(Object.keys(sandboxEgressEnv(env)).sort()).toEqual(["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+			"http_proxy", "https_proxy", "no_proxy"]);
+		expect(sandboxEgressEnv({})).toEqual({});
+	});
+	it("puts the sandbox proxy into the CLI environment without overriding its fixed keys", async () => {
+		const controller = new AbortController();
+		const bridge = new PiToolBridge([], controller.signal);
+		try {
+			const options = isolatedOptions({ ...request(controller, bridge), egress: { HTTPS_PROXY: proxy, NO_PROXY: "169.254.0.0/16" } });
+			expect(options.env).toMatchObject({ HTTPS_PROXY: proxy, NO_PROXY: "169.254.0.0/16", PATH: "/usr/bin:/bin",
+				HOME: "/private", CLAUDE_CODE_OAUTH_TOKEN: synthetic.access_token });
+		} finally { bridge.close(); await bridge.config.instance.close(); }
+	});
+	it.each([
+		["HTTPS_PROXY", "http://proxy.corp.example:8080"],
+		["HTTP_PROXY", "socks5://localhost:1080"],
+		["https_proxy", "http://localhost:3128/path"],
+		["http_proxy", "not a url"],
+		["NO_PROXY", "a\nb"],
+	])("refuses %s that is not the sandbox's loopback proxy, without echoing it", async (key, value) => {
+		const controller = new AbortController();
+		const bridge = new PiToolBridge([], controller.signal);
+		try {
+			expect(() => isolatedOptions({ ...request(controller, bridge), egress: { [key]: value } })).toThrow(new RegExp(`egress setting ${key}`));
+			try { isolatedOptions({ ...request(controller, bridge), egress: { [key]: value } }); } catch (error) { expect(String(error)).not.toContain(value); }
+		} finally { bridge.close(); await bridge.config.instance.close(); }
+	});
+	it("accepts nothing but proxy settings through egress", async () => {
+		const controller = new AbortController();
+		const bridge = new PiToolBridge([], controller.signal);
+		try {
+			const smuggled: Record<string, string>[] = [{ ANTHROPIC_BASE_URL: "http://localhost:1" }, { HTTPS_PROXY: proxy, HOME: "/elsewhere" }, { ALL_PROXY: proxy }];
+			for (const egress of smuggled) {
+				expect(() => isolatedOptions({ ...request(controller, bridge), egress })).toThrow("Only proxy settings");
+			}
+		} finally { bridge.close(); await bridge.config.instance.close(); }
 	});
 });
