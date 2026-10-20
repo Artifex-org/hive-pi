@@ -6,6 +6,7 @@ import { captureDeliveryDiff, explainDeliveryDiffFailure, headCommit, reviewFing
 import { resolve, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
+import { captureReleaseDiff, isReviewTarget, type ReviewTarget } from "./release-review.ts";
 
 export const DELIVERY_REVIEW_GUIDANCE = "Before pushing or opening a PR, run subagent with agent: code-reviewer on the diff and fix its findings. The harness supplies the diff/file list, not the author's design rationale. Docs-only or tiny diffs skip automatically; PI_DELIVERY_REVIEW=0 explicitly overrides the checkpoint.";
 
@@ -41,7 +42,7 @@ export function helpInvocation(words: readonly string[] | null): boolean {
 }
 
 /** One delivery leg: the repo it targets, or null with the leg and the cause that made it unevaluable. */
-export interface DeliveryScan { target: string | null; leg?: string; cause?: string }
+export interface DeliveryScan { target: string | null; leg?: string; cause?: string; reviewTarget?: ReviewTarget }
 
 const clip = (text: string) => { const one = text.trim().replace(/\s+/g, " "); return one.length > 120 ? `${one.slice(0, 117)}...` : one; };
 
@@ -121,12 +122,26 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 				i += ["--repo", "--hostname", "-R"].includes(tokens[i]) ? 2 : 1;
 			}
 			if (tokens[i] !== "pr" || tokens[i + 1] !== "create") continue;
+			const selected: Partial<ReviewTarget> = {};
+			let unsupportedOption: string | undefined;
+			const valueOptions = ["--repo", "--head", "--base", "-R", "-H", "-B", "--title", "--body", "--body-file", "-t", "-b", "-F", "--assignee", "--reviewer", "--label", "--milestone", "--project", "--template"];
 			for (i += 2; i < tokens.length; i++) {
-				const option = tokens[i].split("=")[0];
-				if (["--repo", "--head", "--base", "-R", "-H", "-B"].includes(option)) targetOverride ||= option;
+				const option: string = tokens[i].split("=")[0];
+				if (![...valueOptions, "--draft", "-d", "--fill", "--fill-first", "--fill-verbose", "--no-maintainer-edit"].includes(option)) unsupportedOption ||= option;
+				if (["--repo", "-R"].includes(option)) targetOverride ||= option;
+				if (["--base", "-B", "--head", "-H"].includes(option)) {
+					const key = option === "--base" || option === "-B" ? "base" : "head";
+					if (selected[key] !== undefined) targetOverride ||= "duplicate target";
+					selected[key] = tokens[i].includes("=") ? tokens[i].slice(tokens[i].indexOf("=") + 1) : tokens[i + 1];
+				}
+				// Attached short options cannot silently select another target.
+				if (/^-[BHR].+/.test(tokens[i]) && !["-B", "-H", "-R"].includes(option)) targetOverride ||= option;
 				if (!tokens[i].includes("=") && ["--repo", "--head", "--base", "-R", "-H", "-B", "--title", "--body", "--body-file", "-t", "-b", "-F", "--assignee", "--reviewer", "--label", "--milestone", "--project", "--template"].includes(option)) i++;
 			}
-			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, "the leg redirects input or output"], [dynamicGh, "its arguments are dynamic (substitution or variable)"], [targetOverride, `\`${targetOverride}\` points at a repo/branch this preflight cannot match to the reviewed diff`]) : ok(dir));
+			const explicit = Object.keys(selected).length > 0;
+			if (explicit && unsupportedOption) targetOverride ||= unsupportedOption;
+			if (explicit && !isReviewTarget(selected)) targetOverride ||= selected.base !== undefined ? "--base" : "--head";
+			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, "the leg redirects input or output"], [dynamicGh, "its arguments are dynamic (substitution or variable)"], [targetOverride, `\`${targetOverride}\` points at a repo/branch this preflight cannot match to the reviewed diff`]) : explicit ? { target: dir, reviewTarget: selected as ReviewTarget } : ok(dir));
 			continue;
 		}
 		if (!/^git\s/.test(cleaned)) continue;
@@ -204,7 +219,7 @@ const short = (fingerprint: string) => fingerprint.slice(0, 8);
 
 export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDeliveryDiff): void {
 	const reviewed = new Set<string>();
-	const pending = new Map<string, string>();
+	const pending = new Map<string, { cwd: string; reviewTarget?: ReviewTarget }>();
 	// Why a fingerprint is not covered: the last review per repo (for "stale after
 	// commit X") and the repos where a review ran in the background (never counts).
 	const lastReview = new Map<string, { fingerprint: string; head: string | null }>();
@@ -224,7 +239,7 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		const cwd = typeof input.cwd === "string" ? input.cwd : ctx.cwd;
 		if (event.toolName === "subagent" && input.agent === "code-reviewer") {
 			if (input.background === true) backgroundReview.add(cwd);
-			else pending.set(event.toolCallId, cwd);
+			else if (input.reviewTarget === undefined || isReviewTarget(input.reviewTarget)) pending.set(event.toolCallId, { cwd, reviewTarget: input.reviewTarget as ReviewTarget | undefined });
 			return;
 		}
 		if (event.toolName !== "bash" && event.toolName !== "background_bash") return;
@@ -238,19 +253,22 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		for (const scan of scanDeliveryTargets(command, cwd)) {
 			const target = scan.target;
 			if (!target) return { block: true, reason: `Unsupported command shape: the leg \`${scan.leg ?? clip(command)}\` cannot be evaluated because ${scan.cause ?? "its target cannot be resolved to one reviewed repo"}. Run setup/mutation commands separately, then review and run a standalone \`git push origin HEAD\`, \`hive ship --no-pr\`, or \`gh pr create\` in the reviewed repo (without target overrides).` };
-			const diff = capture(target, "");
-			if (diff && (!needsDeliveryReview(diff) || (stampableReview(diff) && reviewed.has(reviewFingerprint(diff))))) continue;
+			const release = scan.reviewTarget ? captureReleaseDiff(target, scan.reviewTarget) : undefined;
+			const diff = release ? release.diff : capture(target, "");
+			if (diff && ((!scan.reviewTarget && !needsDeliveryReview(diff)) || (stampableReview(diff) && reviewed.has(reviewFingerprint(diff))))) continue;
+			if (scan.reviewTarget) return { block: true, reason: `Explicit PR target requires a matching foreground release review. ${release?.reason ?? "No matching review for the current origin repository and base/head SHAs."} Run subagent({agent:"code-reviewer", task:"Review the release", cwd:${JSON.stringify(target)}, reviewTarget:${JSON.stringify(scan.reviewTarget)}}), then retry. This review does not grant deployment approval.` };
 			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${blockCause(diff, target, lastReview, backgroundReview)}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` };
 		}
 	});
 	pi.on("tool_result", (event) => {
-		const cwd = pending.get(event.toolCallId);
+		const request = pending.get(event.toolCallId);
 		pending.delete(event.toolCallId);
-		if (!cwd || event.isError) return;
+		if (!request || event.isError) return;
+		const { cwd, reviewTarget } = request;
 		const details = event.details as { results?: { agent?: string; exitCode?: number; stopReason?: string; errorMessage?: string; midWork?: boolean; structuredError?: string; reviewFingerprint?: string }[] } | undefined;
 		const result = details?.results?.find((r) => r.agent === "code-reviewer" && r.exitCode === 0 && !r.errorMessage && !r.midWork && !r.structuredError && r.stopReason !== "error" && r.stopReason !== "aborted");
 		if (!result?.reviewFingerprint) return;
-		const diff = capture(cwd, "");
+		const diff = reviewTarget ? captureReleaseDiff(cwd, reviewTarget).diff : capture(cwd, "");
 		if (!diff || !stampableReview(diff) || reviewFingerprint(diff) !== result.reviewFingerprint) return;
 		const fingerprint = result.reviewFingerprint;
 		const head = headCommit(diff.repo);

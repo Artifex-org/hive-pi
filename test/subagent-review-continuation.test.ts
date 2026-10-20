@@ -8,6 +8,10 @@ import { ReviewArtifactReads } from "../extensions/subagent/review-artifact.ts";
 import { ReviewContinuation } from "../extensions/subagent/review-continuation.ts";
 import { captureDeliveryDiff, reviewFingerprint } from "../extensions/subagent/reviewdiff.ts";
 
+it("loads the continuation module in native strip-only Node, as the MCP server does", () => {
+	expect(() => execFileSync(process.execPath, ["--input-type=module", "-e", "await import(\"./extensions/subagent/review-continuation.ts\")"], { cwd: process.cwd(), stdio: "pipe" })).not.toThrow();
+});
+
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 function fixture(symlink = false) {

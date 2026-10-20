@@ -358,6 +358,11 @@ const ModelParam = Type.Optional(
 	}),
 );
 
+const ReviewTargetParam = Type.Optional(Type.Object({
+	base: Type.String({ description: "Literal origin branch targeted by the PR, e.g. prod. Single foreground code-reviewer only; captures the live remote base/head SHAs, not local HEAD." }),
+	head: Type.String({ description: "Literal origin branch supplied as the PR head, e.g. main. Fetch both branches separately first; review is not deployment approval." }),
+}));
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
@@ -381,6 +386,7 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
 
 const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (for single mode)" })),
+	reviewTarget: ReviewTargetParam,
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "Array of {agent, task} for sequential execution" })),
@@ -522,6 +528,9 @@ export default function (pi: ExtensionAPI) {
 		parameters: SubagentParams,
 
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			if (params.reviewTarget && (params.agent !== "code-reviewer" || params.background || params.tasks?.length || params.chain?.length)) {
+				throw new Error("reviewTarget is supported only for a single foreground code-reviewer");
+			}
 			const ownerSessionId = params.background ? ctx.sessionManager.getSessionId() : "";
 			const recordedBackgroundSeq = params.background ? lastSubagentId(ctx.sessionManager.getBranch(), ownerSessionId) : 0;
 			startSubagentWidget(pi, toolCallId);
@@ -890,7 +899,7 @@ export default function (pi: ExtensionAPI) {
 			if (params.agent && params.task) {
 				return toToolResult(
 					await runSingleDelegation(
-						{ agent: params.agent, task: params.task, cwd: params.cwd, model: params.model, schema: structuredRequest(params.schema) },
+						{ agent: params.agent, task: params.task, cwd: params.cwd, model: params.model, schema: structuredRequest(params.schema), reviewTarget: params.reviewTarget },
 						params.verify,
 						host,
 					),

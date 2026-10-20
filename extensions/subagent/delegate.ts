@@ -56,6 +56,7 @@ import { captureDeliveryDiff, captureReviewDiff, withReviewCallers, citedOutside
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 import { ReviewArtifactReads, reviewArtifactText } from "./review-artifact.ts";
 import { ReviewContinuation } from "./review-continuation.ts";
+import { captureReleaseDiff } from "./release-review.ts";
 
 /**
  * A schema the caller wants the final answer validated against, WITH the
@@ -496,6 +497,7 @@ export async function runSingleAgent(
 	requestedModel?: string,
 	env?: WorkerModelEnv,
 	reviewPrepared = false,
+	reviewTarget?: { base: string; head: string },
 ): Promise<SingleResult> {
 	const agent = resolveAgent(agents, agentName);
 
@@ -668,7 +670,9 @@ export async function runSingleAgent(
 		const neutralize = agent.name === "code-reviewer" && !reviewPrepared;
 		let effectiveTask = neutralize ? neutralReviewTask(task) : task;
 		if (isReviewRole(agent.name)) {
-			const captured = agent.name === "code-reviewer" ? captureDeliveryDiff(executionCwd, task) : captureReviewDiff(executionCwd, task);
+			const release = reviewTarget && agent.name === "code-reviewer" ? captureReleaseDiff(executionCwd, reviewTarget) : undefined;
+			if (reviewTarget && (!release || !release.diff)) throw new Error(release?.reason ?? "reviewTarget is only supported for code-reviewer");
+			const captured = release ? release.diff : agent.name === "code-reviewer" ? captureDeliveryDiff(executionCwd, task) : captureReviewDiff(executionCwd, task);
 			const diff = captured ? withReviewCallers(captured) : null;
 			if (diff) {
 				if (Buffer.byteLength(diff.text) > DELIVERY_INLINE_BYTES) {
@@ -679,11 +683,12 @@ export async function runSingleAgent(
 					if (artifact.chunked) effectiveTask += "\nThe patch artifact is a JSON array of string chunks because raw diff lines exceeded read's byte cap. " +
 						"Read every encoded page; concatenating the decoded array entries reproduces the exact complete patch. Array row numbers are transport positions, not source line numbers.";
 				} else effectiveTask = reviewTaskWithDiff(task, diff, neutralize);
+				if (reviewTarget && /^GIT binary patch/m.test(diff.text)) effectiveTask += "\nThe captured Git binary patch includes complete decoded gzip text in labelled sections of the SAME evidence artifact. Review those decoded sections and assess the asset purpose/format; encoded-byte coverage or blob IDs alone are not approval. If any asset cannot be reviewed, emit DELIVERY_REVIEW_INCOMPLETE.";
 				currentResult.reviewFiles = reviewScopeFiles(diff);
 				if (agent.name === "code-reviewer" && stampableReview(diff)) {
 					currentResult.reviewFingerprint = reviewFingerprint(diff);
 					if (artifactReads) {
-						reviewContinuation = new ReviewContinuation(executionCwd, task, currentResult.reviewFingerprint, artifactReads);
+						reviewContinuation = new ReviewContinuation(executionCwd, task, currentResult.reviewFingerprint, artifactReads, reviewTarget);
 						reviewContinuation.configure(args);
 					}
 				}
@@ -900,6 +905,13 @@ export async function runSingleAgent(
 		if (!isFailedResult(currentResult) && stoppedMidWork(getFinalOutput(currentResult.messages))) {
 			currentResult.midWork = true;
 		}
+		if (reviewTarget && currentResult.reviewFingerprint) {
+			const now = captureReleaseDiff(executionCwd, reviewTarget).diff;
+			if (!now || reviewFingerprint(now) !== currentResult.reviewFingerprint) {
+				currentResult.stopReason = "error";
+				currentResult.errorMessage = "Explicit PR target evidence changed during review.";
+			}
+		}
 		if (isFailedResult(currentResult)) delete currentResult.reviewFingerprint;
 		const declaredIncomplete = reviewDeclaresIncomplete(getFinalOutput(currentResult.messages));
 		if ((artifactReads && !artifactReads.complete()) || (isReviewRole(agent.name) && declaredIncomplete)) {
@@ -958,6 +970,7 @@ export async function runAgentWithSchema(
 	schema: StructuredRequest | undefined,
 	requestedModel?: string,
 	env?: WorkerModelEnv,
+	reviewTarget?: { base: string; head: string },
 ): Promise<SingleResult> {
 	// Only the author's initial request is neutralized. Runtime continuation
 	// and schema-validation feedback must survive all subsequent attempts.
@@ -979,6 +992,7 @@ export async function runAgentWithSchema(
 		attemptModel,
 		env,
 		reviewPrepared,
+		reviewTarget,
 	);
 	const readOnly = !agentIsWriterCapable(resolveAgent(agents, agentName));
 
@@ -1010,6 +1024,7 @@ export async function runAgentWithSchema(
 				alternate,
 				env,
 				reviewPrepared,
+				reviewTarget,
 			);
 			const attemptedMessages = [...messagesForTelemetry(result), ...messagesForTelemetry(retried)];
 			const refusal = `${result.model ?? "the delegation default"} refused: ${(result.errorMessage ?? "").slice(0, 160)}`;
@@ -1044,6 +1059,7 @@ export async function runAgentWithSchema(
 			attemptModel,
 			env,
 			reviewPrepared,
+			reviewTarget,
 		);
 		const attemptedMessages = [...messagesForTelemetry(result), ...messagesForTelemetry(retried)];
 		if (isFailedResult(retried)) {
@@ -1075,6 +1091,7 @@ export async function runAgentWithSchema(
 			attemptModel,
 			env,
 			reviewPrepared,
+			reviewTarget,
 		);
 		// Keep the retry only if it is not worse: a retry that crashed leaves the
 		// original answer, which at least contained the work.
@@ -1206,6 +1223,7 @@ export interface DelegationTask {
 	cwd?: string;
 	model?: string;
 	schema?: StructuredRequest;
+	reviewTarget?: { base: string; head: string };
 }
 
 /** What a mode needs from the harness running it. */
@@ -1449,6 +1467,7 @@ export async function runSingleDelegation(
 		params.schema,
 		params.model,
 		host.modelEnv,
+		params.reviewTarget,
 	);
 	if (isFailedResult(result)) {
 		const errorMsg = getResultOutput(result);

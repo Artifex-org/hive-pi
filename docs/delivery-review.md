@@ -68,7 +68,7 @@ The checkpoint supports literal git/gh delivery forms, not
 arbitrary shell programs; only literal `cd` prefixes may precede delivery.
 `hive ship --draft` is target-preserving and uses the same matching-review check
 as `hive ship` and `hive ship --no-pr`; destination-changing flags remain refused.
-Revision-changing prefixes, alternate PR heads/bases, dynamic checkouts, Git
+Revision-changing prefixes, unpaired/unsupported PR target overrides, dynamic checkouts, Git
 configuration overrides and
 over-budget delivery commands require an explicit override. Review is scoped to
 current HEAD to origin: alternate destinations, other explicit source refs,
@@ -77,3 +77,67 @@ be subprocess-local) cannot be stamped as a HEAD review. Runtime schema-retry an
 continuation feedback survives neutralization; only the author's original
 request loses its rationale. Requested non-Git paths remain in the neutral
 review scope, with delivery scope explicitly unverified.
+
+## Explicit release PR targets (HIV-3997)
+
+For a same-repository promotion such as `main → prod`, review the release,
+not the feature diff that may already have merged. Fetch both origin branches
+separately, finish local mutations, and use a clean checkout whose committed
+tree equals the remote source tree (an identical-tree merged feature is fine).
+Index flags that hide edits (assume-unchanged/skip-worktree) and active source
+filters are refused, including inside initialized submodules. Global unused
+filter-driver configuration (such as LFS) is harmless. Submodules must be
+recursively initialized at their recorded commits; submodule-ignore settings
+cannot conceal dirty or stale dependency sources:
+
+```js
+subagent({
+  agent: "code-reviewer",
+  task: "Review the release",
+  cwd: "/path/to/repo",
+  reviewTarget: { base: "prod", head: "main" }
+})
+```
+
+This is single foreground mode only. The harness resolves both **live origin
+branch SHAs**, requires their commit objects locally, and supplies the complete
+merge-base-to-source patch. Evidence binds the repository, origin URL identity
+(without exposing URL credentials), branch names and both exact SHAs. Ordinary
+feature reviews cannot satisfy this target; even a docs-only release needs a
+matching target review. Both endpoints are revalidated on completion,
+continuation and delivery, so moving either branch — even an empty commit with
+identical patch bytes — requires a fresh review. A persisted stamp remains
+usable only while that same evidence matches.
+
+After resolving findings, retry a standalone literal command:
+
+```sh
+gh pr create --base prod --head main --title "release" --body-file /tmp/release.md
+```
+
+Paired `-B`/`-H` and `--base=…`/`--head=…` are also supported. Fork heads,
+repository overrides, unpaired targets, interactive web/recovery forms, ambiguous
+remote configuration and unknown explicit-target options fail closed. The
+supported checkout has exactly one remote, `origin`; its explicitly pinned gh
+default is honored, otherwise `gh repo view` must resolve to that same repository
+(including fork/upstream cases). Custom push URLs, URL rewrites, alternate gh defaults and
+`GH_REPO`/`GH_HOST` overrides are refused. Incomplete captures and binary placeholders do not stamp. Explicit target
+capture inspects actual endpoint blobs independently of Git attributes, so
+text-forcing rules cannot disguise binary assets. It supports gzip-compressed
+UTF-8 data by including lossless encoded bytes and ALL decoded text from each
+changed endpoint in the same
+coverage-checked artifact. Reading encoded bytes alone cannot stamp the review;
+the decoded sections must also be read. Unknown binary formats, invalid UTF-8,
+NUL-containing decoded content, individual endpoint blobs over 16MiB, and
+patch-plus-decoded evidence over 16MiB fail
+closed. Every existing endpoint of a binary-classified path must currently be
+gzip text; plaintext-to-gzip or gzip-to-plaintext replacements are deliberately
+unsupported rather than silently reviewed with incomplete evidence. Reviewers still report semantically unreviewable assets as incomplete.
+Partial clones are refused and lazy fetching is disabled. No automatic fetch,
+branch write or production action occurs during capture.
+
+**This is a review checkpoint, not release approval or a merge gate.** Obtain
+the required operator approval separately, and inspect the eventual PR merge
+tree, CI and rollout; branches can move after the final preflight check.
+Running sessions must pick up the updated extension through the normal harness
+updater and interactive `/reload` before this parameter is available.
