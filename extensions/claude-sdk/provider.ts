@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { createAssistantMessageEventStream, createProvider, collapseSystemMessages,
-	getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type AssistantMessageDiagnostic, type Message, type Model,
+	getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type Message, type Model,
 	type Provider, type SimpleStreamOptions, type TranscriptContext, type TranscriptMessages } from "@earendil-works/pi-ai";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
 import type { PilotQueryBudget } from "./pilot-budget.ts";
-import { EventConverter, emptyUsage, SdkAssistantFailure, type FailureCode } from "./events.ts";
+import { EventConverter, emptyUsage, SdkAssistantFailure, SdkProtocolError, SdkProviderError, streamFailure, type FailureCode } from "./events.ts";
+import { failureDiagnostic, SdkLeaseExpired, type Continuation, type FailureContext, type ParkedEndReason } from "./diagnostics.ts";
 import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
 import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
@@ -33,7 +34,11 @@ interface Parked {
 	lease: AccessLease; bridge: PiToolBridge; query: SdkQuery; iterator: AsyncIterator<SDKMessage>;
 	controller: AbortController; dir: string; processes: ReturnType<typeof processScope>;
 	observedIds: Set<string>; busy: boolean; timer?: ReturnType<typeof setTimeout>; releaseAbort?: () => void; closing?: Promise<void>;
+	/** When the model batch was handed to Pi; diagnostics only. */
+	parkedAt?: number;
 }
+/** Parked queries whose disposal a later tool-result request is matched against, for diagnostics. */
+const PARKED_END_LIMIT = 64;
 
 /**
  * SDK failure codes the pre-effect retry may repeat once. Account, credential,
@@ -42,13 +47,6 @@ interface Parked {
  * arrived as `unknown`.
  */
 const PRE_EFFECT_RETRY_CODES: ReadonlySet<FailureCode> = new Set<FailureCode>(["unknown", "unrecognized", "rate_limit", "overloaded", "server_error"]);
-
-/** The SDK's code and sanitized cause for diagnose_agent_session; never authorizes a Pi retry. */
-function assistantFailureDiagnostic(error: SdkAssistantFailure, timestamp: number, retried: boolean): AssistantMessageDiagnostic {
-	return { type: "claude_sdk_assistant_failure", timestamp,
-		error: { message: error.detail ?? "Claude SDK assistant failure", code: error.code },
-		details: { retrySafe: false, ...(retried ? { retriedOnce: "failed before any content or tool call; the query was opened again" } : {}) } };
-}
 
 // Pi's own docs section as Pi renders it. Extensions that return a whole systemPrompt from
 // before_agent_start flatten the sections into plain text, so match the rendered block.
@@ -80,6 +78,8 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 	let cleanupError = false;
 	let closing: Promise<void> | undefined;
 	const ambiguous = deps.replayProtection ?? new Set<string>();
+	// Fingerprint of a disposed handoff's expected transcript -> why and when; diagnostics only.
+	const parkedEnds = new Map<string, { reason: ParkedEndReason; parkedAt: number; endedAt: number }>();
 	const shutdown = new AbortController();
 	let closed = false;
 	async function getLease(signal: AbortSignal): Promise<AccessLease> {
@@ -103,13 +103,19 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 		}
 		if (failed) {
 			cleanupError = true;
-			throw new Error("Claude SDK resource cleanup failed; operator cleanup required");
+			throw new SdkProviderError("Claude SDK resource cleanup failed; operator cleanup required");
 		}
 	}
-	function dispose(state: Parked): Promise<void> {
+	function dispose(state: Parked, reason?: ParkedEndReason): Promise<void> {
 		// An idle handoff may already have executed in Pi. Losing the transport
 		// cannot authorize replay of the original, result-free attempt.
-		if (!state.busy && state.expected.length) ambiguous.add(fingerprint(transcript(state.prefix)));
+		if (!state.busy && state.expected.length) {
+			ambiguous.add(fingerprint(transcript(state.prefix)));
+			if (reason && !state.closing) {
+				if (parkedEnds.size >= PARKED_END_LIMIT) parkedEnds.delete(parkedEnds.keys().next().value!);
+				parkedEnds.set(fingerprint(transcript(state.expected)), { reason, parkedAt: state.parkedAt ?? now(), endedAt: now() });
+			}
+		}
 		if (state.closing) return state.closing;
 		states.delete(state.key); clearTimeout(state.timer); state.releaseAbort?.();
 		state.closing = cleanupResources(state);
@@ -127,21 +133,27 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 			let sdkStarted = false;
 			let pilotRequest = false;
 			let attemptedPrefix: Message[] | undefined;
+			// Failure-diagnostic context; none of it changes control flow.
+			let continuation: Continuation = "fresh_prompt";
+			let parkedEnd: FailureContext["parkedEnd"];
+			let scope: Parked["processes"] | undefined;
+			let leaseExpired = false;
+			const secrets = [config.token];
 			const signal = AbortSignal.any([options.signal ?? new AbortController().signal, shutdown.signal]);
 			let abortParked: (() => void) | undefined;
 			try {
 				signal.throwIfAborted();
-				if (closed) throw new Error("Claude SDK runtime closed");
-				if (cleanupError) throw new Error("Claude SDK private-state cleanup failed; operator cleanup required");
-				if (model.provider !== PROVIDER_ID || !claudeSdkModels().some(m => m.id === model.id)) throw new Error("Unknown Claude SDK model");
+				if (closed) throw new SdkProviderError("Claude SDK runtime closed");
+				if (cleanupError) throw new SdkProviderError("Claude SDK private-state cleanup failed; operator cleanup required");
+				if (model.provider !== PROVIDER_ID || !claudeSdkModels().some(m => m.id === model.id)) throw new SdkProviderError("Unknown Claude SDK model");
 				if (options.fetch || options.headers && Object.keys(options.headers).length ||
 					options.apiKey && options.apiKey !== "hive-launch-admission") {
-					throw new Error("Claude SDK has no injectable HTTP transport, response headers or API-key fallback; use structured SDK events");
+					throw new SdkProviderError("Claude SDK has no injectable HTTP transport, response headers or API-key fallback; use structured SDK events");
 				}
-				if (options.env && Object.keys(options.env).length) throw new Error("Claude SDK child environment is launch-owned");
-				if (options.deferred || options.samplingParams || options.temperature !== undefined) throw new Error("Unsupported Claude SDK request options");
+				if (options.env && Object.keys(options.env).length) throw new SdkProviderError("Claude SDK child environment is launch-owned");
+				if (options.deferred || options.samplingParams || options.temperature !== undefined) throw new SdkProviderError("Unsupported Claude SDK request options");
 				if (options.toolChoice !== undefined && options.toolChoice !== "auto" && options.toolChoice !== "none") {
-					throw new Error("Unsupported Claude SDK tool choice; pinned Pi supports only auto or none");
+					throw new SdkProviderError("Unsupported Claude SDK tool choice; pinned Pi supports only auto or none");
 				}
 				const reasoning = reasoningOptions(getBuiltinModels("anthropic").find(m => m.id === model.id)!, options);
 				const context = collapseSystemMessages(original);
@@ -152,36 +164,45 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				if (options.onPayload) {
 					const inspected = structuredClone(payload);
 					const replacement = await cancellable(Promise.resolve().then(() => options.onPayload!(inspected, model)), signal);
-					if (!isDeepStrictEqual(replacement ?? inspected, payload)) throw new Error("Claude SDK payload mutation unsupported; Pi owns canonical history");
+					if (!isDeepStrictEqual(replacement ?? inspected, payload)) throw new SdkProviderError("Claude SDK payload mutation unsupported; Pi owns canonical history");
 				}
 				const tools = options.toolChoice === "none" ? [] : getCurrentTools(context.messages);
 				const contextHash = fingerprint(transcript(context.messages));
-				if (ambiguous.has(contextHash)) throw new Error("Ambiguous previous SDK attempt; reconcile side effects before retrying");
+				if (context.messages.at(-1)?.role === "toolResult") continuation = "tool_results";
+				if (ambiguous.has(contextHash)) throw new SdkProviderError("Ambiguous previous SDK attempt; reconcile side effects before retrying");
 				const key = options.sessionId ?? randomUUID();
-				if (reservations.has(key)) throw new Error("Concurrent Claude SDK requests require isolated sessions");
+				if (reservations.has(key)) throw new SdkProviderError("Concurrent Claude SDK requests require isolated sessions");
 				reservations.add(key);
 				reservation = key;
 				const candidates = [...states.values()].filter(s => s.session === options.sessionId &&
 					s.model === model.id && s.expected.length > 0 && isDeepStrictEqual(transcript(context.messages.slice(0, s.expected.length)), transcript(s.expected)));
-				if (candidates.length > 1) throw new Error("Ambiguous SDK tool continuation");
-				if (candidates[0]?.busy) throw new Error("SDK continuation already active");
+				if (candidates.length > 1) throw new SdkProviderError("Ambiguous SDK tool continuation");
+				if (candidates[0]?.busy) throw new SdkProviderError("SDK continuation already active");
 				state = candidates[0];
+				if (state) { continuation = "parked"; scope = state.processes; }
+				else if (continuation === "tool_results") {
+					let handoff = context.messages.length;
+					while (handoff > 0 && context.messages[handoff - 1].role === "toolResult") handoff--;
+					const ended = parkedEnds.get(fingerprint(transcript(context.messages.slice(0, handoff))));
+					continuation = ended ? `rebuilt_after_${ended.reason}` : "rebuilt";
+					if (ended) parkedEnd = { parkedMs: ended.endedAt - ended.parkedAt, endedMsAgo: now() - ended.endedAt };
+				}
 				const suffix = state ? context.messages.slice(state.expected.length) : [];
 				let resultEnd = 0;
 				while (suffix[resultEnd]?.role === "toolResult") resultEnd++;
 				const results = suffix.slice(0, resultEnd);
 				if (state) {
 					const calls = state.expected.at(-1);
-					if (calls?.role !== "assistant") throw new Error("Invalid parked SDK state");
+					if (calls?.role !== "assistant") throw new SdkProviderError("Invalid parked SDK state");
 					const pending = calls.content.filter(block => block.type === "toolCall");
 					if (results.length !== pending.length || results.some(result => result.role !== "toolResult") ||
 						pending.some(call => results.filter(r => r.role === "toolResult" && r.toolCallId === call.id && r.toolName === call.name).length !== 1)) {
-						throw new Error("Missing correlated Pi tool results; reconcile before continuing");
+						throw new SdkProviderError("Missing correlated Pi tool results; reconcile before continuing");
 					}
 				}
 				assertSettledHistory(context.messages);
 				if (!state && !["user", "toolResult"].includes(context.messages.at(-1)?.role ?? "")) {
-					throw new Error("Claude SDK request requires a user message or correlated tool results");
+					throw new SdkProviderError("Claude SDK request requires a user message or correlated tool results");
 				}
 				deps.pilot?.beginRequest(state !== undefined);
 				pilotRequest = deps.pilot !== undefined;
@@ -194,14 +215,15 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					state.releaseAbort?.(); state.releaseAbort = undefined;
 				}
 				const lease = await getLease(signal);
+				secrets.push(lease.access_token);
 				signal.throwIfAborted();
 				// Same named session but edited/compacted/forked transcript: discard SDK cache, never Pi history.
-				for (const old of [...states.values()]) if (old !== state && options.sessionId && old.session === options.sessionId) await dispose(old);
+				for (const old of [...states.values()]) if (old !== state && options.sessionId && old.session === options.sessionId) await dispose(old, "replaced");
 				if (state) {
 					// Token rotation/account changes cannot carry the previous CLI state across the boundary.
 					if (!isDeepStrictEqual(queryOptions, state.queryOptions) || resultEnd !== suffix.length || lease.credential !== state.lease.credential || lease.slot !== state.lease.slot || lease.access_token !== state.lease.access_token ||
 						!isDeepStrictEqual(tools, state.bridge.toolNames.map(name => getCurrentTools(state!.prefix).find(t => t.name === name)))) {
-						await dispose(state); state = undefined;
+						await dispose(state); state = undefined; continuation = "rebuilt_options_changed";
 					} else {
 						attemptedPrefix = structuredClone(context.messages);
 						for (const result of results) if (result.role === "toolResult") state.bridge.complete(result);
@@ -221,13 +243,14 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 							result.role === "toolResult" ? [{ type: "tool_result" as const, tool_use_id: sdkToolCallId(result.toolCallId),
 								is_error: result.isError, content: result.content.map(imageOrText) }] : []) },
 							parent_tool_use_id: null, client_composed: true } as SDKUserMessage;
-					} else throw new Error("Claude SDK request requires a user message or correlated tool results");
+					} else throw new SdkProviderError("Claude SDK request requires a user message or correlated tool results");
 					const history = context.messages.slice(0, split);
 					const controller = new AbortController();
 					const dir = await privateDirectory(config.stateRoot);
 					let bridge: PiToolBridge | undefined;
 					let query: SdkQuery | undefined;
 					const processes = processScope();
+					scope = processes;
 					try {
 						bridge = new PiToolBridge(tools, controller.signal, 10_000);
 						await (deps.validateExecutable ?? validateExecutable)(config, signal);
@@ -266,29 +289,32 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				events.push({ type: "start", partial: output });
 				for (let attempt = 0; ; attempt++) {
 					const owned: Parked = state;
-					abortParked = () => { owned.controller.abort(); if (!owned.busy) void dispose(owned); };
+					abortParked = () => { owned.controller.abort(); if (!owned.busy) void dispose(owned, "aborted"); };
 					signal.addEventListener("abort", abortParked, { once: true });
 					owned.releaseAbort = () => { if (abortParked) signal.removeEventListener("abort", abortParked); };
 					if (signal.aborted) abortParked();
 					const converter = new EventConverter(output, events, model, owned.bridge, owned.observedIds, [lease.access_token]);
-					const expiry = setTimeout(() => owned.controller.abort(), Math.max(1, Date.parse(lease.expires_at) - now()));
+					const expiry = setTimeout(() => { leaseExpired = true; owned.controller.abort(new SdkLeaseExpired()); }, Math.max(1, Date.parse(lease.expires_at) - now()));
 					try {
 						while (true) {
 							const next = await cancellable(owned.iterator.next(), AbortSignal.any([signal, owned.controller.signal]));
-							if (next.done) throw new Error("Claude SDK ended without result");
+							if (next.done) throw new SdkProtocolError("Claude SDK ended without result", "stream_ended");
 							if (options.onProviderStreamEvent) await cancellable(
 								Promise.resolve().then(() => options.onProviderStreamEvent!(structuredClone(next.value), model)),
 								AbortSignal.any([signal, owned.controller.signal]));
 							signal.throwIfAborted(); owned.controller.signal.throwIfAborted();
 							if (next.value.type === "result") deps.pilot?.observeResult(next.value.num_turns, next.value.subtype === "success");
-							const action = converter.consume(next.value);
+							let action: ReturnType<EventConverter["consume"]>;
+							try { action = converter.consume(next.value); }
+							catch (failure) { throw streamFailure(failure, next.value, secrets); }
 							if (action === "tools") {
 								// Reserve the result-free attempt at handoff, across session IDs,
 								// before Pi can execute it or a replacement can pass admission.
 								ambiguous.add(contextHash);
 								owned.expected = [...structuredClone(context.messages), structuredClone(output)];
 								owned.busy = false;
-								owned.timer = setTimeout(() => { void dispose(owned); }, Math.min(5 * 60_000, Date.parse(lease.expires_at) - now()));
+								owned.parkedAt = now();
+								owned.timer = setTimeout(() => { void dispose(owned, "parked_expired"); }, Math.min(5 * 60_000, Date.parse(lease.expires_at) - now()));
 								owned.timer.unref();
 								events.push({ type: "done", reason: "toolUse", message: output }); break;
 							}
@@ -307,7 +333,8 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 							PRE_EFFECT_RETRY_CODES.has(error.code) && context.messages.at(-1)?.role === "user" &&
 							output.content.length === 0 && owned.bridge.idle && !signal.aborted && !owned.controller.signal.aborted;
 						if (!retry) throw error;
-						output.diagnostics = [...output.diagnostics ?? [], assistantFailureDiagnostic(error, now(), true)];
+						output.diagnostics = [...output.diagnostics ?? [], failureDiagnostic(error, { phase: "post_start", continuation, parkedEnd, aborted: false,
+							leaseExpired: false, cleanupFailed: false, evidence: await scope?.evidence(), secrets, retried: true }, now())];
 						state = undefined;
 						await dispose(owned);
 						state = await openQuery();
@@ -316,6 +343,11 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					break;
 				}
 			} catch (error) {
+				// Whether the failure was an abort is read before the evidence wait below.
+				const aborted = signal.aborted;
+				// Snapshot the CLI's evidence before disposal signals it.
+				const evidence = await scope?.evidence();
+				const phase = state || sdkStarted ? "post_start" : "pre_start";
 				let cleanupFailed = cleanupError;
 				if (attemptedPrefix) ambiguous.add(fingerprint(transcript(attemptedPrefix)));
 				if (state) {
@@ -323,9 +355,10 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					try { await dispose(state); } catch { cleanupFailed = true; }
 				}
 				output.stopReason = signal.aborted ? "aborted" : "error";
-				if (error instanceof SdkAssistantFailure) output.diagnostics = [...output.diagnostics ?? [], assistantFailureDiagnostic(error, now(), false)];
 				// SDK classification does not promise nonexecution. Keep all post-start
-				// failures generic/nonretryable for Pi; the code and cause are diagnostics only.
+				// failures generic/nonretryable for Pi; the kind and cause are diagnostics only.
+				output.diagnostics = [...output.diagnostics ?? [], failureDiagnostic(error, { phase, continuation, parkedEnd, aborted,
+					leaseExpired, cleanupFailed, evidence, secrets }, now())];
 				output.errorMessage = cleanupFailed ? "Claude SDK failed to remove private state; operator cleanup required" : state || sdkStarted ? "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" :
 					(error instanceof Error ? error.message : "Claude SDK request failed");
 				events.push({ type: "error", reason: output.stopReason, error: output });
@@ -356,7 +389,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 		const remaining = [...states.values()];
 		shutdown.abort(); leases.close();
 		closing = (async () => {
-			const settled = await Promise.allSettled([...remaining.map(dispose), ...disposals, ...runs]);
+			const settled = await Promise.allSettled([...remaining.map(state => dispose(state)), ...disposals, ...runs]);
 			if (cleanupError || settled.some(result => result.status === "rejected")) throw new Error("Claude SDK private-state cleanup failed; operator cleanup required");
 		})();
 		return closing;

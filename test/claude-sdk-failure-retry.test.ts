@@ -100,7 +100,7 @@ describe("one automatic retry before any content or tool call", () => {
 		expect(result).toMatchObject({ stopReason: "stop", content: [{ type: "text", text: "ok" }] });
 		expect(result.diagnostics).toEqual([{ type: "claude_sdk_assistant_failure", timestamp: expect.any(Number),
 			error: { code: "unknown", message: "API Error 400: invalid_request_error: Third-party apps now draw from your extra usage" },
-			details: { retrySafe: false, retriedOnce: expect.any(String) } }]);
+			details: { retrySafe: false, phase: "post_start", continuation: "fresh_prompt", retriedOnce: expect.any(String) } }]);
 		expect(JSON.stringify(result)).not.toContain("req_011CU");
 		expect(await readdir(sdk.root)).toEqual([]);
 	});
@@ -111,7 +111,8 @@ describe("one automatic retry before any content or tool call", () => {
 		const result = await sdk.provider.streamSimple(sdk.model, ctx, { sessionId: "twice" }).result();
 		expect(sdk.queries()).toBe(2);
 		expect(result.errorMessage).toBe("Claude SDK interrupted or failed; reconcile any pending side effects before retrying");
-		expect(result.diagnostics?.map(d => d.details)).toEqual([{ retrySafe: false, retriedOnce: expect.any(String) }, { retrySafe: false }]);
+		const context = { retrySafe: false, phase: "post_start", continuation: "fresh_prompt" };
+		expect(result.diagnostics?.map(d => d.details)).toEqual([{ ...context, retriedOnce: expect.any(String) }, context]);
 		expect((await sdk.provider.streamSimple(sdk.model, ctx, { sessionId: "twice" }).result()).errorMessage).toMatch(/Ambiguous previous/);
 		expect(sdk.queries()).toBe(2);
 	});

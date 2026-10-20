@@ -2,6 +2,7 @@
 import { isAbsolute } from "node:path";
 import { getSupportedThinkingLevels, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { McpSdkServerConfigWithInstance, Options, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { SdkProviderError } from "./events.ts";
 
 export const CREDENTIAL_PROVIDER = "anthropic";
 export const SDK_VERSION = "0.3.289";
@@ -16,7 +17,7 @@ export interface AccessLease {
 
 /** Validates shape/expiry only. This does NOT authenticate a Hive caller/account. */
 export function accessLease(value: unknown, now: number): AccessLease {
-	const bad = () => new Error("Invalid access-only Claude lease");
+	const bad = () => new SdkProviderError("Invalid access-only Claude lease");
 	if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isFinite(now)) throw bad();
 	const doc = value as Record<string, unknown>;
 	const keys = ["access_token", "expires_at", "credential", "slot"];
@@ -51,8 +52,8 @@ export function sandboxEgressEnv(env: NodeJS.ProcessEnv): Record<string, string>
  *  the key, never the value: it may carry the proxy's credential. */
 function validatedEgress(egress: Readonly<Record<string, string>>): Record<string, string> {
 	for (const [key, value] of Object.entries(egress)) {
-		if (!EGRESS_KEYS.includes(key)) throw new Error("Only proxy settings are forwarded to Claude");
-		const bad = () => new Error(`Unsupported Claude SDK egress setting ${key}: only the Hive sandbox's loopback proxy is forwarded`);
+		if (!EGRESS_KEYS.includes(key)) throw new SdkProviderError("Only proxy settings are forwarded to Claude");
+		const bad = () => new SdkProviderError(`Unsupported Claude SDK egress setting ${key}: only the Hive sandbox's loopback proxy is forwarded`);
 		if (typeof value !== "string" || !value || /[\s\p{Cc}]/u.test(value)) throw bad();
 		if (key.toLowerCase() === "no_proxy") continue;
 		const url = URL.canParse(value) ? new URL(value) : undefined;
@@ -86,12 +87,12 @@ export interface IsolatedRequest {
 export function isolatedOptions(request: IsolatedRequest): Options {
 	const { executablePath, cwd, privateRoot, abortController, bridge } = request;
 	if (![executablePath, cwd, privateRoot].every(path => isAbsolute(path))) {
-		throw new Error("Absolute trusted runtime paths required");
+		throw new SdkProviderError("Absolute trusted runtime paths required");
 	}
-	if (bridge.type !== "sdk" || bridge.name !== "pi") throw new Error("Only the in-process Pi bridge is supported");
+	if (bridge.type !== "sdk" || bridge.name !== "pi") throw new SdkProviderError("Only the in-process Pi bridge is supported");
 	if (request.toolNames.some(name => !/^[a-zA-Z0-9_-]+$/.test(name)) ||
-		new Set(request.toolNames).size !== request.toolNames.length) throw new Error("Invalid Pi tool names");
-	if (!request.model.trim()) throw new Error("Claude model required");
+		new Set(request.toolNames).size !== request.toolNames.length) throw new SdkProviderError("Invalid Pi tool names");
+	if (!request.model.trim()) throw new SdkProviderError("Claude model required");
 	const lease = accessLease(request.lease, request.now);
 	const egress = validatedEgress(request.egress ?? {});
 	return {
@@ -139,27 +140,27 @@ export function isolatedOptions(request: IsolatedRequest): Options {
 export function reasoningOptions(model: Model<"anthropic-messages">, options: SimpleStreamOptions): Pick<Options, "thinking" | "effort"> {
 	const supported = getSupportedThinkingLevels(model);
 	const level = options.reasoning ?? (supported.includes("off") ? "off" : "high");
-	if (!supported.includes(level)) throw new Error(`Unsupported Claude SDK thinking level: ${level}`);
+	if (!supported.includes(level)) throw new SdkProviderError(`Unsupported Claude SDK thinking level: ${level}`);
 	const adaptive = model.compat?.forceAdaptiveThinking === true;
 	if (options.thinkingBudgets && (adaptive || level === "off")) {
-		throw new Error("Claude SDK thinking budgets require budget-based reasoning");
+		throw new SdkProviderError("Claude SDK thinking budgets require budget-based reasoning");
 	}
 	if (level === "off") return { thinking: { type: "disabled" } };
 	if (adaptive) {
 		const effort = model.thinkingLevelMap?.[level] ?? (level === "minimal" ? "low" : level);
 		if (effort !== "low" && effort !== "medium" && effort !== "high" && effort !== "xhigh" && effort !== "max") {
-			throw new Error("Unsupported Claude SDK effort mapping");
+			throw new SdkProviderError("Unsupported Claude SDK effort mapping");
 		}
 		return { thinking: { type: "adaptive" }, effort };
 	}
 	const budgets = { minimal: 1024, low: 2048, medium: 8192, high: 16384, ...options.thinkingBudgets };
 	if (options.thinkingBudgets && Object.entries(options.thinkingBudgets).some(([key, value]) =>
 		!supported.includes(key as typeof level) || !Number.isSafeInteger(value) || value < 1024)) {
-		throw new Error("Unsupported Claude SDK thinking budget");
+		throw new SdkProviderError("Unsupported Claude SDK thinking budget");
 	}
 	const budgetTokens = budgets[level as keyof typeof budgets];
 	if (!Number.isSafeInteger(budgetTokens) || budgetTokens < 1024 || budgetTokens >= (options.maxTokens ?? model.maxTokens)) {
-		throw new Error("Claude SDK thinking budget must fit within the output token limit");
+		throw new SdkProviderError("Claude SDK thinking budget must fit within the output token limit");
 	}
 	return { thinking: { type: "enabled", budgetTokens } };
 }

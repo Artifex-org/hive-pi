@@ -52,7 +52,7 @@ vi.mock("node:fs", async original => {
 		}),
 	};
 });
-import { processScope, validateExecutable } from "../extensions/claude-sdk/runtime.ts";
+import { processScope, STDERR_TAIL_CHARS, validateExecutable } from "../extensions/claude-sdk/runtime.ts";
 import { killAllTrees, killTree } from "../extensions/hive-common/child-tree.ts";
 import { spawn } from "node:child_process";
 
@@ -325,4 +325,25 @@ it.runIf(process.platform === "linux").each(["1", "2"])("checks thread-group exi
 		fixture.deniedRootEnvironment = false; child.emit("close", 0);
 		child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 	}
+});
+
+it.runIf(process.platform === "linux").each([false, true])("keeps a bounded stderr tail and the CLI's own exit (signalled first: %s)", async signalledFirst => {
+	const child = syntheticChild(); const scope = processScope();
+	const handle = scope.spawn(request()); vi.spyOn(process, "kill").mockReturnValue(true);
+	expect(await scope.evidence()).toEqual({ stderr: "" });
+	const stderrPipe = child.stderr as PassThrough;
+	stderrPipe.write("x".repeat(STDERR_TAIL_CHARS)); stderrPipe.write("final error line\n");
+	await new Promise(resolve => setImmediate(resolve));
+	const { stderr } = await scope.evidence();
+	expect(stderr).toHaveLength(STDERR_TAIL_CHARS);
+	expect(stderr.endsWith("final error line\n")).toBe(true);
+	if (signalledFirst) handle.kill("SIGTERM");
+	child.emit("exit", signalledFirst ? null : 2, signalledFirst ? "SIGTERM" : null);
+	// An exited CLI's last stderr can arrive after `exit`: evidence waits for the pipe to close.
+	stderrPipe.end("late fatal line\n");
+	const evidence = await scope.evidence();
+	expect(evidence.exit).toEqual(signalledFirst ? { code: null, signal: "SIGTERM", requested: true } : { code: 2, signal: null, requested: false });
+	if (!signalledFirst) expect(evidence.stderr.endsWith("final error line\nlate fatal line\n")).toBe(true);
+	child.emit("close", 0); await scope.close();
+	child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
 });
