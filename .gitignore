@@ -2,6 +2,11 @@ node_modules/
 *.log
 .DS_Store
 
+# Session-local planning/checkpoint notes are not maintained project docs.
+# Keep them local; promote lasting documentation into docs/ instead.
+/PLAN*.md
+/PROGRESS*.md
+
 # Defence in depth for a public repo: a stranger cloning this and working in it
 # must not be one `git add -A` away from publishing their own credentials.
 .env
