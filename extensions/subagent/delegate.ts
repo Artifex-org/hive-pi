@@ -724,7 +724,7 @@ export async function runSingleAgent(
 				// A Claude helper's worker is a process group (hive-common/child-tree.ts).
 				...tree,
 			});
-			trackTree(proc, tree.detached);
+			trackTree(proc, tree.detached, tree.env.HIVE_PI_TREE_TOKENS?.split(",").at(-1));
 			// A worker that dies before reading its task closes the pipe (EPIPE):
 			// that is the worker's failure, reported through its exit and stderr,
 			// not an unhandled error event here.
