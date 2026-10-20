@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,9 +37,13 @@ function stubTools(home: string): { bin: string; log: string } {
 	writeFileSync(join(pkg, "cli.js"), `#!/bin/sh\necho "pi $*" >> "${log}"\n`, { mode: 0o755 });
 	// Every external tool the activation path runs after the pull, so the test
 	// is hermetic: a runner without stow (or with node off PATH) still passes.
-	for (const name of ["mise", "npm", "stow"]) {
+	for (const name of ["mise", "stow"]) {
 		writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} $*" >> "${log}"\n`, { mode: 0o755 });
 	}
+	// `npm --prefix P ci` installs into P/node_modules, as the real one does, so
+	// the updater's swap of that tree into the checkout is exercised.
+	writeFileSync(join(bin, "npm"), `#!/bin/sh\necho "npm $*" >> "${log}"\n` +
+		`if [ "$1" = --prefix ] && [ "$3" = ci ]; then mkdir -p "$2/node_modules" && echo installed > "$2/node_modules/stamp"; fi\n`, { mode: 0o755 });
 	symlinkSync(join(pkg, "cli.js"), join(bin, "pi"));
 	return { bin, log };
 }
@@ -93,6 +97,9 @@ function fixture() {
 	// a real machine it exited 1 and aborted every update.
 	writeFileSync(join(source, "workstation/.pi/agent/settings.default.json"), '{"theme":"{{HIVE_PI_ROOT}}"}\n');
 	writeFileSync(join(source, "README"), "base\n");
+	writeFileSync(join(source, ".gitignore"), "node_modules/\n");
+	writeFileSync(join(source, "package.json"), '{"name":"fixture"}\n');
+	writeFileSync(join(source, "package-lock.json"), '{"name":"fixture","lockfileVersion":3}\n');
 	git(source, "add", ".");
 	git(source, "commit", "-m", "base");
 	git(source, "push", "-u", "origin", "main");
@@ -174,12 +181,91 @@ describe("hive-pi-update", () => {
 		const { bin, log } = stubTools(home);
 		runUpdater(home, bin);
 		const calls = readFileSync(log, "utf8");
-		expect(calls).toContain(`npm --prefix ${repo} ci --ignore-scripts --no-audit --no-fund`);
+		expect(calls).toMatch(new RegExp(`npm --prefix ${home}/repos/hive-pi__worktrees/\\.hive-pi-update-deps\\.\\w+ ci --ignore-scripts --no-audit --no-fund`));
 		expect(calls).toContain(`npm --prefix ${repo} run typecheck`);
 		expect(calls).not.toContain(`npm --prefix ${repo} run check`);
 		expect(calls).toContain("pi update --extensions");
 		expect(calls).toContain(`stow --restow --no-folding -d ${repo} -t ${home} workstation`);
 		expect(readFileSync(join(home, "state/hive-pi-update/last-run"), "utf8")).toContain("activated");
+	});
+
+	// Running agents load the checkout's node_modules, and the node advertises
+	// Claude SDK support only while the pinned packages there resolve. `npm ci`
+	// in place deleted the tree for seconds, Hive refused the live SDK sessions'
+	// leases meanwhile, and two eval agents died at once.
+	describe("dependency install", () => {
+		const exchange = execFileSync("mv", ["--help"], { encoding: "utf8" }).includes("--exchange");
+
+		/** A PATH dir whose `mv` lacks --exchange, as BSD mv and coreutils < 9.5 do. */
+		function plainMv(home: string, failInstallInto?: string): string {
+			const dir = join(home, "plain-mv");
+			mkdirSync(dir, { recursive: true });
+			const fail = failInstallInto
+				? `case "$1" in */.hive-pi-update-deps.*/node_modules) [ "$2" = "${failInstallInto}" ] && exit 1;; esac\n`
+				: "";
+			writeFileSync(join(dir, "mv"), `#!/bin/sh\n[ "$1" = --help ] && { echo "Usage: mv [OPTION]... SOURCE DEST"; exit 0; }\n${fail}exec /bin/mv "$@"\n`, { mode: 0o755 });
+			return dir;
+		}
+
+		function installed(repo: string): { stamp: string; staging: string[] } {
+			return {
+				stamp: readFileSync(join(repo, "node_modules/stamp"), "utf8"),
+				staging: readdirSync(join(repo, "..")).filter((name) => name.startsWith(".hive-pi-update-deps.")),
+			};
+		}
+
+		function withPreviousTree(name: string) {
+			const { root, origin, source } = fixture();
+			const { home, repo } = checkout(root, origin, name);
+			mkdirSync(join(repo, "node_modules"));
+			writeFileSync(join(repo, "node_modules/stamp"), "previous\n");
+			return { home, repo, source, ...stubTools(home) };
+		}
+
+		it.skipIf(!exchange)("builds the tree beside the checkout and exchanges it in", () => {
+			const { home, repo, bin, log } = withPreviousTree("exchange");
+			runUpdater(home, bin);
+			expect(readFileSync(log, "utf8")).not.toContain(`npm --prefix ${repo} ci`);
+			expect(installed(repo)).toEqual({ stamp: "installed\n", staging: [] });
+			expect(git(repo, "status", "--porcelain")).toBe("");
+		});
+
+		it("swaps with two renames where mv has no --exchange", () => {
+			const { home, repo, bin } = withPreviousTree("plain");
+			runUpdater(home, `${plainMv(home)}:${bin}`);
+			expect(installed(repo)).toEqual({ stamp: "installed\n", staging: [] });
+		});
+
+		it("puts the previous tree back when the second rename fails", () => {
+			const { home, repo, bin } = withPreviousTree("rollback");
+			expect(() => runUpdater(home, `${plainMv(home, join(repo, "node_modules"))}:${bin}`)).toThrow();
+			expect(installed(repo).stamp).toBe("previous\n");
+		});
+
+		it("installs nothing when the dependency manifests have not changed", () => {
+			const { home, repo, source, bin, log } = withPreviousTree("unchanged");
+			runUpdater(home, bin);
+			writeFileSync(join(source, "README"), "advanced\n");
+			git(source, "commit", "-am", "advance");
+			git(source, "push");
+			writeFileSync(log, "");
+			runUpdater(home, bin);
+			expect(git(repo, "rev-parse", "HEAD")).toBe(git(source, "rev-parse", "HEAD"));
+			const calls = readFileSync(log, "utf8");
+			expect(calls).toContain("run typecheck");
+			expect(calls).not.toMatch(/ ci /);
+		});
+
+		it("removes only staging trees an abandoned run left an hour ago", () => {
+			const { home, repo, bin } = withPreviousTree("stale");
+			const parent = join(repo, "..");
+			mkdirSync(join(parent, ".hive-pi-update-deps.abandoned/node_modules"), { recursive: true });
+			mkdirSync(join(parent, ".hive-pi-update-deps.running"));
+			const old = new Date(Date.now() - 2 * 3600_000);
+			utimesSync(join(parent, ".hive-pi-update-deps.abandoned"), old, old);
+			runUpdater(home, bin);
+			expect(installed(repo).staging).toEqual([".hive-pi-update-deps.running"]);
+		});
 	});
 
 	// The guard the removal above must not have weakened: real local work in the

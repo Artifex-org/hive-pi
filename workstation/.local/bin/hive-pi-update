@@ -299,7 +299,53 @@ fi
 # launchd on macOS (ECONNRESET in the audit, then nothing for 11 minutes,
 # measured 2026-10-06), which wedged the whole run. --no-fund drops the other
 # advisory request.
-npm --prefix "${repo}" ci --ignore-scripts --no-audit --no-fund
+#
+# STAGED, then swapped in: never `npm ci` in the live checkout. `npm ci` deletes
+# node_modules before it reinstalls, and running agents load this tree. The node
+# re-probes the Claude SDK runtime (pinned SDK/MCP packages under node_modules)
+# on every capability poll, so for those seconds it advertised no SDK support and
+# Hive refused every live claude-sdk session's next lease with a 403, which pi
+# reports as a fatal auth failure (two eval agents died at once on 2026-10-20,
+# 7-12 s after an update; an in-place `npm ci` measured the SDK package absent
+# for ~60% of its run).
+#
+# So: nothing is installed when the dependency manifests have not changed, which
+# is almost every activation. When they have, the tree is built beside the
+# checkout (same filesystem, so the swap is a rename, never a copy) and swapped
+# in with one rename(2) where mv supports --exchange (GNU coreutils 9.5+). BSD
+# mv and older coreutils take two renames, a gap of microseconds; if the second
+# fails, the previous tree is put back. No run lock serializes updaters, so only
+# a staging tree older than any install is treated as abandoned.
+installed_deps_file="${state_dir}/installed-dependencies"
+install_dependencies() {
+  local manifests parent staging
+  manifests="$(cat "${repo}/package.json" "${repo}/package-lock.json" | git hash-object --stdin)"
+  if [[ -d "${repo}/node_modules" && -f "${installed_deps_file}" \
+    && "$(<"${installed_deps_file}")" == "${manifests}" ]]; then
+    return 0
+  fi
+  parent="$(dirname "${repo}")"
+  find "${parent}" -maxdepth 1 -name '.hive-pi-update-deps.*' -mmin +60 -exec rm -rf {} +
+  staging="$(mktemp -d "${parent}/.hive-pi-update-deps.XXXXXX")"
+  cp "${repo}/package.json" "${repo}/package-lock.json" "${staging}/"
+  npm --prefix "${staging}" ci --ignore-scripts --no-audit --no-fund
+  if [[ "$(mv --help 2>&1 || true)" == *--exchange* && -e "${repo}/node_modules" ]]; then
+    mv -T --exchange "${staging}/node_modules" "${repo}/node_modules"
+  else
+    if [[ -e "${repo}/node_modules" ]]; then
+      mv "${repo}/node_modules" "${staging}/node_modules.old"
+    fi
+    if ! mv "${staging}/node_modules" "${repo}/node_modules"; then
+      if [[ -e "${staging}/node_modules.old" ]]; then
+        mv "${staging}/node_modules.old" "${repo}/node_modules"
+      fi
+      return 1
+    fi
+  fi
+  rm -rf "${staging}"
+  printf '%s\n' "${manifests}" > "${installed_deps_file}"
+}
+install_dependencies
 # Typecheck, NOT `npm run check`: the vitest suite is the repo's gate
 # (.github/workflows/check.yml runs it on every push to main), not this
 # machine's. Re-running it here measured badly on 2026-10-08 on a macOS
