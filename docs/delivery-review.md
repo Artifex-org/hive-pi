@@ -48,11 +48,19 @@ on failure. Its temporary path is not part of the fingerprint.
 Oversized `code-reviewer` reviews can continue in the **same private persisted
 conversation**, retaining the artifact and observed read coverage. The runner
 plans contiguous pages under both read limits (40KiB and 1,000 lines), assigns
-eight pages per invocation, and budgets at most
-`min(64, max(4, ceil(pageCount / 8) + 1))` continuations. This workload-sized allowance includes an integration conclusion;
-it is not an unbounded retry. Each continuation requires newly observed coverage;
-once all pages are read, at most one invocation may finish the integration review
-and cumulative conclusion. No progress or budget exhaustion fails closed with
+eight pages per invocation, and separates ingestion from semantic integration.
+The coverage allowance is `min(56, max(4, ceil(pageCount / 8) + 1))`
+continuations; eight additional continuations are reserved exclusively for
+integration, keeping the combined hard maximum at 64. These counts exclude the
+initial invocation. Unread evidence cannot spend the integration reserve, and
+paging still requires newly observed coverage. Once every byte has been read,
+the same reviewer may use up to eight integration continuations to trace changed
+code, callers, failure paths and regression tests. Targeted repository searches
+and rereads are permitted and necessary; they never replace required artifact
+reads. Cumulative partial reports state semantic work completed and still pending.
+Eight is a bounded opportunity, not a claim that every review can complete.
+Full reads, empty findings and repeated incomplete reports never authorize a
+stamp. No progress during ingestion or exhaustion of either allowance fails closed with
 explicit covered/unread ranges. Failed reviews expose their full cumulative
 partial report to the parent, never a review stamp.
 The runner verifies the exact session ID, checkout and last persisted assistant
@@ -192,5 +200,7 @@ branch write or production action occurs during capture.
 **This is a review checkpoint, not release approval or a merge gate.** Obtain
 the required operator approval separately, and inspect the eventual PR merge
 tree, CI and rollout; branches can move after the final preflight check.
-Running sessions must pick up the updated extension through the normal harness
-updater and interactive `/reload` before this parameter is available.
+Use a supported fresh process after the normal harness updater to establish
+that the updated callbacks are loaded. An on-disk revision alone is not
+loaded-runtime proof; do not rely on `/reload` while the stale-context defect
+HIV-4001 remains unresolved.

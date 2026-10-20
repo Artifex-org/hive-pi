@@ -81,6 +81,7 @@ process.stdout.write("", () => process.exit(${exit}));
 `);
 }
 const run = () => runSingleDelegation({ agent: "code-reviewer", task: "Review the change", model: "zai/glm-low" }, "off", host());
+const semanticFailureModes = ["unfinished", "refusal-fenced", "refusal-indented", "ledger-incomplete"];
 
 describe("large delivery review evidence (HIV-3868)", () => {
 	it("expires owned spills after 24h while preserving fresh and modified directories", () => {
@@ -212,7 +213,7 @@ describe("large delivery review evidence (HIV-3868)", () => {
 		expect(log.prompt).toContain("JSON array of string chunks");
 		expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
 	});
-	it.each(["native-cancel", "claude-cancel", "claude-resolved-cancel", "native-ordinary-cancel", "claude-ordinary-cancel", "success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress", "signal", "unfinished", "refusal-fenced", "refusal-indented", "ledger-only", "ledger-incomplete", "malformed", "parallel-large"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
+	for (const mode of ["native-cancel", "claude-cancel", "claude-resolved-cancel", "native-ordinary-cancel", "claude-ordinary-cancel", "success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress", "signal", "unfinished", "refusal-fenced", "refusal-indented", "ledger-only", "ledger-incomplete", "malformed", "parallel-large"]) it(`resumes an incomplete large review with fail-closed outcome ${mode}`, async () => {
 		writeFileSync(launch.piBin, `#!${process.execPath}
 const fs = require("node:fs");
 const prompt = fs.readFileSync(0, "utf8");
@@ -235,7 +236,9 @@ const patch = fs.readFileSync(patchPath, "utf8");
   prior = JSON.stringify(session.buildSessionContext().messages);
  }
  const read = createReadToolDefinition(${JSON.stringify(launch.root)});
- let offset = calls.length && mode !== "no-progress" ? calls[0].next : 1;
+ // Integration continues the last read cursor instead of replaying the full
+ // artifact on every semantic turn. The no-progress adversary still rereads.
+ let offset = calls.length && mode !== "no-progress" ? calls.at(-1).next : 1;
  for(; offset <= patch.split("\\n").length;) {
   const args = {path:patchPath, offset, limit:1500}, toolCallId = "read-" + offset;
   console.log(JSON.stringify({type:"tool_execution_start",toolName:"read",toolCallId,args}));
@@ -356,11 +359,16 @@ setInterval(() => {},1000);
 		const outcome = mode === "parallel-large" ? await runParallelDelegation([{agent:"code-reviewer",task:"Review independently",model:"zai/glm-low"}], "off", host()) : await run();
 		expect(existsSync(join(launch.root, "patch-log.json")), outcome.text).toBe(true);
 		const calls = JSON.parse(readFileSync(join(launch.root, "patch-log.json"), "utf8"));
-		expect(calls).toHaveLength(["mutated", "missing-session"].includes(mode) ? 1 : ["unfinished", "refusal-fenced", "refusal-indented", "ledger-incomplete"].includes(mode) ? 3 : 2);
+		expect(calls).toHaveLength(["mutated", "missing-session"].includes(mode) ? 1 : semanticFailureModes.includes(mode) ? 10 : 2);
 		expect(calls[0].sessionDir).toBeTruthy(); expect(calls[0].sessionId).toBeTruthy();
-		if (calls.length === 2) {
-			expect(calls[1].sessionDir).toBe(calls[0].sessionDir); expect(calls[1].sessionId).toBe(calls[0].sessionId);
-			expect(calls[1].prior).toContain("code0.ts may expose an unsafe value");
+		for (const call of calls.slice(1)) {
+			expect(call.sessionDir).toBe(calls[0].sessionDir); expect(call.sessionId).toBe(calls[0].sessionId);
+			expect(call.prior).toContain("code0.ts may expose an unsafe value");
+		}
+		if (semanticFailureModes.includes(mode)) {
+			expect(calls.filter((call: { prompt: string }) => call.prompt.includes("Every artifact line has been read"))).toHaveLength(8);
+			for (const call of calls.slice(2)) expect(call.next).toBe(calls[1].next);
+			expect(outcome.text).toContain("semantic integration budget exhausted (8/8)");
 		}
 		if (mode === "parallel-large") {
 			const bodies = [outcome.text], files = new Set<string>();
@@ -426,7 +434,9 @@ setInterval(() => {},1000);
 			}
 		}
 		expect(existsSync(calls[0].patchPath)).toBe(false); expect(existsSync(calls[0].sessionDir)).toBe(false);
-	});
+	// These four cases now run ten real SDK processes, not three. Cold imports
+	// measure ~300ms/process before Git/read/IPC work; keep exact counts above.
+	}, semanticFailureModes.includes(mode) ? 12_000 : 5_000);
 	it.each(["none", "first"])("does not stamp a successful worker with %s artifact read coverage", async pages => {
 		artifactWorker("Complete review; no findings.", 0, pages);
 		const outcome = await run();
