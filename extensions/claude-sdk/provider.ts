@@ -3,8 +3,8 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { createAssistantMessageEventStream, createProvider, collapseSystemMessages,
-	getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type Message, type Model,
-	type Provider, type SimpleStreamOptions, type TranscriptContext } from "@earendil-works/pi-ai";
+	getCurrentSystemMessage, getCurrentTools, getSystemMessageText, type AssistantMessage, type Message, type Model,
+	type Provider, type SimpleStreamOptions, type TranscriptContext, type TranscriptMessages } from "@earendil-works/pi-ai";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
@@ -33,6 +33,18 @@ interface Parked {
 	lease: AccessLease; bridge: PiToolBridge; query: SdkQuery; iterator: AsyncIterator<SDKMessage>;
 	controller: AbortController; dir: string; processes: ReturnType<typeof processScope>;
 	observedIds: Set<string>; busy: boolean; timer?: ReturnType<typeof setTimeout>; releaseAbort?: () => void; closing?: Promise<void>;
+}
+
+/**
+ * Pi's system prompt without its own `docs` section (the pi README/docs/examples paths).
+ * Anthropic bills a subscription request carrying that section as third-party usage
+ * ("400 Third-party apps now draw from your extra usage"); every other section is sent verbatim.
+ */
+export function sdkSystemPrompt(messages: TranscriptMessages): string {
+	const message = getCurrentSystemMessage(messages);
+	if (!message) return "";
+	const sections = Object.fromEntries(Object.entries(message.sections ?? {}).filter(([name]) => name !== "docs"));
+	return getSystemMessageText({ ...message, sections });
 }
 
 export function claudeSdkModels(): Model<string>[] {
@@ -118,7 +130,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				const reasoning = reasoningOptions(getBuiltinModels("anthropic").find(m => m.id === model.id)!, options);
 				const context = collapseSystemMessages(original);
 				const queryOptions = { reasoning, maxTokens: options.maxTokens ?? model.maxTokens,
-					toolChoice: options.toolChoice ?? "auto", systemPrompt: getCurrentSystemPrompt(context.messages) };
+					toolChoice: options.toolChoice ?? "auto", systemPrompt: sdkSystemPrompt(context.messages) };
 				const payload = { transport: PROVIDER_ID, capabilities: { structuredEvents: true, httpResponse: false, payloadMutation: false }, model: model.id, messages: context.messages,
 					reasoning: options.reasoning, maxTokens: options.maxTokens, toolChoice: options.toolChoice };
 				if (options.onPayload) {

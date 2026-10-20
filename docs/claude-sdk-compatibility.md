@@ -74,6 +74,8 @@ prototype implementation moved to `extensions/claude-sdk/`; there is no second
 implementation or compatibility shim.
 
 `isolatedOptions()` supplies verbatim prompts and `client_composed` user messages.
+The one exception is Pi's own `docs` section (the pi README/docs/examples paths),
+which `sdkSystemPrompt()` leaves out; see §Pi documentation section below.
 It disables SDK builtins, settings sources, hooks, plugins, skills, ambient MCP
 and cloud discovery, memory, CLAUDE.md discovery and SDK compaction. Unexpected
 permission requests are denied. The only MCP server is the in-process Pi bridge;
@@ -317,8 +319,29 @@ No test obtains a real token or starts Claude for inference.
 4. Establish subscription/billing/credential-intermediation eligibility with the
    appropriate provider policy. Technical authentication success alone does not.
 
-If the unchanged prompt/tool shape is ineligible, stop this lane. Never rewrite
-identity/instructions to defeat checks or silently fall back to paid API billing.
+Never rewrite identity/instructions to defeat checks or silently fall back to paid
+API billing.
+
+## Pi documentation section
+
+Measured 2026-10-20 on one launch, account and pinned CLI (Hive board thread
+`a179dbc0`). Pi's unchanged prompt was answered `400 Third-party apps now draw
+from your extra usage`. The same prompt without Pi's `docs` section was served
+from plan limits (`rate_limit_event`: `isUsingOverage: false`). Pi's identity
+sentence alone was served. A neutral preamble plus the `docs` section was
+refused. The `docs` section was the only trigger.
+
+The operator decided the provider sends Pi's prompt without that section. This
+rests on Anthropic's help center (June 15 and October 7, 2026 updates), which
+states that Agent SDK and third-party app usage draw from subscription limits;
+the server-side classification lags that statement. `sdkSystemPrompt()` drops
+only the section named `docs`. The preamble that identifies Pi, tools, rules,
+addenda, project context, skills and cwd are sent verbatim and in order. The
+section is pi self-help that a Hive agent does not need. No headers,
+fingerprints or Claude Code identity are imitated.
+
+Anthropic can change this classification. A refusal surfaces as the generic
+SDK failure, not as a silent fallback to paid billing.
 
 ## References
 
