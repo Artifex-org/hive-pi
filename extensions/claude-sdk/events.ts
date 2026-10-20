@@ -38,13 +38,93 @@ export function sdkFailureDetail(content: unknown, secrets: readonly string[] = 
 		// A body without a readable error.message is not copied: it may carry request_id or other fields.
 		body = typeof error?.message === "string" ? `${typeof error.type === "string" ? `${error.type}: ` : ""}${error.message}` : "(unreadable error body)";
 	}
-	const cleaned = redactEvidence(body, secrets)
+	return boundedDetail(`API Error${match[1] ? ` ${match[1]}` : ""}: ${sanitizeDiagnosticText(body, secrets)}`);
+}
+
+/**
+ * The one sanitizer for SDK failure text that reaches `output.diagnostics`:
+ * known secrets and token shapes redacted, URL queries and fragments dropped,
+ * request ids replaced, opaque runs of 32+ characters removed and control
+ * characters/whitespace collapsed. It does not bound the length; callers cut
+ * the sanitized text, so a cut never splits a secret before it is matched.
+ */
+export function sanitizeDiagnosticText(text: string, secrets: readonly string[] = []): string {
+	return redactEvidence(text, secrets)
 		.replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, "$1")
 		.replace(/\breq_[A-Za-z0-9]+/g, "[ID]")
 		.replace(/[A-Za-z0-9_+/=-]{32,}/g, "[REDACTED]")
 		.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, " ").trim();
-	const detail = `API Error${match[1] ? ` ${match[1]}` : ""}: ${cleaned}`;
-	return detail.length > DETAIL_CHARS ? `${detail.slice(0, DETAIL_CHARS - 1)}…` : detail;
+}
+/** Sanitized text cut to `max` characters, keeping the head. */
+export function boundedDetail(text: string, max = DETAIL_CHARS): string {
+	return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** The pinned SDK's `SDKResultError` subtypes; any other value is reported as "unrecognized". */
+const resultSubtypes = ["success", "error_during_execution", "error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries"] as const;
+/** The pinned SDK's `SDKStartupFailureReason` values; anything else is not copied. */
+const startupFailures = ["org_pin_api_key_conflict", "provider_not_allowed", "org_verify_failed", "org_pin_mismatch", "managed_settings_invalid",
+	"remote_settings_required_unavailable", "gateway_signin_required", "gateway_access_denied", "proxy_invalid", "temp_dir_unusable",
+	"cwd_unavailable", "shell_tool_missing", "session_held_by_background", "worktree_resume_refused", "worktree_unverified",
+	"cli_version_too_old", "bypass_root"] as const;
+/** Enumerated SDK values are copied only when they are a known member. */
+const known = <T extends string>(values: readonly T[], value: unknown): T | "unrecognized" | undefined =>
+	value === undefined || value === null ? undefined : values.find(v => v === value) ?? "unrecognized";
+
+/**
+ * An SDK `result` that ended the query in error (`is_error`, or a non-success
+ * subtype). Its fields are already sanitized: enumerated values only when
+ * known, `errors` and an `API Error:` result text through the shared sanitizer.
+ */
+export class SdkResultFailure extends Error {
+	readonly subtype: string;
+	readonly isError: boolean;
+	readonly stopReason?: string;
+	readonly startupFailure?: string;
+	readonly numTurns?: number;
+	readonly errors?: string;
+	readonly apiError?: string;
+	constructor(result: Extract<SDKMessage, { type: "result" }>, secrets: readonly string[]) {
+		super("Claude SDK query failed; no automatic side-effect replay");
+		this.subtype = known(resultSubtypes, result.subtype) ?? "unrecognized";
+		this.isError = result.is_error === true;
+		if (typeof result.stop_reason === "string" && /^[a-z_]{1,40}$/.test(result.stop_reason)) this.stopReason = result.stop_reason;
+		if (Number.isSafeInteger(result.num_turns)) this.numTurns = result.num_turns;
+		if (result.subtype !== "success") {
+			this.startupFailure = known(startupFailures, result.startup_failure_reason);
+			const errors = Array.isArray(result.errors) ? result.errors.filter((e): e is string => typeof e === "string") : [];
+			if (errors.length) this.errors = boundedDetail(sanitizeDiagnosticText(errors.join("; "), secrets));
+		} else if (typeof result.result === "string") this.apiError = sdkFailureDetail([{ type: "text", text: result.result }], secrets);
+	}
+}
+
+/** The shape of the SDK frame a stream failure happened on: allowlisted names only, never content or ids. */
+export interface FrameShape { type: string; subtype?: string; parentToolUseId?: true }
+const FRAME_NAME = /^[a-z][a-z0-9_]{0,40}$/;
+export function frameShape(message: unknown): FrameShape {
+	const frame = (message && typeof message === "object" ? message : {}) as { type?: unknown; subtype?: unknown; parent_tool_use_id?: unknown };
+	const name = (value: unknown) => typeof value === "string" && FRAME_NAME.test(value) ? value : "unrecognized";
+	return { type: name(frame.type), ...(frame.subtype !== undefined ? { subtype: name(frame.subtype) } : {}),
+		...(frame.parent_tool_use_id ? { parentToolUseId: true as const } : {}) };
+}
+
+/**
+ * The SDK stream broke the provider's protocol contract (`stream_protocol`), or
+ * ended without a result (`stream_ended`). Messages are fixed provider text.
+ */
+export class SdkProtocolError extends Error {
+	constructor(message: string, readonly kind: "stream_protocol" | "stream_ended" = "stream_protocol", readonly frame?: FrameShape) { super(message); }
+}
+
+/**
+ * Classifies a failure `EventConverter.consume` raised on `message`, for
+ * diagnostics only: the converter's own plain errors (fixed text) become
+ * `SdkProtocolError` with the frame's shape, and an error result becomes
+ * `SdkResultFailure`. Structured assistant and bridge failures pass through.
+ */
+export function streamFailure(error: unknown, message: SDKMessage, secrets: readonly string[]): unknown {
+	if (message.type === "result" && (message.is_error || message.subtype !== "success")) return new SdkResultFailure(message, secrets);
+	return error instanceof Error && error.constructor === Error ? new SdkProtocolError(error.message, "stream_protocol", frameShape(message)) : error;
 }
 
 /** A structured SDK assistant error: its code and a sanitized cause, never the raw SDK text. */

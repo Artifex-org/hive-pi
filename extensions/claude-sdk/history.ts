@@ -4,10 +4,11 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Message, UserMessage, ToolResultMessage, Model } from "@earendil-works/pi-ai";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { SdkProviderError } from "./diagnostics.ts";
 
 export function fingerprint(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 export function imageOrText(block: UserMessage["content"][number] | ToolResultMessage["content"][number]): unknown {
-	if (typeof block === "string") throw new Error("Invalid content block");
+	if (typeof block === "string") throw new SdkProviderError("Invalid content block");
 	return block.type === "text" ? { type: "text", text: block.text } : {
 		type: "image", source: { type: "base64", media_type: block.mimeType, data: block.data },
 	};
@@ -68,19 +69,19 @@ export function assertSettledHistory(messages: readonly Message[]): void {
 		// or let them hide genuinely handed-off, unresolved toolUse calls.
 		if (failedAssistant(message)) continue;
 		if (message.role === "assistant") for (const block of message.content) if (block.type === "toolCall") {
-			if (seen.has(block.id)) throw new Error("Duplicate historical tool call");
+			if (seen.has(block.id)) throw new SdkProviderError("Duplicate historical tool call");
 			seen.add(block.id);
 			const wireId = sdkToolCallId(block.id);
-			if (wireIds.has(wireId) && wireIds.get(wireId) !== block.id) throw new Error("Colliding historical SDK tool IDs");
+			if (wireIds.has(wireId) && wireIds.get(wireId) !== block.id) throw new SdkProviderError("Colliding historical SDK tool IDs");
 			wireIds.set(wireId, block.id);
 			pending.set(block.id, block.name);
 		}
 		if (message.role === "toolResult") {
-			if (pending.get(message.toolCallId) !== message.toolName) throw new Error("Uncorrelated historical tool result");
+			if (pending.get(message.toolCallId) !== message.toolName) throw new SdkProviderError("Uncorrelated historical tool result");
 			pending.delete(message.toolCallId);
 		}
 	}
-	if (pending.size) throw new Error("Unresolved historical tools; reconcile side effects before retrying");
+	if (pending.size) throw new SdkProviderError("Unresolved historical tools; reconcile side effects before retrying");
 }
 
 /** Pinned CLI JSONL resume chain; no token or auth document is ever written. */

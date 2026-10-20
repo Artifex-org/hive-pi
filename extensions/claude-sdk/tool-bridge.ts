@@ -15,6 +15,9 @@ interface Call {
 	resolve?: (result: CallToolResult) => void;
 }
 
+/** A tool-call correlation or bridge-lifecycle refusal; fixed provider text only. */
+export class BridgeError extends Error {}
+
 const failure = (text: string): CallToolResult => ({ isError: true, content: [{ type: "text", text }] });
 
 /** One bounded SDK query. Lifecycle and canonical transcript ownership live in the provider. */
@@ -30,7 +33,7 @@ export class PiToolBridge {
 	constructor(tools: readonly Tool[], private readonly signal: AbortSignal, private readonly registrationTimeout = 0) {
 		this.toolNames = tools.map(tool => tool.name);
 		if (new Set(this.toolNames).size !== tools.length || tools.some(tool => !/^[a-zA-Z0-9_-]+$/.test(tool.name))) {
-			throw new Error("Invalid Pi tool names");
+			throw new BridgeError("Invalid Pi tool names");
 		}
 		const server = new McpServer({ name: "pi", version: "0.0.0" }, { capabilities: { tools: {} } });
 		this.config = { type: "sdk", name: "pi", instance: server };
@@ -84,14 +87,14 @@ export class PiToolBridge {
 
 	/** Called only for tool-use IDs observed in the model's stream. */
 	expectCall(id: string, name: string, input: Record<string, unknown> = {}): void {
-		if (this.closed) throw new Error("Pi bridge closed");
+		if (this.closed) throw new BridgeError("Pi bridge closed");
 		if (!id || id.length > 256 || /[\s\p{Cc}]/u.test(id) || !this.toolNames.includes(name)) {
-			throw new Error("Invalid Pi tool call");
+			throw new BridgeError("Invalid Pi tool call");
 		}
-		if (this.failedRegistrations.has(id)) throw new Error("Failed tool-use registration; reconcile before retrying");
-		if (this.calls.has(id)) throw new Error("Duplicate tool-use ID");
+		if (this.failedRegistrations.has(id)) throw new BridgeError("Failed tool-use registration; reconcile before retrying");
+		if (this.calls.has(id)) throw new BridgeError("Duplicate tool-use ID");
 		if (!this.registrations.has(id) && this.calls.size + this.failedRegistrations.size + this.registrations.size >= 256) {
-			this.close(); throw new Error("SDK query tool-call limit reached");
+			this.close(); throw new BridgeError("SDK query tool-call limit reached");
 		}
 		this.calls.set(id, { name, input: structuredClone(input), requested: false, completed: false, cancelled: false });
 		for (const ready of this.registrations.get(id) ?? []) ready();
@@ -129,11 +132,11 @@ export class PiToolBridge {
 
 	/** Recheck after observers yield: MCP cancellation can settle a registered call before handoff. */
 	validateBatch(ids: readonly string[]): void {
-		if (this.closed) throw new Error("Pi bridge closed");
+		if (this.closed) throw new BridgeError("Pi bridge closed");
 		for (const id of ids) {
 			const call = this.calls.get(id);
 			if (!call || call.cancelled || call.completed || this.failedRegistrations.has(id)) {
-				throw new Error("Invalid or cancelled MCP tool batch; reconcile before retrying");
+				throw new BridgeError("Invalid or cancelled MCP tool batch; reconcile before retrying");
 			}
 		}
 	}
@@ -149,11 +152,11 @@ export class PiToolBridge {
 
 	/** A guard rejection is an ordinary error result supplied by Pi, not a tool run. */
 	complete(result: Pick<ToolResultMessage, "toolCallId" | "toolName" | "content" | "isError">): void {
-		if (this.closed) throw new Error("Pi bridge closed");
+		if (this.closed) throw new BridgeError("Pi bridge closed");
 		const call = this.calls.get(result.toolCallId);
-		if (!call || call.name !== result.toolName) throw new Error("Unknown tool-use correlation");
-		if (call.cancelled) throw new Error("MCP tool request cancelled; reconcile before retrying");
-		if (call.completed) throw new Error("Duplicate Pi tool result");
+		if (!call || call.name !== result.toolName) throw new BridgeError("Unknown tool-use correlation");
+		if (call.cancelled) throw new BridgeError("MCP tool request cancelled; reconcile before retrying");
+		if (call.completed) throw new BridgeError("Duplicate Pi tool result");
 		const content: CallToolResult["content"] = result.content.map(item => item.type === "text"
 			? { type: "text", text: item.text }
 			: { type: "image", data: item.data, mimeType: item.mimeType });

@@ -127,7 +127,8 @@ Streaming preserves text, thinking/signatures, redacted thinking, tool blocks,
 stop/length/error/abort and uncached/output/cache-read/cache-write token counts.
 Subscription models report zero monetary cost: this is **not** evidence of free
 inference or a billing determination. SDK errors are redacted at the transport
-boundary; no token-bearing options or raw stderr are logged.
+boundary; no token-bearing options or raw stderr are logged (a sanitized stderr tail
+reaches only failure diagnostics, see §Failure diagnostics).
 
 Every structured SDK `assistant.error` frame records a sanitized diagnostic in
 `output.diagnostics` (`claude_sdk_assistant_failure`, `details.retrySafe: false`),
@@ -146,6 +147,51 @@ so Hive's `diagnose_agent_session` can show the cause:
   `Claude SDK assistant failure`.
 
 SDK IDs and credentials are not copied into diagnostics.
+
+### Failure diagnostics
+
+Every other turn that ends in error, before or after the SDK started, records one
+`claude_sdk_failure` diagnostic (`extensions/claude-sdk/diagnostics.ts`). It has a
+stable `error.code` / `details.kind`:
+
+| kind | cause |
+|---|---|
+| `result_error` | an SDK `result` with `is_error` or a non-success subtype; `details.result` carries the subtype, stop reason, turn count and startup reason (pinned enum values only, else `unrecognized`), the `errors` strings and an `API Error:` result text, sanitized |
+| `stream_protocol` | the converter refused a frame (missing partials, subagent output, compaction, invalid blocks); `details.frame` is the frame's `type`/`subtype` and whether it carried `parent_tool_use_id`, never content or IDs |
+| `stream_ended` | the SDK iterator ended without a result |
+| `bridge_correlation` | the Pi tool bridge refused a call, batch or result |
+| `provider_refusal` | the provider's own refusal or runtime failure, such as uncorrelated tool results on a claimed continuation, an ambiguous previous attempt, or a lease refused after a continuation was claimed |
+| `cli_exit` | the CLI child exited or was killed without this provider or the SDK signalling it; `details.cliExit` has the code and signal |
+| `lease_expired` | the lease-expiry timer stopped a running inference |
+| `aborted` | the request was aborted |
+| `thrown_error` | anything else |
+
+Every diagnostic, including `claude_sdk_assistant_failure`, carries
+`details.phase` (`pre_start` or `post_start`) and `details.continuation`: `fresh_prompt`,
+`tool_results` (a tool-result request refused before its parked query was looked up),
+`parked` (a reused handed-off query), `rebuilt_options_changed`, `rebuilt` (tool
+results with no parked query in this runtime), or `rebuilt_after_<reason>` with
+`details.parkedEnd` when this runtime had disposed the parked query
+(`parked_expired`, `aborted`, `replaced`).
+
+The provider's own error text is copied. Text from the SDK, its transport or Node
+is copied only for a few known shapes (for example `Claude Code process exited
+with code N`), and only the matched part. Otherwise the message is
+`(unrecognized error text withheld)` and only the error class name is kept.
+
+The SDK's `stderr` option is wired only to its built-in spawner, so the provider's
+own process scope keeps the last 4,096 characters of the CLI's stderr. When the
+CLI exited on its own, the scope waits up to 250 ms for its stderr to close before
+taking the tail, as the SDK's built-in spawner does. The
+diagnostic carries the end of that tail, at most 500 characters, as
+`details.stderrTail`. All copied text goes through the #191 sanitizer
+(`sanitizeDiagnosticText`), using the lease token and the Hive token as known
+secrets. Raw stderr is never logged.
+
+`errorMessage` is unchanged: it is generic after the SDK starts, and is the
+provider's own message before that. Diagnostics never change retry or
+quarantine behaviour.
+
 Known codes do **not** prove pre-effect rejection: the inspected SDK type contract
 (`sdk.d.ts` `SDKAssistantMessage` / `SDKAssistantMessageError`) provides no
 nonexecution promise, even for an empty first frame with no visible tools or MCP
