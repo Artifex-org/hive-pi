@@ -130,6 +130,11 @@ export function streamFailure(error: unknown, message: SDKMessage, secrets: read
 /** A refusal or failure raised by this provider itself; its message is fixed provider text. */
 export class SdkProviderError extends Error {}
 
+/** Hive refused the launch's lease; `retryable` only for its marked temporary 503. */
+export class SdkLeaseRefused extends SdkProviderError {
+	constructor(readonly status: number, readonly retryable = false, readonly retryAfterMs?: number) { super(`Claude SDK launch lease refused (HTTP ${status})`); }
+}
+
 /** A structured SDK assistant error: its code and a sanitized cause, never the raw SDK text. */
 export class SdkAssistantFailure extends Error {
 	constructor(readonly code: FailureCode, readonly detail: string | undefined) {
