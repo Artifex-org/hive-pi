@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { createAssistantMessageEventStream, createProvider, collapseSystemMessages,
-	getCurrentSystemMessage, getCurrentTools, getSystemMessageText, type AssistantMessage, type Message, type Model,
+	getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type Message, type Model,
 	type Provider, type SimpleStreamOptions, type TranscriptContext, type TranscriptMessages } from "@earendil-works/pi-ai";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
@@ -35,16 +35,17 @@ interface Parked {
 	observedIds: Set<string>; busy: boolean; timer?: ReturnType<typeof setTimeout>; releaseAbort?: () => void; closing?: Promise<void>;
 }
 
+// Pi's own docs section as Pi renders it. Extensions that return a whole systemPrompt from
+// before_agent_start flatten the sections into plain text, so match the rendered block.
+const PI_DOCS_BLOCK = /\n*<docs>\nPi documentation \(read only when the user asks about pi itself[\s\S]*?\n<\/docs>/;
+
 /**
- * Pi's system prompt without its own `docs` section (the pi README/docs/examples paths).
- * Anthropic bills a subscription request carrying that section as third-party usage
- * ("400 Third-party apps now draw from your extra usage"); every other section is sent verbatim.
+ * Pi's system prompt without its own docs block (the pi README/docs/examples paths).
+ * Anthropic bills a subscription request carrying that block as third-party usage
+ * ("400 Third-party apps now draw from your extra usage"); everything else is sent verbatim.
  */
 export function sdkSystemPrompt(messages: TranscriptMessages): string {
-	const message = getCurrentSystemMessage(messages);
-	if (!message) return "";
-	const sections = Object.fromEntries(Object.entries(message.sections ?? {}).filter(([name]) => name !== "docs"));
-	return getSystemMessageText({ ...message, sections });
+	return getCurrentSystemPrompt(messages).replace(PI_DOCS_BLOCK, "");
 }
 
 export function claudeSdkModels(): Model<string>[] {
