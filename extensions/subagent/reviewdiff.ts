@@ -52,10 +52,12 @@ export interface ReviewDiff {
 	/** Captured tracked-file evidence; review capture and delivery have separate byte caps. */
 	text: string;
 	/** What was diffed, for the sentence the worker reads. */
-	scope: "working tree vs HEAD" | "branch vs its base" | "branch and working tree vs merge-base";
+	scope: "working tree vs HEAD" | "branch vs its base" | "branch and working tree vs merge-base" | "explicit origin PR target";
 	truncatedBytes: number;
 	/** Tracked files whose patch is absent or cut short because the diff exceeded the capture budget. */
 	omitted?: string[];
+	/** Explicit target capture supplied complete decoded gzip text alongside binary bytes. */
+	binaryEvidence?: "decoded-gzip";
 }
 
 /** Enough for a real change; beyond it the worker reads files itself, which it can, given the list. */
@@ -359,7 +361,12 @@ export function reviewDeclaresIncomplete(text: string): boolean {
 }
 
 export function stampableReview(diff: ReviewDiff): boolean {
-	return diff.truncatedBytes === 0 && diff.untracked.length === 0 && !/^(?:Binary files|GIT binary patch)/m.test(diff.text);
+	// Ordinary capture contains only binary placeholders. Explicit target capture
+	// includes encoded bytes AND complete decoded gzip text. Unknown binary
+	// formats remain unsupported; decoded content has the same read-coverage gate.
+	const binary = /^(?:GIT binary patch|Encoded gzip blob )/m.test(diff.text) || diff.text.includes("\0") || !!diff.binaryEvidence;
+	return diff.truncatedBytes === 0 && diff.untracked.length === 0 && !/^Binary files/m.test(diff.text) &&
+		(!binary || (diff.scope === "explicit origin PR target" && diff.binaryEvidence === "decoded-gzip"));
 }
 
 /** Fingerprint of the evidence actually supplied to the worker. */

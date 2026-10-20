@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync, promises } from "node:fs";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { gzipSync } from "node:zlib";
+import { captureReleaseDiff } from "../extensions/subagent/release-review.ts";
 import { captureDeliveryDiff, reviewFingerprint, reviewTaskWithDiff, stampableReview, type GitRunner } from "../extensions/subagent/reviewdiff.ts";
 import { registerDeliveryReview } from "../extensions/subagent/delivery.ts";
 import { runSingleDelegation, type DelegationHost } from "../extensions/subagent/delegate.ts";
@@ -38,6 +41,9 @@ const fs = require("node:fs");
 const prompt = fs.readFileSync(0, "utf8");
 const path = prompt.match(/Complete captured patch: (.+) \\(\\d+ bytes,/)[1];
 const patch = fs.readFileSync(path, "utf8");
+const decodedAt = patch.search(/^Decoded gzip asset /m);
+const encodedEnd = decodedAt < 0 ? patch.split("\\n").length : patch.slice(0,decodedAt).split("\\n").length - 1;
+let readThrough = 0;
 (async () => {
 const {createReadToolDefinition} = await import(${JSON.stringify(join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/read.js"))});
 const read = createReadToolDefinition(${JSON.stringify(launch.root)});
@@ -54,14 +60,16 @@ const emit = async event => {
 };
 if (${JSON.stringify(pages)} !== "none") for(let offset = 1; offset <= patch.split("\\n").length; ) {
  const readPath = ${JSON.stringify(pathPrefix)} === "@" ? "@" + path : ${JSON.stringify(pathPrefix)} === "file" ? require("node:url").pathToFileURL(path).href : path;
- const args = {path:readPath, offset, limit:1500}, toolCallId = "read-" + offset;
+ if (${JSON.stringify(pages)} === "encoded" && offset > encodedEnd) break;
+ const args = {path:readPath, offset, limit:${JSON.stringify(pages)} === "encoded" ? Math.min(1500,encodedEnd-offset+1) : 1500}, toolCallId = "read-" + offset;
  console.log(JSON.stringify({type:"tool_execution_start",toolName:"read",toolCallId,args}));
  const result = await read.execute(toolCallId, args);
  await emit({type:"tool_execution_end",toolName:"read",toolCallId,result,isError:false});
  if (${JSON.stringify(pages)} === "first") break;
- offset += result.details?.truncation?.outputLines ?? Math.min(1500, patch.split("\\n").length - offset + 1);
+ offset += result.details?.truncation?.outputLines ?? Math.min(args.limit, patch.split("\\n").length - offset + 1);
+ readThrough = offset - 1;
 }
-fs.writeFileSync(${JSON.stringify(join(launch.root, "patch-log.json"))}, JSON.stringify({prompt, path, patch, splitWrites, mode: fs.statSync(path).mode & 0o777}));
+fs.writeFileSync(${JSON.stringify(join(launch.root, "patch-log.json"))}, JSON.stringify({prompt, path, patch, splitWrites, encodedEnd, readThrough, mode: fs.statSync(path).mode & 0o777}));
 console.log(JSON.stringify({type:"message_end", message:{role:"assistant", content:[{type:"text", text:${JSON.stringify(reply)}}], stopReason:"stop"}}));
 process.stdout.write("", () => process.exit(${exit}));
 })().catch(error => {console.error(error); process.exit(1);});
@@ -70,6 +78,33 @@ process.stdout.write("", () => process.exit(${exit}));
 const run = () => runSingleDelegation({ agent: "code-reviewer", task: "Review the change", model: "zai/glm-low" }, "off", host());
 
 describe("large delivery review evidence (HIV-3868)", () => {
+	it.each(["all", "encoded"])("requires decoded explicit-target binary evidence in the coverage-checked artifact (%s)", async pages => {
+		artifactWorker("Complete review; no findings.",0,pages);
+		writeFileSync(join(launch.root, "data.gz"), gzipSync("name,value\nasset,123\n")); git("add", "."); git("commit", "-m", "binary and reviewer fixture");
+		git("branch", "prod", "main"); git("branch", "-f", "main", "HEAD");
+		const remote = await promises.mkdtemp(join(tmpdir(), "large-release-origin-"));
+		try {
+			git("clone", "--bare", launch.root, remote); git("remote", "add", "origin", remote); git("config","remote.origin.gh-resolved","base");
+			const target = {base:"prod",head:"main"}, expected = captureReleaseDiff(launch.root,target).diff!;
+			expect(expected.text).toContain("GIT binary patch"); expect(Buffer.byteLength(expected.text)).toBeGreaterThan(256*1024);
+			const pi = createFakePi(); registerDeliveryReview(pi.api);
+			await pi.emit({type:"tool_call",toolName:"subagent",toolCallId:"release",input:{agent:"code-reviewer",cwd:launch.root,reviewTarget:target}});
+			const outcome = await runSingleDelegation({agent:"code-reviewer",task:"Review release",model:"zai/glm-low",reviewTarget:target},"off",host());
+			if (pages === "encoded") {
+				const log = JSON.parse(readFileSync(join(launch.root,"patch-log.json"),"utf8"));
+				expect(log.readThrough).toBe(log.encodedEnd); expect(log.encodedEnd).toBeGreaterThan(1000);
+				expect(outcome.isError).toBe(true); expect(outcome.results[0].reviewFingerprint).toBeUndefined();
+				await pi.emit({type:"tool_result",toolName:"subagent",toolCallId:"release",input:{},isError:false,details:{results:outcome.results}});
+				expect((await pi.emit({type:"tool_call",toolName:"bash",input:{cwd:launch.root,command:"gh pr create --base prod --head main --title release"}}))[0]).toMatchObject({block:true});
+				return;
+			}
+			expect(outcome.isError,outcome.text).toBeUndefined(); expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
+			const log = JSON.parse(readFileSync(join(launch.root,"patch-log.json"),"utf8"));
+			expect(log.patch).toBe(expected.text); expect(log.prompt).toContain("decoded gzip text"); expect(log.patch).toContain("name,value\nasset,123\n"); expect(existsSync(log.path)).toBe(false);
+			await pi.emit({type:"tool_result",toolName:"subagent",toolCallId:"release",input:{},isError:false,details:{results:outcome.results}});
+			expect((await pi.emit({type:"tool_call",toolName:"bash",input:{cwd:launch.root,command:"gh pr create --base prod --head main --title release"}}))[0]).toBeUndefined();
+		} finally { rmSync(remote,{recursive:true,force:true}); }
+	});
 	it("retains all inventories when per-file patch fallback exhausts the scan deadline", () => {
 		// Inject scan costs, not a flaky sleep: reproduce an ENOBUFS followed by
 		// fallback consuming the budget before the next layer's inventory.

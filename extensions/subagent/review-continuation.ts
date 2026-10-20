@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ReviewArtifactReads } from "./review-artifact.ts";
 import { captureDeliveryDiff, reviewDeclaresIncomplete, reviewFingerprint } from "./reviewdiff.ts";
+import { captureReleaseDiff, type ReviewTarget } from "./release-review.ts";
 
 /** One private reviewer conversation, never a union of independent approvals. */
 export class ReviewContinuation {
@@ -16,8 +17,9 @@ export class ReviewContinuation {
 	private readonly task: string;
 	private readonly fingerprint: string;
 	private readonly reads: ReviewArtifactReads;
-	constructor(cwd: string, task: string, fingerprint: string, reads: ReviewArtifactReads) {
-		this.cwd = cwd; this.task = task; this.fingerprint = fingerprint; this.reads = reads;
+	private readonly reviewTarget?: ReviewTarget;
+	constructor(cwd: string, task: string, fingerprint: string, reads: ReviewArtifactReads, reviewTarget?: ReviewTarget) {
+		this.cwd = cwd; this.task = task; this.fingerprint = fingerprint; this.reads = reads; this.reviewTarget = reviewTarget;
 	}
 	configure(args: string[]): void {
 		const index = args.indexOf("--no-session");
@@ -25,7 +27,7 @@ export class ReviewContinuation {
 		args.push("--session-dir", this.dir, "--session-id", this.id);
 	}
 	unchanged(): boolean {
-		const diff = captureDeliveryDiff(this.cwd, this.task);
+		const diff = this.reviewTarget ? captureReleaseDiff(this.cwd, this.reviewTarget).diff : captureDeliveryDiff(this.cwd, this.task);
 		return !!diff && reviewFingerprint(diff) === this.fingerprint;
 	}
 	private persisted(output: string): boolean {

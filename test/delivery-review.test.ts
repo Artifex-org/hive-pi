@@ -256,7 +256,7 @@ describe("delivery review", () => {
 		expect(captureDeliveryDiff(cwd)).toBeNull();
 	});
 	it("explicitly refuses dynamic/configured/over-budget delivery targets", () => {
-		for (const c of ['git -C "$REPO" push', "git -c core.worktree=/other push", "GIT_DIR=/other git push", "git push origin feature-branch", "git push --all", "git push other HEAD", "git push https://elsewhere/repo.git HEAD", "cd /clean | cat\ngit push", "git checkout work && git push origin HEAD", "gh pr create --head work --base main",    "echo " + "x".repeat(8200) + " && git push"]) expect(deliveryTargets(c, "/repo")).toEqual([null]);
+		for (const c of ['git -C "$REPO" push', "git -c core.worktree=/other push", "GIT_DIR=/other git push", "git push origin feature-branch", "git push --all", "git push other HEAD", "git push https://elsewhere/repo.git HEAD", "cd /clean | cat\ngit push", "git checkout work && git push origin HEAD", "gh pr create --head work",    "echo " + "x".repeat(8200) + " && git push"]) expect(deliveryTargets(c, "/repo")).toEqual([null]);
 		expect(deliveryTargets("git -C /repo -C child push", "/tmp")).toEqual(["/repo/child"]);
 		expect(deliveryCommand("git -c x=y status")).toBe(false);
 	});
