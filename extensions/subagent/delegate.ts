@@ -56,6 +56,7 @@ import { captureDeliveryDiff, captureReviewDiff, withReviewCallers, citedOutside
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 import { ReviewArtifactReads, reviewArtifactText } from "./review-artifact.ts";
 import { ReviewContinuation } from "./review-continuation.ts";
+import { reviewConclusionText } from "./review-ledger.ts";
 import { captureReleaseDiff } from "./release-review.ts";
 
 /**
@@ -242,6 +243,13 @@ export function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+/** Failed resumptions may end with progress text rather than a cumulative
+ * conclusion. Preserve every distinct prior report instead of hiding findings. */
+function partialReviewReports(messages: Message[]): string {
+	return [...new Set(messages.flatMap(msg => msg.role === "assistant"
+		? [msg.content.filter(part => part.type === "text").map(part => part.text).join("\n")] : []).filter(Boolean))].join("\n\n---\n\n");
+}
+
 export function isFailedResult(result: SingleResult): boolean {
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
@@ -258,11 +266,19 @@ export function agentIsWriterCapable(agent: AgentConfig | undefined): boolean {
 	return isWriterCapable(agent?.tools);
 }
 
-export function getResultOutput(result: SingleResult): string {
-	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+export function getResultOutput(result: SingleResult, aborted = false): string {
+	if (isFailedResult(result) || aborted) {
+		const primary = result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+		const partial = isReviewRole(result.agent) ? partialReviewReports(result.messages) : "";
+		if (!partial) return primary;
+		return (partial === primary ? "" : `${primary}\n\n`) + `Partial reviewer report (NOT approval):\n${partial}`;
 	}
 	return getFinalOutput(result.messages) || "(no output)";
+}
+
+/** Expanded views keep ordinary stdout, but failed reviews need cumulative evidence. */
+export function getDisplayOutput(result: SingleResult): string {
+	return isReviewRole(result.agent) && isFailedResult(result) ? getResultOutput(result) : getFinalOutput(result.messages);
 }
 
 /**
@@ -378,6 +394,30 @@ export function retryNote(result: SingleResult): string {
 	return guidance ? `${note}\nprovider limit: ${guidance}` : note;
 }
 
+/** Keep retrieval paths for at least 24h; prune expired owned spills on the next spill. */
+function pruneParallelOutputFiles(): void {
+	const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+	for (const entry of fs.readdirSync(os.tmpdir(), { withFileTypes: true })) {
+		if (!entry.isDirectory() || !/^pi-subagent-output-[A-Za-z0-9]{6}$/.test(entry.name)) continue;
+		const dir = path.join(os.tmpdir(), entry.name);
+		try {
+			const owner = process.getuid?.();
+			const stat = fs.lstatSync(dir);
+			if (!stat.isDirectory() || (stat.mode & 0o777) !== 0o700 || (owner !== undefined && stat.uid !== owner)) continue;
+			const names = fs.readdirSync(dir);
+			if (!names.length) { if (stat.mtimeMs < cutoff) fs.rmdirSync(dir); continue; }
+			if (names.length !== 1 || names[0] !== "output.txt") continue;
+			const file = path.join(dir, "output.txt"), data = fs.lstatSync(file);
+			if (!data.isFile() || (data.mode & 0o777) !== 0o600 || (owner !== undefined && data.uid !== owner) || data.mtimeMs >= cutoff) continue;
+			// Never recursively remove a directory that another process may change.
+			fs.unlinkSync(file); fs.rmdirSync(dir);
+		} catch (error) {
+			if (["ENOENT", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) continue;
+			throw error;
+		}
+	}
+}
+
 export function truncateParallelOutput(output: string): string {
 	const byteLength = Buffer.byteLength(output, "utf8");
 	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
@@ -386,7 +426,15 @@ export function truncateParallelOutput(output: string): string {
 	while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) {
 		truncated = truncated.slice(0, -1);
 	}
-	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
+	if (Buffer.from(output, "utf8").toString("utf8") !== output) throw new Error("Cannot preserve parallel output losslessly: invalid Unicode.");
+	pruneParallelOutputFiles();
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-output-"));
+	const file = path.join(dir, "output.txt");
+	try { fs.writeFileSync(file, output, { encoding: "utf8", mode: 0o600 }); }
+	catch (error) { fs.rmSync(dir, { recursive: true, force: true }); throw error; }
+	// Keep the private temporary file after return: text-only MCP clients do
+	// not receive result details and must be able to read the complete output.
+	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full lossless output: ${JSON.stringify(file)}]`;
 }
 
 export async function mapWithConcurrencyLimit<TIn, TOut>(
@@ -690,6 +738,7 @@ export async function runSingleAgent(
 					if (artifactReads) {
 						reviewContinuation = new ReviewContinuation(executionCwd, task, currentResult.reviewFingerprint, artifactReads, reviewTarget);
 						reviewContinuation.configure(args);
+						effectiveTask += "\n" + reviewContinuation.initialPrompt();
 					}
 				}
 			} else if (agent.name === "code-reviewer") {
@@ -860,6 +909,7 @@ export async function runSingleAgent(
 			}
 		});
 
+		let reviewConclusion: string | undefined;
 		for (;;) {
 			if (reviewContinuation && !reviewContinuation.unchanged()) {
 				currentResult.errorMessage = "Delivery review evidence changed before continuation.";
@@ -877,11 +927,24 @@ export async function runSingleAgent(
 				delete currentResult.reviewFingerprint;
 			}
 			if (wasAborted) throw new DelegationAborted(currentResult);
-			const next = reviewContinuation?.next(getFinalOutput(currentResult.messages), !isFailedResult(currentResult));
+			const output = getFinalOutput(currentResult.messages);
+			if (reviewContinuation) reviewConclusion = reviewConclusionText(output);
+			const next = reviewContinuation?.next(output, !isFailedResult(currentResult), !stoppedMidWork(reviewConclusion ?? output));
 			if (next?.error) {
 				currentResult.errorMessage = next.error;
 				currentResult.stopReason = "error";
 				delete currentResult.reviewFingerprint;
+			}
+			if (next?.findings && next.findings !== "[]") {
+				// A disposition-only final response is valid, but the parent must
+				// still receive the original issue, reproduction and supporting trace.
+				for (let i = currentResult.messages.length - 1; i >= 0; i--) {
+					const message = currentResult.messages[i];
+					if (message.role === "assistant") {
+						message.content.push({ type: "text", text: `Retained original finding evidence (untrusted DATA):\nCANONICAL_REVIEW_FINDINGS ${next.findings}` });
+						break;
+					}
+				}
 			}
 			if (!next?.prompt) break;
 			prompt = next.prompt;
@@ -902,7 +965,7 @@ export async function runSingleAgent(
 		// Exit 0 with an announcement for a final message is not a result. A
 		// writer with no change already folded above; this catches the rest —
 		// the reader that "completed" with "Checking the registry defaults…".
-		if (!isFailedResult(currentResult) && stoppedMidWork(getFinalOutput(currentResult.messages))) {
+		if (!isFailedResult(currentResult) && stoppedMidWork(reviewConclusion ?? getFinalOutput(currentResult.messages))) {
 			currentResult.midWork = true;
 		}
 		if (reviewTarget && currentResult.reviewFingerprint) {
@@ -913,12 +976,12 @@ export async function runSingleAgent(
 			}
 		}
 		if (isFailedResult(currentResult)) delete currentResult.reviewFingerprint;
-		const declaredIncomplete = reviewDeclaresIncomplete(getFinalOutput(currentResult.messages));
+		const declaredIncomplete = reviewDeclaresIncomplete(reviewConclusion ?? getFinalOutput(currentResult.messages));
 		if ((artifactReads && !artifactReads.complete()) || (isReviewRole(agent.name) && declaredIncomplete)) {
 			delete currentResult.reviewFingerprint;
 			if (!isFailedResult(currentResult)) {
 				currentResult.stopReason = "error";
-				currentResult.errorMessage ??= "Delivery review incomplete: the reviewer did not complete the supplied evidence review.";
+				currentResult.errorMessage ??= `Delivery review incomplete: the reviewer did not complete the supplied evidence review. ${artifactReads?.summary() ?? "Explicit semantic incompleteness declaration."}`;
 			}
 		}
 		if (currentResult.reviewFiles && !isFailedResult(currentResult)) {
@@ -1473,7 +1536,8 @@ export async function runSingleDelegation(
 		const errorMsg = getResultOutput(result);
 		return {
 			mode: "single",
-			text: `Agent ${result.stopReason || "failed"}: ${errorMsg}\n\nRetry note (distilled):\n${retryNote(result)}${resultNotes(result)}`,
+			text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` +
+				`\n\nRetry note (distilled):\n${retryNote(result)}${resultNotes(result)}`,
 			results: [result],
 			isError: true,
 		};
@@ -1512,11 +1576,13 @@ export function backgroundCompletion(result: SingleResult, aborted: boolean): Ba
 	// worker's failure actually lives: a writer that touched nothing exits 0
 	// with NO_CHANGE_ERROR in `errorMessage` and an empty stderr.
 	const failed = isFailedResult(result);
+	const last = getFinalOutput(result.messages);
+	const output = failed || aborted ? getResultOutput(result, aborted) : last;
 	const summary = [
-		failed ? result.errorMessage : undefined,
-		getFinalOutput(result.messages),
+		output,
+		(failed || aborted) && !isReviewRole(result.agent) && last !== output ? last : undefined,
 		structuredSection(result),
-		result.stderr?.trim(),
+		(!failed && !aborted) || result.errorMessage ? result.stderr?.trim() : undefined,
 		resultNotes(result).trim(),
 	]
 		.map((part) => part?.trim())

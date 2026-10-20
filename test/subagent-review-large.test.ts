@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync, promises } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync, statSync, utimesSync, promises } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { gzipSync } from "node:zlib";
+import { stripVTControlCharacters } from "node:util";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import subagentExtension from "../extensions/subagent/index.ts";
 import { captureReleaseDiff } from "../extensions/subagent/release-review.ts";
 import { captureDeliveryDiff, reviewFingerprint, reviewTaskWithDiff, stampableReview, type GitRunner } from "../extensions/subagent/reviewdiff.ts";
 import { registerDeliveryReview } from "../extensions/subagent/delivery.ts";
-import { runSingleDelegation, type DelegationHost } from "../extensions/subagent/delegate.ts";
+import { runSingleDelegation, runChainDelegation, runParallelDelegation, truncateParallelOutput, backgroundCompletion, type DelegationHost } from "../extensions/subagent/delegate.ts";
 import { makeLaunch, type LaunchEnv } from "./claude-harness.ts";
 import { createFakePi } from "./fake-pi.ts";
 
@@ -35,7 +38,7 @@ const host = (): DelegationHost => ({
 
 // A real spawned worker reads the supplied artifact while it exists, rather
 // than pretending that a digest or a preview equals full review evidence.
-function artifactWorker(reply = "Complete review; no findings.", exit = 0, pages = "all", splitUtf8 = false, pathPrefix = "") {
+function artifactWorker(reply = "Complete review; no findings.", exit = 0, pages = "all", splitUtf8 = false, pathPrefix = "", options: { prior?: string; ledger?: string } = {}) {
 	writeFileSync(launch.piBin, `#!${process.execPath}
 const fs = require("node:fs");
 const prompt = fs.readFileSync(0, "utf8");
@@ -70,7 +73,8 @@ if (${JSON.stringify(pages)} !== "none") for(let offset = 1; offset <= patch.spl
  readThrough = offset - 1;
 }
 fs.writeFileSync(${JSON.stringify(join(launch.root, "patch-log.json"))}, JSON.stringify({prompt, path, patch, splitWrites, encodedEnd, readThrough, mode: fs.statSync(path).mode & 0o777}));
-console.log(JSON.stringify({type:"message_end", message:{role:"assistant", content:[{type:"text", text:${JSON.stringify(reply)}}], stopReason:"stop"}}));
+if (${JSON.stringify(!!options.prior)}) console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:${JSON.stringify(options.prior)}},{type:"toolCall",id:"next-read",name:"read",arguments:{path,offset:1,limit:1}}],stopReason:"toolUse"}}));
+console.log(JSON.stringify({type:"message_end", message:{role:"assistant", content:[{type:"text", text:${JSON.stringify(reply + (options.ledger ?? '\nREVIEW_LEDGER {"complete":true,"findings":[]}' ))}}], stopReason:"stop"}}));
 process.stdout.write("", () => process.exit(${exit}));
 })().catch(error => {console.error(error); process.exit(1);});
 `);
@@ -78,6 +82,49 @@ process.stdout.write("", () => process.exit(${exit}));
 const run = () => runSingleDelegation({ agent: "code-reviewer", task: "Review the change", model: "zai/glm-low" }, "off", host());
 
 describe("large delivery review evidence (HIV-3868)", () => {
+	it("expires owned spills after 24h while preserving fresh and modified directories", () => {
+		const files: string[] = [];
+		const spill = () => {
+			const result = truncateParallelOutput("a".repeat(52000));
+			const file = JSON.parse(result.match(/Full lossless output: (".*")\]/)![1]); files.push(file); return file;
+		};
+		try {
+			const old = spill(), fresh = spill(), modified = spill();
+			writeFileSync(join(dirname(modified), "keep.txt"), "foreign data");
+			const expired = new Date(Date.now() - 25 * 60 * 60 * 1000);
+			for (const file of [old, modified]) { utimesSync(file, expired, expired); utimesSync(dirname(file), expired, expired); }
+			const latest = spill();
+			expect(existsSync(dirname(old))).toBe(false);
+			expect(existsSync(fresh)).toBe(true); expect(existsSync(latest)).toBe(true);
+			expect(readFileSync(join(dirname(modified), "keep.txt"), "utf8")).toBe("foreign data");
+		} finally { for (const file of files) rmSync(dirname(file), {recursive:true,force:true}); }
+	});
+	it("refuses invalid Unicode instead of silently changing a persisted report", () => {
+		expect(() => truncateParallelOutput("a".repeat(52000) + String.fromCharCode(0xd800))).toThrow("invalid Unicode");
+	});
+	it("preserves capped output losslessly in a private retrievable file", () => {
+		const original = "é".repeat(26000) + "UNIQUE-OUTPUT-END";
+		const rendered = truncateParallelOutput(original);
+		const match = rendered.match(/Full lossless output: (".*")\]/); expect(match).not.toBeNull();
+		const file = JSON.parse(match![1]);
+		try {
+			expect(readFileSync(file, "utf8")).toBe(original);
+			expect(statSync(file).mode & 0o777).toBe(0o600);
+			expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+		} finally { rmSync(dirname(file), {recursive:true,force:true}); }
+	});
+	it.each(["chain", "parallel"])("preserves full mixed-message review evidence on %s failure", async mode => {
+		const prior = "code0.ts:1 — race\nORIGINAL SUPPORT: caller A and caller B both observe absence before publication.";
+		artifactWorker("Checking remaining callers", 0, "all", false, "", { prior, ledger: "\nREVIEW_LEDGER invalid" });
+		const tasks = [{ agent: "code-reviewer", task: "Review independently", model: "zai/glm-low" }];
+		const outcome = mode === "chain" ? await runChainDelegation(tasks, host()) : await runParallelDelegation(tasks, "off", host());
+		if (mode === "chain") expect(outcome.isError, outcome.text).toBe(true);
+		expect(outcome.results[0].stopReason).toBe("error");
+		expect(outcome.results[0].errorMessage).toContain("invalid ledger protocol");
+		expect(outcome.text).toContain("invalid ledger protocol");
+		expect(outcome.text).toContain("ORIGINAL SUPPORT: caller A and caller B both observe absence before publication.");
+		expect(outcome.results[0].reviewFingerprint).toBeUndefined();
+	});
 	it.each(["all", "encoded"])("requires decoded explicit-target binary evidence in the coverage-checked artifact (%s)", async pages => {
 		artifactWorker("Complete review; no findings.",0,pages);
 		writeFileSync(join(launch.root, "data.gz"), gzipSync("name,value\nasset,123\n")); git("add", "."); git("commit", "-m", "binary and reviewer fixture");
@@ -164,7 +211,7 @@ describe("large delivery review evidence (HIV-3868)", () => {
 		expect(log.prompt).toContain("JSON array of string chunks");
 		expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
 	});
-	it.each(["success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress", "signal"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
+	it.each(["success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress", "signal", "unfinished", "refusal-fenced", "refusal-indented", "ledger-only", "ledger-incomplete", "malformed", "parallel-large"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
 		writeFileSync(launch.piBin, `#!${process.execPath}
 const fs = require("node:fs");
 const prompt = fs.readFileSync(0, "utf8");
@@ -198,8 +245,16 @@ const patch = fs.readFileSync(patchPath, "utf8");
  }
  const finding = "code0.ts may expose an unsafe value";
  if(calls.length && !prior.includes(finding)) throw Error("prior finding lost");
- const text = calls.length ? "Complete cumulative review: " + finding + "; remainder reviewed." : "DELIVERY_REVIEW_INCOMPLETE: more patch remains; " + finding;
+ const record = calls.length ? {id:"F1",status:"upheld",location:"code0.ts:1",evidence:"The caller passes the unsafe value directly."} : {id:null,status:"new",location:"code0.ts:1",issue:finding,scenario:"The caller supplies an unsafe value.",evidence:"No validation occurs before the return."};
+ let human = calls.length ? ["nonzero", "unfinished"].includes(mode) ? "Checking remaining callers" : "Complete cumulative review: " + finding + "; remainder reviewed." : "DELIVERY_REVIEW_INCOMPLETE: more patch remains; " + finding;
+ if(calls.length && mode === "refusal-fenced") human = "~~~text\\nDELIVERY_REVIEW_INCOMPLETE: callers remain\\n~~~";
+ if(calls.length && mode === "refusal-indented") human = "    DELIVERY_REVIEW_INCOMPLETE: callers remain";
+ if(calls.length && mode === "ledger-only") human = "";
+ if(calls.length && mode === "malformed") record.evidence = "";
+ if(!calls.length && mode === "parallel-large") record.scenario += "A".repeat(60000) + "UNIQUE-ORIGINAL-SCENARIO-END";
+ const text = human + "\\nREVIEW_LEDGER " + JSON.stringify({complete:!!calls.length && mode !== "ledger-incomplete",findings:[record]});
  const message = {role:"assistant",content:[{type:"text",text}],stopReason:"stop",timestamp:Date.now()};
+ if(!calls.length && mode === "nonzero") message.content.push({type:"toolCall",id:"remaining-read",name:"read",arguments:{path:patchPath,offset:1,limit:1}});
  if(calls.length && mode === "aborted") message.stopReason = "aborted";
  if(!(calls.length && mode === "no-output")) session?.appendMessage(message);
  if(mode === "missing-session" && sessionDir) fs.rmSync(sessionDir,{recursive:true,force:true});
@@ -224,22 +279,77 @@ const patch = fs.readFileSync(patchPath, "utf8");
 			expect(existsSync(calls[0].patchPath)).toBe(false); expect(existsSync(calls[0].sessionDir)).toBe(false);
 			return;
 		}
-		const outcome = await run();
+		const outcome = mode === "parallel-large" ? await runParallelDelegation([{agent:"code-reviewer",task:"Review independently",model:"zai/glm-low"}], "off", host()) : await run();
 		expect(existsSync(join(launch.root, "patch-log.json")), outcome.text).toBe(true);
 		const calls = JSON.parse(readFileSync(join(launch.root, "patch-log.json"), "utf8"));
-		expect(calls).toHaveLength(["mutated", "missing-session"].includes(mode) ? 1 : 2);
+		expect(calls).toHaveLength(["mutated", "missing-session"].includes(mode) ? 1 : ["unfinished", "refusal-fenced", "refusal-indented", "ledger-incomplete"].includes(mode) ? 3 : 2);
 		expect(calls[0].sessionDir).toBeTruthy(); expect(calls[0].sessionId).toBeTruthy();
 		if (calls.length === 2) {
 			expect(calls[1].sessionDir).toBe(calls[0].sessionDir); expect(calls[1].sessionId).toBe(calls[0].sessionId);
 			expect(calls[1].prior).toContain("code0.ts may expose an unsafe value");
 		}
-		if (mode === "success") {
-			expect(outcome.text).toContain("Complete cumulative review: code0.ts may expose an unsafe value");
+		if (mode === "parallel-large") {
+			const bodies = [outcome.text], files = new Set<string>();
+			try {
+				for (let i = 0; i < bodies.length; i++) for (const match of bodies[i].matchAll(/Full lossless output: (".*")\]/g)) {
+					const file = JSON.parse(match[1]);
+					expect(file.startsWith(join(tmpdir(), "pi-subagent-output-"))).toBe(true);
+					if (!files.has(file)) { files.add(file); expect(files.size).toBeLessThan(8); bodies.push(readFileSync(file, "utf8")); }
+				}
+				expect(files.size).toBeGreaterThan(0);
+				expect(bodies.join("\n")).toContain("UNIQUE-ORIGINAL-SCENARIO-END");
+				expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
+			} finally { for (const file of files) rmSync(dirname(file), {recursive:true,force:true}); }
+			return;
+		}
+		if (mode === "success" || mode === "ledger-only") {
+			if (mode === "success") expect(outcome.text).toContain("Complete cumulative review: code0.ts may expose an unsafe value");
+			expect(outcome.text).toContain("The caller supplies an unsafe value.");
+			expect(outcome.text).toContain("No validation occurs before the return.");
 			expect(outcome.isError, outcome.text).toBeUndefined();
 			expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
 		} else {
 			expect(outcome.isError, outcome.text).toBe(true);
 			expect(outcome.results[0].reviewFingerprint).toBeUndefined();
+			if (mode === "ledger-incomplete") {
+				const completion = backgroundCompletion(outcome.results[0], false);
+				expect(completion.status).toBe("failed");
+				expect(completion.summary).toContain("The caller supplies an unsafe value.");
+				expect(completion.summary).toContain("No validation occurs before the return.");
+				const canceled = backgroundCompletion({ ...outcome.results[0], exitCode: 0, stopReason: "stop", errorMessage: undefined }, true);
+				expect(canceled.status).toBe("canceled");
+				expect(canceled.summary).toContain("The caller supplies an unsafe value.");
+				expect(canceled.summary).toContain("No validation occurs before the return.");
+				const ordinary = backgroundCompletion({ ...outcome.results[0], agent: "research" }, false);
+				expect(ordinary.status).toBe("failed");
+				expect(ordinary.summary).toContain(outcome.results[0].errorMessage!);
+				expect(ordinary.summary).toContain("Complete cumulative review: code0.ts may expose an unsafe value");
+				const ordinaryCanceled = backgroundCompletion({ ...outcome.results[0], agent: "research", exitCode: 0, stopReason: "stop", errorMessage: undefined }, true);
+				expect(ordinaryCanceled.status).toBe("canceled");
+				expect(ordinaryCanceled.summary.match(/Complete cumulative review:/g)).toHaveLength(1);
+				const pi = createFakePi(); subagentExtension(pi.api);
+				const render = pi.tools.find(tool => tool.name === "subagent")!.definition.renderResult as (
+					result: { details: unknown }, options: { expanded: boolean },
+					theme: { fg: (color: string, text: string) => string; bold: (text: string) => string },
+				) => { render(width: number): string[] };
+				const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+				for (const palette of ["dark", "light"]) {
+					initTheme(palette, false);
+					for (const mode of ["single", "chain", "parallel"]) for (const width of [80, 140]) {
+						const view = render({ details: { mode, agentScope: "user", projectAgentsDir: null, results: [{ ...outcome.results[0], step: 1 }] } }, { expanded: true }, theme);
+						const text = stripVTControlCharacters(view.render(width).join("\n")).replace(/\s+/g, "");
+						expect(text).toContain("Thecallersuppliesanunsafevalue.");
+						expect(text).toContain("Novalidationoccursbeforethereturn.");
+						expect(text).toContain("✗");
+						if (mode === "chain") expect(text).toContain("0/1steps");
+					}
+				}
+			}
+			if (mode === "nonzero") {
+				expect(outcome.text).toContain("code0.ts may expose an unsafe value");
+				expect(outcome.text).toContain("Checking remaining callers");
+				expect(outcome.text).toContain("No validation occurs before the return.");
+			}
 		}
 		expect(existsSync(calls[0].patchPath)).toBe(false); expect(existsSync(calls[0].sessionDir)).toBe(false);
 	});
@@ -317,12 +427,15 @@ const patch = fs.readFileSync(patchPath, "utf8");
 		expect(failedDir).not.toBe(""); expect(existsSync(failedDir)).toBe(false);
 	});
 	it.each([0, 3])("cleans artifacts and cannot stamp incomplete/failed worker output (exit %s)", async exit => {
-		artifactWorker("DELIVERY_REVIEW_INCOMPLETE: unable to complete review.", exit);
+		artifactWorker("code0.ts:1 — unresolved issue.\nDELIVERY_REVIEW_INCOMPLETE: unable to complete review.", exit);
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd: launch.root } });
 		const outcome = await run();
 		const log = JSON.parse(readFileSync(join(launch.root, "patch-log.json"), "utf8"));
 		expect(existsSync(log.path)).toBe(false); expect(outcome.results[0].reviewFingerprint).toBeUndefined();
+		expect(outcome.text).toContain("Partial reviewer report (NOT approval)");
+		expect(outcome.text).toContain("code0.ts:1 — unresolved issue.");
+		expect(outcome.text).toContain("DELIVERY_REVIEW_INCOMPLETE: unable to complete review.");
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: exit !== 0, details: { results: outcome.results } });
 		expect(pi.entries).toHaveLength(0);
 	});

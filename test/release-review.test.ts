@@ -4,13 +4,14 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { captureReleaseDiff, isReviewTarget } from "../extensions/subagent/release-review.ts";
 import { captureDeliveryDiff, reviewFingerprint, stampableReview } from "../extensions/subagent/reviewdiff.ts";
 import { registerDeliveryReview, scanDeliveryTargets } from "../extensions/subagent/delivery.ts";
 import { createFakePi } from "./fake-pi.ts";
 import { runSingleDelegation, type DelegationHost } from "../extensions/subagent/delegate.ts";
 import { ReviewContinuation } from "../extensions/subagent/review-continuation.ts";
-import { ReviewArtifactReads } from "../extensions/subagent/review-artifact.ts";
+import { ReviewArtifactReads, reviewArtifactText } from "../extensions/subagent/review-artifact.ts";
 
 const dirs: string[] = [];
 afterEach(() => { vi.unstubAllEnvs(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -80,6 +81,17 @@ console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content
 			git("checkout","prod"); git("commit","--allow-empty","-m","base moved"); git("push","origin","prod"); git("checkout","merged-feature");
 			expect(continuation.unchanged()).toBe(false);
 		} finally { continuation.cleanup(); }
+	});
+	it("wraps large encoded gzip evidence losslessly without encoding ordinary patch/data lines", () => {
+		const { cwd, git } = fixture();
+		const plain = Array.from({ length: 5000 }, (_, i) => `${i},${createHash("sha256").update(String(i)).digest("hex")}\n`).join("");
+		const compressed = gzipSync(plain);
+		writeFileSync(join(cwd, "data.csv.gz"), compressed); git("add", "."); git("commit", "-m", "data"); git("push", "origin", "HEAD:main");
+		const diff = captureReleaseDiff(cwd, target).diff!;
+		const encoded = /Encoded gzip blob [^\n]+:\n([A-Za-z0-9+/=\n]+)\n\nDecoded gzip asset/.exec(diff.text)![1];
+		expect(Buffer.from(encoded, "base64")).toEqual(compressed);
+		expect(encoded.trim().split("\n").every(line => line.length <= 76)).toBe(true);
+		expect(diff.text).toContain(plain); expect(reviewArtifactText(diff.text).chunked).toBe(false);
 	});
 	it.each([false,true])("inspects binary objects independently of text-forcing attributes (%s)", forceText => {
 		const {cwd,git} = fixture();

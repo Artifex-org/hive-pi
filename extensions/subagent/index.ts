@@ -66,7 +66,7 @@ import { credentialCheck, type WorkerModelEnv } from "./model.ts";
 import {
 	backgroundCompletion,
 	describeAgentForRecovery,
-	getFinalOutput,
+	getDisplayOutput,
 	isFailedResult,
 	requestedAgentNames,
 	runAgentWithSchema,
@@ -980,7 +980,7 @@ export default function (pi: ExtensionAPI) {
 				const isError = isFailedResult(r);
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
-				const finalOutput = getFinalOutput(r.messages);
+				const finalOutput = getDisplayOutput(r);
 
 				if (expanded) {
 					const container = new Container();
@@ -1047,7 +1047,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
+				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
 				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
 
 				if (expanded) {
@@ -1064,9 +1064,9 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
-						const finalOutput = getFinalOutput(r.messages);
+						const finalOutput = getDisplayOutput(r);
 
 						container.addChild(new Spacer(1));
 						container.addChild(
@@ -1116,7 +1116,7 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("chain ")) +
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -1155,7 +1155,7 @@ export default function (pi: ExtensionAPI) {
 					for (const r of details.results) {
 						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
-						const finalOutput = getFinalOutput(r.messages);
+						const finalOutput = getDisplayOutput(r);
 
 						container.addChild(new Spacer(1));
 						container.addChild(

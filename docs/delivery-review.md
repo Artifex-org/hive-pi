@@ -46,16 +46,54 @@ artifact exists throughout worker execution and is removed afterward, including
 on failure. Its temporary path is not part of the fingerprint.
 
 Oversized `code-reviewer` reviews can continue in the **same private persisted
-conversation**, retaining the artifact and observed read coverage. There are at
-most four continuation invocations, each requiring newly observed coverage;
-once all pages are read, at most one of those invocations may finish the
-integration review and cumulative conclusion. No progress stops the loop.
+conversation**, retaining the artifact and observed read coverage. The runner
+plans contiguous pages under both read limits (40KiB and 1,000 lines), assigns
+eight pages per invocation, and budgets at most
+`min(64, max(4, ceil(pageCount / 8) + 1))` continuations. This workload-sized allowance includes an integration conclusion;
+it is not an unbounded retry. Each continuation requires newly observed coverage;
+once all pages are read, at most one invocation may finish the integration review
+and cumulative conclusion. No progress or budget exhaustion fails closed with
+explicit covered/unread ranges. Failed reviews expose their full cumulative
+partial report to the parent, never a review stamp.
 The runner verifies the exact session ID, checkout and last persisted assistant
 report before resuming: a missing transcript is a refusal, not a fresh review.
 Every continuation and final result rechecks the original evidence fingerprint.
 Failures, aborts, changed evidence and a final incomplete declaration never
-stamp. Earlier findings remain in the conversation and the final report must
-cover the entire change, not only newly read pages. Coverage is necessary, not
+stamp. Every retained-review report supplies one unquoted, unfenced protocol line:
+`REVIEW_LEDGER {"complete":false,"findings":[...]}`. The mandatory boolean is
+`true` only when the full semantic review is complete; observed reads alone never
+set it. A ledger-only final report is valid only with explicit `complete:true`,
+full coverage and every required disposition. New records have `id:null`, `status:"new"` and
+nonempty `location` (`path:line`), `issue`, `scenario`, and `evidence` fields containing
+the full supporting details. The parent assigns distinct stable IDs even for bugs
+at the same location. Each later report must reconcile **every** previous ID using
+`id:"F1"`, `status:"upheld"|"resolved"|"withdrawn"`, `location` and `evidence`.
+The original issue, reproduction scenario and evidence are immutable; dispositions
+cannot erase them. These canonical records are re-injected as untrusted data after
+compaction. Human recaps are presentation, never finding identity, so rephrasing
+cannot invent a finding ID. The structured fields must contain all supporting
+details, not references to prose that may be compacted away.
+
+Malformed frames and unknown/duplicate IDs fail immediately; their full raw
+reports remain in failure diagnostics, never silently repaired into approval.
+Missing dispositions, explicit `complete:false`, bare ID mentions and quoted/code
+examples cannot complete a review. Canonical finding state and
+retained continuation prompt data are capped at 64KiB; overflow fails explicitly,
+never truncates support. This is not a cap on the private transcript or full
+failure diagnostics. Single, chain, parallel, background completion and expanded terminal views share
+cumulative review-output handling. On failure/cancellation all distinct reports
+are returned, even
+if a later worker died after emitting progress text (including text beside tool
+calls). Successful results also return the canonical original evidence alongside
+the final dispositions. Human-conclusion checks exclude protocol bytes and run
+before canonical evidence is appended, so metadata cannot disguise unfinished work.
+Parallel output caps preserve complete text in private temporary files (0600 in
+0700 directories); previews return retrieval paths, including through text-only
+MCP adapters. Follow those references before relying on truncated output. These
+files outlive the tool call for at least 24 hours; expired, unchanged, owned
+artifacts are pruned on the next spill. Changed/foreign directories are not
+removed. This is temporary retrieval storage, not a long-term archive.
+The final report must cover the entire change, not only newly read pages. Coverage is necessary, not
 approval. Session files and artifacts are deleted on all exits; ordinary workers
 remain ephemeral (`--no-session`).
 The command's `cd` / `git -C` checkout is checked, not the launch's checkout.
@@ -139,7 +177,9 @@ capture inspects actual endpoint blobs independently of Git attributes, so
 text-forcing rules cannot disguise binary assets. It supports gzip-compressed
 UTF-8 data by including lossless encoded bytes and ALL decoded text from each
 changed endpoint in the same
-coverage-checked artifact. Reading encoded bytes alone cannot stamp the review;
+coverage-checked artifact. Base64 is losslessly wrapped at 76 columns so it does
+not force otherwise readable patch and decoded data into JSON chunks.
+Reading encoded bytes alone cannot stamp the review;
 the decoded sections must also be read. Unknown binary formats, invalid UTF-8,
 NUL-containing decoded content, individual endpoint blobs over 16MiB, and
 patch-plus-decoded evidence over 16MiB fail

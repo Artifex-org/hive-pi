@@ -15,6 +15,23 @@ describe("artifact read coverage", () => {
 		expect(encoded.chunked).toBe(true); expect(JSON.parse(encoded.text).join("")).toBe(raw);
 		expect(encoded.text.split("\n").every(line => Buffer.byteLength(line) < 32 * 1024)).toBe(true);
 	});
+	it("plans contiguous pages under both native read caps and preserves every byte", () => {
+		for (const text of [("🧪".repeat(100) + "\n").repeat(800), "\n".repeat(5000)]) {
+			const lines = text.split("\n"), reads = new ReviewArtifactReads("/tmp/patch", text, "/repo");
+			const returned: string[] = [];
+			let cursor = 1;
+			for (const plan of reads.pages) {
+				expect(plan.offset).toBe(cursor); expect(plan.limit).toBeLessThanOrEqual(1000);
+				const output = lines.slice(plan.offset - 1, plan.offset - 1 + plan.limit).join("\n");
+				expect(Buffer.byteLength(output)).toBeLessThanOrEqual(40 * 1024);
+				returned.push(output); page(reads, plan.offset, plan.limit, output); cursor += plan.limit;
+			}
+			expect(returned.join("\n")).toBe(text); expect(reads.complete()).toBe(true); expect(reads.pagePlan()).toBe("");
+		}
+	});
+	it("refuses a raw line that cannot fit a read page", () => {
+		expect(() => new ReviewArtifactReads("/tmp/patch", "x".repeat(50 * 1024), "/repo")).toThrow("unpageable line");
+	});
 	it("accepts exact pages out of order with overlap and pagination notices", () => {
 		const reads = new ReviewArtifactReads("/tmp/patch", patch, "/repo");
 		page(reads, 3, 2, "c\n"); page(reads, 1, 2, "a\nb\n\n[2 more lines in file. Use offset=3 to continue.]");

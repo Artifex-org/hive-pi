@@ -23,10 +23,12 @@ it("the actual CLI resumes the configured private reviewer conversation", async 
 	const continuation = new ReviewContinuation(root, "review", reviewFingerprint(diff), reads);
 	const requests: { messages: { role: string; content: unknown }[] }[] = [];
 	const finding = "Prior review finding: unsafe boundary in code0.ts";
+	const first = "DELIVERY_REVIEW_INCOMPLETE: " + finding + "\nREVIEW_LEDGER " + JSON.stringify({ complete: false, findings: [{ id: null, status: "new", location: "code0.ts:1", issue: finding, scenario: "An unchecked input crosses the boundary.", evidence: "The caller forwards the unchecked input." }] });
+	const final = "Complete cumulative review: " + finding + "\nREVIEW_LEDGER " + JSON.stringify({ complete: true, findings: [{ id: "F1", status: "upheld", location: "code0.ts:1", evidence: "The caller still forwards the unchecked input." }] });
 	const server = createServer(async (req, res) => {
 		let body = ""; for await (const chunk of req) body += chunk;
 		requests.push(JSON.parse(body));
-		const text = requests.length === 1 ? "DELIVERY_REVIEW_INCOMPLETE: " + finding : "Complete cumulative review: " + finding;
+		const text = requests.length === 1 ? first : final;
 		res.writeHead(200, { "Content-Type": "text/event-stream" });
 		res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "review", choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] })}\n\n`);
 		res.end(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "review", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
@@ -51,7 +53,7 @@ it("the actual CLI resumes the configured private reviewer conversation", async 
 		// transcript that the REAL CLI serialized, not a fixture-authored log.
 		reads.observe({ type: "tool_execution_start", toolName: "read", toolCallId: "page", args: { path: patch, offset: 1, limit: 1 } });
 		reads.observe({ type: "tool_execution_end", toolName: "read", toolCallId: "page", result: { content: [{ type: "text", text: diff.text.split("\n")[0] }] } });
-		const next = continuation.next("DELIVERY_REVIEW_INCOMPLETE: " + finding, true);
+		const next = continuation.next(first, true);
 		expect(next.error).toBeUndefined(); expect(next.prompt).toContain("SAME delivery review");
 		expect(await run(next.prompt!)).toContain("Complete cumulative review");
 		expect(requests).toHaveLength(2);
