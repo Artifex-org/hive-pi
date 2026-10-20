@@ -129,18 +129,56 @@ Subscription models report zero monetary cost: this is **not** evidence of free
 inference or a billing determination. SDK errors are redacted at the transport
 boundary; no token-bearing options or raw stderr are logged.
 
-Only structured SDK `assistant.error` codes `overloaded`, `rate_limit` and
-`server_error` retain sanitized classification in `output.diagnostics`
-(`claude_sdk_assistant_failure`, allowlisted `error.code`, fixed `error.message`,
-`details.retrySafe: false`). SDK text, IDs and credentials are not copied into diagnostics.
+Every structured SDK `assistant.error` frame records a sanitized diagnostic in
+`output.diagnostics` (`claude_sdk_assistant_failure`, `details.retrySafe: false`),
+so Hive's `diagnose_agent_session` can show the cause:
+
+- `error.code` is the SDK's code when it is one of the pinned
+  `SDKAssistantMessageError` values, otherwise `unrecognized`. The raw value is
+  never copied.
+- `error.message` is the CLI's `API Error: <status> …` text when the frame carries
+  it: the status plus, from a JSON body, only `error.type` and `error.message`
+  (never `request_id`; a JSON body without a readable `error.message` is not
+  copied). It is redacted with the shared secret patterns and the
+  lease's access token, URL queries and fragments are dropped, opaque runs of 32+
+  characters are removed, and the result is cut to 200 characters. Any other
+  frame text is not copied; the message is then the fixed
+  `Claude SDK assistant failure`.
+
+SDK IDs and credentials are not copied into diagnostics.
 Known codes do **not** prove pre-effect rejection: the inspected SDK type contract
 (`sdk.d.ts` `SDKAssistantMessage` / `SDKAssistantMessageError`) provides no
 nonexecution promise, even for an empty first frame with no visible tools or MCP
 activity. Synthetic fixtures cannot establish that promise.
 
-All post-start SDK failures remain generic/nonretryable in `errorMessage` and
-quarantine the failed context against explicit replay, including classified
-empty failures and synchronous query-launch throws. There is no automatic SDK
+### Pre-effect retry
+
+The provider repeats a request **once**, inside the same Pi request, when all of
+the following hold. Nothing was proposed to Pi or the bridge, so nothing can
+have run:
+
+1. The failure is a structured `assistant.error` frame with code `unknown`,
+   `unrecognized`, `rate_limit`, `overloaded` or `server_error`. Account,
+   credential, billing, model and `invalid_request` codes would fail the same
+   way again and are not retried. (The HIV-3906 refusals that a replay served
+   arrived as `unknown`.)
+2. The query was opened by this request for a **user prompt**. A reused parked
+   continuation, or any request whose input is tool results, is never retried:
+   the tools already ran in Pi.
+3. No content block (text, thinking or tool use) was converted from this query,
+   and its bridge never observed, received or refused a tool call.
+4. The request is not aborted, the lease has not expired, and it is not a pilot
+   request.
+
+The failed query is disposed and its private state removed; it is not
+quarantined. A fresh query is seeded from the same canonical history with the
+same lease. The first failure stays in `output.diagnostics` with
+`details.retriedOnce`, whether the retry succeeds or not. A second failure takes
+the conservative path below.
+
+All other post-start SDK failures, and a failed retry, remain generic/nonretryable
+in `errorMessage` and quarantine the failed context against explicit replay,
+including synchronous query-launch throws. There is no other automatic SDK
 post-start failure retry, either here or through Pi's retry classifier, absent a
 verified protocol guarantee of nonexecution. Diagnostics preserve failure
 classification without authorizing replay; private state is still cleaned up.
@@ -351,7 +389,8 @@ tools, all Hive extensions, skills and MCP): with Pi's docs block removed, a
 was refused.
 
 Anthropic can change this classification. A refusal surfaces as the generic
-SDK failure, not as a silent fallback to paid billing.
+SDK failure, with the sanitized API error in its diagnostics, not as a silent
+fallback to paid billing.
 
 ## References
 

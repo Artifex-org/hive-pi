@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import sessionIdentity, { SESSION_IDENTITY_ENTRY } from "../extensions/hive-remote/sessionIdentity.ts";
 import { SESSION_IDENTITY_INITIAL_CHANNEL, SESSION_PLAN_INTRO_CHANNEL } from "../extensions/hive-remote/sessionIdentityBus.ts";
 import { createFakePi } from "./fake-pi.ts";
@@ -38,5 +42,44 @@ describe("canonical session context", () => {
 		} }] });
 		const result = await fake.emit({ type: "before_agent_start" });
 		expect(result).toContainEqual(expect.objectContaining({ message: expect.objectContaining({ content: expect.stringContaining("Resumed task") }) }));
+	});
+});
+
+const cleanups: (() => Promise<unknown>)[] = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+
+describe("session_context is declared to the model it is named to", () => {
+	it("is active, and listed in the system prompt, in a real pi session", async () => {
+		// HIV-3906: registered `deferred` by the loadout policy, so the kickoff
+		// message named a tool the claude-sdk launch was never given.
+		const root = await mkdtemp(join(tmpdir(), "session-identity-"));
+		cleanups.push(() => rm(root, { force: true, recursive: true }));
+		const settings = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
+		const loader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager: settings, extensionFactories: [sessionIdentity],
+			noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+		await loader.reload();
+		const { session } = await createAgentSession({ cwd: root, agentDir: root, settingsManager: settings,
+			resourceLoader: loader, sessionManager: SessionManager.inMemory(root) });
+		cleanups.push(async () => { session.dispose(); });
+		await session.bindExtensions({ mode: "json" });
+		expect(session.getActiveToolNames()).toContain("session_context");
+		expect(session.systemPrompt).toContain("- session_context: At kickoff, define the goal and approach");
+	});
+
+	it("never names session_context once the tool is not active", async () => {
+		const fake = createFakePi();
+		sessionIdentity(fake.api);
+		await fake.emit({ type: "session_start", reason: "new" });
+		expect(fake.api.getActiveTools()).toContain("session_context");
+		fake.api.setActiveTools([]); // a mode narrowed the set
+		expect(await fake.emit({ type: "before_agent_start" })).toEqual([undefined]);
+
+		await fake.emit({ type: "session_start", reason: "resume" }, { branch: [{ type: "custom", customType: SESSION_IDENTITY_ENTRY, data: {
+			title: "Resumed task", description: "Goal: continue. Approach: verify.", provisional: true, revision: 1,
+		} }] });
+		fake.api.setActiveTools([]);
+		const [result] = await fake.emit({ type: "before_agent_start" }) as [{ message: { content: string } }];
+		expect(result.message.content).toContain("Resumed task");
+		expect(result.message.content).not.toContain("session_context");
 	});
 });

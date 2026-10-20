@@ -7,11 +7,17 @@ import {
 	createBashToolDefinition,
 	createLocalBashOperations,
 	createEditTool,
+	createEditToolDefinition,
 	createFindTool,
+	createFindToolDefinition,
 	createGrepTool,
+	createGrepToolDefinition,
 	createLsTool,
+	createLsToolDefinition,
 	createReadTool,
+	createReadToolDefinition,
 	createWriteTool,
+	createWriteToolDefinition,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -438,6 +444,15 @@ function output(text: string, expanded: boolean, theme: { fg(color: string, text
  * read/edit/write/bash. pi's own example spreads the built-in for exactly this
  * reason (changelog #10072).
  *
+ * The metadata is taken from the `create*ToolDefinition` result, NOT from the
+ * `create*Tool` the overrides execute through. `create*Tool` returns pi's
+ * `wrapToolDefinition` AgentTool, which keeps `prepareArguments` and
+ * `constrainedSampling` but drops `promptSnippet`/`promptGuidelines` (only
+ * `createBashTool` copies them back). Reading them from the wrapped tool left
+ * read/edit/write/grep/find/ls out of the system prompt's tool list, and their
+ * guidelines ("Use read to examine files instead of cat or sed", the edit rules)
+ * never reached the model.
+ *
  * `outputSchema` is deliberately NOT inherited: an override with its own
  * execute (bash runs on a pty here) does not promise the built-in's structured
  * result shape, and declaring a schema it does not honour is worse than none.
@@ -474,7 +489,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "read", exposure: exposureFor("read"), label: "Read", description: read.description, parameters: read.parameters,
-		...builtinMeta(read),
+		...builtinMeta(createReadToolDefinition(cwd)),
 		// The two wrappers COMPOSE, and the nesting order matters: the queue is
 		// outermost, so the diagnosis in the catch also runs inside the slot. If it
 		// ran outside, explainPathFailure would stat the path while a concurrent
@@ -536,7 +551,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 			"Use background_bash for commands expected to take more than about 30 seconds; " +
 			"after a timeout, check side effects before retrying.",
 		parameters: bashParameters,
-		...builtinMeta(bash),
+		...builtinMeta(createBashToolDefinition(cwd)),
 		/**
 		 * Runs the command on a real pty when one is available, so an interactive
 		 * prompt can appear and a human can answer it, and says so when a command
@@ -694,7 +709,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "edit", exposure: exposureFor("edit"), label: "Edit", description: edit.description, parameters: edit.parameters,
-		...builtinMeta(edit),
+		...builtinMeta(createEditToolDefinition(cwd)),
 		execute: async (id, params, signal, onUpdate) => {
 			try {
 				return await edit.execute(id, params, signal, onUpdate);
@@ -715,7 +730,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "write", exposure: exposureFor("write"), label: "Write", description: write.description, parameters: write.parameters,
-		...builtinMeta(write),
+		...builtinMeta(createWriteToolDefinition(cwd)),
 		execute: (id, params, signal, onUpdate) => write.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "✦ write")} ${theme.fg("toolTitle", args.path)}${theme.fg("dim", ` · ${args.content.split("\n").length} lines`)}`, 0, 0),
 		renderResult: (result, { expanded, isPartial }, theme) => isPartial
@@ -725,7 +740,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "grep", exposure: exposureFor("grep"), label: "Grep", description: grep.description, parameters: grep.parameters,
-		...builtinMeta(grep),
+		...builtinMeta(createGrepToolDefinition(cwd)),
 		execute: async (id, params, signal, onUpdate) => {
 			let result: Awaited<ReturnType<typeof grep.execute>>;
 			try {
@@ -751,7 +766,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "find", exposure: exposureFor("find"), label: "Find", description: find.description, parameters: find.parameters,
-		...builtinMeta(find),
+		...builtinMeta(createFindToolDefinition(cwd)),
 		execute: (id, params, signal, onUpdate) => find.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "⌕ find")} ${theme.fg("toolTitle", args.pattern)}${theme.fg("dim", ` in ${args.path ?? "."}`)}`, 0, 0),
 		renderResult: (result, { expanded, isPartial }, theme) => isPartial ? new Text(theme.fg("warning", "searching…"), 0, 0) : output(textContent(result), expanded, theme),
@@ -759,7 +774,7 @@ export default function prettyTools(pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "ls", exposure: exposureFor("ls"), label: "List", description: ls.description, parameters: ls.parameters,
-		...builtinMeta(ls),
+		...builtinMeta(createLsToolDefinition(cwd)),
 		execute: (id, params, signal, onUpdate) => ls.execute(id, params, signal, onUpdate),
 		renderCall: (args, theme) => new Text(`${theme.fg("accent", "≡ ls")} ${theme.fg("toolTitle", args.path ?? ".")}`, 0, 0),
 		renderResult: (result, { expanded, isPartial }, theme) => isPartial ? new Text(theme.fg("warning", "listing…"), 0, 0) : output(textContent(result), expanded, theme),

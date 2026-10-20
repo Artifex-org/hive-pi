@@ -138,6 +138,11 @@ export class PiToolBridge {
 		}
 	}
 
+	/** Open, and no tool call was ever observed, requested or refused on this query. */
+	get idle(): boolean {
+		return !this.closed && this.calls.size === 0 && this.registrations.size === 0 && this.failedRegistrations.size === 0;
+	}
+
 	get pendingCallIds(): string[] {
 		return [...this.calls].filter(([, call]) => call.requested && !call.completed && !call.cancelled).map(([id]) => id);
 	}

@@ -47,6 +47,39 @@ export interface CatalogMode {
  */
 export type ConfiguredCheck = (spec: string) => boolean | null;
 
+/**
+ * The registry questions `credentialCheck` asks. Structural, so the pure
+ * routing is tested without pi's ModelRegistry.
+ */
+export interface CredentialRegistry<M> {
+	find(provider: string, modelId: string): M | undefined;
+	hasConfiguredAuth(model: M): boolean;
+}
+
+/**
+ * Whether `provider/id` can RUN here: the model is known AND its provider holds
+ * a credential.
+ *
+ * Asking only `find()` answered "the model exists", which every catalog model
+ * does once its provider's extension is loaded. On a claude-sdk launch the
+ * catalog's `medium` mode (openai-codex) was therefore "configured", the
+ * code-reviewer was spawned on it, and it died on `No API key found for
+ * "openai-codex"` (HIV-3906 eval). `null` for a spec that is not
+ * `provider/id`, or a registry that throws: "cannot tell", never "no".
+ */
+export function credentialCheck<M>(registry: CredentialRegistry<M>): ConfiguredCheck {
+	return (spec) => {
+		const at = spec.indexOf("/");
+		if (at <= 0 || at === spec.length - 1) return null;
+		try {
+			const model = registry.find(spec.slice(0, at), spec.slice(at + 1));
+			return model !== undefined && registry.hasConfiguredAuth(model);
+		} catch {
+			return null;
+		}
+	};
+}
+
 export interface WorkerModelEnv {
 	isConfigured: ConfiguredCheck;
 	/** The session's own `provider/id`, always configured by definition. */
@@ -161,18 +194,23 @@ export async function chooseWorkerModel(
 	}
 
 	// A role's catalog CLASS (`tier:` frontmatter): the catalog's mode with that
-	// key when this machine can run it. Otherwise the ordinary delegation lane,
-	// SAID — a review that quietly ran on the cheap lane is the failure the tier
-	// exists to prevent, so the caller must be able to see it happened.
+	// key when this machine can run it. Otherwise THIS SESSION'S model when it
+	// can run — the class exists so a review does not quietly drop to the cheap
+	// lane, and the session's model is the one credential known to work (a
+	// claude-sdk launch holds no catalog provider at all). Only then the
+	// ordinary delegation lane. Either way SAID, so the caller can see it.
 	const tier = opts.tier?.trim();
 	if (tier && env) {
 		const mode = (await safeCatalog(env)).find((m) => m?.key === tier && typeof m.model === "string" && m.model.includes("/"));
 		if (mode && configured(mode.model)) return { spec: mode.model };
-		const lane = await chooseWorkerModel({ preferred: opts.preferred, roleName: opts.roleName }, env);
-		if (lane.refusal) return lane;
 		const why = mode
 			? `the catalog's "${tier}" mode (${mode.model}) is not configured on this machine`
 			: `the Hive catalog offers no "${tier}" mode here (or could not be read)`;
+		if (env.sessionModel && env.isConfigured(env.sessionModel) === true) {
+			return { spec: env.sessionModel, note: `role "${opts.roleName}" asks for the "${tier}" class, but ${why}; it ran on ${env.sessionModel}, this session's model.` };
+		}
+		const lane = await chooseWorkerModel({ preferred: opts.preferred, roleName: opts.roleName }, env);
+		if (lane.refusal) return lane;
 		const ranOn = lane.spec ?? "pi's default model";
 		return { spec: lane.spec, note: `role "${opts.roleName}" asks for the "${tier}" class, but ${why}; it ran on ${ranOn}.${lane.note ? ` ${lane.note}` : ""}` };
 	}
