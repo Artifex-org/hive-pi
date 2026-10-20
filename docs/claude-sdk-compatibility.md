@@ -334,11 +334,21 @@ refused. The `docs` section was the only trigger.
 The operator decided the provider sends Pi's prompt without that section. This
 rests on Anthropic's help center (June 15 and October 7, 2026 updates), which
 states that Agent SDK and third-party app usage draw from subscription limits;
-the server-side classification lags that statement. `sdkSystemPrompt()` drops
-only the section named `docs`. The preamble that identifies Pi, tools, rules,
-addenda, project context, skills and cwd are sent verbatim and in order. The
-section is pi self-help that a Hive agent does not need. No headers,
-fingerprints or Claude Code identity are imitated.
+the server-side classification lags that statement. `sdkSystemPrompt()` removes
+only Pi's own rendered docs block, matched by its `<docs>` header line ("Pi
+documentation (read only when the user asks about pi itself…"). It matches the
+rendered text because extensions that return a whole `systemPrompt` from
+`before_agent_start` flatten Pi's sections into plain content; a real Hive launch
+does (`opmode`, `plan`, `loadout`, `skillscope`, `agmsg`). The preamble that
+identifies Pi, tools, rules, addenda, project context, skills and cwd are sent
+verbatim and in order, and a `<docs>` block that is not Pi's is kept. The block
+is pi self-help that a Hive agent does not need. No headers, fingerprints or
+Claude Code identity are imitated.
+
+Measured the same day on a full Hive launch (117,608-char flattened prompt, 37
+tools, all Hive extensions, skills and MCP): with Pi's docs block removed, a
+`read` tool round trip completed on the subscription; with the block present it
+was refused.
 
 Anthropic can change this classification. A refusal surfaces as the generic
 SDK failure, not as a silent fallback to paid billing.
