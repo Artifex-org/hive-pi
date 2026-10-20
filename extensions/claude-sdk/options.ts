@@ -2,7 +2,7 @@
 import { isAbsolute } from "node:path";
 import { getSupportedThinkingLevels, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { McpSdkServerConfigWithInstance, Options, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { SdkProviderError } from "./diagnostics.ts";
+import { SdkProviderError } from "./events.ts";
 
 export const CREDENTIAL_PROVIDER = "anthropic";
 export const SDK_VERSION = "0.3.289";

@@ -266,6 +266,14 @@ describe("aborts, lease expiry and continuations", () => {
 			message: "Missing correlated Pi tool results; reconcile before continuing" }, details: { phase: "post_start", continuation: "parked" } });
 	});
 
+	it("records invalid Pi tool names as the provider's refusal, not a bridge correlation", async () => {
+		const sdk = await runtime(() => []);
+		const ctx = normalizeContext({ systemPrompt: "Pi", tools: [{ ...tool, name: "bad name" }], messages: [{ role: "user", content: "go", timestamp: 1 }] });
+		const output = await sdk.provider.streamSimple(sdk.model, ctx).result();
+		expect(output.errorMessage).toBe("Invalid Pi tool names");
+		expect(only(output)).toMatchObject({ error: { name: "SdkProviderError", code: "provider_refusal" }, details: { phase: "pre_start" } });
+	});
+
 	it("keeps a pre-start refusal's own errorMessage and records it as pre_start", async () => {
 		const sdk = await runtime(() => [resultError({})]);
 		const ctx = prompt();
@@ -301,5 +309,15 @@ describe.runIf(process.platform === "linux")("cli_exit: the CLI child died on it
 		expect(tail).toContain("Error: upstream failed [REDACTED]");
 		expect(tail).toContain("see https://api.anthropic.com/v1/messages request [ID]");
 		await expectQuarantined(sdk, ctx, output);
+	});
+
+	it("waits briefly for a dying CLI's exit and last stderr when the stream ends first", async () => {
+		const sdk = await runtime(async function* (_, request) {
+			request.options.spawnClaudeCodeProcess!({ command: "/bin/sh", args: ["-c", "sleep 0.05; printf 'fatal: late words\\n' >&2; exit 4"],
+				cwd: process.cwd(), env: request.options.env!, signal: request.options.abortController!.signal }).stdout.resume();
+		});
+		const output = await sdk.provider.streamSimple(sdk.model, prompt()).result();
+		expect(only(output)).toMatchObject({ error: { code: "cli_exit", message: "Claude CLI exited with code 4" },
+			details: { cliExit: { code: 4, signal: null, requested: false }, stderrTail: "fatal: late words" } });
 	});
 });

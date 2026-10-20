@@ -127,6 +127,9 @@ export function streamFailure(error: unknown, message: SDKMessage, secrets: read
 	return error instanceof Error && error.constructor === Error ? new SdkProtocolError(error.message, "stream_protocol", frameShape(message)) : error;
 }
 
+/** A refusal or failure raised by this provider itself; its message is fixed provider text. */
+export class SdkProviderError extends Error {}
+
 /** A structured SDK assistant error: its code and a sanitized cause, never the raw SDK text. */
 export class SdkAssistantFailure extends Error {
 	constructor(readonly code: FailureCode, readonly detail: string | undefined) {

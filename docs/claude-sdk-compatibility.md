@@ -180,9 +180,10 @@ with code N`), and only the matched part. Otherwise the message is
 `(unrecognized error text withheld)` and only the error class name is kept.
 
 The SDK's `stderr` option is wired only to its built-in spawner, so the provider's
-own process scope keeps the last 4,096 characters of the CLI's stderr. When the
-CLI exited on its own, the scope waits up to 250 ms for its stderr to close before
-taking the tail, as the SDK's built-in spawner does. The
+own process scope keeps the last 4,096 characters of the CLI's stderr. Unless the
+provider or the SDK signalled the CLI, the scope waits up to 250 ms for its exit and
+for its stderr to close before taking the tail, as the SDK's built-in spawner waits
+for stderr before reporting an exit. The
 diagnostic carries the end of that tail, at most 500 characters, as
 `details.stderrTail`. All copied text goes through the #191 sanitizer
 (`sanitizeDiagnosticText`), using the lease token and the Hive token as known

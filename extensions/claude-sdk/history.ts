@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Message, UserMessage, ToolResultMessage, Model } from "@earendil-works/pi-ai";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { SdkProviderError } from "./diagnostics.ts";
+import { SdkProviderError } from "./events.ts";
 
 export function fingerprint(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 export function imageOrText(block: UserMessage["content"][number] | ToolResultMessage["content"][number]): unknown {

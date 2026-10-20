@@ -9,8 +9,8 @@ import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-a
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
 import type { PilotQueryBudget } from "./pilot-budget.ts";
-import { EventConverter, emptyUsage, SdkAssistantFailure, SdkProtocolError, streamFailure, type FailureCode } from "./events.ts";
-import { failureDiagnostic, SdkLeaseExpired, SdkProviderError, type Continuation, type FailureContext, type ParkedEndReason } from "./diagnostics.ts";
+import { EventConverter, emptyUsage, SdkAssistantFailure, SdkProtocolError, SdkProviderError, streamFailure, type FailureCode } from "./events.ts";
+import { failureDiagnostic, SdkLeaseExpired, type Continuation, type FailureContext, type ParkedEndReason } from "./diagnostics.ts";
 import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
 import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
@@ -343,6 +343,8 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					break;
 				}
 			} catch (error) {
+				// Whether the failure was an abort is read before the evidence wait below.
+				const aborted = signal.aborted;
 				// Snapshot the CLI's evidence before disposal signals it.
 				const evidence = await scope?.evidence();
 				const phase = state || sdkStarted ? "post_start" : "pre_start";
@@ -355,7 +357,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				output.stopReason = signal.aborted ? "aborted" : "error";
 				// SDK classification does not promise nonexecution. Keep all post-start
 				// failures generic/nonretryable for Pi; the kind and cause are diagnostics only.
-				output.diagnostics = [...output.diagnostics ?? [], failureDiagnostic(error, { phase, continuation, parkedEnd, aborted: signal.aborted,
+				output.diagnostics = [...output.diagnostics ?? [], failureDiagnostic(error, { phase, continuation, parkedEnd, aborted,
 					leaseExpired, cleanupFailed, evidence, secrets }, now())];
 				output.errorMessage = cleanupFailed ? "Claude SDK failed to remove private state; operator cleanup required" : state || sdkStarted ? "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" :
 					(error instanceof Error ? error.message : "Claude SDK request failed");

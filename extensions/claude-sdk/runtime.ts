@@ -6,7 +6,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { accessLease, LOOPBACK_HOSTS, sandboxEgressEnv, type AccessLease } from "./options.ts";
-import { SdkProviderError } from "./diagnostics.ts";
+import { SdkProviderError } from "./events.ts";
 import { assertTreeIdentityReadable, killTree, releaseTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 
 export const CLI_VERSION = "2.1.286";
@@ -121,7 +121,7 @@ export const STDERR_TAIL_CHARS = 4096;
 export interface CliExit { code: number | null; signal: string | null; requested: boolean }
 /** Raw, unsanitized evidence for a failure diagnostic. Never log or forward it unsanitized. */
 export interface ProcessEvidence { stderr: string; exit?: CliExit }
-/** How long evidence waits for an exited CLI's stderr to drain. */
+/** How long evidence waits for an unsignalled CLI's exit and stderr to settle. */
 export const STDERR_DRAIN_MS = 250;
 
 /** SDK-only strict ownership: Linux readable procfs; never group-only fallback. */
@@ -133,7 +133,10 @@ export function processScope(): { spawn: NonNullable<Options["spawnClaudeCodePro
 	// spawnClaudeCodeProcess, so this scope keeps the tail itself (HIV-3906 follow-up).
 	let stderr = "";
 	let exit: CliExit | undefined;
-	let drained: Promise<void> = Promise.resolve();
+	// The latest child, and when both its exit and its stderr close were observed.
+	let latest: ReturnType<typeof spawn> | undefined;
+	let settled: Promise<unknown> = Promise.resolve();
+	let finished = false;
 	const signalled = new WeakSet<ReturnType<typeof spawn>>();
 	const signal = (child: ReturnType<typeof spawn>, value: NodeJS.Signals) => {
 		signalled.add(child);
@@ -142,14 +145,15 @@ export function processScope(): { spawn: NonNullable<Options["spawnClaudeCodePro
 	};
 	return {
 		/**
-		 * The stderr tail and exit status. A CLI that exited on its own may still
-		 * have unread stderr when its `exit` fires, so this waits briefly for the
-		 * pipe to close, as the SDK's built-in spawner does before reporting an exit.
+		 * The stderr tail and exit status. A failing CLI may not have reported its
+		 * exit yet, or may still have unread stderr when it does, so unless this
+		 * scope or the SDK signalled it, this waits briefly for both, as the SDK's
+		 * built-in spawner waits for stderr before reporting an exit.
 		 */
 		evidence: async () => {
-			if (exit && !exit.requested) {
+			if (latest && !finished && !signalled.has(latest)) {
 				let timer: ReturnType<typeof setTimeout> | undefined;
-				await Promise.race([drained, new Promise<void>(resolve => { timer = setTimeout(resolve, STDERR_DRAIN_MS); timer.unref(); })]);
+				await Promise.race([settled, new Promise<void>(resolve => { timer = setTimeout(resolve, STDERR_DRAIN_MS); timer.unref(); })]);
 				clearTimeout(timer);
 			}
 			return { stderr, ...(exit ? { exit: { ...exit } } : {}) };
@@ -171,7 +175,9 @@ export function processScope(): { spawn: NonNullable<Options["spawnClaudeCodePro
 			// Never forward raw stderr: it may contain credentials or request content.
 			// Only a bounded tail is kept, for sanitized failure diagnostics.
 			child.stderr!.setEncoding("utf8");
-			drained = new Promise(resolve => child.stderr!.once("close", () => resolve()));
+			latest = child; finished = false;
+			settled = Promise.all([new Promise(resolve => child.once("exit", resolve)), new Promise(resolve => child.stderr!.once("close", resolve))])
+				.then(() => { if (latest === child) finished = true; });
 			child.stderr!.on("data", (chunk: string) => {
 				stderr += chunk;
 				if (stderr.length > STDERR_TAIL_CHARS) stderr = stderr.slice(-STDERR_TAIL_CHARS);

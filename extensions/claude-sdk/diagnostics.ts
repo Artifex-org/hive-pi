@@ -5,15 +5,12 @@
  * `errorMessage` stays the generic user-facing text.
  */
 import type { AssistantMessageDiagnostic, JsonObject } from "@earendil-works/pi-ai";
-import { boundedDetail, sanitizeDiagnosticText, SdkAssistantFailure, SdkProtocolError, SdkResultFailure } from "./events.ts";
+import { boundedDetail, sanitizeDiagnosticText, SdkAssistantFailure, SdkProtocolError, SdkProviderError, SdkResultFailure } from "./events.ts";
 import { BridgeError } from "./tool-bridge.ts";
 import type { ProcessEvidence } from "./runtime.ts";
 
 /** Characters of sanitized CLI stderr a diagnostic carries (the end of the tail). */
 export const STDERR_DIAGNOSTIC_CHARS = 500;
-
-/** A refusal or failure raised by this provider itself; its message is fixed provider text. */
-export class SdkProviderError extends Error {}
 
 /** The abort reason the lease-expiry timer gives a running query. */
 export class SdkLeaseExpired extends Error {

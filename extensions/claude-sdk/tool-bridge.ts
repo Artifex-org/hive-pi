@@ -4,6 +4,7 @@ import type { Tool, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { SdkProviderError } from "./events.ts";
 
 interface Call {
 	name: string;
@@ -33,7 +34,7 @@ export class PiToolBridge {
 	constructor(tools: readonly Tool[], private readonly signal: AbortSignal, private readonly registrationTimeout = 0) {
 		this.toolNames = tools.map(tool => tool.name);
 		if (new Set(this.toolNames).size !== tools.length || tools.some(tool => !/^[a-zA-Z0-9_-]+$/.test(tool.name))) {
-			throw new BridgeError("Invalid Pi tool names");
+			throw new SdkProviderError("Invalid Pi tool names");
 		}
 		const server = new McpServer({ name: "pi", version: "0.0.0" }, { capabilities: { tools: {} } });
 		this.config = { type: "sdk", name: "pi", instance: server };
