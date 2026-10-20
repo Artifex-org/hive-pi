@@ -113,11 +113,17 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 		const ghBodyFile = cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body");
 		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) && !literalWords(ghBodyFile);
 		const dynamicCause = (text: string) => `its arguments are dynamic: ${literalProblem(text) ?? "a substitution or variable"} cannot be read before it runs`;
-		if (!prefix || configuredEnv || gitWritesOutput || implicitStaging || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "push"].includes(prefix[verb]) ||
-			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) { precedingMutation = true; mutationLeg ||= clip(raw); }
+		// A listing (`gofmt -l`, `ls`) cannot change what was reviewed. Only fully literal
+		// words, no assignments (a substitution or LD_PRELOAD runs code), no redirects and
+		// no glob (an expanded `-w` file name becomes a flag).
+		const literal = assignments.trim() === "" && !redirected && !/[*?[]/.test(cleaned) ? literalWords(cleaned) : null;
+		const inert = !!literal && readOnlyLeg(literal);
+		if (!inert && (!prefix || configuredEnv || gitWritesOutput || implicitStaging || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "push"].includes(prefix[verb]) ||
+			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship"))) { precedingMutation = true; mutationLeg ||= clip(raw); }
 		const leg = clip(raw);
 		const why = (...checks: [unknown, string][]): DeliveryScan => ({ target: null, leg, cause: checks.find(([hit]) => hit)?.[1] ?? "its target cannot be resolved to one reviewed repo" });
-		const precedingCause = `an earlier leg (\`${precededBy}\`) can change HEAD or the files after review`;
+		const precedingCause = `an earlier leg (\`${precededBy}\`) can change HEAD or the files after review${/^\s*cat\s*>/.test(precededBy)
+			? " (write the PR body file in its own command first, then run `gh pr create … --body-file <file>` standalone)" : ""}`;
 		const envCause = `\`${clip(assignments)}\` sets environment that can redirect or reconfigure the delivery`;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);
@@ -153,7 +159,8 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 			const explicit = Object.keys(selected).length > 0;
 			if (explicit && unsupportedOption) targetOverride ||= unsupportedOption;
 			if (explicit && !isReviewTarget(selected)) targetOverride ||= selected.base !== undefined ? "--base" : "--head";
-			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, REDIRECT_CAUSE], [dynamicGh, dynamicCause(ghBodyFile)], [targetOverride, `\`${targetOverride}\` points at a repo/branch this preflight cannot match to the reviewed diff`]) : explicit ? { target: dir, reviewTarget: selected as ReviewTarget } : ok(dir));
+			const baseOnly = targetOverride === "--base" && selected.head === undefined;
+			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, REDIRECT_CAUSE], [dynamicGh, dynamicCause(ghBodyFile)], [targetOverride, baseOnly ? BASE_ONLY_CAUSE : `\`${targetOverride}\` points at a repo/branch this preflight cannot match to the reviewed diff`]) : explicit ? { target: dir, reviewTarget: selected as ReviewTarget } : ok(dir));
 			continue;
 		}
 		if (!/^git\s/.test(cleaned)) continue;
@@ -184,7 +191,9 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 	return targets.reverse();
 }
 
-const REDIRECT_CAUSE = "the leg redirects to or from a file (only fd duplication such as `2>&1`, output to `/dev/null` and here-documents are supported)";
+const REDIRECT_CAUSE = "the leg redirects to or from a file (only fd duplication such as `2>&1`, output to `/dev/null` and here-documents are supported). To write a PR body, run `cat > /tmp/pr-body.md <<'EOF' … EOF` as its own command first, then `gh pr create --title … --body-file /tmp/pr-body.md` standalone";
+// `--base` alone is neither the default target nor a release target, and is usually meant as the default branch.
+const BASE_ONLY_CAUSE = "`--base` without `--head` cannot be matched to the reviewed diff. For the repository's default branch, omit `--base` (gh targets it by default); a release PR names both `--base` and `--head`";
 
 /** The literal words of a leg, after its environment assignments and benign redirects. */
 function commandWords(segment: string): string[] | null {
@@ -206,6 +215,27 @@ function legKind(words: readonly string[], dir: string): { kind: LegKind | null;
 	if (words[i] === "commit") return { kind: "commit", target };
 	if (words[i] === "push" && !words.slice(i + 1).some((t) => t === "--dry-run" || t === "-n")) return { kind: "push", target };
 	return { kind: null, target };
+}
+
+const GOFMT_READ_FLAGS = new Set(["-l", "-d", "-e", "-s"]);
+
+/**
+ * A leg that only reads and prints: an allowlist of commands AND options, never a
+ * denylist. Git subcommands never qualify (`git status` can run `core.fsmonitor`, a
+ * diff runs configured drivers), and option-taking tools such as `sort` or `sed` can write.
+ */
+export function readOnlyLeg(words: readonly string[]): boolean {
+	const args = words.slice(1);
+	switch (words[0]) {
+		case "gofmt": {
+			const flags = args.filter((a) => a.startsWith("-"));
+			return flags.every((a) => GOFMT_READ_FLAGS.has(a)) && flags.some((a) => a === "-l" || a === "-d");
+		}
+		case "ls": case "pwd": case "echo": case "true":
+			return true;
+		default:
+			return false;
+	}
 }
 
 /** A stage that only reads its stdin (and named files) and writes stdout. */
