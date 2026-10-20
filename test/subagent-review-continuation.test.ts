@@ -46,6 +46,13 @@ const disposition = (id: string, location = "code.ts:7", status = "upheld") => (
 const advance = (c: ReviewContinuation, output: string, success: boolean, finished = true) =>
  c.next([{ role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" }], success, finished);
 const incomplete = `DELIVERY_REVIEW_INCOMPLETE: more\n${frame()}`;
+function exhaustIntegration(c: ReviewContinuation, output: string) {
+	for (let pass = 0; pass <= 8; pass++) {
+		const next = advance(c, output, true); expect(next.findings).toBeUndefined();
+		if (next.error) return next;
+	}
+	throw new Error("Semantic integration did not stop at its bounded reserve");
+}
 describe("ReviewContinuation", () => {
 	it.each(["progress", "mixed-final", "tool-stop", "duplicate-final"])("rejects nonauthoritative invocation frames: %s", kind => {
 		const { c, cover } = fixture(); cover();
@@ -69,10 +76,47 @@ describe("ReviewContinuation", () => {
 		}
 		cover(5, 1); expect(advance(c, incomplete, true).error).toContain("budget exhausted");
 	});
-	it("permits only one conclusion continuation after complete reads", () => {
+	it("permits multiple bounded semantic passes after early full coverage", () => {
+		const { c, cover, persist } = fixture(); cover();
+		const partial = 'DELIVERY_REVIEW_INCOMPLETE: tracing callers and tests\nREVIEW_LEDGER {"complete":false,"findings":[]}';
+		for (let pass = 0; pass < 3; pass++) {
+			persist(partial); const next = advance(c, partial, true);
+			expect(next.error).toBeUndefined(); expect(next.prompt).toContain("Every artifact line has been read");
+			expect(next.findings).toBeUndefined();
+		}
+		expect(advance(c, frame(), true).findings).toBe("[]");
+	});
+	it("reserves semantic passes when full coverage reaches the paging allowance", () => {
+		const { c, cover, persist } = fixture(false, "line\n".repeat(30));
+		const partial = 'DELIVERY_REVIEW_INCOMPLETE: integration remains\nREVIEW_LEDGER {"complete":false,"findings":[]}';
+		for (let round = 1; round <= 4; round++) {
+			cover(round, 1); persist(partial); expect(advance(c, partial, true).prompt).toBeDefined();
+		}
+		cover();
+		for (let pass = 0; pass < 2; pass++) {
+			persist(partial); const next = advance(c, partial, true);
+			expect(next.error).toBeUndefined(); expect(next.prompt).toContain("Every artifact line has been read");
+		}
+		expect(advance(c, frame(), true).findings).toBe("[]");
+	});
+	it("bounds semantic-only incomplete reports independently of remaining paging budget", () => {
+		const { c, cover, persist } = fixture(); cover();
+		const partial = 'REVIEW_LEDGER {"complete":false,"findings":[]}'; persist(partial);
+		for (let pass = 1; pass <= 8; pass++) {
+			const next = advance(c, partial, true);
+			expect(next.error).toBeUndefined(); expect(next.findings).toBeUndefined();
+			expect(next.prompt).toContain(`Semantic integration continuation ${pass}/8`);
+		}
+		expect(advance(c, partial, true).error).toContain("semantic integration budget exhausted (8/8)");
+	});
+	it("accepts genuine completion on the last reserved semantic invocation", () => {
 		const { c, cover, persist } = fixture(); cover(); persist(incomplete);
-		expect(advance(c, incomplete, true).prompt).toContain("Every artifact line has been read");
-		expect(advance(c, incomplete, true).error).toContain("semantic conclusion still incomplete");
+		for (let pass = 0; pass < 8; pass++) expect(advance(c, incomplete, true).prompt).toBeDefined();
+		expect(advance(c, frame(), true).findings).toBe("[]");
+	});
+	it("keeps the combined continuation allowance at the existing hard ceiling", () => {
+		const { c } = fixture(false, ("x".repeat(1024) + "\n").repeat(20000));
+		expect(c.maxRounds).toBe(64);
 	});
 	it("sizes the bounded budget to pages and preserves five rounds of independent findings", () => {
 		const { c, reads, cover, persist } = fixture(false, ("x".repeat(1000) + "\n").repeat(15000));
@@ -104,24 +148,24 @@ describe("ReviewContinuation", () => {
 	it("requires evidence-bearing dispositions for prior IDs before completion", () => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const report = frame([fresh("code.ts:7", "concrete bug")]);
 		persist(report); expect(advance(c, report, true).prompt).toContain("code.ts:7"); cover(); persist(frame());
-		expect(advance(c, frame(), true).prompt).toContain("F1"); expect(advance(c, frame(), true).error).toContain("F1");
+		expect(advance(c, frame(), true).prompt).toContain("F1"); expect(exhaustIntegration(c, frame()).error).toContain("F1");
 		expect(advance(c, frame([disposition("F1", "code.ts:7", "withdrawn")]), true).findings).toContain("concrete bug");
 	});
 	it.each(["Dockerfile", "src/[id]/page.tsx", "source (copy)/file name"])("retains a finding at valid Git path %s", path => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const report = frame([fresh(`${path}:7`, "concrete bug")]); persist(report);
 		expect(advance(c, report, true).prompt).toContain("F1"); cover(); persist(frame());
-		expect(advance(c, frame(), true).prompt).toContain(path); expect(advance(c, frame(), true).error).toContain("F1");
+		expect(advance(c, frame(), true).prompt).toContain(path); expect(exhaustIntegration(c, frame()).error).toContain("F1");
 	});
 	it("does not collapse independent findings at the same location", () => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const report = frame([fresh("code.ts:7", "race"), fresh("code.ts:7", "data loss")]); persist(report);
 		const next = advance(c, report, true); expect(next.prompt).toContain("F1"); expect(next.prompt).toContain("F2");
 		cover(); const partial = frame([disposition("F2", "code.ts:7", "resolved")]); persist(partial);
-		expect(advance(c, partial, true).prompt).toContain("F1"); expect(advance(c, partial, true).error).toContain("F1");
+		expect(advance(c, partial, true).prompt).toContain("F1"); expect(exhaustIntegration(c, partial).error).toContain("F1");
 	});
 	it.each(["```text\nDELIVERY_REVIEW_INCOMPLETE: callers remain\n```", "    DELIVERY_REVIEW_INCOMPLETE: callers remain"])("keeps refusal-only reports incomplete despite required protocol metadata: %s", refusal => {
 		const { c, cover, persist } = fixture(); cover(); const output = `${refusal}\n${frame()}`; persist(output);
 		expect(advance(c, output, true).prompt).toContain("Every artifact line");
-		expect(advance(c, output, true).error).toContain("semantic conclusion still incomplete");
+		expect(exhaustIntegration(c, output).error).toContain("semantic integration budget exhausted");
 	});
 	it("does not invent phantom IDs from rephrased required human recaps", () => {
 		const { c, cover, persist } = fixture(); cover(); const first = `DELIVERY_REVIEW_INCOMPLETE: integrate\ncode.ts:7 — race\n${frame([fresh("code.ts:7", "race")])}`;
