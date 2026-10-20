@@ -53,6 +53,12 @@ export type BackgroundJobEvent = { sessionId: string; executionId: string } & (
 			id: string;
 			status: Exclude<JobStatus, "running">;
 			exitCode?: number;
+			/**
+			 * A code-reviewer job's own evidence: the fingerprint of the diff the
+			 * worker actually reviewed. Absent when the worker could not capture it,
+			 * and then the review cannot vouch for any diff.
+			 */
+			reviewFingerprint?: string;
 	  });
 
 export interface BackgroundCancelEvent {

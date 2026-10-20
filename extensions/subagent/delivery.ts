@@ -396,7 +396,7 @@ const JOB_ID = (() => {
 })();
 
 interface BackgroundReview { cwd: string; fingerprint: string | null }
-interface BackgroundJob { output: string; status?: string; review?: BackgroundReview }
+interface BackgroundJob { output: string; status?: string; review?: BackgroundReview; reviewFingerprint?: string }
 
 const resultText = (content: unknown) => Array.isArray(content) ? content.map((part) => typeof (part as { text?: unknown })?.text === "string" ? (part as { text: string }).text : "").join("\n") : "";
 
@@ -458,19 +458,19 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 	});
 
 	// A background code-reviewer counts once it FINISHES cleanly on the diff it
-	// was dispatched against. The diff is fingerprinted at dispatch (the worker
-	// captures the same diff a moment later) and again at completion; a change
-	// in between voids it, exactly as a foreground review is voided. The job's
-	// completion does not carry the worker's own evidence fingerprint, so one
-	// residual gap remains: a worker whose own capture failed (2 s budget) and
-	// reviewed without the diff still counts if this side's captures agree.
+	// was dispatched against. Three fingerprints must agree: this side's capture
+	// at dispatch, the worker's own evidence (carried on the finish event), and
+	// this side's capture at completion. A change in between voids it, exactly as
+	// a foreground review is voided, and a worker that could not capture its diff
+	// (2 s budget) reviewed nothing this gate can vouch for.
 	const settle = (id: string, job: BackgroundJob) => {
 		const review = job.review;
 		if (!review || job.status === undefined) return;
 		jobs.delete(id);
 		if (job.status !== "done" || job.output.includes(MID_WORK_NOTE)) { backgroundState.set(review.cwd, `finished without a complete review (${job.status})`); return; }
+		if (!job.reviewFingerprint) { backgroundState.set(review.cwd, "finished, but the reviewer could not capture the diff it reviewed"); return; }
 		const diff = capture(review.cwd, "");
-		if (!diff || !stampableReview(diff) || !review.fingerprint || reviewFingerprint(diff) !== review.fingerprint) { backgroundState.set(review.cwd, "finished, but the diff changed after it was dispatched (or cannot be stamped)"); return; }
+		if (!diff || !stampableReview(diff) || !review.fingerprint || job.reviewFingerprint !== review.fingerprint || reviewFingerprint(diff) !== review.fingerprint) { backgroundState.set(review.cwd, "finished, but the diff changed after it was dispatched (or cannot be stamped)"); return; }
 		backgroundState.delete(review.cwd);
 		stamp(diff, "background");
 	};
@@ -486,6 +486,7 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		if (!job) return;
 		if (event.action === "output") { job.output += event.chunk; return; }
 		job.status = event.status;
+		job.reviewFingerprint = event.reviewFingerprint;
 		settle(event.id, job);
 	});
 
