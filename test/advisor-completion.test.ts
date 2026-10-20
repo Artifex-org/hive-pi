@@ -32,7 +32,7 @@ describe("advisor completion", () => {
 			model: { ...model, id: "caller" },
 			sessionManager: { buildContextEntries: () => [] },
 			modelRegistry: {
-				find: () => model,
+				find: () => model, hasConfiguredAuth: () => true,
 				getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "t" }),
 				complete, streamSimple,
 			},
@@ -41,6 +41,35 @@ describe("advisor completion", () => {
 		expect(result.content).toEqual([{ type: "text", text: "reviewed" }]);
 		expect(streamSimple).toHaveBeenCalledWith(model, expect.any(Object), expect.objectContaining({ reasoning: expected }));
 		expect(complete).not.toHaveBeenCalled();
+	});
+});
+
+describe("advisor model choice", () => {
+	// Eval wave 2: in a claude-sdk session the catalog's top mode (openai-codex) is registered
+	// but holds no credential; the advisor picked it and failed with "Provider is not configured".
+	it("skips a registered catalog mode with no credential and says it ran on the same class", async () => {
+		vi.spyOn(config, "loadAdvisorConfig").mockReturnValue({ disabled: false, modelOverride: undefined, timeoutMs: 1000, maxChars: 1000 });
+		vi.spyOn(identity, "resolveAuth").mockReturnValue({ token: "t", url: "https://hive.example", source: "test" });
+		vi.spyOn(modes, "fetchAgentModeOutcome").mockResolvedValue({ kind: "ok", catalog: { subagentKey: undefined, modes: [
+			{ key: "high", model: "openai-codex/gpt-6.1-sol" }, { key: "opus", model: "claude-sdk/claude-opus-5-5" }] } });
+		const registerTool = vi.fn();
+		advisor({ registerTool } as unknown as ExtensionAPI);
+		const tool = registerTool.mock.calls[0][0] as ToolDefinition;
+		const response = { content: [{ type: "text", text: "reviewed" }], usage: { input: 1, output: 1 } };
+		const streamSimple = vi.fn().mockReturnValue({ result: async () => response });
+		const ctx = {
+			model: { provider: "claude-sdk", id: "claude-opus-5-5" },
+			sessionManager: { buildContextEntries: () => [] },
+			modelRegistry: {
+				find: (provider: string, id: string) => ({ provider, id }),
+				hasConfiguredAuth: (model: { provider: string }) => model.provider === "claude-sdk",
+				getApiKeyAndHeaders: async (model: { provider: string }) => model.provider === "claude-sdk" ? { ok: true, apiKey: "t" } : { ok: false, error: "none" },
+				streamSimple,
+			},
+		} as unknown as ExtensionToolContext;
+		const result = await tool.execute("call", {}, undefined, undefined, ctx);
+		expect(streamSimple).toHaveBeenCalledWith({ provider: "claude-sdk", id: "claude-opus-5-5" }, expect.any(Object), expect.any(Object));
+		expect(JSON.stringify(result.content)).toContain("the same class as this session");
 	});
 });
 
@@ -64,7 +93,7 @@ describe("advisor transcript", () => {
 		const ctx = {
 			model: { ...model, id: "caller" },
 			sessionManager: { buildContextEntries: () => entries },
-			modelRegistry: { find: () => model, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "t" }), streamSimple },
+			modelRegistry: { find: () => model, hasConfiguredAuth: () => true, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "t" }), streamSimple },
 		} as unknown as ExtensionToolContext;
 		await tool.execute("call", {}, undefined, undefined, ctx);
 		const sent = JSON.stringify(streamSimple.mock.calls[0][1]);

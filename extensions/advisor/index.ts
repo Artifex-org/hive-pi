@@ -64,9 +64,13 @@ export default function (pi: ExtensionAPI) {
 			const serialized = serializeConversation(convertToLlm(advisorMessages(entries)));
 			const { text: transcript, capped } = capTranscript(serialized, cfg.maxChars);
 
+			// Registered AND credentialed: every built-in model is registered, so a catalog
+			// mode on a provider this session holds no credential for (a claude-sdk launch has
+			// none for openai-codex) used to be picked and then fail as "Provider is not configured".
 			const isConfigured = (spec: string): boolean => {
 				const p = splitModelSpec(spec);
-				return p !== null && registry.find(p.provider, p.id) !== undefined;
+				const model = p ? registry.find(p.provider, p.id) : undefined;
+				return model !== undefined && registry.hasConfiguredAuth(model);
 			};
 			const pick = await resolveAdvisor(cfg.modelOverride, currentSpec, isConfigured);
 			const parts = splitModelSpec(pick.spec);
