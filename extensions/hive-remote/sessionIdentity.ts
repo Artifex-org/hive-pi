@@ -5,6 +5,7 @@ import { manualTitleError, normalizeSessionTitle } from "./sessionTitleText.ts";
 import { SESSION_IDENTITY_CHANNEL, SESSION_IDENTITY_INITIAL_CHANNEL, SESSION_PLAN_INTRO_CHANNEL, SESSION_MANUAL_TITLE_CHANNEL, type SessionIdentityUpdate } from "./sessionIdentityBus.ts";
 
 export const SESSION_IDENTITY_ENTRY = "session-identity";
+const KICKOFF_TOOL = "session_context";
 export interface SessionIdentity {
 	title: string;
 	description: string;
@@ -69,10 +70,28 @@ export default function (pi: ExtensionAPI) {
 			if (!result.titlePinned) pi.setSessionName(result.title);
 		}
 	});
+	/**
+	 * Declare `session_context` to the model, the way a mode activates its tools.
+	 *
+	 * The kickoff message below tells the model to call it before it has had a
+	 * turn to search, but `registerGuardedTool` registers it with the loadout
+	 * policy's exposure, which is `deferred` for a tool not in DIRECT_TOOLS. So
+	 * it was registered and never declared: the HIV-3906 claude-sdk launch was
+	 * told to call a tool it did not have, and the codex arm reached it only
+	 * through codemode. Done at session_start, before the first request, so the
+	 * declared set does not change mid-session and cost a prompt-cache rewrite.
+	 * A tool the launch filtered out (`--tools`) is not registered and stays so.
+	 */
+	const declareKickoffTool = () => {
+		const active = pi.getActiveTools();
+		if (active.includes(KICKOFF_TOOL) || !pi.getAllTools().some((tool) => tool.name === KICKOFF_TOOL)) return;
+		pi.setActiveTools([...active, KICKOFF_TOOL]);
+	};
 	pi.on("session_start", (_event, ctx) => {
 		try { identity = readIdentity(ctx.sessionManager.getBranch()); } catch { identity = undefined; }
 		manualTitle = identity?.titlePinned ? identity.title : undefined;
 		injectKickoff = true;
+		declareKickoffTool();
 	});
 	pi.on("session_info_changed", (_event, ctx) => {
 		// Manual names are operator-owned text, not model-generated headlines.
@@ -95,10 +114,16 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", () => {
 		if (!injectKickoff) return;
 		injectKickoff = false;
+		// Never name a tool the model was not given: a mode may have narrowed
+		// the set since session_start, and a filtered launch never had it.
+		const callable = pi.getActiveTools().includes(KICKOFF_TOOL);
+		if (!identity && !callable) return;
 		return { message: {
 			customType: "session-identity-context",
 			content: identity
-				? `Session identity (canonical): ${identity.title}\n${identity.description}${identity.provisional ? "\nRefine this provisional kickoff using session_context once the goal and approach are understood." : ""}\n\nAt kickoff, call session_context with a concise goal and approach paragraph even when no formal plan is needed. This does not create a plan or activate plan mode.`
+				? `Session identity (canonical): ${identity.title}\n${identity.description}` + (callable
+					? `${identity.provisional ? "\nRefine this provisional kickoff using session_context once the goal and approach are understood." : ""}\n\nAt kickoff, call session_context with a concise goal and approach paragraph even when no formal plan is needed. This does not create a plan or activate plan mode.`
+					: "")
 				: "At kickoff, call session_context with a concise goal and approach paragraph, even when no formal plan is needed. Do not create a formal plan or activate plan mode unless the task warrants it.",
 			display: false,
 		},

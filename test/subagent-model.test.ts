@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
 	chooseWorkerModel,
 	continuationTask,
+	credentialCheck,
 	isAccountRefusal,
 	pickAlternateAccount,
 	stoppedMidWork,
@@ -235,6 +236,15 @@ describe("chooseWorkerModel — a role's catalog tier", () => {
 		expect(choice.note).toMatch(/asks for the "high" class.*gpt-5\.6-terra.*not configured.*ran on xai\/grok-4/);
 	});
 
+	it("runs on THIS SESSION'S model, and says so, when the class has no credential here", async () => {
+		// The HIV-3906 claude-sdk launch: the catalog's medium mode is openai-codex,
+		// which that launch holds no credential for; the session's model runs.
+		const e = env(["claude-sdk/claude-opus-5-5", "xai/grok-4"], { sessionModel: "claude-sdk/claude-opus-5-5" });
+		const choice = await chooseWorkerModel({ preferred: "xai/grok-4", roleName: "code-reviewer", tier: "mid" }, e);
+		expect(choice.spec).toBe("claude-sdk/claude-opus-5-5");
+		expect(choice.note).toMatch(/asks for the "mid" class.*gpt-5\.6-luna.*not configured.*ran on claude-sdk\/claude-opus-5-5, this session's model/);
+	});
+
 	it("names a class the catalog does not have", async () => {
 		const e = env(["xai/grok-4"]);
 		const choice = await chooseWorkerModel({ preferred: "xai/grok-4", roleName: "code-reviewer", tier: "ultra" }, e);
@@ -247,5 +257,42 @@ describe("chooseWorkerModel — a role's catalog tier", () => {
 		const choice = await chooseWorkerModel({ requested: "xai/grok-4", roleName: "code-reviewer", tier: "high" }, e);
 		expect(choice).toEqual({ spec: "xai/grok-4" });
 		expect(e.fetches).toBe(0);
+	});
+});
+
+describe("credentialCheck — configured means a credential, not a catalog entry", () => {
+	type Fake = { provider: string; id: string };
+	const registry = (models: Fake[], credentialed: string[]) => ({
+		find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+		hasConfiguredAuth: (model: Fake) => credentialed.includes(model.provider),
+	});
+	const models = [
+		{ provider: "openai-codex", id: "gpt-5.6-luna" },
+		{ provider: "claude-sdk", id: "claude-opus-5-5" },
+	];
+
+	it("is false for a model the registry knows but holds no credential for", () => {
+		const check = credentialCheck(registry(models, ["claude-sdk"]));
+		expect(check("openai-codex/gpt-5.6-luna")).toBe(false);
+		expect(check("claude-sdk/claude-opus-5-5")).toBe(true);
+	});
+
+	it("is false for an unknown model and null when it cannot tell", () => {
+		const check = credentialCheck(registry(models, ["openai-codex"]));
+		expect(check("xai/grok-4")).toBe(false);
+		expect(check("grok-4")).toBeNull();
+		expect(check("xai/")).toBeNull();
+		const throwing = credentialCheck({ find: () => { throw new Error("registry gone"); }, hasConfiguredAuth: () => true });
+		expect(throwing("xai/grok-4")).toBeNull();
+	});
+
+	it("routes an uncredentialed tier to the session model end to end", async () => {
+		const check = credentialCheck(registry(models, ["claude-sdk"]));
+		const choice = await chooseWorkerModel(
+			{ roleName: "code-reviewer", tier: "mid" },
+			{ isConfigured: check, sessionModel: "claude-sdk/claude-opus-5-5", catalog: async () => CATALOG },
+		);
+		expect(choice.spec).toBe("claude-sdk/claude-opus-5-5");
+		expect(choice.note).toContain("this session's model");
 	});
 });

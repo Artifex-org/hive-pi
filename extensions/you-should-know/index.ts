@@ -25,6 +25,14 @@ interface State {
 	failed?: number;
 	recording?: boolean; desiredRecording?: boolean;
 }
+/**
+ * Failures that say the low model cannot run in THIS session at all: nothing
+ * about the next excerpt can change them. The HIV-3906 claude-sdk launch hit
+ * "low model credentials unavailable" on 16 of 16 scans, each one a provider
+ * round trip that could only fail. After the first, scanning stops for the
+ * session; `/you-should-know on` re-arms it (after `/login`, say).
+ */
+const SESSION_HALTING = new Set(["no Hive catalog auth", "invalid low model spec", "low model is unavailable in this registry", "low model credentials unavailable"]);
 export interface ScanRequest { source: string; seen: string[] }
 export type Scanner = (ctx: ExtensionContext, request: ScanRequest, signal: AbortSignal) => Promise<AssistantMessage>;
 
@@ -101,6 +109,8 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	let latestCtx: ExtensionContext | undefined;
 	let generation = 0, lastStart = -Infinity;
 	let failure = "", recordingFailure = "";
+	/** Set by a SESSION_HALTING failure: no further scans until `on` or a new session. */
+	let halted = false;
 	let remoteAvailable = false, policyReady = false;
 	let serverSessionId: string | undefined;
 	let recordingRevision = 0;
@@ -109,7 +119,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	const save = () => pi.appendEntry(KEY, { ...state, notes: [...state.notes], seen: [...state.seen] });
 	const publishLedger = () => { if (remoteAvailable && policyReady) pi.events.emit(YSK_FINDINGS_CHANNEL, ledger.filter(x => x.serverSessionId === serverSessionId)); };
 	const supported = (ctx: ExtensionContext) => ctx.mode === "tui" || (ctx.mode === "rpc" && remoteAvailable);
-	const eligible = (ctx: ExtensionContext) => !isSdkPilotEnv(process.env) && state.enabled && supported(ctx) && state.scans < cfg.maxScans;
+	const eligible = (ctx: ExtensionContext) => !isSdkPilotEnv(process.env) && state.enabled && !halted && supported(ctx) && state.scans < cfg.maxScans;
 	const paint = (ctx: ExtensionContext) => {
 		latestCtx = ctx;
 		if (!supported(ctx)) { pi.events.emit(YSK_STATE_CHANNEL, undefined); return; }
@@ -135,7 +145,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	};
 	const apply = (action: YouShouldKnowAction, ctx: ExtensionContext) => {
 		if (action === "record_on" || action === "record_off") { record(action === "record_on", ctx); return; }
-		if (action === "on") { state.sessionId = ctx.sessionManager.getSessionId(); state.enabled = true; }
+		if (action === "on") { state.sessionId = ctx.sessionManager.getSessionId(); state.enabled = true; halted = false; failure = ""; }
 		else { cancel(); if (action === "off") state.enabled = false; else state.notes = []; }
 		save(); paint(ctx);
 	};
@@ -248,6 +258,10 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 			if (gen !== generation) return;
 			const known = ["scanner returned invalid JSON", "scanner returned no notes array", "scanner returned too many notes", "scanner returned an invalid note", "scanner returned an invalid or ungrounded note", "scanner could not finish its response", "scan canceled or timed out", "no Hive catalog auth", "Hive catalog has no low model", "invalid low model spec", "low model is unavailable in this registry", "low model credentials unavailable"];
 			failure = `Scan failed: ${error instanceof Error && known.includes(error.message) ? error.message : "provider request failed"}; this excerpt was not checked.`;
+			if (error instanceof Error && SESSION_HALTING.has(error.message)) {
+				halted = true; sources = []; incompleteSources = false;
+				failure += " Scanning is stopped for this session; /you-should-know on retries.";
+			}
 			state.failed = (state.failed ?? 0) + 1; save();
 		} finally {
 			// Pair with the baseline off the extraction path. Failed extraction is
@@ -266,7 +280,7 @@ export function wireYouShouldKnow(pi: ExtensionAPI, cfg: ScanConfig, scanner: Sc
 	const load = (ctx: ExtensionContext) => {
 		const sameSession = state.sessionId === ctx.sessionManager.getSessionId();
 		if (!sameSession) { serverSessionId = undefined; remoteAvailable = false; }
-		cancel(); state = fresh(cfg.enabled); appliedCommandId = undefined; state.sessionId = ctx.sessionManager.getSessionId(); failure = ""; recordingFailure = ""; lastStart = -Infinity;
+		cancel(); state = fresh(cfg.enabled); appliedCommandId = undefined; state.sessionId = ctx.sessionManager.getSessionId(); failure = ""; recordingFailure = ""; halted = false; lastStart = -Infinity;
 		ledger = []; pendingControl = undefined; policyReady = false; recordingRevision = 0;
 		prefilterDetail = prefilterEnabled ? "shadow; waiting" : "disabled";
 		classify = createJevShadow(jevConfig, jevKey);

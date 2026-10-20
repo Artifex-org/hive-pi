@@ -377,7 +377,7 @@ describe("offline production Claude SDK transport", () => {
 });
 
 describe("conservative post-start SDK failures through Pi AgentSession", () => {
-	it.each(["overloaded", "rate_limit", "server_error"])("never retries an empty classified %s failure without a nonexecution guarantee", async code => {
+	it.each(["overloaded", "rate_limit", "server_error"])("retries an empty %s failure on a fresh prompt once inside the provider, never through Pi", async code => {
 		const options: Options[] = []; const closed = vi.fn();
 		const f = await fixture(request => {
 			options.push(request.options);
@@ -388,11 +388,15 @@ describe("conservative post-start SDK failures through Pi AgentSession", () => {
 		});
 		const { session, outputs, retries, execute } = await retrySession(f, 2);
 		await session.prompt("fresh request");
-		expect(retries).toEqual([]); expect(options).toHaveLength(1); expect(closed).toHaveBeenCalledOnce();
+		expect(retries).toEqual([]); expect(options).toHaveLength(2); expect(closed).toHaveBeenCalledTimes(2);
 		expect(outputs).toHaveLength(1);
 		expect(outputs[0]).toMatchObject({ stopReason: "error", content: [], errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying",
-			diagnostics: [{ type: "claude_sdk_assistant_failure", timestamp: expect.any(Number),
-				error: { message: "Claude SDK assistant failure", code }, details: { retrySafe: false } }] });
+			diagnostics: [
+				{ type: "claude_sdk_assistant_failure", timestamp: expect.any(Number), error: { message: "Claude SDK assistant failure", code },
+					details: { retrySafe: false, retriedOnce: expect.any(String) } },
+				{ type: "claude_sdk_assistant_failure", timestamp: expect.any(Number), error: { message: "Claude SDK assistant failure", code }, details: { retrySafe: false } },
+			] });
+		expect(outputs[0].diagnostics?.[1]?.details).not.toHaveProperty("retriedOnce");
 		expect(JSON.stringify(outputs)).not.toContain("SECRET-SDK-TOKEN");
 		expect(execute).not.toHaveBeenCalled();
 		expect((await readdir(f.root)).filter(name => name.startsWith("query-"))).toEqual([]);
@@ -423,21 +427,23 @@ describe("conservative post-start SDK failures through Pi AgentSession", () => {
 		const first = await f.provider.streamSimple(f.model, ctx, { sessionId: "quarantine" }).result();
 		expect(first.errorMessage).toBe("Claude SDK interrupted or failed; reconcile any pending side effects before retrying");
 		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "quarantine" }).result()).errorMessage).toMatch(/Ambiguous previous/);
-		expect(queries).toBe(1); expect(await readdir(f.root)).toEqual([]);
+		// An empty structured failure on a fresh prompt is retried once inside the first request.
+		expect(queries).toBe(["overloaded", "rate_limit", "server_error", "started", "history"].includes(mode) ? 2 : 1); expect(await readdir(f.root)).toEqual([]);
 	});
 	it("quarantines a classified failure without preventing an independent request", async () => {
 		let queries = 0;
 		const f = await fixture(() => { const attempt = ++queries; return { close() {}, [Symbol.asyncIterator]: () => (async function* () {
-			if (attempt === 1) yield sdkFailure("overloaded"); else yield* text("independent request completed");
+			if (attempt <= 2) yield sdkFailure("overloaded"); else yield* text("independent request completed");
 		})() }; });
 		const ctx = context();
 		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "reuse" }).result()).stopReason).toBe("error");
 		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "reuse" }).result()).errorMessage).toMatch(/Ambiguous previous/);
 		ctx.messages = [{ role: "user", content: "independent request", timestamp: 2 }];
 		expect((await f.provider.streamSimple(f.model, ctx, { sessionId: "reuse" }).result()).stopReason).toBe("stop");
-		expect(queries).toBe(2); expect(await readdir(f.root)).toEqual([]);
+		expect(queries).toBe(3); expect(await readdir(f.root)).toEqual([]);
 	});
-	it.each(["unknown-exception", "unknown-code", "started", "text", "tool-proposal", "failure-content", "mcp-missing-id", "mcp-pending", "mcp-discovery", "mcp-connect", "history"])("never retries ambiguous %s even with Pi retries enabled", async mode => {
+	const PRE_EFFECT_MODES = ["unknown-code", "started", "failure-content", "mcp-discovery", "mcp-connect", "history"];
+	it.each(["unknown-exception", "unknown-code", "started", "text", "tool-proposal", "failure-content", "mcp-missing-id", "mcp-pending", "mcp-discovery", "mcp-connect", "history"])("never retries %s through Pi, and inside the provider only before any content or tool call", async mode => {
 		let queries = 0; let pending: Promise<unknown> | undefined;
 		const f = await fixture(request => {
 			queries++; const client = new Client({ name: "unsafe-retry-probe", version: "1" });
@@ -461,9 +467,13 @@ describe("conservative post-start SDK failures through Pi AgentSession", () => {
 		const history: Message[] = mode === "history" ? [{ role: "user", content: "old turn", timestamp: 1 }] : [];
 		const { session, retries, outputs, execute } = await retrySession(f, 2, history);
 		await session.prompt("ambiguous request");
-		expect(queries).toBe(1); expect(retries).toEqual([]); expect(execute).not.toHaveBeenCalled();
+		const preEffect = PRE_EFFECT_MODES.includes(mode);
+		expect(queries).toBe(preEffect ? 2 : 1); expect(retries).toEqual([]); expect(execute).not.toHaveBeenCalled();
 		expect(outputs.at(-1)).toMatchObject({ stopReason: "error", errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" });
-		if (!["unknown-exception", "unknown-code"].includes(mode)) expect(outputs.at(-1)?.diagnostics).toMatchObject([{ error: { code: "rate_limit" }, details: { retrySafe: false } }]);
+		const code = mode === "unknown-code" ? "unrecognized" : "rate_limit";
+		if (mode !== "unknown-exception") expect(outputs.at(-1)?.diagnostics).toMatchObject(preEffect
+			? [{ error: { code }, details: { retrySafe: false, retriedOnce: expect.any(String) } }, { error: { code }, details: { retrySafe: false } }]
+			: [{ error: { code }, details: { retrySafe: false } }]);
 		expect(JSON.stringify(outputs)).not.toContain("SECRET-SDK-TOKEN");
 		if (pending) await pending;
 		expect((await readdir(f.root)).filter(name => name.startsWith("query-"))).toEqual([]);

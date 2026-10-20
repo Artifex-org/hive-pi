@@ -289,6 +289,29 @@ describe("asynchronous lifecycle", () => {
 		await h.fake.runCommand("you-should-know", "status");
 		expect(h.fake.notifications.at(-1)?.message).toContain("1 failed");
 	});
+	it("stops scanning for the session after the low model's credentials are unavailable", async () => {
+		// HIV-3906 eval, 2026-10-20: a claude-sdk launch held no credential for
+		// the catalog's low model and failed 16 of 16 scans, silently.
+		const scanner = vi.fn(async () => { throw new Error("low model credentials unavailable"); });
+		const h = harness(scanner);
+		await h.fake.emit({ type: "session_start" });
+		for (let i = 0; i < 3; i++) { await prose(h.fake, `${quote} ${i}`); await vi.advanceTimersByTimeAsync(1_000); }
+		expect(scanner).toHaveBeenCalledTimes(1);
+		await h.fake.runCommand("you-should-know", "status");
+		expect(h.fake.notifications.at(-1)?.message).toContain("low model credentials unavailable");
+		expect(h.fake.notifications.at(-1)?.message).toContain("Scanning is stopped for this session");
+		// `on` re-arms it, e.g. after /login.
+		await h.fake.runCommand("you-should-know", "on");
+		await prose(h.fake, `${quote} again`); await vi.advanceTimersByTimeAsync(1_000);
+		expect(scanner).toHaveBeenCalledTimes(2);
+	});
+	it("keeps scanning after a provider failure the next excerpt could survive", async () => {
+		const scanner = vi.fn(async () => { throw new Error("socket hang up"); });
+		const h = harness(scanner);
+		await h.fake.emit({ type: "session_start" });
+		for (let i = 0; i < 3; i++) { await prose(h.fake, `${quote} ${i}`); await vi.advanceTimersByTimeAsync(1_000); }
+		expect(scanner).toHaveBeenCalledTimes(3);
+	});
 	it("malformed verdict is visibly failed, never a clean empty scan", async () => {
 		const h = harness(async () => reply("NOT JSON")); await prose(h.fake);
 		expect(h.fake.statuses.at(-1)?.text).toContain("failed");

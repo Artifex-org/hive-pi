@@ -3,13 +3,13 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { createAssistantMessageEventStream, createProvider, collapseSystemMessages,
-	getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type Message, type Model,
+	getCurrentSystemPrompt, getCurrentTools, type AssistantMessage, type AssistantMessageDiagnostic, type Message, type Model,
 	type Provider, type SimpleStreamOptions, type TranscriptContext, type TranscriptMessages } from "@earendil-works/pi-ai";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { isolatedOptions, reasoningOptions, type AccessLease } from "./options.ts";
 import { PiToolBridge } from "./tool-bridge.ts";
 import type { PilotQueryBudget } from "./pilot-budget.ts";
-import { EventConverter, emptyUsage, SdkAssistantFailure } from "./events.ts";
+import { EventConverter, emptyUsage, SdkAssistantFailure, type FailureCode } from "./events.ts";
 import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
 import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
@@ -33,6 +33,21 @@ interface Parked {
 	lease: AccessLease; bridge: PiToolBridge; query: SdkQuery; iterator: AsyncIterator<SDKMessage>;
 	controller: AbortController; dir: string; processes: ReturnType<typeof processScope>;
 	observedIds: Set<string>; busy: boolean; timer?: ReturnType<typeof setTimeout>; releaseAbort?: () => void; closing?: Promise<void>;
+}
+
+/**
+ * SDK failure codes the pre-effect retry may repeat once. Account, credential,
+ * model and request-shape (`invalid_request`) failures are left out: they would
+ * fail the same way a second time. The HIV-3906 refusals that a replay served
+ * arrived as `unknown`.
+ */
+const PRE_EFFECT_RETRY_CODES: ReadonlySet<FailureCode> = new Set<FailureCode>(["unknown", "unrecognized", "rate_limit", "overloaded", "server_error"]);
+
+/** The SDK's code and sanitized cause for diagnose_agent_session; never authorizes a Pi retry. */
+function assistantFailureDiagnostic(error: SdkAssistantFailure, timestamp: number, retried: boolean): AssistantMessageDiagnostic {
+	return { type: "claude_sdk_assistant_failure", timestamp,
+		error: { message: error.detail ?? "Claude SDK assistant failure", code: error.code },
+		details: { retrySafe: false, ...(retried ? { retriedOnce: "failed before any content or tool call; the query was opened again" } : {}) } };
 }
 
 // Pi's own docs section as Pi renders it. Extensions that return a whole systemPrompt from
@@ -193,7 +208,8 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						state.prefix = structuredClone(context.messages);
 					}
 				}
-				if (!state) {
+				/** A fresh SDK query seeded from Pi's canonical history; this request's input is its only prompt. */
+				const openQuery = async (): Promise<Parked> => {
 					const last = context.messages.at(-1);
 					// Rebuilt tool continuations use native tool-result input, never a synthetic user prompt.
 					let split = context.messages.length;
@@ -235,49 +251,70 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						sdkStarted = true;
 						query = deps.query ? deps.query({ prompt: prompt(), options: sdkOptions }) :
 							(await import("@anthropic-ai/claude-agent-sdk")).query({ prompt: prompt(), options: sdkOptions });
-						state = { key: randomUUID(), session: options.sessionId, model: model.id, prefix: structuredClone(context.messages), expected: [],
+						const opened: Parked = { key: randomUUID(), session: options.sessionId, model: model.id, prefix: structuredClone(context.messages), expected: [],
 							queryOptions: structuredClone(queryOptions), lease, bridge, query, iterator: query[Symbol.asyncIterator](), controller, dir, processes, observedIds: new Set(), busy: true };
-						states.set(state.key, state);
+						states.set(opened.key, opened);
+						return opened;
 					} catch (error) {
 						await cleanupResources({ controller, dir, processes, bridge, query });
 						throw error;
 					}
-				}
-				const owned = state;
-				abortParked = () => { owned.controller.abort(); if (!owned.busy) void dispose(owned); };
-				signal.addEventListener("abort", abortParked, { once: true });
-				state.releaseAbort = () => { if (abortParked) signal.removeEventListener("abort", abortParked); };
-				if (signal.aborted) abortParked();
+				};
+				// Only a query this request opened may be retried, never a reused parked continuation.
+				const openedHere = !state;
+				if (!state) state = await openQuery();
 				events.push({ type: "start", partial: output });
-				const converter = new EventConverter(output, events, model, state.bridge, state.observedIds);
-				const expiry = setTimeout(() => state?.controller.abort(), Math.max(1, Date.parse(lease.expires_at) - now()));
-				try {
-					while (true) {
-						const next = await cancellable(state.iterator.next(), AbortSignal.any([signal, state.controller.signal]));
-						if (next.done) throw new Error("Claude SDK ended without result");
-						if (options.onProviderStreamEvent) await cancellable(
-							Promise.resolve().then(() => options.onProviderStreamEvent!(structuredClone(next.value), model)),
-							AbortSignal.any([signal, state.controller.signal]));
-						signal.throwIfAborted(); state.controller.signal.throwIfAborted();
-						if (next.value.type === "result") deps.pilot?.observeResult(next.value.num_turns, next.value.subtype === "success");
-						const action = converter.consume(next.value);
-						if (action === "tools") {
-							// Reserve the result-free attempt at handoff, across session IDs,
-							// before Pi can execute it or a replacement can pass admission.
-							ambiguous.add(contextHash);
-							state.expected = [...structuredClone(context.messages), structuredClone(output)];
-							state.busy = false;
-							const parked = state;
-							state.timer = setTimeout(() => { void dispose(parked); }, Math.min(5 * 60_000, Date.parse(lease.expires_at) - now()));
-							state.timer.unref();
-							events.push({ type: "done", reason: "toolUse", message: output }); break;
+				for (let attempt = 0; ; attempt++) {
+					const owned: Parked = state;
+					abortParked = () => { owned.controller.abort(); if (!owned.busy) void dispose(owned); };
+					signal.addEventListener("abort", abortParked, { once: true });
+					owned.releaseAbort = () => { if (abortParked) signal.removeEventListener("abort", abortParked); };
+					if (signal.aborted) abortParked();
+					const converter = new EventConverter(output, events, model, owned.bridge, owned.observedIds, [lease.access_token]);
+					const expiry = setTimeout(() => owned.controller.abort(), Math.max(1, Date.parse(lease.expires_at) - now()));
+					try {
+						while (true) {
+							const next = await cancellable(owned.iterator.next(), AbortSignal.any([signal, owned.controller.signal]));
+							if (next.done) throw new Error("Claude SDK ended without result");
+							if (options.onProviderStreamEvent) await cancellable(
+								Promise.resolve().then(() => options.onProviderStreamEvent!(structuredClone(next.value), model)),
+								AbortSignal.any([signal, owned.controller.signal]));
+							signal.throwIfAborted(); owned.controller.signal.throwIfAborted();
+							if (next.value.type === "result") deps.pilot?.observeResult(next.value.num_turns, next.value.subtype === "success");
+							const action = converter.consume(next.value);
+							if (action === "tools") {
+								// Reserve the result-free attempt at handoff, across session IDs,
+								// before Pi can execute it or a replacement can pass admission.
+								ambiguous.add(contextHash);
+								owned.expected = [...structuredClone(context.messages), structuredClone(output)];
+								owned.busy = false;
+								owned.timer = setTimeout(() => { void dispose(owned); }, Math.min(5 * 60_000, Date.parse(lease.expires_at) - now()));
+								owned.timer.unref();
+								events.push({ type: "done", reason: "toolUse", message: output }); break;
+							}
+							if (action === "done") {
+								await dispose(owned); state = undefined;
+								events.push({ type: "done", reason: output.stopReason === "length" ? "length" : "stop", message: output }); break;
+							}
 						}
-						if (action === "done") {
-							await dispose(state); state = undefined;
-							events.push({ type: "done", reason: output.stopReason === "length" ? "length" : "stop", message: output }); break;
-						}
-					}
-				} finally { clearTimeout(expiry); }
+					} catch (error) {
+						// The one automatic retry (docs/claude-sdk-compatibility.md §Pre-effect
+						// retry): a structured SDK API failure on a query this request opened
+						// for a user prompt, before any content block or MCP call. Nothing was
+						// proposed, so nothing can have run. The failed query is discarded, not
+						// quarantined; a second failure takes the conservative path below.
+						const retry = attempt === 0 && openedHere && !deps.pilot && error instanceof SdkAssistantFailure &&
+							PRE_EFFECT_RETRY_CODES.has(error.code) && context.messages.at(-1)?.role === "user" &&
+							output.content.length === 0 && owned.bridge.idle && !signal.aborted && !owned.controller.signal.aborted;
+						if (!retry) throw error;
+						output.diagnostics = [...output.diagnostics ?? [], assistantFailureDiagnostic(error, now(), true)];
+						state = undefined;
+						await dispose(owned);
+						state = await openQuery();
+						continue;
+					} finally { clearTimeout(expiry); }
+					break;
+				}
 			} catch (error) {
 				let cleanupFailed = cleanupError;
 				if (attemptedPrefix) ambiguous.add(fingerprint(transcript(attemptedPrefix)));
@@ -286,13 +323,9 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					try { await dispose(state); } catch { cleanupFailed = true; }
 				}
 				output.stopReason = signal.aborted ? "aborted" : "error";
-				if (error instanceof SdkAssistantFailure) output.diagnostics = [{
-					type: "claude_sdk_assistant_failure", timestamp: now(),
-					error: { message: "Claude SDK assistant failure", code: error.code },
-					details: { retrySafe: false },
-				}];
+				if (error instanceof SdkAssistantFailure) output.diagnostics = [...output.diagnostics ?? [], assistantFailureDiagnostic(error, now(), false)];
 				// SDK classification does not promise nonexecution. Keep all post-start
-				// failures generic/nonretryable; allowlisted codes are diagnostics only.
+				// failures generic/nonretryable for Pi; the code and cause are diagnostics only.
 				output.errorMessage = cleanupFailed ? "Claude SDK failed to remove private state; operator cleanup required" : state || sdkStarted ? "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" :
 					(error instanceof Error ? error.message : "Claude SDK request failed");
 				events.push({ type: "error", reason: output.stopReason, error: output });

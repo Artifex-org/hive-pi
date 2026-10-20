@@ -1,15 +1,55 @@
 /** SDK structured events -> Pi's balanced live block protocol. No HTTP fiction. */
 import { calculateCost, type AssistantMessage, type AssistantMessageEventStream, type Model, type Usage } from "@earendil-works/pi-ai";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKAssistantMessageError, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { redactEvidence } from "../hive-common/redact.ts";
 import type { PiToolBridge } from "./tool-bridge.ts";
 
 export function emptyUsage(): Usage { return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }; }
-const failureCodes = ["overloaded", "rate_limit", "server_error"] as const;
-type FailureCode = typeof failureCodes[number];
-/** Only structured allowlisted codes, never SDK text, cross the error boundary. */
+/** The pinned SDK's `SDKAssistantMessageError` union; any other value is reported as "unrecognized". */
+const failureCodes = ["authentication_failed", "oauth_org_not_allowed", "account_on_hold", "verification_required", "billing_error",
+	"rate_limit", "overloaded", "invalid_request", "model_not_found", "server_error", "unknown", "max_output_tokens",
+	"cloud_credential_error"] as const satisfies readonly SDKAssistantMessageError[];
+export type FailureCode = typeof failureCodes[number] | "unrecognized";
+const DETAIL_CHARS = 200;
+// The CLI's synthetic API-error message: "API Error: 400 {json}" or "API Error: <text>".
+const API_ERROR = /^API Error(?: \([^)\n]{0,80}\))?:\s*(?:(\d{3})\b\s*)?([\s\S]*)$/;
+
+/**
+ * The cause of an SDK API failure, sanitized for diagnostics, or undefined when
+ * the frame does not carry the CLI's `API Error:` text.
+ *
+ * Only that shape is read: the status, and from a JSON body only
+ * `error.type`/`error.message` (never `request_id` or other fields). Known
+ * secrets and token shapes are redacted, URL queries and fragments dropped,
+ * long opaque runs removed and the result cut to 200 characters. Any other
+ * text in an error frame is not copied at all.
+ */
+export function sdkFailureDetail(content: unknown, secrets: readonly string[] = []): string | undefined {
+	if (!Array.isArray(content)) return undefined;
+	const text = content.flatMap(block => block?.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n").trim();
+	const match = API_ERROR.exec(text);
+	if (!match) return undefined;
+	let body = match[2].trim();
+	if (body.startsWith("{")) {
+		let parsed: unknown;
+		try { parsed = JSON.parse(body); } catch { parsed = undefined; } // a truncated body stays text
+		const error = (parsed as { error?: { type?: unknown; message?: unknown } } | undefined)?.error;
+		// A body without a readable error.message is not copied: it may carry request_id or other fields.
+		body = typeof error?.message === "string" ? `${typeof error.type === "string" ? `${error.type}: ` : ""}${error.message}` : "(unreadable error body)";
+	}
+	const cleaned = redactEvidence(body, secrets)
+		.replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, "$1")
+		.replace(/\breq_[A-Za-z0-9]+/g, "[ID]")
+		.replace(/[A-Za-z0-9_+/=-]{32,}/g, "[REDACTED]")
+		.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, " ").trim();
+	const detail = `API Error${match[1] ? ` ${match[1]}` : ""}: ${cleaned}`;
+	return detail.length > DETAIL_CHARS ? `${detail.slice(0, DETAIL_CHARS - 1)}…` : detail;
+}
+
+/** A structured SDK assistant error: its code and a sanitized cause, never the raw SDK text. */
 export class SdkAssistantFailure extends Error {
-	constructor(readonly code: FailureCode) {
+	constructor(readonly code: FailureCode, readonly detail: string | undefined) {
 		super(`Claude SDK assistant failure (${code})`);
 	}
 }
@@ -21,7 +61,8 @@ export class EventConverter {
 	private open = false;
 	private stop = "end_turn";
 	constructor(readonly output: AssistantMessage, private readonly stream: AssistantMessageEventStream,
-		private readonly model: Model<string>, private readonly bridge: PiToolBridge, private readonly observedIds = new Set<string>()) {}
+		private readonly model: Model<string>, private readonly bridge: PiToolBridge, private readonly observedIds = new Set<string>(),
+		private readonly secrets: readonly string[] = []) {}
 
 	private usage(value: object): void {
 		for (const [key, count] of Object.entries(value)) if (typeof count === "number") {
@@ -51,9 +92,8 @@ export class EventConverter {
 		}
 		if (message.type === "assistant") {
 			if (message.error) {
-				const code = failureCodes.find(code => code === message.error);
-				if (code) throw new SdkAssistantFailure(code);
-				throw new Error("Unclassified Claude SDK assistant error");
+				const code = failureCodes.find(code => code === message.error) ?? "unrecognized";
+				throw new SdkAssistantFailure(code, sdkFailureDetail(message.message?.content, this.secrets));
 			}
 			if (this.observedIds.has(message.message.id)) return "continue"; // duplicate may arrive on the next Pi tool turn
 			// Canonical frames may carry only one completed block, not a complete response.

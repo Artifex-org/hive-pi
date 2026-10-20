@@ -62,7 +62,7 @@ import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { fetchAgentModeCatalog } from "../advisor/modes.ts";
 import { HIVE_METRIC_CHANNEL, type HiveMetricEvent } from "../hive-telemetry/types.ts";
-import type { WorkerModelEnv } from "./model.ts";
+import { credentialCheck, type WorkerModelEnv } from "./model.ts";
 import {
 	backgroundCompletion,
 	describeAgentForRecovery,
@@ -605,15 +605,7 @@ export default function (pi: ExtensionAPI) {
 			// goes stale when the session is replaced). The catalog is a
 			// closure, fetched only on the paths that need a fallback.
 			const modelEnv: WorkerModelEnv = {
-				isConfigured: (spec) => {
-					const at = spec.indexOf("/");
-					if (at <= 0 || at === spec.length - 1) return null;
-					try {
-						return ctx.modelRegistry.find(spec.slice(0, at), spec.slice(at + 1)) !== undefined;
-					} catch {
-						return null;
-					}
-				},
+				isConfigured: credentialCheck(ctx.modelRegistry),
 				sessionModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 				// One in-flight fetch per tool call: a parallel wave with an
 				// unconfigured default would otherwise start up to four catalog
