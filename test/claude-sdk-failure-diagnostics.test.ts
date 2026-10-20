@@ -18,6 +18,7 @@ import type { SDKMessage, SDKUserMessage, Options } from "@anthropic-ai/claude-a
 import { createClaudeSdkRuntime, type QueryFactory } from "../extensions/claude-sdk/provider.ts";
 import { failureDiagnostic, STDERR_DIAGNOSTIC_CHARS, type FailureContext } from "../extensions/claude-sdk/diagnostics.ts";
 import { frameShape, streamFailure } from "../extensions/claude-sdk/events.ts";
+import { firstInput } from "./claude-sdk-test-input.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.useRealTimers(); });
@@ -47,7 +48,7 @@ async function runtime(frames: Frames, leaseMs = 3600_000) {
 	const query: QueryFactory = request => {
 		const attempt = ++queries;
 		const iterator = (async function* () {
-			await request.prompt[Symbol.asyncIterator]().next();
+			await firstInput(request);
 			yield* frames(attempt, request);
 		})();
 		return { [Symbol.asyncIterator]: () => iterator, close() {} };

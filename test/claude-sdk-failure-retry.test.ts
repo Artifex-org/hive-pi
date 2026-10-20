@@ -16,6 +16,7 @@ import { normalizeContext, type AssistantMessage, type Message } from "@earendil
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createClaudeSdkRuntime, type QueryFactory } from "../extensions/claude-sdk/provider.ts";
 import { emptyUsage, sdkFailureDetail } from "../extensions/claude-sdk/events.ts";
+import { firstInput } from "./claude-sdk-test-input.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -47,7 +48,7 @@ async function runtime(frames: (attempt: number) => Iterable<SDKMessage>) {
 	const query: QueryFactory = request => {
 		const attempt = ++queries;
 		const iterator = (async function* () {
-			await request.prompt[Symbol.asyncIterator]().next();
+			await firstInput(request);
 			yield* frames(attempt);
 		})();
 		return { [Symbol.asyncIterator]: () => iterator, close() {} };
