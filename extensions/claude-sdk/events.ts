@@ -82,6 +82,11 @@ export class EventConverter {
 	}
 	/** Returns true at a complete model tool batch; SDK is then left parked. */
 	consume(message: SDKMessage): "continue" | "tools" | "done" {
+		// The CLI reports a Pi tool call that has run for 30 s or more with heartbeat
+		// `tool_progress` frames whose parent_tool_use_id is that in-flight call, not a
+		// subagent. They carry no content (only elapsed time), so skip them before the
+		// subagent guard, which still rejects real nested output.
+		if (message.type === "tool_progress") return "continue";
 		if ("parent_tool_use_id" in message && message.parent_tool_use_id) throw new Error("Unexpected SDK subagent output");
 		if (message.type === "system" && message.subtype === "compact_boundary") throw new Error("SDK compaction is forbidden; Pi owns history");
 		if (message.type === "result") {
