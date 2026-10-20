@@ -36,6 +36,7 @@ We do not fork pi. The short version:
 | `agents/` | subagent roles | pi has no `agents` package resource, so `extensions/subagent/agents.ts` resolves this dir relative to itself |
 | `skills/` | skills | `craft-ui`, `app-analytics-dashboard` |
 | `types/` | ambient declarations | hand-written types for runtime deps that ship none |
+| `docs/` | project documentation | maintained guides; historical task notes live in [docs/archive/](docs/archive/README.md) |
 | `workstation/` | machine skeleton | defaults, the self-updater and its timer — **stowed, not installed**; see [workstation/README.md](workstation/README.md) |
 | `agmsg/` | agmsg driver | the `pi` agent type for [agmsg](https://agmsg.cc/) — see [agmsg/README.md](agmsg/README.md) |
 | `evals/`, `test/` | not shipped to pi | |
@@ -137,6 +138,11 @@ workspace releases the server-side pin.
 npm ci --ignore-scripts
 npm run check      # tsc --noEmit && vitest run
 ```
+
+Keep the root for the README, license/security notices, and package/tooling
+configuration. Maintained guides belong in `docs/` (or beside the component they
+document). Root `PLAN*.md` and `PROGRESS*.md` session notes are ignored; promote
+lasting findings into maintained documentation rather than committing task logs.
 
 ## License
 
