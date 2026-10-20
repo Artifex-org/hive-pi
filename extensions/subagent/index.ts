@@ -843,6 +843,7 @@ export default function (pi: ExtensionAPI) {
 							...jobIdentity,
 							status: completion.status,
 							exitCode: completion.exitCode,
+							...(result.reviewFingerprint ? { reviewFingerprint: result.reviewFingerprint } : {}),
 						} satisfies BackgroundJobEvent);
 					})
 					.catch((err: unknown) => {

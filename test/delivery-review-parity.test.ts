@@ -142,9 +142,12 @@ describe("delivery review: tree fingerprint, background and unavailable reviewer
 		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "start", id, sessionId: "s", executionId: "e", what: "review", kind: "subagent", detail: `code-reviewer: ${task}` });
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId, input: {}, isError: false, content: [{ type: "text", text: backgroundStartedMessage(id, "review", "code-reviewer") }], details: { results: [] } });
 	};
-	const finish = (pi: ReturnType<typeof createFakePi>, id: string, status: "done" | "failed", chunk = "Looks good.") => {
+	// The worker's own evidence: the fingerprint of the diff it reviewed, as the
+	// subagent tool reports it on the finish event.
+	const workerFingerprint = (cwd: string) => reviewFingerprint(captureDeliveryDiff(cwd, "")!);
+	const finish = (pi: ReturnType<typeof createFakePi>, id: string, status: "done" | "failed", chunk = "Looks good.", fingerprint?: string) => {
 		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "output", id, sessionId: "s", executionId: "e", chunk });
-		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "finish", id, sessionId: "s", executionId: "e", status, exitCode: status === "done" ? 0 : 1 });
+		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "finish", id, sessionId: "s", executionId: "e", status, exitCode: status === "done" ? 0 : 1, ...(fingerprint ? { reviewFingerprint: fingerprint } : {}) });
 	};
 
 	it("accepts a background code-reviewer that completed cleanly on the same diff", async () => {
@@ -153,9 +156,25 @@ describe("delivery review: tree fingerprint, background and unavailable reviewer
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "bg", input: { agent: "code-reviewer", background: true, what: "review", task: "Review", cwd } });
 		await start(pi, "sub-1", "Review");
 		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true, reason: expect.stringContaining("still running") });
-		finish(pi, "sub-1", "done");
+		finish(pi, "sub-1", "done", "Looks good.", workerFingerprint(cwd));
 		expect(await deliver(pi, "git commit -m code && git push origin HEAD", cwd)).toBeUndefined();
 		expect(pi.entries.at(-1)).toMatchObject({ customType: "delivery-review", data: { source: "background" } });
+	});
+
+	it("does not accept a background review whose worker could not capture the diff it reviewed", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "bg", input: { agent: "code-reviewer", background: true, what: "review", task: "Review", cwd } });
+		await start(pi, "sub-1", "Review"); finish(pi, "sub-1", "done");
+		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true, reason: expect.stringContaining("could not capture the diff it reviewed") });
+	});
+
+	it("does not accept a background review of a different diff than the one dispatched", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "bg", input: { agent: "code-reviewer", background: true, what: "review", task: "Review", cwd } });
+		await start(pi, "sub-1", "Review"); finish(pi, "sub-1", "done", "Looks good.", "0".repeat(64));
+		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true, reason: expect.stringContaining("diff changed after it was dispatched") });
 	});
 
 	it.each([
@@ -174,8 +193,9 @@ describe("delivery review: tree fingerprint, background and unavailable reviewer
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "bg", input: { agent: "code-reviewer", background: true, what: "review", task: "Review", cwd } });
 		await start(pi, "sub-1", "Review");
+		const reviewed = workerFingerprint(cwd);
 		writeFileSync(join(cwd, "code.ts"), substantive + "export const late = 1;\n"); git("add", ".");
-		finish(pi, "sub-1", "done");
+		finish(pi, "sub-1", "done", "Looks good.", reviewed);
 		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true, reason: expect.stringContaining("diff changed after it was dispatched") });
 	});
 
@@ -188,7 +208,7 @@ describe("delivery review: tree fingerprint, background and unavailable reviewer
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "bg-b", input: { agent: "code-reviewer", background: true, what: "review", task: "Review the change", cwd: b.cwd } });
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "bg-a", input: {}, isError: true, content: [{ type: "text", text: "Background delegation needs `what`" }] });
 		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "start", id: "sub-1", sessionId: "s", executionId: "e", what: "review", kind: "subagent", detail: "code-reviewer: Review the change" });
-		finish(pi, "sub-1", "done");
+		finish(pi, "sub-1", "done", "Looks good.", workerFingerprint(b.cwd));
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "bg-b", input: {}, isError: false, content: [{ type: "text", text: backgroundStartedMessage("sub-1", "review", "code-reviewer") }] });
 		expect(await deliver(pi, "git commit -m code && git push origin HEAD", b.cwd)).toBeUndefined();
 		expect(await deliver(pi, "git commit -m code && git push origin HEAD", a.cwd)).toMatchObject({ block: true, reason: expect.stringContaining("No code review has run") });

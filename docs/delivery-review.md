@@ -5,11 +5,24 @@ Subagent's delivery checkpoint defaults on for substantive code changes. Before
 its findings. The prompt provides the complete merge-base diff, file inventory
 and scope paths, not the author's rationale or conclusions.
 
-Stage new files first. Successful foreground reviews stamp the reviewed diff;
-later edits, staging or commits invalidate it. Review the final commit before
-pushing. Committed, staged and unstaged evidence is kept separate so a dirty
-revert cannot hide delivered code. Review
-results with errors and background launch receipts never satisfy the checkpoint.
+Stage new files first. A successful review stamps the reviewed diff, keyed by
+its evidence fingerprint and by the content it covers: committing exactly the
+reviewed tree keeps the stamp, while a later edit, staging change or amend
+invalidates it. A commit hook that rewrites the reviewed code is caught after a
+chained commit: the delivery result says so and the next push or PR needs a new
+review. Committed, staged and unstaged evidence is kept separate so a dirty
+revert cannot hide delivered code. Review results with errors never satisfy the
+checkpoint.
+
+A background `code-reviewer` counts once it finishes cleanly and three
+fingerprints agree: this side's capture at dispatch, the worker's own evidence
+fingerprint (carried on the job's finish event), and this side's capture at
+completion. A launch receipt alone, a worker that stopped mid-work, and a worker
+that could not capture the diff it reviewed never count.
+
+When no reviewer model can run in the session, the checkpoint records "review
+unavailable" for that exact diff and lets delivery of it proceed, with a visible
+note on the delivery result; state it in the PR description.
 The worker returns the fingerprint of the complete evidence supplied inline or
 in a readable patch artifact; the checkpoint compares it to current evidence
 before recording a stamp, never to a separate pre-launch snapshot. Patches over
