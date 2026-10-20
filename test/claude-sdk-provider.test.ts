@@ -1136,3 +1136,31 @@ describe("handoff reservation and destination history", () => {
 		expect(ctx).toEqual(before);
 	});
 });
+
+describe("long-running Pi tool calls", () => {
+	// What the pinned CLI emits while a Pi tool call runs past 30 s: buffered while
+	// the query is parked, delivered together on resume, before the model continues.
+	const heartbeat = (toolId: string, seconds = 30) => ({ type: "tool_progress", tool_use_id: `${toolId}-heartbeat-0`, tool_name: "mcp__pi__read",
+		parent_tool_use_id: toolId, elapsed_time_seconds: seconds, heartbeat: true, uuid: "00000000-0000-0000-0000-000000000002", session_id: "fixture" }) as unknown as SDKMessage;
+
+	it("continues past heartbeat tool_progress frames for an in-flight tool call", async () => {
+		const f = await fixture(() => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			yield* tools(["slow-call"]);
+			yield heartbeat("slow-call", 30); yield heartbeat("slow-call", 60);
+			yield* text("finished after the slow tool");
+		})() }));
+		const { session, outputs, execute } = await retrySession(f, 0);
+		await session.prompt("run the slow tool");
+		expect(execute).toHaveBeenCalledOnce();
+		expect(outputs.at(-1)).toMatchObject({ stopReason: "stop", content: [{ type: "text", text: "finished after the slow tool" }] });
+		expect(outputs.some(output => output.stopReason === "error")).toBe(false);
+	});
+
+	it("still rejects real nested subagent output", async () => {
+		const f = await fixture(() => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			yield { ...canonical([{ type: "text", text: "nested" }], "end_turn"), parent_tool_use_id: "some-task" } as SDKMessage;
+		})() }));
+		const out = await f.provider.streamSimple(f.model, context()).result();
+		expect(out).toMatchObject({ stopReason: "error", errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" });
+	});
+});
