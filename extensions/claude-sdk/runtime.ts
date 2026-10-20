@@ -48,6 +48,8 @@ export function hiveLease(config: LaunchConfig, fetcher: typeof fetch = fetch,
 }
 
 /** Coalesces concurrent GETs only; no cached authorization across model requests. */
+/** The least remaining lease validity a turn may start with. */
+export const LEASE_TURN_FLOOR_MS = 60_000;
 export class LeaseManager {
 	private flight?: Promise<AccessLease>;
 	private readonly controller = new AbortController();
@@ -62,7 +64,7 @@ export class LeaseManager {
 		}
 		const lease = await cancellable(this.flight, signal);
 		// Never restart with a token whose remaining validity cannot support a turn.
-		if (Date.parse(lease.expires_at) - this.now() < 60_000) throw new SdkProviderError("Claude SDK lease too near expiry; wait for authd renewal");
+		if (Date.parse(lease.expires_at) - this.now() < LEASE_TURN_FLOOR_MS) throw new SdkProviderError("Claude SDK lease too near expiry; wait for authd renewal");
 		if (previous && lease.access_token === previous.access_token && Date.parse(previous.expires_at) <= this.now()) {
 			throw new SdkProviderError("Claude SDK lease not renewed; reconciliation required");
 		}

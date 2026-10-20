@@ -12,7 +12,7 @@ import type { PilotQueryBudget } from "./pilot-budget.ts";
 import { EventConverter, emptyUsage, SdkAssistantFailure, SdkProtocolError, SdkProviderError, streamFailure, type FailureCode } from "./events.ts";
 import { failureDiagnostic, SdkLeaseExpired, type Continuation, type FailureContext, type ParkedEndReason } from "./diagnostics.ts";
 import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
-import { cancellable, hiveLease, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
+import { cancellable, hiveLease, LEASE_TURN_FLOOR_MS, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
 
 export const PROVIDER_ID = "claude-sdk";
@@ -314,7 +314,10 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 								owned.expected = [...structuredClone(context.messages), structuredClone(output)];
 								owned.busy = false;
 								owned.parkedAt = now();
-								owned.timer = setTimeout(() => { void dispose(owned, "parked_expired"); }, Math.min(5 * 60_000, Date.parse(lease.expires_at) - now()));
+								// Wait for Pi's tool results as long as this lease can still serve the
+								// continuation: a rebuilt tool-result continuation loses the results.
+								const parkedFor = Math.max(1, Date.parse(lease.expires_at) - owned.parkedAt - LEASE_TURN_FLOOR_MS);
+								owned.timer = setTimeout(() => { void dispose(owned, "parked_expired"); }, parkedFor);
 								owned.timer.unref();
 								events.push({ type: "done", reason: "toolUse", message: output }); break;
 							}

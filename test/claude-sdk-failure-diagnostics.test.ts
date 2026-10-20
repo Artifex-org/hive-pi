@@ -210,17 +210,18 @@ describe("aborts, lease expiry and continuations", () => {
 		const sdk = await runtime(async function* (attempt, request) {
 			if (attempt === 1) { yield* toolBatch("call-a"); await never(request.options.abortController!.signal); }
 			if (attempt === 2) yield resultError({ errors: ["rebuilt continuation failed"] });
-		});
+		}, 20 * 60_000);
 		const ctx = prompt();
 		const first = await sdk.provider.streamSimple(sdk.model, ctx).result();
 		expect(first.stopReason).toBe("toolUse");
 		ctx.messages.push(first, ...results(first));
-		await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+		// A 20-minute lease keeps the parked query 19 minutes.
+		await vi.advanceTimersByTimeAsync(19 * 60_000 + 1);
 		const output = await sdk.provider.streamSimple(sdk.model, ctx).result();
 		expect(output).toMatchObject({ stopReason: "error", errorMessage: GENERIC });
 		expect(sdk.queries()).toBe(2);
 		expect(only(output)).toMatchObject({ error: { code: "result_error", message: "Claude SDK result error_during_execution: rebuilt continuation failed" },
-			details: { phase: "post_start", continuation: "rebuilt_after_parked_expired", parkedEnd: { parkedMs: 5 * 60_000, endedMsAgo: expect.any(Number) } } });
+			details: { phase: "post_start", continuation: "rebuilt_after_parked_expired", parkedEnd: { parkedMs: 19 * 60_000, endedMsAgo: expect.any(Number) } } });
 		// The same tool-result request again is refused before any parked query is looked up.
 		const again = await sdk.provider.streamSimple(sdk.model, ctx).result();
 		expect(again.errorMessage).toMatch(/Ambiguous previous SDK attempt/);
