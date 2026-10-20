@@ -355,6 +355,45 @@ describe("delivery review", () => {
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "PI_DELIVERY_REVIEW=0 git push" } }))[0]).toBeUndefined();
 		expect(pi.entries).toHaveLength(0);
 	});
+	// Eval wave 2: each of these refused a correct delivery, and the agent retried and
+	// regenerated its PR body several times.
+	describe("delivery shapes that cannot change what was reviewed", () => {
+		const shape = async (command: string, cwd: string) => {
+			const pi = createFakePi(); registerDeliveryReview(pi.api);
+			const result = (await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0] as { block?: boolean; reason?: string } | undefined;
+			return result?.reason ?? "";
+		};
+		it("tells a base-only PR to omit --base instead of naming it unmatchable", async () => {
+			const { cwd } = repo();
+			const text = await shape("gh pr create --base main --title t --body b", cwd);
+			expect(text).toContain("omit `--base`"); expect(text).not.toContain("points at a repo/branch");
+			expect(scanDeliveryTargets("gh pr create --base main --head work", cwd)[0]).toMatchObject({ reviewTarget: { base: "main", head: "work" } });
+		});
+		it("never treats a leg that can run code or write as inert", async () => {
+			const { cwd } = repo();
+			for (const command of ["echo $(git commit --amend -m x) && git push origin HEAD", "ls `git reset --hard HEAD~1` && git push origin HEAD",
+				"gofmt -l $(git checkout other) && git push origin HEAD", "LD_PRELOAD=/tmp/x.so ls && git push origin HEAD",
+				"gofmt -l --w . && git push origin HEAD", "gofmt -l -cpuprofile .git/HEAD . && git push origin HEAD",
+				"sort --o=.git/HEAD /tmp/ref && git push origin HEAD", "sed -n -ewsrc/a.ts 1p /tmp/x && git push origin HEAD",
+				"git status && git push origin HEAD", "gofmt -l * && git push origin HEAD"]) {
+				expect(await shape(command, cwd), command).toContain("Unsupported command shape");
+			}
+		});
+		it("lets a gofmt listing, ls or echo precede the delivery, never a write", async () => {
+			const { cwd } = repo();
+			for (const command of ["gofmt -l . && git push origin HEAD", "ls && echo done && git push origin HEAD", "gofmt -d code.go; git push origin HEAD"]) {
+				expect(await shape(command, cwd), command).toBe("");
+			}
+			expect(await shape("gofmt -w . && git push origin HEAD", cwd)).toContain("earlier leg (`gofmt -w .`)");
+			expect(await shape("gofmt -l -w . && git push origin HEAD", cwd)).toContain("earlier leg");
+		});
+		it("tells a chained PR-body heredoc to run on its own first", async () => {
+			const { cwd } = repo();
+			const text = await shape(`cat > ${tmpdir()}/pr-body.md <<'EOF'\nbody\nEOF\ngh pr create --title t --body-file ${tmpdir()}/pr-body.md`, cwd);
+			expect(text).toContain("Unsupported command shape"); expect(text).toContain("PR body file in its own command first");
+		});
+	});
+
 	describe("block reasons name the cause and the standalone command", () => {
 		const reason = async (pi: ReturnType<typeof createFakePi>, command: string, cwd?: string) =>
 			((await pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } }))[0] as { reason: string }).reason;
