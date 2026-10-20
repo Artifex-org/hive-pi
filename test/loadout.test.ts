@@ -9,7 +9,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import loadoutExtension, { CODEMODE_SCRIPT_GUIDANCE, codemodeDiscoveryMisuse, deferredToolNames, LOAD_TOOL, loadoutPrompt, mcpHint, planLoad } from "../extensions/loadout/index.ts";
+import loadoutExtension, { CODEMODE_SCRIPT_GUIDANCE, codemodeDiscoveryMisuse, deferredToolNames, LOAD_TOOL, loadoutPrompt, mcpHint, planLoad, searchResultText } from "../extensions/loadout/index.ts";
+import { createToolSearchExtension } from "../node_modules/@earendil-works/pi-coding-agent/dist/extensions/tool-search/index.js";
 import { exposureFor, GATED_TOOLS, restoredLoadout } from "../extensions/loadout/policy.ts";
 import opmodeExtension from "../extensions/opmode/index.ts";
 import planExtension from "../extensions/plan/index.ts";
@@ -173,12 +174,16 @@ describe("consent-gated tools stay unreachable without consent", () => {
 		expect(info?.exposure).toBe("direct");
 		expect(planLoad(["orchestrate"], pi.api.getAllTools(), pi.api.getActiveTools()).refused).toEqual(["orchestrate"]);
 	});
-	it("a Hive-launched session keeps its explicitly authorized orchestration tools active", async () => {
+	it("a Hive-launched session lists its offered orchestration tools on demand instead of declaring them", async () => {
 		vi.stubEnv("HIVE_LAUNCH_ID", "123e4567-e89b-42d3-a456-426614174000");
 		const pi = createFakePi(); agendaExtension(pi.api); loadoutExtension(pi.api);
 		await pi.emit({ type: "session_start", reason: "startup" });
-		expect(pi.activeTools).toContain("orchestrate");
-		expect(planLoad(["orchestrate"], pi.api.getAllTools(), pi.api.getActiveTools()).already).toEqual(["orchestrate"]);
+		expect(pi.activeTools).not.toContain("orchestrate");
+		expect(pi.api.getAllTools().find((t) => t.name === "orchestrate")?.exposure).toBe("direct");
+		const results = await pi.emit({ type: "before_agent_start", prompt: "x", systemPrompt: "BASE" } as never);
+		const prompt = (results as Array<{ systemPrompt?: string } | undefined>).find((r) => r?.systemPrompt)?.systemPrompt;
+		expect(prompt).toContain("orchestrate, orchestrate_result");
+		expect(prompt).toContain("worker_send");
 	});
 });
 
@@ -313,10 +318,10 @@ describe("codemode discovery preflight", () => {
 });
 
 describe("exact-name loading guidance", () => {
-	it("teaches load_tools with a full mcp name and forbids limit:1, in the prompt and the hint", () => {
+	it("teaches load_tools with a full mcp name and that tool_search loads nothing, in the prompt and the hint", () => {
 		for (const text of [loadoutPrompt(["session_grep"]), mcpHint({ getAllTools: () => [{ name: "tool_search" }] } as never)]) {
 			expect(text).toContain("`mcp__<server>__<tool>`");
-			expect(text).toContain("never with `limit: 1`");
+			expect(text).toContain("`tool_search` only finds names and loads nothing");
 			expect(text).toContain("For a deferred MCP tool");
 			expect(text).toContain("`tools.mcp__<server>__<tool>(...)`");
 		}
@@ -327,7 +332,94 @@ describe("exact-name loading guidance", () => {
 		expect(planLoad(["mcp__hive__list_communications"], tools, ["bash"]).load).toEqual(["mcp__hive__list_communications"]);
 	});
 
+	// pi's MCP default exposure is `codemode`, which tool_search loads; since it
+	// now only names its matches, load_tools must load those too.
+	it("load_tools accepts an MCP tool at pi's default codemode exposure", () => {
+		const tools = [{ name: "mcp__linear__get_issue", exposure: "codemode" }];
+		expect(planLoad(["mcp__linear__get_issue"], tools, ["bash"]).load).toEqual(["mcp__linear__get_issue"]);
+	});
+
 	it("warns that store() writes vanish when the script throws", () => {
 		expect(CODEMODE_SCRIPT_GUIDANCE).toContain("`store()` writes are discarded when the script throws");
+	});
+});
+
+describe("tool_search is discovery only (HIV-3906)", () => {
+	// In the eval one keyword search loaded 8 unrelated hive tools (13.7k
+	// characters) and forced a 142k-token cache rewrite. pi core's tool is
+	// wrapped, not forked: its matches are un-loaded and named instead.
+	function bootWithSearch() {
+		const pi = createFakePi();
+		const register = (name: string, description: string, exposure: "direct" | "deferred") =>
+			pi.api.registerTool({ name, label: name, description, parameters: {}, exposure, execute: async () => ({ content: [], details: {} }) } as never);
+		register("bash", "Run a command", "direct");
+		register("mcp__hive__get_run", "Get a CI run with its task DAG\nMore detail.", "deferred");
+		register("mcp__hive__list_runs", "List CI runs by project", "deferred");
+		register("mcp__hive__get_pull", "Get a PR and its CI runs", "deferred");
+		createToolSearchExtension()(pi.api);
+		loadoutExtension(pi.api);
+		pi.api.setActiveTools(["bash", LOAD_TOOL, "tool_search"]);
+		return pi;
+	}
+
+	async function search(pi: FakePi, query: string) {
+		const tool = pi.tools.find((t) => t.name === "tool_search")!;
+		const definition = tool.definition as { execute: (id: string, params: { query: string }) => Promise<{ content: { type: "text"; text: string }[]; details: unknown }> };
+		await pi.emit({ type: "tool_call", toolName: "tool_search", toolCallId: "s1", input: { query } } as never);
+		const raw = await definition.execute("s1", { query });
+		const results = (await pi.emit({
+			type: "tool_result", toolName: "tool_search", toolCallId: "s1", input: { query }, content: raw.content, details: raw.details, isError: false,
+		} as never)) as Array<{ content?: { text: string }[]; details?: { loaded: string[]; found: string[] } } | undefined>;
+		return { raw, result: results.find((r) => r?.content) };
+	}
+
+	it("leaves the active set as it was and names the matches with the load_tools call", async () => {
+		const pi = bootWithSearch();
+		const before = [...pi.api.getActiveTools()];
+		const { raw, result } = await search(pi, "CI run");
+		// pi's own tool did load them…
+		expect((raw.details as { loaded: string[] }).loaded.length).toBeGreaterThan(0);
+		// …and the wrapper gave them back before the model's next request.
+		expect(pi.api.getActiveTools()).toEqual(before);
+		expect(result?.details?.loaded).toEqual([]);
+		expect(result?.details?.found).toContain("mcp__hive__get_run");
+		const text = result!.content![0]!.text;
+		expect(text).toContain("none is loaded yet");
+		expect(text).toContain("- mcp__hive__get_run: Get a CI run with its task DAG");
+		expect(text).not.toContain("More detail.");
+		expect(text).toContain("`load_tools`");
+	});
+
+	it("keeps a tool that was already active before the search", async () => {
+		const pi = bootWithSearch();
+		pi.api.setActiveTools([...pi.api.getActiveTools(), "mcp__hive__list_runs"]);
+		await search(pi, "CI run");
+		expect(pi.api.getActiveTools()).toContain("mcp__hive__list_runs");
+		expect(pi.api.getActiveTools()).not.toContain("mcp__hive__get_run");
+	});
+
+	it("leaves pi's loading alone where load_tools is not declared (a worker granted only tool_search)", async () => {
+		const pi = bootWithSearch();
+		pi.api.setActiveTools(["bash", "tool_search"]);
+		const { result } = await search(pi, "CI run");
+		expect(result).toBeUndefined();
+		expect(pi.api.getActiveTools()).toContain("mcp__hive__get_run");
+	});
+
+	it("never un-loads a tool the model asked load_tools for in the same batch", async () => {
+		const pi = bootWithSearch();
+		const tool = pi.tools.find((t) => t.name === "tool_search")!;
+		const searchTool = tool.definition as { execute: (id: string, params: { query: string }) => Promise<{ content: { type: "text"; text: string }[]; details: unknown }> };
+		const loadTool = pi.tools.find((t) => t.name === LOAD_TOOL)!.definition as { execute: (id: string, params: { names: string[] }) => Promise<unknown> };
+		await pi.emit({ type: "tool_call", toolName: "tool_search", toolCallId: "s1", input: { query: "CI run" } } as never);
+		const raw = await searchTool.execute("s1", { query: "CI run" });
+		await loadTool.execute("l1", { names: ["mcp__hive__get_run"] });
+		await pi.emit({ type: "tool_result", toolName: "tool_search", toolCallId: "s1", input: {}, content: raw.content, details: raw.details, isError: false } as never);
+		expect(pi.api.getActiveTools()).toContain("mcp__hive__get_run");
+		expect(pi.api.getActiveTools()).not.toContain("mcp__hive__list_runs");
+	});
+
+	it("says so when nothing matched", () => {
+		expect(searchResultText([], [])).toBe("No matching tools found.");
 	});
 });

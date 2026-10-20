@@ -12,6 +12,8 @@
 
 import { describe, expect, it } from "vitest";
 
+import { formatSkillsForPrompt, type Skill } from "@earendil-works/pi-coding-agent";
+import { buildSystemPrompt, normalizeBuildSystemPromptOptions } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/system-prompt.js";
 import { createFakePi } from "./fake-pi.ts";
 import { wireSkillScope, type ScopeSources } from "../extensions/skillscope/index.ts";
 import {
@@ -20,12 +22,16 @@ import {
 	EMPTY_CONFIG,
 	isConfigured,
 	isInsideDir,
+	launchDefaultConfig,
+	type LaunchScope,
 	mergeScopeConfigs,
 	normalizeReadPath,
 	parseScopeConfig,
 	partitionSkills,
+	repoTokens,
 	resolveScope,
 	swapSkillsBlock,
+	swapSkillsSection,
 	type ScopeConfig,
 	type SkillPaths,
 } from "../extensions/skillscope/scope.ts";
@@ -517,5 +523,102 @@ describe("wiring", () => {
 			systemPromptOptions: { cwd: "/repo", skills: loaded },
 		});
 		expect(results.filter(Boolean)).toEqual([]);
+	});
+});
+
+/* -------------------------------------------------------------------------- */
+/* Hive launches                                                               */
+/* -------------------------------------------------------------------------- */
+
+describe("the launch default (HIV-3906)", () => {
+	const launch: LaunchScope = {
+		repoName: "hive",
+		repoRoot: "/home/u/repos/hive__worktrees/agents-x",
+		ownSkillNames: new Set(["browser-use", "analytics-visualisation"]),
+	};
+	const library = [
+		skill("browser-use", "/home/u/repos/hive-pi/skills/browser-use"),
+		skill("analytics-visualisation"),
+		skill("hive-doctor"),
+		skill("fix-pr-checks"),
+		skill("asfam-audit"),
+		skill("omarchy"),
+		skill("docx"),
+		skill("repo-local", "/home/u/repos/hive__worktrees/agents-x/.pi/skills/repo-local"),
+	];
+
+	it("lists the harness's own, Hive's workflow, the checkout's and the repo-named skills; the rest go manual", () => {
+		const resolved = partitionSkills(library, launchDefaultConfig(library, launch));
+		expect(resolved.auto.map((s) => s.name)).toEqual(["browser-use", "analytics-visualisation", "hive-doctor", "fix-pr-checks", "repo-local"]);
+		expect(resolved.manual.map((s) => s.name)).toEqual(["asfam-audit", "omarchy", "docx"]);
+		expect(resolved.off).toEqual([]);
+	});
+
+	it("follows the repository: asfam-* skills are listed in ASFAM-PMware", () => {
+		const asfam = { ...launch, repoName: "ASFAM-PMware", repoRoot: "/home/u/repos/ASFAM-PMware__worktrees/x" };
+		expect(resolveScope("asfam-audit", launchDefaultConfig(library, asfam))).toBe("auto");
+		expect(resolveScope("hive-doctor", launchDefaultConfig(library, asfam))).toBe("auto"); // a Hive workflow skill
+		expect([...repoTokens("ASFAM-PMware")]).toEqual(["asfam", "pmware"]);
+		expect([...repoTokens("hive-pi")]).toEqual(["hive"]);
+		expect([...repoTokens(null)]).toEqual([]);
+	});
+
+	it("sits under the user's file, which overrides it per key and by default", () => {
+		const base = launchDefaultConfig(library, launch);
+		expect(resolveScope("omarchy", mergeScopeConfigs(base, config({ omarchy: "auto" })))).toBe("auto");
+		expect(resolveScope("docx", mergeScopeConfigs(base, config({ default: "auto" })))).toBe("auto");
+		expect(resolveScope("asfam-audit", mergeScopeConfigs(base, config({ "browser-use": "off" })))).toBe("manual");
+	});
+
+	it("scopes a launch's prompt with no config files at all, and leaves an operator session alone", async () => {
+		const prompt = promptWith(["audit", "deploy"]);
+		const run = async (withLaunch: boolean) => {
+			const pi = createFakePi();
+			wireSkillScope(pi.api, { ...sources(), launch: withLaunch ? { ...launch, ownSkillNames: new Set(["deploy"]) } : null });
+			await pi.emit({ type: "session_start", reason: "startup" }, { cwd: "/repo" });
+			const results = await pi.emit({
+				type: "before_agent_start",
+				prompt: "go",
+				systemPrompt: prompt,
+				systemPromptOptions: { cwd: "/repo", skills: loaded, forceSystemPrompt: prompt },
+			});
+			return results.find(Boolean) as { systemPrompt: string } | undefined;
+		};
+		expect((await run(true))?.systemPrompt).toBe(promptWith(["deploy"]));
+		expect(await run(false)).toBeUndefined();
+	});
+});
+
+/* pi ≥ 1.1 renders skills as a `<skills>` section of the TRIMMED block. */
+describe("against pi's real prompt builder", () => {
+	const skills: Skill[] = loaded.map((s) => ({ ...s, sourceInfo: { path: s.filePath, source: "local", scope: "user", origin: "top-level" } }));
+	const options = () => normalizeBuildSystemPromptOptions({ cwd: "/repo", selectedTools: ["read", "bash"], skills });
+
+	it("finds and replaces the section form of the block", () => {
+		const rendered = buildSystemPrompt(options());
+		const before = formatSkillsForPrompt(skills);
+		const after = formatSkillsForPrompt([skills[1]!]);
+		const swapped = swapSkillsSection(rendered, before, after);
+		expect(swapped).not.toBe(rendered);
+		expect(swapped).not.toContain("<name>audit</name>");
+		expect(swapped).toContain("<name>deploy</name>");
+		// An empty replacement removes the section, not just its contents.
+		expect(swapSkillsSection(rendered, before, "")).not.toContain("<skills>");
+	});
+
+	it("scopes a structured prompt by handing pi the auto subset, without forcing it", async () => {
+		const pi = createFakePi();
+		wireSkillScope(pi.api, sources({ audit: "off" }));
+		await pi.emit({ type: "session_start", reason: "startup" }, { cwd: "/repo" });
+		const live = options();
+		const handler = pi.handlers.get("before_agent_start")![0]!;
+		const result = await handler(
+			{ type: "before_agent_start", prompt: "go", get systemPrompt() { return buildSystemPrompt(live); }, systemPromptOptions: live },
+			{} as never,
+		);
+		expect(result).toBeUndefined();
+		const rendered = buildSystemPrompt(live);
+		expect(rendered).not.toContain("<name>audit</name>");
+		expect(rendered).toContain("<name>deploy</name>");
 	});
 });

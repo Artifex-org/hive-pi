@@ -79,6 +79,11 @@ export type RemindReason = "streak" | "slow-wait";
  */
 export const SILENT_TOOL_CALLS = 5;
 
+/** The HIV-3906 canonical narration sentence, verbatim: one line, a cap, and a finding when the plan changed. */
+export const NARRATION_LINE =
+	"ONE short line, under ~80 characters. Say what you are about to do, or, if the last results changed your plan, " +
+	"the finding that changed it. Not a report.";
+
 /**
  * What the reminder says.
  *
@@ -95,15 +100,22 @@ export const SILENT_TOOL_CALLS = 5;
  *
  * "What you are doing and why" was the old wording, and the `why` was doing real
  * damage: measured over 39,816 preambles, the median ran to 202 characters —
- * longer than the median END-OF-TURN report on the same fleet. A preamble is a
- * label for someone glancing at a pane, so it asks for what and where only.
+ * longer than the median END-OF-TURN report on the same fleet. So the ~80
+ * character cap and the single line stay.
+ *
+ * The cap is about length, not content, and the wording that replaced "why"
+ * ("no reasoning … a label, not a report") over-corrected: in the HIV-3906 eval
+ * pi's interim lines were content-free labels ("Now the store and service
+ * edits."), while Claude Code's carried findings and reasons. The sentence in
+ * the middle is the eval's canonical narration text,
+ * kept identical to the prose block in the global AGENTS.md so the reminder and
+ * the rule it stands in for say the same thing.
  */
 export function reminderText(silentToolCalls: number): string {
 	return (
 		`<system-reminder>You have run ${silentToolCalls} tool calls without saying anything. ` +
 		`Someone is watching this session and cannot tell working from stuck. ` +
-		`Before the next batch, write ONE short line naming what you are doing and where — or what you just found. ` +
-		`Under ~80 characters, no reasoning, no list of the calls. A label, not a report. Then carry on.</system-reminder>`
+		`Before the next batch, write ${NARRATION_LINE} Then carry on.</system-reminder>`
 	);
 }
 

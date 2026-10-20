@@ -30,7 +30,8 @@ irrelevant.
 ## Config
 
 **Absent config means everything is `auto`** — that is, today's exact behaviour.
-Installing this extension changes nothing at all until you configure it.
+Installing this extension changes nothing at all until you configure it, with
+one exception: a Hive task launch (see *Hive launches* below).
 
 Two files, both optional, both the same flat shape:
 
@@ -66,6 +67,32 @@ config-carrying extension in this repo goes through that one function. The state
 directory name is frozen for the reason documented in
 `extensions/hive-common/identity.ts`.
 
+## Hive launches
+
+A Hive-launched task session (`HIVE_LAUNCH_ID` set) starts from a default
+scope instead of "everything `auto`", because a global library listed in full
+is the largest block of a launch's system prompt: in the HIV-3906 eval a
+hive-repo launch listed 48 skills in 37.5k characters, a quarter of them for
+a trading system and most of the rest for office formats, desktop
+configuration and CAD.
+
+The launch default (`launchDefaultConfig` in `scope.ts`) lists:
+
+- the skills this package ships (`skills/` here),
+- Hive's workflow skills (`LAUNCH_WORKFLOW_SKILLS`: the gate, tickets,
+  handoff, browser, a red PR, hosts, Sentry, team roles),
+- skills that live inside the checkout,
+- skills named for the repository: the first word of the skill's name matches
+  a word of the repository's name (`asfam-*` in `ASFAM-PMware`, `hive-*` in
+  `hive`). The name comes from git's common dir, so every worktree of
+  `~/repos/hive.git` is `hive`.
+
+Everything else is `manual`: not listed, still `/skill:<name>` away. Both
+config files sit ON TOP of the launch default, per key and including
+`default`, so `{"react-doctor": "auto"}` in the user file adds a skill to every
+launch and `{"default": "auto"}` turns the launch default off. An operator's
+own sessions never see it.
+
 ## `/skills`
 
 Lists every loaded skill with its resolved scope, plus both config paths and
@@ -82,12 +109,16 @@ pi 0.84.1 has **no skill-filtering API** — `ExtensionAPI` carries
 is where enforcement happens.
 
 1. **Advisory — `before_agent_start`.** pi hands the handler the full loaded skill
-   list (`systemPromptOptions.skills`) and accepts a replacement system prompt.
-   pi assembles the prompt with `prompt += formatSkillsForPrompt(skills)`
-   verbatim, so re-formatting the `auto` subset and splicing it over the original
-   block is exact. This is where the attention saving comes from. The replacement
-   is deterministic for a given skill list and config, so the prompt prefix stays
-   cacheable across turns.
+   list (`systemPromptOptions.skills`). Since pi 1.1 the prompt is built from
+   those options in sections until some handler returns a full replacement, so
+   while it is still structured the handler hands pi the `auto` subset and pi
+   renders the `<skills>` section from it. Once a handler has forced the prompt,
+   the `auto` subset is re-formatted and spliced over the original block, which
+   pi renders TRIMMED inside `<skills>…</skills>` (the pre-1.1 untrimmed append
+   is still recognised). Before this was handled the splice silently matched
+   nothing on pi 1.1. This is where the attention saving comes from. The
+   replacement is deterministic for a given skill list and config, so the
+   prompt prefix stays cacheable across turns.
 2. **Enforcement — `tool_call` on `read`.** pi's own prompt block instructs the
    model to auto-select a skill *by reading its SKILL.md*, so refusing that read
    refuses auto-selection. This is needed because the advisory half is only a
