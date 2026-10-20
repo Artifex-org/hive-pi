@@ -11,7 +11,7 @@ import { PiToolBridge } from "./tool-bridge.ts";
 import type { PilotQueryBudget } from "./pilot-budget.ts";
 import { EventConverter, emptyUsage, SdkAssistantFailure, SdkProtocolError, SdkProviderError, streamFailure, type FailureCode } from "./events.ts";
 import { failureDiagnostic, SdkLeaseExpired, type Continuation, type FailureContext, type ParkedEndReason } from "./diagnostics.ts";
-import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage, imageOrText, sdkToolCallId } from "./history.ts";
+import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage } from "./history.ts";
 import { cancellable, hiveLease, LEASE_TURN_FLOOR_MS, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
 
@@ -34,11 +34,15 @@ interface Parked {
 	lease: AccessLease; bridge: PiToolBridge; query: SdkQuery; iterator: AsyncIterator<SDKMessage>;
 	controller: AbortController; dir: string; processes: ReturnType<typeof processScope>;
 	observedIds: Set<string>; busy: boolean; timer?: ReturnType<typeof setTimeout>; releaseAbort?: () => void; closing?: Promise<void>;
+	/** Opened with no input, to continue a seeded tool-result turn; cleared once that turn starts. */
+	resumes?: boolean;
 	/** When the model batch was handed to Pi; diagnostics only. */
 	parkedAt?: number;
 }
 /** Parked queries whose disposal a later tool-result request is matched against, for diagnostics. */
 const PARKED_END_LIMIT = 64;
+/** A resumed tool-result query sends no input, so nothing but this bounds a CLI that does not continue the turn. */
+const RESUME_START_MS = 120_000;
 
 /**
  * SDK failure codes the pre-effect retry may repeat once. Account, credential,
@@ -233,17 +237,15 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				/** A fresh SDK query seeded from Pi's canonical history; this request's input is its only prompt. */
 				const openQuery = async (): Promise<Parked> => {
 					const last = context.messages.at(-1);
-					// Rebuilt tool continuations use native tool-result input, never a synthetic user prompt.
+					// A new user prompt is this query's input. Correlated tool results are seeded instead: sent as
+					// input after a resumed `tool_use`, the pinned CLI first answered that call with a synthetic
+					// "interrupted" result and dropped Pi's (a batch was re-issued). Seeded, the transcript ends
+					// mid-turn and CLAUDE_CODE_RESUME_INTERRUPTED_TURN makes the CLI continue it, as it does after
+					// its own worker restarts. Nothing synthetic enters Pi history and no tool runs again.
 					let split = context.messages.length;
-					let input: SDKUserMessage;
+					let input: SDKUserMessage | undefined;
 					if (last?.role === "user") { split--; input = userMessage(last); }
-					else if (last?.role === "toolResult") {
-						while (split > 0 && context.messages[split - 1].role === "toolResult") split--;
-						input = { type: "user", message: { role: "user", content: context.messages.slice(split).flatMap(result =>
-							result.role === "toolResult" ? [{ type: "tool_result" as const, tool_use_id: sdkToolCallId(result.toolCallId),
-								is_error: result.isError, content: result.content.map(imageOrText) }] : []) },
-							parent_tool_use_id: null, client_composed: true } as SDKUserMessage;
-					} else throw new SdkProviderError("Claude SDK request requires a user message or correlated tool results");
+					else if (last?.role !== "toolResult") throw new SdkProviderError("Claude SDK request requires a user message or correlated tool results");
 					const history = context.messages.slice(0, split);
 					const controller = new AbortController();
 					const dir = await privateDirectory(config.stateRoot);
@@ -262,9 +264,10 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						sdkOptions.resume = resume;
 						sdkOptions.env!.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(deps.pilot ? Math.min(queryOptions.maxTokens, deps.pilot.maxOutputTokens) : queryOptions.maxTokens);
 						Object.assign(sdkOptions, reasoning);
+						if (!input) sdkOptions.env!.CLAUDE_CODE_RESUME_INTERRUPTED_TURN = "1";
 						async function* prompt(): AsyncGenerator<SDKUserMessage> {
-							yield input;
-							// Keep stdin open while MCP tools are parked. Resume-only queries need an explicit protocol trigger.
+							if (input) yield input;
+							// Keep stdin open while MCP tools are parked. A resumed tool-result turn needs no input.
 							await new Promise<void>(resolve => { if (controller.signal.aborted) resolve();
 								else controller.signal.addEventListener("abort", () => resolve(), { once: true }); });
 						}
@@ -275,7 +278,8 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						query = deps.query ? deps.query({ prompt: prompt(), options: sdkOptions }) :
 							(await import("@anthropic-ai/claude-agent-sdk")).query({ prompt: prompt(), options: sdkOptions });
 						const opened: Parked = { key: randomUUID(), session: options.sessionId, model: model.id, prefix: structuredClone(context.messages), expected: [],
-							queryOptions: structuredClone(queryOptions), lease, bridge, query, iterator: query[Symbol.asyncIterator](), controller, dir, processes, observedIds: new Set(), busy: true };
+							queryOptions: structuredClone(queryOptions), lease, bridge, query, iterator: query[Symbol.asyncIterator](), controller, dir, processes, observedIds: new Set(), busy: true,
+							resumes: !input };
 						states.set(opened.key, opened);
 						return opened;
 					} catch (error) {
@@ -295,10 +299,16 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					if (signal.aborted) abortParked();
 					const converter = new EventConverter(output, events, model, owned.bridge, owned.observedIds, [lease.access_token]);
 					const expiry = setTimeout(() => { leaseExpired = true; owned.controller.abort(new SdkLeaseExpired()); }, Math.max(1, Date.parse(lease.expires_at) - now()));
+					let resumeStall = owned.resumes ? setTimeout(() => {
+						owned.controller.abort(new SdkProviderError("Claude SDK did not resume the seeded tool-result turn"));
+					}, RESUME_START_MS) : undefined;
 					try {
 						while (true) {
 							const next = await cancellable(owned.iterator.next(), AbortSignal.any([signal, owned.controller.signal]));
 							if (next.done) throw new SdkProtocolError("Claude SDK ended without result", "stream_ended");
+							if (resumeStall && ["stream_event", "assistant", "result"].includes(next.value.type)) {
+								clearTimeout(resumeStall); resumeStall = undefined; owned.resumes = false;
+							}
 							if (options.onProviderStreamEvent) await cancellable(
 								Promise.resolve().then(() => options.onProviderStreamEvent!(structuredClone(next.value), model)),
 								AbortSignal.any([signal, owned.controller.signal]));
@@ -342,7 +352,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						await dispose(owned);
 						state = await openQuery();
 						continue;
-					} finally { clearTimeout(expiry); }
+					} finally { clearTimeout(expiry); clearTimeout(resumeStall); }
 					break;
 				}
 			} catch (error) {

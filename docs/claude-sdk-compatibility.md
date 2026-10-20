@@ -267,7 +267,16 @@ earlier on abort, replacement or session shutdown. Changed query options rebuild
 only after correlated Pi results have settled; historical tools are not replayed. Edits, compaction, fork/tree navigation,
 provider switch, account/token rotation or process loss rebuild from Pi's canonical
 history in fresh private state. Recorded tools are loaded as history, never sent
-to the bridge for re-execution. Unresolved historical calls and ambiguous failed
+to the bridge for re-execution. A rebuilt tool-result continuation seeds Pi's
+correlated results as the transcript's trailing entries (one per result) and
+sends no input; the CLI continues that interrupted turn itself
+(`CLAUDE_CODE_RESUME_INTERRUPTED_TURN`, its own worker-restart path). The model
+then also sees the CLI's meta line "Continue from where you left off." after the
+results; it is not stored in Pi history. A resumed query that starts no turn
+within 120 s fails as `provider_refusal` ("did not resume the seeded tool-result
+turn") rather than waiting out its lease. Sending the results as input instead
+made the pinned CLI answer the resumed call with a synthetic "interrupted"
+result and drop Pi's, and re-issue a batch. Unresolved historical calls and ambiguous failed
 attempts require reconciliation; there is no automatic crash-after-side-effect
 replay. Completed results allow a new account-bound history rebuild.
 

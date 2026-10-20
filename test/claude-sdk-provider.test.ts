@@ -18,6 +18,7 @@ import { hiveLease, launchConfig, LeaseManager, privateDirectory } from "../exte
 import { workerExtensionPaths } from "../extensions/subagent/worker.ts";
 import { chooseWorkerModel } from "../extensions/subagent/model.ts";
 import { resolveYouShouldKnowModel } from "../extensions/you-should-know/index.ts";
+import { firstInput } from "./claude-sdk-test-input.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.unstubAllEnvs(); });
@@ -64,7 +65,7 @@ async function fixture(query?: QueryFactory, leaseSource = vi.fn(async () => lea
 	const requests: { options: Options; input: unknown }[] = [];
 	const queryImpl: QueryFactory = query ?? (request => {
 		const iterator = (async function* () {
-			const input = await request.prompt[Symbol.asyncIterator]().next(); requests.push({ options: request.options, input: input.value });
+			requests.push({ options: request.options, input: await firstInput(request) });
 			yield* text();
 		})();
 		return { [Symbol.asyncIterator]: () => iterator, close: vi.fn() };
@@ -225,7 +226,7 @@ describe("offline production Claude SDK transport", () => {
 		const f = await fixture(request => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
 			queries++;
 			seed = (await readFile(request.options.resume!, "utf8")).trim().split("\n").map(line => JSON.parse(line));
-			input = (await request.prompt[Symbol.asyncIterator]().next()).value;
+			input = await firstInput(request);
 			yield* text("foreign history accepted offline");
 		})() }));
 		const assistant: AssistantMessage = { role: "assistant", api: "openai-responses", provider: "openai", model: "gpt-foreign",
@@ -240,9 +241,10 @@ describe("offline production Claude SDK transport", () => {
 		expect(wireIds).toHaveLength(ids.length); expect(new Set(wireIds).size).toBe(ids.length);
 		for (const id of wireIds) expect(id).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
 		expect(wireIds.slice(-2)).toEqual(ids.slice(-2));
-		const wireResults = following ? (input as { message: { content: { tool_use_id: string }[] } }).message.content.map(block => block.tool_use_id)
-			: seed.flatMap(entry => Array.isArray(entry.message.content) ? entry.message.content : []).filter(block => block.type === "tool_result").map(block => block.tool_use_id);
+		// Following results are seeded too: the CLI resumes the turn they end, so nothing is sent as input.
+		const wireResults = seed.flatMap(entry => Array.isArray(entry.message.content) ? entry.message.content : []).filter(block => block.type === "tool_result").map(block => block.tool_use_id);
 		expect(wireResults).toEqual(wireIds);
+		if (following) expect(input).toBeUndefined();
 		expect(ctx).toEqual(canonical); expect(queries).toBe(1);
 	});
 	it.each(["error", "aborted"] as const)("omits %s frames only from SDK history without synthesizing results or hiding pending effects", async stopReason => {
@@ -583,10 +585,11 @@ describe("stream and lifecycle edge cases", () => {
 		const { provider, model } = await fixture(request => {
 			const index = queries++;
 			return { close: closes, [Symbol.asyncIterator]: () => (async function* () {
-				seen.push((await request.prompt[Symbol.asyncIterator]().next()).value);
+				seen.push(await firstInput(request));
 				if (!index) yield* tools(["account-call"]); else {
 					const seed = await readFile(request.options.resume!, "utf8");
-					expect(seed).toContain('"tool_use"'); expect(seed).not.toContain("synthetic-access-only"); yield* text();
+					expect(seed).toContain('"tool_use"'); expect(seed).toContain('"tool_use_id":"account-call"');
+					expect(seed).not.toContain("synthetic-access-only"); yield* text();
 				}
 			})() };
 		}, vi.fn(async () => ({ ...lease(), credential: account })));
@@ -594,7 +597,7 @@ describe("stream and lifecycle edge cases", () => {
 		account = "account-b"; ctx.messages.push(first, ...correlated(first));
 		expect((await provider.streamSimple(model, ctx, { sessionId: "account" }).result()).stopReason).toBe("stop");
 		expect(queries).toBe(2); expect(closes).toHaveBeenCalledTimes(2);
-		expect(seen[1]).toMatchObject({ message: { content: [{ type: "tool_result", tool_use_id: "account-call" }] } });
+		expect(seen[1]).toBeUndefined();
 	});
 	it.each(["abort", "expiry"])("parked %s quarantines the original attempt but allows correlated reconstruction", async boundary => {
 		vi.useFakeTimers();
@@ -628,9 +631,14 @@ describe("stream and lifecycle edge cases", () => {
 		const f = await fixture(request => {
 			const query = queries++;
 			return { close() {}, [Symbol.asyncIterator]: () => (async function* () {
-				const input = (await request.prompt[Symbol.asyncIterator]().next()).value;
+				const input = await firstInput(request);
 				if (!query) yield* tools(["boundary-call"]);
-				else { expect(input.client_composed).toBe(true); yield* text("rebuilt"); }
+				else {
+					// A new user prompt is the input; correlated results end the seed and resume its turn.
+					if (input) expect(input).toMatchObject({ client_composed: true });
+					else expect(await readFile(request.options.resume!, "utf8")).toContain('"tool_use_id":"boundary-call"');
+					yield* text("rebuilt");
+				}
 			})() };
 		});
 		const ctx = context();
@@ -1040,7 +1048,7 @@ describe("final review agent-loop safeguards", () => {
 		const f = await fixture(request => {
 			const number = requests.push(request.options);
 			return { close() {}, [Symbol.asyncIterator]: () => (async function* () {
-				inputs.push((await request.prompt[Symbol.asyncIterator]().next()).value);
+				inputs.push(await firstInput(request));
 				seeds.push(request.options.resume ? await readFile(request.options.resume, "utf8") : "");
 				if (number === 1) yield* tools(["once"]);
 				yield* text("settled continuation");
@@ -1054,8 +1062,9 @@ describe("final review agent-loop safeguards", () => {
 				maxTokens: change === "maxTokens" && turn > 0 ? 32000 : 24000, onPayload: () => { turn++; } }) });
 		await agent.prompt("one side effect");
 		expect(execute).toHaveBeenCalledOnce(); expect(requests).toHaveLength(2);
-		expect(seeds[1]).toContain('"tool_use"'); expect(seeds[1]).not.toContain("settled tool result");
-		expect(inputs[1]).toMatchObject({ message: { content: [{ type: "tool_result", tool_use_id: "once", content: [{ text: "settled tool result" }] }] } });
+		// The settled result is seeded, never re-executed or sent as input: the CLI resumes the turn it ends.
+		expect(seeds[1]).toContain('"tool_use"'); expect(seeds[1]).toContain('"tool_use_id":"once"'); expect(seeds[1]).toContain("settled tool result");
+		expect(inputs[1]).toBeUndefined(); expect(requests[1].env).toMatchObject({ CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1" });
 		expect(requests[1]).toMatchObject(change === "maxTokens" ? { env: { CLAUDE_CODE_MAX_OUTPUT_TOKENS: "32000" } } :
 			{ thinking: { type: "enabled", budgetTokens: change === "reasoning" ? 16384 : 4096 } });
 		expect(agent.state.messages.at(-1)).toMatchObject({ content: [{ text: "settled continuation" }] });
@@ -1200,6 +1209,59 @@ describe("parked continuation lifetime", () => {
 			expect(close).not.toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(1_000);
 			expect(close).toHaveBeenCalledOnce();
+		} finally { vi.useRealTimers(); }
+	});
+});
+
+describe("rebuilt tool-result continuation", () => {
+	// Sent as input after a resumed tool_use, the pinned CLI answered the call with a synthetic
+	// "interrupted" result and dropped Pi's (live, 2026-10-21); a batch was re-issued instead.
+	it("seeds the correlated results and lets the CLI resume the turn instead of sending them as input", async () => {
+		const seen: { input: unknown; env: Options["env"]; seed: string }[] = [];
+		const f = await fixture(request => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+			seen.push({ input: await firstInput(request), env: request.options.env, seed: request.options.resume ? await readFile(request.options.resume, "utf8") : "" });
+			yield* text("used the seeded result");
+		})() }));
+		const call: AssistantMessage = { role: "assistant", api: "claude-sdk", provider: "claude-sdk", model: f.model.id, usage: emptyUsage(), stopReason: "toolUse", timestamp: 2,
+			content: [{ type: "toolCall", id: "seeded-a", name: "read", arguments: { path: "a" } }, { type: "toolCall", id: "seeded-b", name: "read", arguments: { path: "b" } }] };
+		const ctx = context(); ctx.messages.push(call, ...correlated(call));
+		expect((await f.provider.streamSimple(f.model, ctx).result()).stopReason).toBe("stop");
+		expect(seen[0].input).toBeUndefined();
+		expect(seen[0].env).toMatchObject({ CLAUDE_CODE_RESUME_INTERRUPTED_TURN: "1" });
+		for (const id of ["seeded-a", "seeded-b"]) {
+			expect(seen[0].seed).toContain(`"tool_use_id":"${id}"`);
+			expect(seen[0].seed).toContain(`Pi result ${id}`);
+		}
+		// A new user prompt is still the query's input, and never resumes a turn.
+		await f.provider.streamSimple(f.model, context()).result();
+		expect(seen[1].input).toMatchObject({ client_composed: true });
+		expect(seen[1].env).not.toHaveProperty("CLAUDE_CODE_RESUME_INTERRUPTED_TURN");
+	});
+
+	it("fails a resumed turn the CLI never continues instead of waiting out the lease", async () => {
+		vi.useFakeTimers();
+		try {
+			const started = deferred<void>();
+			const f = await fixture(request => ({ close() {}, [Symbol.asyncIterator]: () => (async function* () {
+				await firstInput(request);
+				started.resolve();
+				await new Promise(resolve => request.options.abortController!.signal.addEventListener("abort", resolve, { once: true }));
+			})() }));
+			const call: AssistantMessage = { role: "assistant", api: "claude-sdk", provider: "claude-sdk", model: f.model.id, usage: emptyUsage(), stopReason: "toolUse", timestamp: 2,
+				content: [{ type: "toolCall", id: "stalled", name: "read", arguments: { path: "a" } }] };
+			const ctx = context(); ctx.messages.push(call, ...correlated(call));
+			const pending = f.provider.streamSimple(f.model, ctx).result();
+			await started.promise;
+			await vi.advanceTimersByTimeAsync(119_000);
+			let settled = false; void pending.then(() => { settled = true; });
+			await vi.advanceTimersByTimeAsync(0);
+			expect(settled).toBe(false);
+			// Past the bound; disposal then does real I/O and drains stderr on its own timers.
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.waitFor(async () => { await vi.advanceTimersByTimeAsync(500); expect(settled).toBe(true); }, { timeout: 10_000 });
+			const output = await pending;
+			expect(output.stopReason).toBe("error");
+			expect(output.diagnostics?.[0]).toMatchObject({ error: { message: "Claude SDK did not resume the seeded tool-result turn" }, details: { kind: "provider_refusal", continuation: "rebuilt" } });
 		} finally { vi.useRealTimers(); }
 	});
 });
