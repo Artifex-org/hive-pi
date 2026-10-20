@@ -22,6 +22,7 @@ import type { Usage } from "../../extensions/harness/usage.ts";
 import { backgroundRefusal } from "../../extensions/subagent/background.ts";
 import {
 	backgroundCompletion,
+	backgroundFailure,
 	DelegationAborted,
 	describeAgentForRecovery,
 	requestedAgentNames,
@@ -328,7 +329,7 @@ export async function runSubagentTool(args: Record<string, unknown>, host: Subag
 				spoolResults(host.spool, [result]);
 				const completion = backgroundCompletion(result, jobSignal.aborted);
 				text = jobSignal.aborted
-					? abortedText(jobSignal, jobId, agentName, what)
+					? [abortedText(jobSignal, jobId, agentName, what), completion.summary].filter(Boolean).join("\n\n")
 					: [`Background delegation \`${jobId}\` (${agentName} — ${what}) ${completion.status}${completion.exitCode !== undefined ? ` (exit ${completion.exitCode})` : ""}.`, completion.summary].filter(Boolean).join("\n\n");
 			} catch (error) {
 				if (error instanceof DelegationAborted) {
@@ -338,9 +339,9 @@ export async function runSubagentTool(args: Record<string, unknown>, host: Subag
 					// must hear that the job is gone — otherwise it waits for a
 					// completion that will never come.
 					spoolResults(host.spool, [error.result]);
-					text = abortedText(jobSignal, jobId, agentName, what);
+					text = [abortedText(jobSignal, jobId, agentName, what), backgroundFailure(error).summary].filter(Boolean).join("\n\n");
 				} else {
-					text = `Background delegation \`${jobId}\` (${agentName} — ${what}) failed: the delegation threw: ${error instanceof Error ? error.message : String(error)}`;
+					text = `Background delegation \`${jobId}\` (${agentName} — ${what}) failed: ${backgroundFailure(error).summary}`;
 				}
 			}
 			host.spool.wake(jobId, text);

@@ -127,7 +127,7 @@ export function captureReleaseDiff(cwd: string, target: ReviewTarget): { diff: R
 				// and all decoded content under the artifact's read-coverage gate.
 				if (!gzip) return fail(`unsupported binary asset ${JSON.stringify(path)}: no readable decoded review evidence`);
 				hasBinary = true;
-				const encoded = `\nEncoded gzip blob ${JSON.stringify({ path, revision, blob })}:\n${bytes.toString("base64")}\n`;
+				const encoded = `\nEncoded gzip blob ${JSON.stringify({ path, revision, blob })}:\n${bytes.toString("base64").match(/.{1,76}/g)!.join("\n")}\n`;
 				const plain = gunzipSync(bytes, { maxOutputLength: Math.max(1, cap - Buffer.byteLength(patch + decoded + encoded)) });
 				const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(plain);
 				if (text.includes("\0")) return fail("decoded gzip asset is not reviewable UTF-8 text");

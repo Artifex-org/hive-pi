@@ -65,8 +65,10 @@ import { HIVE_METRIC_CHANNEL, type HiveMetricEvent } from "../hive-telemetry/typ
 import { credentialCheck, type WorkerModelEnv } from "./model.ts";
 import {
 	backgroundCompletion,
+	backgroundFailure,
+	DelegationAborted,
 	describeAgentForRecovery,
-	getFinalOutput,
+	getDisplayOutput,
 	isFailedResult,
 	requestedAgentNames,
 	runAgentWithSchema,
@@ -801,8 +803,20 @@ export default function (pi: ExtensionAPI) {
 					detail: `${agentName}: ${(params.task as string).slice(0, 200)}`,
 				} satisfies BackgroundJobEvent);
 
+				const publishCompletion = (completion: ReturnType<typeof backgroundCompletion>, fingerprint?: string) => {
+					if (completion.summary) {
+						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
+							action: "output", ...jobIdentity, chunk: completion.summary,
+						} satisfies BackgroundJobEvent);
+					}
+					pi.events.emit(BACKGROUND_JOB_CHANNEL, {
+						action: "finish", ...jobIdentity, status: completion.status, exitCode: completion.exitCode,
+						...(completion.status === "done" && fingerprint ? { reviewFingerprint: fingerprint } : {}),
+					} satisfies BackgroundJobEvent);
+				};
+
 				// Deliberately NOT awaited. The floating promise IS the feature; it
-				// is given a terminal `.then` so nothing can reject unhandled and
+				// is given a terminal `.catch` so nothing can reject unhandled and
 				// take the session down with it.
 				//
 				// Through runAgentWithSchema, not runSingleAgent: all three
@@ -830,34 +844,14 @@ export default function (pi: ExtensionAPI) {
 						if (usageByModel.length > 0) {
 							pi.events.emit(HIVE_METRIC_CHANNEL, { kind: "nested_usage", models: usageByModel } satisfies HiveMetricEvent);
 						}
-						const completion = backgroundCompletion(result, controller.signal.aborted);
-						if (completion.summary) {
-							pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-								action: "output",
-								...jobIdentity,
-								chunk: completion.summary,
-							} satisfies BackgroundJobEvent);
-						}
-						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-							action: "finish",
-							...jobIdentity,
-							status: completion.status,
-							exitCode: completion.exitCode,
-							...(result.reviewFingerprint ? { reviewFingerprint: result.reviewFingerprint } : {}),
-						} satisfies BackgroundJobEvent);
+						publishCompletion(backgroundCompletion(result, controller.signal.aborted), result.reviewFingerprint);
 					})
-					.catch((err: unknown) => {
-						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-							action: "output",
-							...jobIdentity,
-							chunk: `The delegation threw: ${(err as Error)?.message ?? String(err)}`,
-						} satisfies BackgroundJobEvent);
-						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-							action: "finish",
-							...jobIdentity,
-							status: "failed",
-							exitCode: 1,
-						} satisfies BackgroundJobEvent);
+					.catch((error: unknown) => {
+						if (error instanceof DelegationAborted) {
+							const usageByModel = subagentUsageByModel([error.result], authModeFor);
+							if (usageByModel.length > 0) pi.events.emit(HIVE_METRIC_CHANNEL, { kind: "nested_usage", models: usageByModel } satisfies HiveMetricEvent);
+						}
+						publishCompletion(backgroundFailure(error));
 					})
 					.finally(() => {
 						backgroundAborts.delete(jobId);
@@ -980,7 +974,7 @@ export default function (pi: ExtensionAPI) {
 				const isError = isFailedResult(r);
 				const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 				const displayItems = getDisplayItems(r.messages);
-				const finalOutput = getFinalOutput(r.messages);
+				const finalOutput = getDisplayOutput(r);
 
 				if (expanded) {
 					const container = new Container();
@@ -1047,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			if (details.mode === "chain") {
-				const successCount = details.results.filter((r) => r.exitCode === 0).length;
+				const successCount = details.results.filter((r) => !isFailedResult(r)).length;
 				const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
 
 				if (expanded) {
@@ -1064,9 +1058,9 @@ export default function (pi: ExtensionAPI) {
 					);
 
 					for (const r of details.results) {
-						const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
-						const finalOutput = getFinalOutput(r.messages);
+						const finalOutput = getDisplayOutput(r);
 
 						container.addChild(new Spacer(1));
 						container.addChild(
@@ -1116,7 +1110,7 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("toolTitle", theme.bold("chain ")) +
 					theme.fg("accent", `${successCount}/${details.results.length} steps`);
 				for (const r of details.results) {
-					const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+					const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -1155,7 +1149,7 @@ export default function (pi: ExtensionAPI) {
 					for (const r of details.results) {
 						const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
 						const displayItems = getDisplayItems(r.messages);
-						const finalOutput = getFinalOutput(r.messages);
+						const finalOutput = getDisplayOutput(r);
 
 						container.addChild(new Spacer(1));
 						container.addChild(

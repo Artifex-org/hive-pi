@@ -33,8 +33,16 @@ export function reviewArtifactText(text: string): { text: string; chunked: boole
 	return { text: JSON.stringify(chunks, null, 2), chunked: true };
 }
 
+/** Stay below read's 50KiB/2000-line limits, including its pagination footer. */
+const PAGE_BYTES = 40 * 1024;
+const PAGE_LINES = 1000;
+export const REVIEW_PAGES_PER_ROUND = 8;
+export interface ReviewPage { offset: number; limit: number }
+
 export class ReviewArtifactReads {
 	private readonly lines: string[];
+	private readonly sizes: number[];
+	readonly pages: ReviewPage[] = [];
 	private readonly covered: Uint8Array;
 	private readonly pending = new Map<string, { start: number; limit?: number }>();
 	private readonly path: string;
@@ -43,7 +51,15 @@ export class ReviewArtifactReads {
 		this.path = artifactReadPath(path, cwd) ?? path;
 		this.cwd = cwd;
 		this.lines = text.split("\n");
+		this.sizes = this.lines.map(line => Buffer.byteLength(line) + 1);
 		this.covered = new Uint8Array(this.lines.length);
+		for (let start = 0; start < this.lines.length;) {
+			let end = start, bytes = 0;
+			while (end < this.lines.length && end - start < PAGE_LINES && bytes + this.sizes[end] <= PAGE_BYTES) bytes += this.sizes[end++];
+			if (end === start) throw new Error("Review artifact contains an unpageable line; encode oversized lines first.");
+			this.pages.push({ offset: start + 1, limit: end - start });
+			start = end;
+		}
 	}
 	observe(event: Record<string, unknown>): void {
 		if (typeof event.toolCallId !== "string" || event.toolName !== "read") return;
@@ -73,6 +89,13 @@ export class ReviewArtifactReads {
 		this.covered.fill(1, page.start, page.start + count);
 	}
 	beginRound(): void { this.pending.clear(); }
+	pagePlan(): string {
+		return this.pages.filter(page => this.covered.slice(page.offset - 1, page.offset - 1 + page.limit).some(value => !value))
+			.slice(0, REVIEW_PAGES_PER_ROUND).map(page => `read offset=${page.offset} limit=${page.limit}`).join("; ");
+	}
+	summary(): string {
+		return `${this.coveredLines()}/${this.lines.length} artifact lines observed; unread ranges: ${this.missingRanges() || "none"}`;
+	}
 	coveredLines(): number { return this.covered.reduce((sum, value) => sum + value, 0); }
 	missingRanges(): string {
 		const ranges: string[] = [];
