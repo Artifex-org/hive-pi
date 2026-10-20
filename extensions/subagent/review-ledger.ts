@@ -1,6 +1,6 @@
 /** Explicit retained-review protocol. Human prose is presentation, never identity. */
 export const REVIEW_LEDGER_INSTRUCTION =
-	'End every report with one unquoted, unfenced line: REVIEW_LEDGER {"complete":false,"findings":[...]}. Set complete:true only after the full semantic review is complete; reads alone are not completion. ' +
+	'Only the FINAL assistant response of each invocation may contain a protocol frame; never put one in progress or tool-call messages. End that response with one unquoted, unfenced line: REVIEW_LEDGER {"complete":false,"findings":[...]}. Set complete:true only after the full semantic review is complete; reads alone are not completion. ' +
 	'For EACH NEW finding include {"id":null,"status":"new","location":"path:line","issue":"full issue","scenario":"full reproduction/interleaving","evidence":"full supporting trace"}. ' +
 	'For EVERY previously assigned ID include {"id":"F1","status":"upheld|resolved|withdrawn","location":"path:line","evidence":"supporting trace and explanation"}. ' +
 	'Use separate new records for independent bugs even at the same location. Put ALL supporting details in the structured fields; they are retained across compaction. ' +
@@ -24,7 +24,7 @@ const nonempty = (value: unknown): value is string => typeof value === "string" 
 const location = (value: unknown): value is string => nonempty(value) && /^[\s\S]+:[1-9]\d*(?:[–-][1-9]\d*)?$/.test(value);
 
 /** Only a real protocol line counts, not an example inside Markdown. */
-function frames(output: string): string[] {
+export function reviewLedgerFrames(output: string): string[] {
 	const found: string[] = [];
 	let fence: { marker: string; length: number } | undefined;
 	for (const line of output.split("\n")) {
@@ -43,7 +43,7 @@ export class ReviewLedger {
 	private records = new Map<string, Finding>();
 	private nextId = 1;
 	apply(output: string): { complete: boolean; valid?: boolean; error?: string; feedback?: string } {
-		const lines = frames(output);
+		const lines = reviewLedgerFrames(output);
 		if (lines.length !== 1) return { complete: false, feedback: "Exactly one real REVIEW_LEDGER protocol line is required; quoted examples and bare ID mentions do not count." };
 		let parsed: unknown;
 		try { parsed = JSON.parse(lines[0]); }

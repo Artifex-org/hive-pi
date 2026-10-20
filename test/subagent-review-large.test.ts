@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { gzipSync } from "node:zlib";
 import { stripVTControlCharacters } from "node:util";
 import { initTheme } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import subagentExtension from "../extensions/subagent/index.ts";
 import { captureReleaseDiff } from "../extensions/subagent/release-review.ts";
 import { captureDeliveryDiff, reviewFingerprint, reviewTaskWithDiff, stampableReview, type GitRunner } from "../extensions/subagent/reviewdiff.ts";
@@ -211,7 +212,7 @@ describe("large delivery review evidence (HIV-3868)", () => {
 		expect(log.prompt).toContain("JSON array of string chunks");
 		expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
 	});
-	it.each(["success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress", "signal", "unfinished", "refusal-fenced", "refusal-indented", "ledger-only", "ledger-incomplete", "malformed", "parallel-large"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
+	it.each(["native-cancel", "claude-cancel", "claude-resolved-cancel", "native-ordinary-cancel", "claude-ordinary-cancel", "success", "no-output", "nonzero", "aborted", "mutated", "missing-session", "no-progress", "signal", "unfinished", "refusal-fenced", "refusal-indented", "ledger-only", "ledger-incomplete", "malformed", "parallel-large"])("resumes an incomplete large review with fail-closed outcome %s", async mode => {
 		writeFileSync(launch.piBin, `#!${process.execPath}
 const fs = require("node:fs");
 const prompt = fs.readFileSync(0, "utf8");
@@ -253,19 +254,92 @@ const patch = fs.readFileSync(patchPath, "utf8");
  if(calls.length && mode === "malformed") record.evidence = "";
  if(!calls.length && mode === "parallel-large") record.scenario += "A".repeat(60000) + "UNIQUE-ORIGINAL-SCENARIO-END";
  const text = human + "\\nREVIEW_LEDGER " + JSON.stringify({complete:!!calls.length && mode !== "ledger-incomplete",findings:[record]});
- const message = {role:"assistant",content:[{type:"text",text}],stopReason:"stop",timestamp:Date.now()};
- if(!calls.length && mode === "nonzero") message.content.push({type:"toolCall",id:"remaining-read",name:"read",arguments:{path:patchPath,offset:1,limit:1}});
+ const message = {role:"assistant",content:[{type:"text",text}],stopReason:"stop",timestamp:Date.now(),provider:"zai",model:"glm-low",usage:{input:10,output:20,cost:{total:0.001}}};
+ if(!calls.length && mode === "nonzero") console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:human},{type:"toolCall",id:"remaining-read",name:"read",arguments:{path:patchPath,offset:1,limit:1}}],stopReason:"toolUse"}}));
  if(calls.length && mode === "aborted") message.stopReason = "aborted";
  if(!(calls.length && mode === "no-output")) session?.appendMessage(message);
  if(mode === "missing-session" && sessionDir) fs.rmSync(sessionDir,{recursive:true,force:true});
  if(mode === "mutated") fs.appendFileSync(${JSON.stringify(join(launch.root,"code0.ts"))}, "export const mutation = true;\\n");
  calls.push({argv,prompt,patchPath,sessionDir,sessionId,prior,next:offset,pid:process.pid}); fs.writeFileSync(callsPath,JSON.stringify(calls));
- if(calls.length === 2 && mode === "signal") { setInterval(() => {}, 1000); console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"ABORT_READY"}],stopReason:"stop"}})); return; }
+ if(calls.length === 2 && ["signal","native-cancel","claude-cancel"].includes(mode)) { setInterval(() => {}, 1000); console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"ABORT_READY"}],stopReason:"stop"}})); return; }
  if(!(calls.length === 2 && mode === "no-output")) console.log(JSON.stringify({type:"message_end",message}));
  if(calls.length === 2 && mode === "nonzero") process.exitCode = 1;
 })().catch(error => { console.error(error); process.exit(1); });
 `);
 		const expected = captureDeliveryDiff(launch.root)!;
+
+		if (mode.includes("cancel")) {
+			const native = mode.startsWith("native-");
+			const ordinary = mode.includes("ordinary");
+			const agent = ordinary ? "research" : "code-reviewer";
+			if (ordinary) writeFileSync(launch.piBin, `#!${process.execPath}
+const fs = require("node:fs");
+fs.readFileSync(0,"utf8");
+console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"ORDINARY-PARTIAL-REPORT"}],stopReason:"stop",provider:"zai",model:"glm-low",usage:{input:10,output:20,cost:{total:0.001}}}}));
+process.stdout.write("", () => fs.writeFileSync(${JSON.stringify(join(launch.root, "patch-log.json"))}, "[{},{}]"));
+setInterval(() => {},1000);
+`);
+			const { BACKGROUND_JOB_CHANNEL, BACKGROUND_CANCEL_CHANNEL } = await import("../extensions/background/channel.ts");
+			const { HIVE_METRIC_CHANNEL } = await import("../extensions/hive-telemetry/types.ts");
+			const { PI_ROLES_RUNTIME, discoverAgents } = await import("../extensions/harness/roles.ts");
+			const { BackgroundJobs, runSubagentTool } = await import("../claude/mcp/subagent-tool.ts");
+			const events: { action?: string; id?: string; status?: string; chunk?: string }[] = [];
+			const wakes: string[] = [], spend: unknown[] = [];
+			const jobs = new BackgroundJobs(line => { throw Error(line); });
+			const pi = createFakePi();
+			let id = "";
+			if (native) {
+				for (const name of discoverAgents(launch.root, "user").agents.find(a => a.name === agent)!.tools ?? []) {
+					pi.api.registerTool({ name, label: name, description: "fixture", parameters: Type.Object({}), execute: async () => ({ content: [], details: {} }) });
+				}
+				subagentExtension(pi.api);
+				pi.api.events.on(BACKGROUND_JOB_CHANNEL, payload => { events.push(payload as typeof events[number]); });
+				pi.api.events.on(HIVE_METRIC_CHANNEL, payload => { spend.push(payload); });
+				const tool = pi.tools.find(t => t.name === "subagent")!.definition as { execute: (...args: unknown[]) => Promise<unknown> };
+				await tool.execute("bg", { agent, task: "Review the change", model: "zai/glm-low", background: true, what: "review" }, undefined, undefined, {
+					mode: "tui", cwd: launch.root, sessionManager: { getSessionId: () => "fixture", getBranch: () => [] },
+					isProjectTrusted: () => true, hasUI: false, modelRegistry: { find: () => ({}) },
+				});
+				expect(events[0]?.action).toBe("start"); id = events[0].id!;
+			} else {
+				const result = await runSubagentTool({ agent, task: "Review the change", model: "zai/glm-low", background: true, what: "review" }, {
+					cwd: launch.root, opMode: () => "build", roles: PI_ROLES_RUNTIME, modelEnv: host().modelEnv!, canWake: true, jobs,
+					spool: {
+						usage: (...args) => {
+							spend.push(args);
+							// Cancel after the worker resolves but before the adapter formats completion.
+							if (mode === "claude-resolved-cancel") expect(jobs.cancel(id)).toBe(true);
+						},
+						gate: () => {}, wake: (_id, text) => { wakes.push(text); },
+					},
+				}, new AbortController().signal);
+				id = result.text.match(/hive-pi-job: (\S+)/)![1];
+			}
+			try {
+				await vi.waitFor(() => {
+					const calls = JSON.parse(readFileSync(join(launch.root, "patch-log.json"), "utf8"));
+					expect(calls).toHaveLength(2);
+				}, { timeout: 10000 });
+				// Round one has already retained the finding; round two is now running.
+				if (native) pi.api.events.emit(BACKGROUND_CANCEL_CHANNEL, { id });
+				else if (mode !== "claude-resolved-cancel") expect(jobs.cancel(id)).toBe(true);
+				await vi.waitFor(() => {
+					if (native) expect(events.some(e => e.action === "finish")).toBe(true);
+					else expect(wakes).toHaveLength(1);
+				}, { timeout: 10000 });
+				const text = native ? events.map(e => e.chunk ?? "").join("\n") : wakes.join("\n");
+				if (ordinary) expect(text).toContain("ORDINARY-PARTIAL-REPORT");
+				else {
+					expect(text).toContain("The caller supplies an unsafe value.");
+					expect(text).toContain("No validation occurs before the return.");
+				}
+				expect(spend).toHaveLength(1);
+				if (native) expect(events.find(e => e.action === "finish")?.status).toBe("canceled");
+				else expect(text).toContain("cancelled at your request");
+			} finally { await pi.emit({ type: "session_shutdown" }); await jobs.stopAll(); }
+			return;
+		}
+
 		if (mode === "signal") {
 			const controller = new AbortController();
 			const controlled = host(); controlled.signal = controller.signal;
@@ -439,4 +513,16 @@ const patch = fs.readFileSync(patchPath, "utf8");
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: exit !== 0, details: { results: outcome.results } });
 		expect(pi.entries).toHaveLength(0);
 	});
+});
+
+it("rejects an earlier mixed ledger before a clean final", async () => {
+	const prior = "REVIEW_LEDGER " + JSON.stringify({ complete: false, findings: [{
+		id: null, status: "new", location: "code0.ts:1", issue: "lost finding", scenario: "MARKER-SCENARIO", evidence: "MARKER-EVIDENCE",
+	}] });
+	artifactWorker("Complete review; no findings.", 0, "all", false, "", { prior });
+	const outcome = await run();
+	expect(outcome.isError).toBe(true);
+	expect(outcome.results[0].reviewFingerprint).toBeUndefined();
+	expect(outcome.text).toContain("MARKER-SCENARIO");
+	expect(outcome.text).toContain("MARKER-EVIDENCE");
 });

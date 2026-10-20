@@ -43,25 +43,36 @@ function fixture(symlink = false, artifactText?: string) {
 const frame = (findings: unknown[] = []) => `REVIEW_LEDGER ${JSON.stringify({ complete: true, findings })}`;
 const fresh = (location: string, issue: string, scenario = "Two callers interleave before publication.") => ({ id: null, status: "new", location, issue, scenario, evidence: "The read occurs before the create-if-absent boundary." });
 const disposition = (id: string, location = "code.ts:7", status = "upheld") => ({ id, status, location, evidence: "Caller permits the failing input; the read precedes publication." });
+const advance = (c: ReviewContinuation, output: string, success: boolean, finished = true) =>
+ c.next([{ role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" }], success, finished);
 const incomplete = `DELIVERY_REVIEW_INCOMPLETE: more\n${frame()}`;
 describe("ReviewContinuation", () => {
+	it.each(["progress", "mixed-final", "tool-stop", "duplicate-final"])("rejects nonauthoritative invocation frames: %s", kind => {
+		const { c, cover } = fixture(); cover();
+		const final = { role: "assistant", content: [{ type: "text", text: frame() }], stopReason: "stop" };
+		const messages = kind === "progress" ? [{ ...final, content: [{ type: "text", text: frame([fresh("code.ts:7", "lost finding")]) }] }, final] :
+			kind === "mixed-final" ? [{ ...final, content: [...final.content, { type: "toolCall", text: "" }] }] :
+			kind === "tool-stop" ? [{ ...final, stopReason: "toolUse" }] :
+			[{ ...final, content: [{ type: "text", text: frame() + "\n" + frame() }] }];
+		expect(c.next(messages, true).error).toContain("invalid ledger protocol");
+	});
 	it("accepts a persisted physical checkout when invoked through its symlink", () => {
 		const { c, cover, persist } = fixture(true); cover(1, 1); persist(incomplete);
-		expect(c.next(incomplete, true).prompt).toContain("Coverage work for this invocation");
+		expect(advance(c, incomplete, true).prompt).toContain("Coverage work for this invocation");
 	});
 	it("requires observed progress and caps small progressing continuations at four", () => {
 		const { c, cover, persist } = fixture(); persist(incomplete);
-		expect(c.next(incomplete, true).error).toContain("no newly observed");
+		expect(advance(c, incomplete, true).error).toContain("no newly observed");
 		for (let round = 1; round <= 4; round++) {
-			cover(round, 1); expect(c.next(incomplete, true).prompt).toContain("Coverage work for this invocation");
-			expect(c.next(incomplete, true).error).toContain(round === 4 ? "budget exhausted" : "no newly observed");
+			cover(round, 1); expect(advance(c, incomplete, true).prompt).toContain("Coverage work for this invocation");
+			expect(advance(c, incomplete, true).error).toContain(round === 4 ? "budget exhausted" : "no newly observed");
 		}
-		cover(5, 1); expect(c.next(incomplete, true).error).toContain("budget exhausted");
+		cover(5, 1); expect(advance(c, incomplete, true).error).toContain("budget exhausted");
 	});
 	it("permits only one conclusion continuation after complete reads", () => {
 		const { c, cover, persist } = fixture(); cover(); persist(incomplete);
-		expect(c.next(incomplete, true).prompt).toContain("Every artifact line has been read");
-		expect(c.next(incomplete, true).error).toContain("semantic conclusion still incomplete");
+		expect(advance(c, incomplete, true).prompt).toContain("Every artifact line has been read");
+		expect(advance(c, incomplete, true).error).toContain("semantic conclusion still incomplete");
 	});
 	it("sizes the bounded budget to pages and preserves five rounds of independent findings", () => {
 		const { c, reads, cover, persist } = fixture(false, ("x".repeat(1000) + "\n").repeat(15000));
@@ -71,12 +82,12 @@ describe("ReviewContinuation", () => {
 			const report = `DELIVERY_REVIEW_INCOMPLETE: more\n${frame([
 				...Array.from({ length: round }, (_, i) => disposition(`F${i + 1}`, `code.ts:${i + 1}`)), fresh(`code.ts:${round + 1}`, `finding ${round}`),
 			])}`;
-			persist(report); const next = c.next(report, true); expect(next.error).toBeUndefined();
+			persist(report); const next = advance(c, report, true); expect(next.error).toBeUndefined();
 			for (let prior = 0; prior <= round; prior++) expect(next.prompt).toContain(`finding ${prior}`);
 		}
 		for (const page of reads.pages.slice(40)) cover(page.offset, page.limit);
 		expect(reads.complete()).toBe(true);
-		expect(c.next(frame(Array.from({ length: 5 }, (_, i) => disposition(`F${i + 1}`, `code.ts:${i + 1}`))), true).findings).toContain("finding 0");
+		expect(advance(c, frame(Array.from({ length: 5 }, (_, i) => disposition(`F${i + 1}`, `code.ts:${i + 1}`))), true).findings).toContain("finding 0");
 	});
 	it("retains original support without duplicating fourteen large cumulative human reports", () => {
 		const { c, reads, cover, persist } = fixture(false, ("x".repeat(1000) + "\n").repeat(15000));
@@ -85,38 +96,38 @@ describe("ReviewContinuation", () => {
 			const report = `DELIVERY_REVIEW_INCOMPLETE: more\n${"large human recap ".repeat(1500)}\npass ${round}\n${frame([
 				round ? disposition("F1") : fresh("code.ts:7", "race", "original support ".repeat(1500)),
 			])}`;
-			persist(report); const next = c.next(report, true);
+			persist(report); const next = advance(c, report, true);
 			expect(next.error).toBeUndefined(); expect(next.prompt).toContain("original support");
 			expect(Buffer.byteLength(next.prompt!)).toBeLessThan(64 * 1024 + 4096);
 		}
 	});
 	it("requires evidence-bearing dispositions for prior IDs before completion", () => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const report = frame([fresh("code.ts:7", "concrete bug")]);
-		persist(report); expect(c.next(report, true).prompt).toContain("code.ts:7"); cover(); persist(frame());
-		expect(c.next(frame(), true).prompt).toContain("F1"); expect(c.next(frame(), true).error).toContain("F1");
-		expect(c.next(frame([disposition("F1", "code.ts:7", "withdrawn")]), true).findings).toContain("concrete bug");
+		persist(report); expect(advance(c, report, true).prompt).toContain("code.ts:7"); cover(); persist(frame());
+		expect(advance(c, frame(), true).prompt).toContain("F1"); expect(advance(c, frame(), true).error).toContain("F1");
+		expect(advance(c, frame([disposition("F1", "code.ts:7", "withdrawn")]), true).findings).toContain("concrete bug");
 	});
 	it.each(["Dockerfile", "src/[id]/page.tsx", "source (copy)/file name"])("retains a finding at valid Git path %s", path => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const report = frame([fresh(`${path}:7`, "concrete bug")]); persist(report);
-		expect(c.next(report, true).prompt).toContain("F1"); cover(); persist(frame());
-		expect(c.next(frame(), true).prompt).toContain(path); expect(c.next(frame(), true).error).toContain("F1");
+		expect(advance(c, report, true).prompt).toContain("F1"); cover(); persist(frame());
+		expect(advance(c, frame(), true).prompt).toContain(path); expect(advance(c, frame(), true).error).toContain("F1");
 	});
 	it("does not collapse independent findings at the same location", () => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const report = frame([fresh("code.ts:7", "race"), fresh("code.ts:7", "data loss")]); persist(report);
-		const next = c.next(report, true); expect(next.prompt).toContain("F1"); expect(next.prompt).toContain("F2");
+		const next = advance(c, report, true); expect(next.prompt).toContain("F1"); expect(next.prompt).toContain("F2");
 		cover(); const partial = frame([disposition("F2", "code.ts:7", "resolved")]); persist(partial);
-		expect(c.next(partial, true).prompt).toContain("F1"); expect(c.next(partial, true).error).toContain("F1");
+		expect(advance(c, partial, true).prompt).toContain("F1"); expect(advance(c, partial, true).error).toContain("F1");
 	});
 	it.each(["```text\nDELIVERY_REVIEW_INCOMPLETE: callers remain\n```", "    DELIVERY_REVIEW_INCOMPLETE: callers remain"])("keeps refusal-only reports incomplete despite required protocol metadata: %s", refusal => {
 		const { c, cover, persist } = fixture(); cover(); const output = `${refusal}\n${frame()}`; persist(output);
-		expect(c.next(output, true).prompt).toContain("Every artifact line");
-		expect(c.next(output, true).error).toContain("semantic conclusion still incomplete");
+		expect(advance(c, output, true).prompt).toContain("Every artifact line");
+		expect(advance(c, output, true).error).toContain("semantic conclusion still incomplete");
 	});
 	it("does not invent phantom IDs from rephrased required human recaps", () => {
 		const { c, cover, persist } = fixture(); cover(); const first = `DELIVERY_REVIEW_INCOMPLETE: integrate\ncode.ts:7 — race\n${frame([fresh("code.ts:7", "race")])}`;
-		persist(first); expect(c.next(first, true).prompt).toContain("F1");
+		persist(first); expect(advance(c, first, true).prompt).toContain("F1");
 		const final = `code.ts:7 — concurrent publication remains unsafe\n${frame([disposition("F1")])}`;
-		const result = c.next(final, true); expect(result.error).toBeUndefined();
+		const result = advance(c, final, true); expect(result.error).toBeUndefined();
 		expect(JSON.parse(result.findings!)).toHaveLength(1);
 	});
 	it.each([
@@ -125,18 +136,18 @@ describe("ReviewContinuation", () => {
 		`> ${frame([disposition("F1")])}`,
 		`    ${frame([disposition("F1")])}`,
 	])("does not reconcile using a bare ID or quoted protocol example: %s", output => {
-		const { c, cover, persist } = fixture(); cover(1, 1); const first = frame([fresh("code.ts:7", "race")]); persist(first); c.next(first, true);
-		cover(); persist(output); expect(c.next(output, true).error).toContain("invalid ledger protocol");
+		const { c, cover, persist } = fixture(); cover(1, 1); const first = frame([fresh("code.ts:7", "race")]); persist(first); advance(c, first, true);
+		cover(); persist(output); expect(advance(c, output, true).error).toContain("invalid ledger protocol");
 	});
 	it("keeps immutable original reproduction support after a noncumulative F2-only report", () => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const first = frame([fresh("code.ts:7", "race", "UNIQUE-ORIGINAL-INTERLEAVING")]);
-		persist(first); c.next(first, true); cover(2, 1); const second = frame([fresh("code.ts:9", "partial group", "UNIQUE-SECOND-SCENARIO")]);
-		persist(second); const next = c.next(second, true);
+		persist(first); advance(c, first, true); cover(2, 1); const second = frame([fresh("code.ts:9", "partial group", "UNIQUE-SECOND-SCENARIO")]);
+		persist(second); const next = advance(c, second, true);
 		expect(next.prompt).toContain("UNIQUE-ORIGINAL-INTERLEAVING"); expect(next.prompt).toContain("UNIQUE-SECOND-SCENARIO");
 	});
 	it("fails explicitly rather than truncating oversized original finding support", () => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const report = frame([fresh("code.ts:7", "race", "x".repeat(70 * 1024))]); persist(report);
-		expect(c.next(report, true).error).toContain("64KiB");
+		expect(advance(c, report, true).error).toContain("64KiB");
 	});
 	it.each(["missing", "wrong-id", "wrong-cwd", "missing-finding", "broken-json"])("refuses an invalid persisted transcript (%s)", kind => {
 		const { c, cover, persist } = fixture(); cover(1, 1); const file = persist(kind === "missing-finding" ? "different report" : incomplete);
@@ -147,14 +158,14 @@ describe("ReviewContinuation", () => {
 			rows[0][kind === "wrong-id" ? "id" : "cwd"] = kind === "wrong-id" ? "not-the-id" : "/wrong/cwd";
 			fs.writeFileSync(file, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
 		}
-		expect(c.next(incomplete, true).error).toContain("matching persisted reviewer transcript");
+		expect(advance(c, incomplete, true).error).toContain("matching persisted reviewer transcript");
 	});
 	it("never retries a failed worker", () => {
-		const { c, cover, persist } = fixture(); cover(1, 1); persist(incomplete); expect(c.next(incomplete, false)).toEqual({});
+		const { c, cover, persist } = fixture(); cover(1, 1); persist(incomplete); expect(advance(c, incomplete, false)).toEqual({});
 	});
 	it("rejects changed evidence even after a complete successful review", () => {
 		const { c, cover, cwd } = fixture(); cover(); fs.writeFileSync(join(cwd, "change.ts"), "export const value = 3;\n");
-		expect(c.next(frame(), true).error).toContain("evidence changed");
+		expect(advance(c, frame(), true).error).toContain("evidence changed");
 	});
 	it("configures private identity and removes all session material on cleanup", () => {
 		const { c, persist } = fixture(); const args = ["--mode", "json", "--no-session"]; c.configure(args);

@@ -929,7 +929,7 @@ export async function runSingleAgent(
 			if (wasAborted) throw new DelegationAborted(currentResult);
 			const output = getFinalOutput(currentResult.messages);
 			if (reviewContinuation) reviewConclusion = reviewConclusionText(output);
-			const next = reviewContinuation?.next(output, !isFailedResult(currentResult), !stoppedMidWork(reviewConclusion ?? output));
+			const next = reviewContinuation?.next(currentResult.messages.slice(roundStart), !isFailedResult(currentResult), !stoppedMidWork(reviewConclusion ?? output));
 			if (next?.error) {
 				currentResult.errorMessage = next.error;
 				currentResult.stopReason = "error";
@@ -1562,6 +1562,12 @@ export interface BackgroundCompletion {
 	status: "done" | "failed" | "canceled";
 	/** Undefined for a canceled run — a killed worker's exit code says nothing about the work. */
 	exitCode: number | undefined;
+}
+
+/** Rejections use the same lossless completion path as resolved cancellations. */
+export function backgroundFailure(error: unknown): BackgroundCompletion {
+	if (error instanceof DelegationAborted) return backgroundCompletion(error.result, true);
+	return { summary: `The delegation threw: ${error instanceof Error ? error.message : String(error)}`, status: "failed", exitCode: 1 };
 }
 
 /**

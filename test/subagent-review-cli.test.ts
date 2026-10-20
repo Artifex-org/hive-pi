@@ -53,7 +53,7 @@ it("the actual CLI resumes the configured private reviewer conversation", async 
 		// transcript that the REAL CLI serialized, not a fixture-authored log.
 		reads.observe({ type: "tool_execution_start", toolName: "read", toolCallId: "page", args: { path: patch, offset: 1, limit: 1 } });
 		reads.observe({ type: "tool_execution_end", toolName: "read", toolCallId: "page", result: { content: [{ type: "text", text: diff.text.split("\n")[0] }] } });
-		const next = continuation.next(first, true);
+		const next = continuation.next([{ role: "assistant", content: [{ type: "text", text: first }], stopReason: "stop" }], true);
 		expect(next.error).toBeUndefined(); expect(next.prompt).toContain("SAME delivery review");
 		expect(await run(next.prompt!)).toContain("Complete cumulative review");
 		expect(requests).toHaveLength(2);

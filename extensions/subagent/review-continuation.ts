@@ -3,9 +3,17 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ReviewArtifactReads, REVIEW_PAGES_PER_ROUND } from "./review-artifact.ts";
-import { ReviewLedger, REVIEW_LEDGER_INSTRUCTION, reviewConclusionText } from "./review-ledger.ts";
+import { ReviewLedger, REVIEW_LEDGER_INSTRUCTION, reviewConclusionText, reviewLedgerFrames } from "./review-ledger.ts";
 import { captureDeliveryDiff, reviewDeclaresIncomplete, reviewFingerprint } from "./reviewdiff.ts";
 import { captureReleaseDiff, type ReviewTarget } from "./release-review.ts";
+
+interface ReviewMessage {
+	role: string;
+	content: string | readonly { type: string; text?: string }[];
+	stopReason?: string;
+}
+const messageText = (message: ReviewMessage): string => typeof message.content === "string" ? message.content :
+	message.content.filter(part => part.type === "text").map(part => part.text ?? "").join("\n");
 
 /** One private reviewer conversation, never a union of independent approvals. */
 export class ReviewContinuation {
@@ -54,9 +62,17 @@ export class ReviewContinuation {
 			return last?.content?.filter((part: { type: string }) => part.type === "text").map((part: { text: string }) => part.text).join("\n") === output;
 		} catch { return false; }
 	}
-	next(output: string, success: boolean, conclusionFinished = true): { prompt?: string; error?: string; findings?: string } {
+	next(invocation: readonly ReviewMessage[], success: boolean, conclusionFinished = true): { prompt?: string; error?: string; findings?: string } {
 		if (!this.unchanged()) return { error: "Delivery review evidence changed during the review." };
 		if (!success) return {};
+		// Only this CLI invocation is authoritative. Prior invocation finals have
+		// already been reconciled and remain valid in the retained conversation.
+		const assistants = invocation.filter(message => message.role === "assistant");
+		const final = assistants.at(-1);
+		if (!final || final.stopReason === "toolUse" || (typeof final.content !== "string" && final.content.some(part => part.type === "toolCall")) ||
+			assistants.slice(0, -1).some(message => reviewLedgerFrames(messageText(message)).length > 0))
+			return { error: "Delivery review incomplete: invalid ledger protocol; REVIEW_LEDGER is allowed only in the final assistant response, never in progress or tool-call messages." };
+		const output = messageText(final);
 		const reconciliation = this.ledger.apply(output);
 		if (reconciliation.error) return { error: `Delivery review incomplete: ${reconciliation.error}` };
 		if (!reconciliation.valid) return { error: `Delivery review incomplete: invalid ledger protocol; ${reconciliation.feedback}` };

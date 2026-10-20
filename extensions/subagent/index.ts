@@ -65,6 +65,8 @@ import { HIVE_METRIC_CHANNEL, type HiveMetricEvent } from "../hive-telemetry/typ
 import { credentialCheck, type WorkerModelEnv } from "./model.ts";
 import {
 	backgroundCompletion,
+	backgroundFailure,
+	DelegationAborted,
 	describeAgentForRecovery,
 	getDisplayOutput,
 	isFailedResult,
@@ -801,8 +803,20 @@ export default function (pi: ExtensionAPI) {
 					detail: `${agentName}: ${(params.task as string).slice(0, 200)}`,
 				} satisfies BackgroundJobEvent);
 
+				const publishCompletion = (completion: ReturnType<typeof backgroundCompletion>, fingerprint?: string) => {
+					if (completion.summary) {
+						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
+							action: "output", ...jobIdentity, chunk: completion.summary,
+						} satisfies BackgroundJobEvent);
+					}
+					pi.events.emit(BACKGROUND_JOB_CHANNEL, {
+						action: "finish", ...jobIdentity, status: completion.status, exitCode: completion.exitCode,
+						...(completion.status === "done" && fingerprint ? { reviewFingerprint: fingerprint } : {}),
+					} satisfies BackgroundJobEvent);
+				};
+
 				// Deliberately NOT awaited. The floating promise IS the feature; it
-				// is given a terminal `.then` so nothing can reject unhandled and
+				// is given a terminal `.catch` so nothing can reject unhandled and
 				// take the session down with it.
 				//
 				// Through runAgentWithSchema, not runSingleAgent: all three
@@ -830,34 +844,14 @@ export default function (pi: ExtensionAPI) {
 						if (usageByModel.length > 0) {
 							pi.events.emit(HIVE_METRIC_CHANNEL, { kind: "nested_usage", models: usageByModel } satisfies HiveMetricEvent);
 						}
-						const completion = backgroundCompletion(result, controller.signal.aborted);
-						if (completion.summary) {
-							pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-								action: "output",
-								...jobIdentity,
-								chunk: completion.summary,
-							} satisfies BackgroundJobEvent);
-						}
-						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-							action: "finish",
-							...jobIdentity,
-							status: completion.status,
-							exitCode: completion.exitCode,
-							...(result.reviewFingerprint ? { reviewFingerprint: result.reviewFingerprint } : {}),
-						} satisfies BackgroundJobEvent);
+						publishCompletion(backgroundCompletion(result, controller.signal.aborted), result.reviewFingerprint);
 					})
-					.catch((err: unknown) => {
-						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-							action: "output",
-							...jobIdentity,
-							chunk: `The delegation threw: ${(err as Error)?.message ?? String(err)}`,
-						} satisfies BackgroundJobEvent);
-						pi.events.emit(BACKGROUND_JOB_CHANNEL, {
-							action: "finish",
-							...jobIdentity,
-							status: "failed",
-							exitCode: 1,
-						} satisfies BackgroundJobEvent);
+					.catch((error: unknown) => {
+						if (error instanceof DelegationAborted) {
+							const usageByModel = subagentUsageByModel([error.result], authModeFor);
+							if (usageByModel.length > 0) pi.events.emit(HIVE_METRIC_CHANNEL, { kind: "nested_usage", models: usageByModel } satisfies HiveMetricEvent);
+						}
+						publishCompletion(backgroundFailure(error));
 					})
 					.finally(() => {
 						backgroundAborts.delete(jobId);
