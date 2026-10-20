@@ -135,6 +135,39 @@ export function goRunPatterns(command: string): string[] {
 	return patterns;
 }
 
+// `go test` flags that take a separate value, so the value is not read as a package.
+const GO_TEST_VALUE_FLAGS = new Set(["-run", "-skip", "-count", "-timeout", "-tags", "-p", "-parallel", "-bench", "-benchtime", "-cpu",
+	"-coverprofile", "-coverpkg", "-covermode", "-o", "-exec", "-vet", "-list", "-shuffle", "-fuzz", "-fuzztime", "-fuzzminimizetime",
+	"-memprofile", "-memprofilerate", "-cpuprofile", "-blockprofile", "-blockprofilerate", "-mutexprofile", "-mutexprofilefraction",
+	"-outputdir", "-trace", "-modfile", "-mod", "-C", "-ldflags", "-gcflags", "-asmflags", "-pkgdir", "-toolexec"]);
+
+/**
+ * The test files one `go test` invocation compiles, as git pathspecs relative to its directory:
+ * a relative package is its own directory, `/...` adds the subtree, no package means `.`.
+ * Null for import paths (their directory is unknown here): the caller scans every test file.
+ */
+export function goTestPathspecs(segment: string): string[] | null {
+	const words = literalWords(segment);
+	if (!words) return null;
+	while (/^\w+=/.test(words[0] ?? "")) words.shift();
+	if (words[0] !== "go" || words[1] !== "test") return null;
+	const packages: string[] = [];
+	for (let i = 2; i < words.length; i++) {
+		const word = words[i];
+		if (word === "-args") break;
+		if (word.startsWith("-")) { if (!word.includes("=") && GO_TEST_VALUE_FLAGS.has(word)) i++; continue; }
+		packages.push(word);
+	}
+	const specs: string[] = [];
+	for (const pkg of packages.length ? packages : ["."]) {
+		if (!/^\.{1,2}(\/|$)/.test(pkg)) return null;
+		const recursive = pkg === "./..." || pkg.endsWith("/...");
+		const dir = (recursive ? pkg.slice(0, -4) : pkg).replace(/\/+$/, "") || ".";
+		specs.push(recursive ? `:(glob)${dir}/**/*_test.go` : `:(glob)${dir}/*_test.go`);
+	}
+	return specs;
+}
+
 export function addedGoTests(diff: string): string[] {
 	return [...new Set([...diff.matchAll(/^\+func (Test[\p{L}\p{Nd}_]*)\s*\(\s*\w+\s+\*testing\.T\s*\)/gmu)].map((m) => m[1]).filter((name) => !/^Test\p{Ll}/u.test(name)))];
 }
@@ -183,8 +216,10 @@ export async function goTestHint(command: string, cwd: string, git: GitRead = gi
 			}
 			if (!head) throw new Error("no declared or conventional base ref");
 			const base = (await scanGit(["merge-base", "HEAD", head], dir)).trim();
-			const diff = await scanGit(["diff", "--no-color", "--no-ext-diff", "--unified=0", base, "--", "*_test.go"], dir);
-			const untracked = (await scanGit(["ls-files", "--others", "--exclude-standard", "--", "*_test.go"], dir)).trim().split("\n").filter(Boolean);
+			// Only the packages this invocation tests: an added test elsewhere is not one it excludes.
+			const scope = goTestPathspecs(segment) ?? ["*_test.go"];
+			const diff = await scanGit(["diff", "--no-color", "--no-ext-diff", "--unified=0", base, "--", ...scope], dir);
+			const untracked = (await scanGit(["ls-files", "--others", "--exclude-standard", "--", ...scope], dir)).trim().split("\n").filter(Boolean);
 			if (untracked.length > 8) throw new Error("more than eight untracked test files");
 			let additions = diff;
 			for (const path of untracked) {
@@ -199,7 +234,7 @@ export async function goTestHint(command: string, cwd: string, git: GitRead = gi
 			const pattern = patterns.at(-1)!;
 			const excluded = excludedGoTests(pattern, names);
 			if (excluded === null) messages.push("Added Go tests found, but this -run pattern is outside the bounded matcher; coverage NOT checked. Run the added tests without -run before delivery.");
-			else if (excluded.length > 0) messages.push(`In ${dir}, -run ${JSON.stringify(pattern)} excludes added tests: ${excluded.join(", ")}. Run them (or omit -run) before delivery; a green selected run does not cover this change.`);
+			else if (excluded.length > 0) messages.push(`In ${dir}, -run ${JSON.stringify(pattern)} excludes tests added in the tested packages: ${excluded.join(", ")}. Run them too, e.g. -run '^(${excluded.join("|")})$' on the same packages, before delivery; a green selected run does not cover this change.`);
 		}
 	} catch (error) {
 		messages.push(`Added-test coverage NOT checked: merge-base/diff scan failed or exceeded its bounded budget (${String(error).slice(0, 160)}). Check added func Test names against -run before delivery.`);
