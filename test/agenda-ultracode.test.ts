@@ -71,6 +71,7 @@ vi.mock("../extensions/agenda/rpc-worker.ts", async (importOriginal) => {
 });
 
 import agenda from "../extensions/agenda/index.ts";
+import loadout from "../extensions/loadout/index.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
 
 let pi: FakePi;
@@ -88,6 +89,13 @@ beforeEach(() => {
 	pi = createFakePi();
 });
 
+/** Call the real `load_tools` the way the model would. */
+async function loadTools(names: string[]) {
+	const tool = pi.tools.find((candidate) => candidate.name === "load_tools");
+	if (!tool) throw new Error("load_tools not registered");
+	return (tool.definition as { execute: (id: string, params: { names: string[] }) => Promise<{ isError?: boolean; content: { text: string }[] }> }).execute("load", { names });
+}
+
 describe("orchestrate is gated behind /ultracode", () => {
 	it("is stripped from the active set on session_start, despite being registered", async () => {
 		agenda(pi.api);
@@ -100,11 +108,71 @@ describe("orchestrate is gated behind /ultracode", () => {
 		expect(pi.activeTools).not.toContain("orchestrate");
 	});
 
-	it("is available by default in a Hive-launched coding-agent session", async () => {
+	// HIV-3906: a plain build-mode launch declared all three (~11.7k characters)
+	// on every request. A launch's consent is standing, so the trio is OFFERED to
+	// load_tools and activated when the model asks — never declared up front.
+	it("is offered, not declared, in a Hive-launched session, and load_tools activates the trio", async () => {
 		vi.stubEnv("HIVE_LAUNCH_ID", "f7ac2065-7b82-44be-a3c1-0cf0f97127b2");
 		agenda(pi.api);
+		loadout(pi.api);
 		await pi.emit({ type: "session_start", reason: "startup" });
+		for (const name of ["orchestrate", "worker_send", "orchestrate_result"]) expect(pi.activeTools).not.toContain(name);
+
+		const result = await loadTools(["orchestrate"]);
+		expect(result.isError).toBe(false);
+		expect(result.content[0].text).toContain("Loaded: orchestrate");
 		expect(pi.activeTools).toEqual(expect.arrayContaining(["orchestrate", "worker_send", "orchestrate_result"]));
+	});
+
+	it("is not offered outside a launch: load_tools cannot activate it without /ultracode", async () => {
+		agenda(pi.api);
+		loadout(pi.api);
+		await pi.emit({ type: "session_start", reason: "startup" });
+		const result = await loadTools(["orchestrate"]);
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain("Not loadable here: orchestrate");
+		expect(pi.activeTools).not.toContain("orchestrate");
+	});
+
+	it("/ultracode off in a launch withdraws the offer, so the model cannot load it straight back", async () => {
+		vi.stubEnv("HIVE_LAUNCH_ID", "f7ac2065-7b82-44be-a3c1-0cf0f97127b2");
+		agenda(pi.api);
+		loadout(pi.api);
+		await pi.emit({ type: "session_start", reason: "startup" });
+		await pi.runCommand("ultracode", "off");
+		expect((await loadTools(["orchestrate"])).isError).toBe(true);
+		expect(pi.activeTools).not.toContain("orchestrate");
+		await pi.runCommand("ultracode", "on");
+		expect(pi.activeTools).toContain("orchestrate");
+	});
+
+	it("a resumed launch that had loaded the trio keeps it", async () => {
+		vi.stubEnv("HIVE_LAUNCH_ID", "f7ac2065-7b82-44be-a3c1-0cf0f97127b2");
+		agenda(pi.api);
+		loadout(pi.api);
+		const loadedBefore = { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "load_tools", arguments: { names: ["orchestrate"] } }] } };
+		await pi.emit({ type: "session_start", reason: "resume" }, { branch: [loadedBefore] as never });
+		expect(pi.activeTools).toEqual(expect.arrayContaining(["orchestrate", "worker_send", "orchestrate_result"]));
+	});
+
+	it("a resumed launch that never asked for it starts without it", async () => {
+		vi.stubEnv("HIVE_LAUNCH_ID", "f7ac2065-7b82-44be-a3c1-0cf0f97127b2");
+		agenda(pi.api);
+		const other = { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "load_tools", arguments: { names: ["session_grep"] } }] } };
+		await pi.emit({ type: "session_start", reason: "resume" }, { branch: [other] as never });
+		expect(pi.activeTools).not.toContain("orchestrate");
+	});
+
+	it("a genuinely NEW launch session starts with the trio offered again, not active", async () => {
+		vi.stubEnv("HIVE_LAUNCH_ID", "f7ac2065-7b82-44be-a3c1-0cf0f97127b2");
+		agenda(pi.api);
+		loadout(pi.api);
+		await pi.emit({ type: "session_start", reason: "startup" });
+		await loadTools(["orchestrate"]);
+		await pi.emit({ type: "session_start", reason: "new" });
+		expect(pi.activeTools).not.toContain("orchestrate");
+		expect((await loadTools(["orchestrate"])).isError).toBe(false);
+		expect(pi.activeTools).toContain("orchestrate");
 	});
 
 	it("is stripped again on RELOAD, which re-activates every registered tool", async () => {

@@ -9,17 +9,23 @@
  * So this extension does two things:
  *
  *   - `load_tools` activates deferred tools by EXACT name. pi's `tool_search`
- *     can load them too, but it ranks with BM25 and loads its top hits:
- *     measured over the real registrations, `artifact_read` ranks
- *     `artifact_list` first and `orchestrate` ranks `orchestrate_result` first.
- *     A loader that takes names cannot pick the wrong one.
+ *     ranks with BM25 and loads its top hits: measured over the real
+ *     registrations, `artifact_read` ranks `artifact_list` first and
+ *     `orchestrate` ranks `orchestrate_result` first, and in the HIV-3906 eval
+ *     one keyword search loaded 8 unrelated hive tools (13.7k characters) and
+ *     forced a 142k-token cache rewrite. So this extension turns `tool_search`
+ *     into discovery only: its matches are un-loaded again before the model
+ *     sees the result, which names them and points at `load_tools`. pi core's
+ *     tool is not forked; the wrapper is a `tool_call`/`tool_result` pair.
  *   - the system prompt names every deferred harness tool, a few hundred
  *     characters instead of ~45k of definitions. The list is the same whether
  *     or not a tool has been loaded, so the cached prompt prefix survives.
  *
- * Only `deferred` tools load here. A tool kept inactive by its owner until
- * consent is registered `direct` (see GATED_TOOLS), so this loader cannot reach
- * it. Neither can a `hidden` one.
+ * Only `deferred` tools load here, plus a gated tool its owner OFFERS (see
+ * GATED_OFFER_CHANNEL): for those `load_tools` asks the owner, which activates
+ * it through its own gate or declines. A gated tool nobody offers is
+ * registered `direct` and inactive, so this loader cannot reach it. Neither can
+ * a `hidden` one.
  *
  * MCP tools are not listed: pi's built-in MCP describes each server in its own
  * prompt section, and `tool_search` is the way to them. Mode tools are not
@@ -29,29 +35,60 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { exposureFor, LOAD_TOOL, MODE_TOOLS } from "./policy.ts";
+import { exposureFor, GATED_LOAD_REQUEST_CHANNEL, GATED_OFFER_CHANNEL, type GatedToolsEvent, LOAD_TOOL, MODE_TOOLS } from "./policy.ts";
 
 export { LOAD_TOOL };
 
-type ToolLike = { name: string; exposure?: string };
+/** pi core's discovery tool (`extensions/tool-search`), wrapped below rather than forked. */
+const TOOL_SEARCH = "tool_search";
 
-/** The deferred harness tools worth naming, sorted for a stable prompt. */
-export function deferredToolNames(tools: readonly ToolLike[]): string[] {
+type ToolLike = { name: string; exposure?: string; description?: string };
+
+/**
+ * The on-demand harness tools worth naming, sorted for a stable prompt: every
+ * deferred one, plus the gated tools their owner offers. Offered names stay
+ * listed after they load, like deferred ones, so the prompt does not change.
+ */
+export function deferredToolNames(tools: readonly ToolLike[], offered: ReadonlySet<string> = new Set()): string[] {
 	return tools
-		.filter((tool) => tool.exposure === "deferred" && !tool.name.startsWith("mcp__") && !(tool.name in MODE_TOOLS))
+		.filter(
+			(tool) =>
+				(tool.exposure === "deferred" && !tool.name.startsWith("mcp__") && !(tool.name in MODE_TOOLS)) ||
+				(tool.exposure === "direct" && offered.has(tool.name)),
+		)
 		.map((tool) => tool.name)
 		.sort();
 }
 
 /**
  * `tool_search` ranks with BM25, so an exact name can come back behind an
- * unrelated tool, and `limit: 1` then loads the wrong one. A known name goes
- * straight to `load_tools`, which takes names and cannot pick a neighbour.
+ * unrelated tool. Here it only finds names (see `searchResultText`); loading
+ * is always `load_tools`, which takes names and cannot pick a neighbour.
  */
 export const EXACT_NAME_LOADING =
-	"For a deferred MCP tool whose exact name (`mcp__<server>__<tool>`) you know, pass it to `load_tools`; use " +
-	"`tool_search` only to discover names, and never with `limit: 1` (the top hit is often a different tool). " +
+	"For a deferred MCP tool whose exact name (`mcp__<server>__<tool>`) you know, pass it to `load_tools`. " +
+	"`tool_search` only finds names and loads nothing: pass the ones you need to `load_tools`. " +
 	"A tool exposed to codemode needs no loading: call it as `tools.mcp__<server>__<tool>(...)` inside a script.";
+
+/**
+ * What a `tool_search` call returns once this extension has un-loaded its
+ * matches: the names, each with its description's first line, and how to
+ * load one by exact name. Pure, for the hook and its test.
+ */
+export function searchResultText(found: readonly string[], tools: readonly ToolLike[]): string {
+	if (found.length === 0) return "No matching tools found.";
+	const byName = new Map(tools.map((tool) => [tool.name, tool]));
+	const lines = found.map((name) => {
+		const summary = (byName.get(name)?.description ?? "").trim().split(/\r?\n/)[0];
+		return summary ? `- ${name}: ${summary}` : `- ${name}`;
+	});
+	return [
+		`Found ${found.length} tool${found.length === 1 ? "" : "s"}; none is loaded yet:`,
+		...lines,
+		`Load only the ones this task needs, by exact name: \`${LOAD_TOOL}\` with ` +
+			`\`${JSON.stringify({ names: [found[0]] })}\`. They are callable from your next turn.`,
+	].join("\n");
+}
 
 /**
  * A codemode script that calls `tools.tool_search` / `tools.describeTool` fails
@@ -116,11 +153,17 @@ export const CODEMODE_SCRIPT_GUIDANCE = [
 	"- Calls made before a script fails have already run. Use `Promise.allSettled` for independent calls and inspect effects before retrying.",
 ].join("\n");
 
-/** What `load_tools` does with a list of names: pure, for the tool and its test. */
+/**
+ * What `load_tools` does with a list of names: pure, for the tool and its test.
+ * Loadable: `deferred` tools, `codemode` ones (pi's default MCP exposure, which
+ * `tool_search` used to load and now only names), and an offered gated tool,
+ * for which the tool asks its owner rather than activating it.
+ */
 export function planLoad(
 	requested: readonly string[],
 	tools: readonly ToolLike[],
 	active: readonly string[],
+	offered: ReadonlySet<string> = new Set(),
 ): { load: string[]; already: string[]; refused: string[] } {
 	const byName = new Map(tools.map((tool) => [tool.name, tool]));
 	const load: string[] = [];
@@ -131,7 +174,7 @@ export function planLoad(
 		if (!name || load.includes(name) || already.includes(name) || refused.includes(name)) continue;
 		const tool = byName.get(name);
 		if (active.includes(name)) already.push(name);
-		else if (tool?.exposure === "deferred") load.push(name);
+		else if (tool?.exposure === "deferred" || tool?.exposure === "codemode" || (tool && offered.has(name))) load.push(name);
 		else refused.push(name);
 	}
 	return { load, already, refused };
@@ -145,11 +188,19 @@ export function planLoad(
  */
 export function mcpHint(pi: Pick<ExtensionAPI, "getAllTools">): string {
 	return pi.getAllTools().some((tool) => tool.name === "tool_search")
-		? `MCP tools load with tool_search outside codemode; inside scripts use await searchTools(query). ${EXACT_NAME_LOADING}`
+		? `Find MCP tool names with tool_search outside codemode (inside scripts use await searchTools(query)), then load them with load_tools. ${EXACT_NAME_LOADING}`
 		: "this session has no MCP servers configured (no ~/.pi/agent/mcp.json), so there are no MCP tools to load.";
 }
 
 export default function loadout(pi: ExtensionAPI) {
+	/** Gated tools their owner currently offers to `load_tools` (GATED_OFFER_CHANNEL). */
+	let offered = new Set<string>();
+	/** Names the model asked `load_tools` for: a concurrent `tool_search` never un-loads them. */
+	const requested = new Set<string>();
+	pi.events.on(GATED_OFFER_CHANNEL, (data) => {
+		offered = new Set((data as GatedToolsEvent | undefined)?.names ?? []);
+	});
+
 	pi.registerTool({
 		name: LOAD_TOOL,
 		exposure: exposureFor(LOAD_TOOL),
@@ -161,8 +212,18 @@ export default function loadout(pi: ExtensionAPI) {
 			names: Type.Array(Type.String(), { minItems: 1, description: "Exact tool names, e.g. [\"session_grep\"]." }),
 		}),
 		async execute(_id, params) {
-			const { load, already, refused } = planLoad(params.names, pi.getAllTools(), pi.getActiveTools());
-			if (load.length > 0) pi.setActiveTools([...pi.getActiveTools(), ...load]);
+			const planned = planLoad(params.names, pi.getAllTools(), pi.getActiveTools(), offered);
+			for (const name of [...planned.load, ...planned.already]) requested.add(name);
+			const { already } = planned;
+			const gated = planned.load.filter((name) => offered.has(name));
+			// The owner decides, synchronously on the bus; whatever it did not
+			// activate is reported as not loadable.
+			if (gated.length > 0) pi.events.emit(GATED_LOAD_REQUEST_CHANNEL, { names: gated } satisfies GatedToolsEvent);
+			const deferred = planned.load.filter((name) => !offered.has(name));
+			if (deferred.length > 0) pi.setActiveTools([...pi.getActiveTools(), ...deferred]);
+			const nowActive = pi.getActiveTools();
+			const load = planned.load.filter((name) => nowActive.includes(name));
+			const refused = [...planned.refused, ...gated.filter((name) => !nowActive.includes(name))];
 			const lines: string[] = [];
 			if (load.length > 0) lines.push(`Loaded: ${load.join(", ")}. Call them from your next turn.`);
 			if (already.length > 0) lines.push(`Already available: ${already.join(", ")}.`);
@@ -177,11 +238,36 @@ export default function loadout(pi: ExtensionAPI) {
 		},
 	});
 
+	// tool_search as discovery only. pi's tool activates its matches inside
+	// execute; the active set before the call is the one to give back. Keyed by
+	// call id because a batch may hold several searches. Only when `load_tools`
+	// is declared: a worker restricted by `--tools` to `tool_search` has no other
+	// way to load anything, so there pi's own behaviour stands.
+	const beforeSearch = new Map<string, string[]>();
 	pi.on("tool_call", (event) => {
+		if (event.toolName === TOOL_SEARCH) {
+			const active = pi.getActiveTools();
+			if (active.includes(LOAD_TOOL)) beforeSearch.set(event.toolCallId, active);
+			return;
+		}
 		if (event.toolName !== "codemode") return;
 		const code = (event.input as { code?: unknown } | undefined)?.code;
 		const reason = typeof code === "string" ? codemodeDiscoveryMisuse(code) : null;
 		return reason ? { block: true, reason } : undefined;
+	});
+	pi.on("tool_result", (event) => {
+		if (event.toolName !== TOOL_SEARCH) return;
+		const before = beforeSearch.get(event.toolCallId);
+		beforeSearch.delete(event.toolCallId);
+		const loaded = (event.details as { loaded?: unknown } | undefined)?.loaded;
+		if (!before || !Array.isArray(loaded) || event.isError) return;
+		const found = loaded.filter((name): name is string => typeof name === "string");
+		const added = found.filter((name) => !before.includes(name) && !requested.has(name));
+		if (added.length > 0) pi.setActiveTools(pi.getActiveTools().filter((name) => !added.includes(name)));
+		return {
+			content: [{ type: "text" as const, text: searchResultText(found, pi.getAllTools()) }],
+			details: { loaded: [], found },
+		};
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -189,7 +275,7 @@ export default function loadout(pi: ExtensionAPI) {
 		// Only when the loader itself is declared: a role worker restricted by
 		// `--tools` has no way to load anything, and its grants are already active.
 		const sections = [
-			active.includes(LOAD_TOOL) ? loadoutPrompt(deferredToolNames(pi.getAllTools())) : "",
+			active.includes(LOAD_TOOL) ? loadoutPrompt(deferredToolNames(pi.getAllTools(), offered)) : "",
 			active.includes("codemode") ? CODEMODE_SCRIPT_GUIDANCE : "",
 		].filter(Boolean);
 		if (sections.length === 0) return;

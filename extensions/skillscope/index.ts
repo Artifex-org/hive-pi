@@ -12,12 +12,13 @@
  * prompt is advisory, the call is where enforcement happens. Here that is:
  *
  *   ADVISORY   `before_agent_start` hands us `systemPromptOptions.skills` (the
- *              full loaded list) and lets us return a replacement systemPrompt.
- *              pi appends the skills block verbatim as
- *              `formatSkillsForPrompt(skills)`, so re-formatting the auto subset
- *              and splicing it over the original removes the descriptions of
- *              everything else from the prompt. That is the attention saving —
- *              the actual point of the feature.
+ *              full loaded list). While the prompt is structured, pi renders
+ *              its `<skills>` section from that list, so we hand it the auto
+ *              subset; once a handler has forced a full string, we re-format
+ *              the auto subset and splice it over pi's block
+ *              (`swapSkillsSection`). Either way the descriptions of everything
+ *              else leave the prompt. That is the attention saving — the
+ *              actual point of the feature.
  *
  *   ENFORCEMENT `tool_call` on `read`. The prompt block tells the model to
  *              auto-select a skill BY READING ITS SKILL.md, so refusing that one
@@ -45,24 +46,29 @@
  * factory, never in a handler.
  */
 
-import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { formatSkillsForPrompt, isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext, Skill } from "@earendil-works/pi-coding-agent";
 
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
+import { isUnattendedHiveLaunch } from "../hive-common/launch.ts";
 import {
 	blockedReadReason,
 	blockedSkillRead,
 	describeScopes,
 	EMPTY_CONFIG,
 	isConfigured,
+	launchDefaultConfig,
+	type LaunchScope,
 	mergeScopeConfigs,
 	parseScopeConfig,
 	partitionSkills,
-	swapSkillsBlock,
+	swapSkillsSection,
 	type ScopeConfig,
 	type SkillPartition,
 } from "./scope.ts";
@@ -93,6 +99,52 @@ export interface ScopeSources {
 	 * mistaken for a skill named "enabled".
 	 */
 	readonly enabled: boolean;
+	/**
+	 * Set in a Hive task launch: the launch's default scope (`launchDefaultConfig`)
+	 * then sits UNDER both files, so a launch lists only what the task can use
+	 * while an operator's own sessions keep their exact behaviour.
+	 */
+	readonly launch?: LaunchScope | null;
+}
+
+/** The skills this package ships: `<package>/skills/<name>/SKILL.md`. */
+function ownSkillNames(): Set<string> {
+	const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
+	try {
+		return new Set(
+			readdirSync(dir, { withFileTypes: true })
+				.filter((entry) => entry.isDirectory() && existsSync(join(dir, entry.name, "SKILL.md")))
+				.map((entry) => entry.name),
+		);
+	} catch {
+		return new Set();
+	}
+}
+
+/**
+ * Where a launch runs, from git: the checkout's top level and the repository's
+ * name. The name comes from the COMMON git dir, because a launch works in a
+ * worktree whose directory is named for its branch (`~/repos/hive.git` →
+ * `hive`; a plain clone's `<repo>/.git` → `<repo>`).
+ */
+function resolveLaunchScope(cwd: string): LaunchScope {
+	let repoRoot: string | null = null;
+	let repoName: string | null = null;
+	try {
+		const [top, common] = execFileSync("git", ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 2_000,
+		})
+			.trim()
+			.split("\n");
+		repoRoot = top || null;
+		if (common) repoName = basename(common) === ".git" ? basename(dirname(common)) : basename(common).replace(/\.git$/, "");
+	} catch {
+		// Not a repository (or no git): only the package's own and Hive's workflow skills match.
+	}
+	return { repoRoot, repoName, ownSkillNames: ownSkillNames() };
 }
 
 /**
@@ -115,6 +167,7 @@ function loadSources(cwd: string): ScopeSources {
 		// weakens a control the user set, and the project file is already the
 		// less-trusted of the two.
 		enabled: userRaw?.enabled !== false,
+		launch: isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID) ? resolveLaunchScope(cwd) : null,
 	};
 }
 
@@ -167,6 +220,10 @@ export function wireSkillScope(pi: ExtensionAPI, sources: ScopeSources): void {
 	// we expand it the same way (see `normalizeReadPath`).
 	const homeDir = homedir();
 
+	/** The config in force for this skill list: the launch default under the files. */
+	const effectiveConfig = (skills: readonly Skill[]): ScopeConfig =>
+		sources.launch ? mergeScopeConfigs(launchDefaultConfig(skills, sources.launch), config) : config;
+
 	pi.on("session_start", (_event, ctx) => {
 		// pi itself refuses to LOAD project skills from an untrusted checkout; a
 		// project file that re-scopes them deserves the same bar.
@@ -182,12 +239,12 @@ export function wireSkillScope(pi: ExtensionAPI, sources: ScopeSources): void {
 	/* ---------------------------------------------------------------------- */
 
 	pi.on("before_agent_start", (event) => {
-		if (!isConfigured(config)) return;
+		if (!sources.launch && !isConfigured(config)) return;
 		const skills = event.systemPromptOptions.skills;
 		if (!skills || skills.length === 0) return;
 
 		if (!cache || cache.skills !== skills) {
-			const partition = partitionSkills(skills, config);
+			const partition = partitionSkills(skills, effectiveConfig(skills));
 			cache = {
 				skills,
 				partition,
@@ -199,14 +256,22 @@ export function wireSkillScope(pi: ExtensionAPI, sources: ScopeSources): void {
 			};
 		}
 
+		// pi ≥ 1.1 renders the prompt from these options until a handler forces a
+		// full string, so while nothing has, handing pi the auto subset IS the
+		// scoping, and the prompt stays structured. A forced prompt is opaque:
+		// that one is spliced below.
+		const structured = event.systemPromptOptions.forceSystemPrompt === undefined;
+		if (structured && cache.partition.auto.length !== skills.length) event.systemPromptOptions.skills = cache.partition.auto;
+
 		// Deterministic for a given skill list and config, which is what keeps the
 		// prompt prefix cacheable across turns. A replacement that varied per turn
 		// would cost a full cache miss on every request.
-		const swapped = swapSkillsBlock(event.systemPrompt, cache.before, cache.after);
+		const swapped = swapSkillsSection(event.systemPrompt, cache.before, cache.after);
 		if (swapped === event.systemPrompt) {
-			// Unchanged for one of two very different reasons: there was nothing to
-			// remove (every skill is auto), or the block was not where pi puts it.
-			promptSwapFailed = cache.before !== cache.after;
+			// Unchanged for one of three reasons: there was nothing to remove (every
+			// skill is auto), the structured prompt already re-rendered without it,
+			// or the block was not where pi puts it.
+			promptSwapFailed = cache.before !== cache.after && !structured;
 			return;
 		}
 		promptSwapFailed = false;
@@ -242,8 +307,9 @@ export function wireSkillScope(pi: ExtensionAPI, sources: ScopeSources): void {
 				`project config: ${sources.projectPath}${
 					isConfigured(sources.project) ? (projectApplied ? "" : " (present, NOT applied: project not trusted)") : " (absent or empty)"
 				}`,
+				...(sources.launch ? ["launch default: on (Hive task launch; the files above override it per key)"] : []),
 				"",
-				...(skills.length === 0 ? ["no skills loaded"] : describeScopes(skills, config)),
+				...(skills.length === 0 ? ["no skills loaded"] : describeScopes(skills, effectiveConfig(skills))),
 			];
 			if (promptSwapFailed) {
 				lines.push(

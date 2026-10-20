@@ -294,3 +294,97 @@ export function describeScopes(skills: readonly SkillLike[], config: ScopeConfig
 	const width = skills.reduce((max, skill) => Math.max(max, skill.name.length), 0);
 	return skills.map((skill) => `${skill.name.padEnd(width)}  ${resolveScope(skill.name, config)}`);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Hive launches: a default scope for a task-shaped session                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Hive's own workflow skills: what a launched coding task reaches for whatever
+ * the repository — running the gate, tickets and the board, handing off,
+ * driving the browser, fixing a red PR, reaching a host, reading Sentry,
+ * working in a team. Names that are not installed cost nothing.
+ */
+export const LAUNCH_WORKFLOW_SKILLS: ReadonlySet<string> = new Set([
+	"browser-use",
+	"fix-pr-checks",
+	"hive-check",
+	"hive-consolidate",
+	"hive-doctor",
+	"hive-handoff",
+	"hive-tickets",
+	"sentry",
+	"ssh-hosts",
+	"swarm",
+	"team-fixer",
+	"team-lead",
+	"team-reviewer",
+	"team-worker",
+]);
+
+/** What a launch knows about where it runs; resolved once, in the factory. */
+export interface LaunchScope {
+	/** The repository's name (`hive` for `~/repos/hive.git` and all its worktrees), or null. */
+	readonly repoName: string | null;
+	/** The checkout's top level, or null outside a repository. */
+	readonly repoRoot: string | null;
+	/** Names of the skills this harness package ships. */
+	readonly ownSkillNames: ReadonlySet<string>;
+}
+
+/** `ASFAM-PMware` → asfam, pmware. Short tokens are dropped: `pi` would match too much. */
+export function repoTokens(repoName: string | null): Set<string> {
+	if (!repoName) return new Set();
+	return new Set(
+		repoName
+			.toLowerCase()
+			.split(/[^a-z0-9]+/)
+			.filter((token) => token.length >= 3),
+	);
+}
+
+/**
+ * The default scope of a Hive task launch, as a config the user's and the
+ * project's files override per key (their `default` included).
+ *
+ * MEASURED (HIV-3906 eval, a hive-repo launch): 48 skills, 37.5k characters of
+ * `<skills>` listing, a quarter of them for a trading system and the rest
+ * office formats, desktop configuration and CAD — every one competing with the
+ * task on every request. Claude Code's own launch carried a fraction of that.
+ *
+ * `auto` for: the skills this harness ships, Hive's workflow skills, skills
+ * that live inside the checkout (the project's own), and skills named for the
+ * repository (`asfam-*` in ASFAM-PMware, `hive-*` in hive). Everything else is
+ * `manual`: not listed, and still a `/skill:<name>` away for the operator.
+ */
+export function launchDefaultConfig(skills: readonly SkillPaths[], launch: LaunchScope): ScopeConfig {
+	const tokens = repoTokens(launch.repoName);
+	const bySkill = new Map<string, SkillScope>([[DEFAULT_KEY, "manual"]]);
+	for (const skill of skills) {
+		const prefix = skill.name.toLowerCase().split(/[^a-z0-9]+/)[0] ?? "";
+		const relevant =
+			launch.ownSkillNames.has(skill.name) ||
+			LAUNCH_WORKFLOW_SKILLS.has(skill.name) ||
+			(launch.repoRoot !== null && isInsideDir(launch.repoRoot, skill.filePath)) ||
+			tokens.has(prefix);
+		if (relevant) bySkill.set(skill.name, "auto");
+	}
+	return { bySkill };
+}
+
+/**
+ * Replace the skills listing in a rendered prompt, in either shape pi has used.
+ *
+ * pi ≥ 1.1 renders it as a `<skills>` section of the TRIMMED block; before that
+ * it was appended verbatim with two leading newlines. The trimmed form is tried
+ * first, and an empty replacement removes the whole section rather than leaving
+ * an empty tag. Unchanged when neither form is found (see `swapSkillsBlock`).
+ */
+export function swapSkillsSection(prompt: string, before: string, after: string): string {
+	if (!before || before === after) return prompt;
+	const section = (block: string) => `<skills>\n${block.trim()}\n</skills>`;
+	if (prompt.includes(section(before))) {
+		return swapSkillsBlock(prompt, section(before), after.trim() ? section(after) : "");
+	}
+	return swapSkillsBlock(prompt, before, after);
+}

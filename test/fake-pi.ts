@@ -417,7 +417,13 @@ export function createFakePi(): FakePi {
 		setLabel() {},
 		exec: async () => ({ stdout: "", stderr: "", code: 0 }),
 		getActiveTools: () => [...activeTools],
-		getAllTools: () => tools.map((t) => ({ name: t.name, exposure: (t.definition.exposure as string | undefined) ?? "direct" })),
+		getAllTools: () =>
+			tools.map((t) => ({
+				name: t.name,
+				description: (t.definition.description as string | undefined) ?? "",
+				parameters: t.definition.parameters,
+				exposure: (t.definition.exposure as string | undefined) ?? "direct",
+			})),
 		setActiveTools(names: string[]) {
 			activeTools = [...names];
 			activeToolsHistory.push([...names]);

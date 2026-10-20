@@ -147,7 +147,7 @@ import { randomUUID } from "node:crypto";
 import { DurableRunRegistry, type DurableRunResult } from "./run-registry.ts";
 import { nodeResultText, pageText, renderRunResults, RESULT_PAGE_CHARS, selectableNodes } from "./run-output.ts";
 import { configPathFor, readJSON } from "../hive-common/identity.ts";
-import { exposureFor, LOAD_TOOL } from "../loadout/policy.ts";
+import { exposureFor, GATED_LOAD_REQUEST_CHANNEL, GATED_OFFER_CHANNEL, type GatedToolsEvent, LOAD_TOOL } from "../loadout/policy.ts";
 import { isSdkPilotEnv } from "../fast/policy.ts";
 
 /**
@@ -170,6 +170,25 @@ const WORKER_SEND_TOOL = "worker_send";
 
 /** Pull status or retained output for a background durable run. */
 const ORCHESTRATE_RESULT_TOOL = "orchestrate_result";
+
+/**
+ * Whether this branch already asked for orchestration: called one of the trio,
+ * or named `orchestrate` in a `load_tools` call. Read on resume, so a launch
+ * that loaded the trio keeps it.
+ */
+export function orchestrationRequested(entries: readonly unknown[]): boolean {
+	const trio = [ORCHESTRATE_TOOL, WORKER_SEND_TOOL, ORCHESTRATE_RESULT_TOOL];
+	return entries.some((raw) => {
+		const message = (raw as { type?: string; message?: { role?: string; content?: unknown } } | undefined)?.message;
+		if (message?.role !== "assistant" || !Array.isArray(message.content)) return false;
+		return message.content.some((part: { type?: string; name?: unknown; arguments?: { names?: unknown } }) => {
+			if (part?.type !== "toolCall") return false;
+			if (typeof part.name === "string" && trio.includes(part.name)) return true;
+			const requested = part.name === LOAD_TOOL ? part.arguments?.names : undefined;
+			return Array.isArray(requested) && requested.some((name) => trio.includes(name as string));
+		});
+	});
+}
 
 /** What a background run's completion notification volunteers, unasked. */
 const NOTIFY_PAGE_CHARS = 6_000;
@@ -474,9 +493,11 @@ export default function (pi: ExtensionAPI) {
 			loop = null;
 			conductor = null;
 			attended = false;
-			ultracodeOn = hiveLaunched;
+			ultracodeOn = false;
+			orchestrationDeclined = false;
 			syncWakeTool();
 			syncOrchestrateTool();
+			offerOrchestration();
 			return;
 		}
 		try {
@@ -492,6 +513,9 @@ export default function (pi: ExtensionAPI) {
 			conductor = rehydrateConductor(entries);
 			attended = rehydrateAttended(entries);
 			heardUserMessage = entries.some((raw) => (raw as { message?: { role?: string } } | undefined)?.message?.role === "user");
+			// A resumed launch that had loaded orchestration keeps it: its next
+			// `worker_send` or `orchestrate_result` must not hit a missing tool.
+			if (orchestrationOffered && !orchestrationDeclined && orchestrationRequested(entries)) ultracodeOn = true;
 		} catch {
 			goal = null;
 			loop = null;
@@ -503,6 +527,7 @@ export default function (pi: ExtensionAPI) {
 		// exists. This handler is that point.
 		syncWakeTool();
 		syncOrchestrateTool();
+		offerOrchestration();
 		paintConductor();
 	});
 
@@ -1589,10 +1614,15 @@ export default function (pi: ExtensionAPI) {
 		return { cancel: true };
 	});
 
-	// A Hive launch is already an operator-authorized coding-agent task. Exposing
-	// orchestration lets task shape decide whether to use it; a human's own TUI
-	// still opts in through plan approval or `/ultracode on`.
-	let ultracodeOn = hiveLaunched;
+	// Whether the trio is ACTIVE (declared to the model). Consent is separate:
+	// a human's own TUI opts in through plan approval or `/ultracode on`, and a
+	// Hive launch is already an operator-authorized coding-agent task, so there
+	// consent is standing. Standing consent used to mean "active from the first
+	// request", which declared ~11.7k characters of orchestration schema in
+	// every plain build-mode launch (HIV-3906). Now a launch OFFERS the trio to
+	// loadout's `load_tools` and activates it when the model asks, so task shape
+	// still decides and a task that never fans out does not pay for it.
+	let ultracodeOn = false;
 
 	// Lives in the factory closure, never at module scope: pi builds a fresh jiti
 	// per extension entry, so a module-level registry would fork silently and
@@ -1603,20 +1633,43 @@ export default function (pi: ExtensionAPI) {
 	const announceDurableRuns = () =>
 		announceOwnWork(pi, "orchestrate", runs.list().filter((run) => run.status === "running").length);
 
+	// The trio moves together: worker_send addresses workers only an orchestrate
+	// run creates, so offering it alone is a tool that can only ever answer "no
+	// such worker".
+	const ORCHESTRATION_TOOLS = [ORCHESTRATE_TOOL, WORKER_SEND_TOOL, ORCHESTRATE_RESULT_TOOL];
+
 	/** Keep `orchestrate` in the active set exactly while /ultracode is on. */
 	const syncOrchestrateTool = () => {
 		try {
-			const active = pi.getActiveTools();
-			// Both tools move together: worker_send addresses workers only an
-			// orchestrate run creates, so offering it alone is a tool that can only
-			// ever answer "no such worker".
-			const gated = [ORCHESTRATE_TOOL, WORKER_SEND_TOOL, ORCHESTRATE_RESULT_TOOL];
-			const without = active.filter((name) => !gated.includes(name));
-			pi.setActiveTools(ultracodeOn ? [...without, ...gated] : without);
+			const without = pi.getActiveTools().filter((name) => !ORCHESTRATION_TOOLS.includes(name));
+			pi.setActiveTools(ultracodeOn ? [...without, ...ORCHESTRATION_TOOLS] : without);
 		} catch {
 			/* tool sets are best-effort */
 		}
 	};
+
+	// Standing consent: a Hive launch, and never a worker (orchestration is depth 1).
+	const orchestrationOffered = hiveLaunched && !IS_WORKER;
+	// An operator's `/ultracode off` withdraws the offer until `/ultracode on`
+	// or a new session: the model must not be able to load it straight back.
+	let orchestrationDeclined = false;
+
+	/** Tell loadout which gated tools `load_tools` may request (none without standing consent). */
+	const offerOrchestration = () => {
+		const names = orchestrationOffered && !orchestrationDeclined ? ORCHESTRATION_TOOLS : [];
+		pi.events.emit(GATED_OFFER_CHANNEL, { names } satisfies GatedToolsEvent);
+	};
+
+	// `load_tools` asks; the gate stays here. Only standing consent turns a
+	// request into activation — anywhere else the request is declined and
+	// loadout reports the tool as not loadable.
+	pi.events.on(GATED_LOAD_REQUEST_CHANNEL, (data) => {
+		const names = (data as GatedToolsEvent | undefined)?.names ?? [];
+		if (!orchestrationOffered || orchestrationDeclined || ultracodeOn) return;
+		if (!names.some((name) => ORCHESTRATION_TOOLS.includes(name))) return;
+		ultracodeOn = true;
+		syncOrchestrateTool();
+	});
 
 	/**
 	 * The upward half of the channel, and it lives in the CHILD.
@@ -2076,7 +2129,9 @@ export default function (pi: ExtensionAPI) {
 			const argument = args.trim().toLowerCase();
 			if (argument === "on") {
 				ultracodeOn = true;
+				orchestrationDeclined = false;
 				syncOrchestrateTool();
+				offerOrchestration();
 				pi.sendMessage(
 					{
 						customType: "agenda",
@@ -2098,7 +2153,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (argument === "off") {
 				ultracodeOn = false;
+				orchestrationDeclined = true;
 				syncOrchestrateTool();
+				offerOrchestration();
 				ctx.ui.notify("Ultracode off.", "info");
 				return;
 			}

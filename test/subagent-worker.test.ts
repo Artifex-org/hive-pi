@@ -154,7 +154,7 @@ describe("subagent worker invocation", () => {
 		const loadout = workerExtensionPaths().find((path) => path.endsWith("/extensions/loadout/index.ts"));
 		expect(loadout, "worker must load the loadout module").toBeDefined();
 		const source = readFileSync(loadout as string, "utf8");
-		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map((m) => m[1])).toEqual(["tool_call", "before_agent_start"]);
+		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map((m) => m[1])).toEqual(["tool_call", "tool_result", "before_agent_start"]);
 	});
 
 	it("pins the Claude SDK provider to launch-gated lifecycle cleanup only", () => {

@@ -85,11 +85,34 @@ export const DIRECT_TOOLS: Readonly<Record<string, string>> = {
  * default nobody declares them.
  */
 export const GATED_TOOLS: Readonly<Record<string, string>> = {
-	orchestrate: "agenda: /ultracode consent",
-	worker_send: "agenda: /ultracode consent",
-	orchestrate_result: "agenda: /ultracode consent",
+	orchestrate: "agenda: /ultracode or plan-approval consent; offered to load_tools in a Hive launch",
+	worker_send: "agenda: moves with orchestrate",
+	orchestrate_result: "agenda: moves with orchestrate",
 	agenda_wake: "agenda: a self-paced /loop",
 };
+
+/**
+ * A gated tool's owner OFFERS it when consent is standing but the tool need not
+ * be declared yet: a Hive launch is operator-authorized orchestration, but a
+ * plain build-mode task that never fans out should not pay ~11.7k characters of
+ * `orchestrate`/`worker_send`/`orchestrate_result` on every request (HIV-3906:
+ * all three were declared in every launch). The owner announces the names on
+ * this channel at `session_start` (an empty list withdraws the offer); loadout
+ * lists them under "Tools loaded on demand".
+ *
+ * `load_tools` then REQUESTS an offered name on GATED_LOAD_REQUEST_CHANNEL and
+ * the owner decides: it activates the tool through its own gate, or declines.
+ * Loadout never activates a gated tool itself, so the gate stays the owner's
+ * and the tool stays `direct` (codemode still cannot reach it while inactive).
+ *
+ * Both payloads are identifiers only, per hive-common/channels.ts.
+ */
+export const GATED_OFFER_CHANNEL = "hive.loadout.gated-offer";
+export const GATED_LOAD_REQUEST_CHANNEL = "hive.loadout.gated-request";
+
+export interface GatedToolsEvent {
+	names: string[];
+}
 
 /**
  * Deferred, and activated by their mode when it starts. Listed so the

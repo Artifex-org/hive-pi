@@ -130,6 +130,18 @@ describe("reminderText", () => {
 	it("is short enough to be a nudge", () => {
 		expect(reminderText(9).length).toBeLessThan(400);
 	});
+
+	// HIV-3906: the "no reasoning, a label" clause produced content-free labels.
+	// The cap stays; the line may carry the finding that changed the plan.
+	it("keeps the ~80-character cap but asks for the finding, not a label", () => {
+		const text = reminderText(5);
+		expect(text).toContain(
+			"ONE short line, under ~80 characters. Say what you are about to do, or, if the last results changed your plan, " +
+				"the finding that changed it. Not a report.",
+		);
+		expect(text).not.toContain("no reasoning");
+		expect(text).not.toContain("A label");
+	});
 });
 
 /**

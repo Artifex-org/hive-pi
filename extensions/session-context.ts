@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { consumeHandoff } from "./agenda/handoff.ts";
+import { isUnattendedHiveLaunch } from "./hive-common/launch.ts";
 
 const HOOK = join(process.env.HOME ?? "", ".claude/hooks/session-context.sh");
 const HOOK_TIMEOUT_MS = 20_000;
@@ -70,6 +71,25 @@ function runSessionContext(cwd: string): Promise<string | null> {
  */
 const IS_WORKER = process.env.PI_AGENDA_WORKER === "1";
 
+/**
+ * A Hive task launch gets no frontload from the hook, only its handoff seed.
+ *
+ * MEASURED (HIV-3906 eval, one hive-repo launch): 13.3k characters, of which
+ * ~10k were an infrastructure pack (four Kubernetes clusters, a trading
+ * cluster's nodes, kubectl recipes) for a Go/TS change in one repository; the
+ * rest listed OTHER agents' worktrees and an open-PR / recent-commit snapshot
+ * that was stale by the first push. The hook is written for an operator's
+ * long-lived Claude Code session, and Claude Code keeps using it unchanged.
+ *
+ * Nothing in it is something a launch lacks: Hive's launch brief names the
+ * worktree, branch and task, the launch overlay carries the knowledge-base
+ * guidance and the memories relevant to the task, and the global instructions
+ * name each project's KB entry point. A launch that needs cluster facts gets
+ * them from the KB, on demand. The handoff seed is different — a successor
+ * launch has no other way to receive it — so that half still runs.
+ */
+const IS_LAUNCH = isUnattendedHiveLaunch(process.env.HIVE_LAUNCH_ID);
+
 export default function (pi: ExtensionAPI) {
 	let armed = false;
 	/**
@@ -96,7 +116,7 @@ export default function (pi: ExtensionAPI) {
 		if ((event.reason === "startup" || event.reason === "new") && !alreadyInjected) {
 			armed = true;
 			handoffArmed = true;
-			pending = runSessionContext(ctx.cwd); // start early, await at first prompt
+			pending = IS_LAUNCH ? null : runSessionContext(ctx.cwd); // start early, await at first prompt
 		}
 	});
 
@@ -120,7 +140,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			return;
 		}
-		const context = await (pending ?? runSessionContext(cwd));
+		const context = IS_LAUNCH ? null : await (pending ?? runSessionContext(cwd));
 		pending = null;
 		// Interactive modes only: a stray scripted `pi -p` in this cwd must not
 		// silently eat a handoff seed meant for the next real session.
