@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addedGoTests, boundedFile, codemodeTruncationHint, excludedGoTests, goRunPatterns, goTestHint, SCAN_BYTES, socketTimeoutHint } from "../extensions/toolhints/contextual.ts";
+import { addedGoTests, boundedFile, codemodeTruncationHint, excludedGoTests, goRunPatterns, goTestHint, goTestPathspecs, SCAN_BYTES, socketTimeoutHint } from "../extensions/toolhints/contextual.ts";
 import toolhints from "../extensions/toolhints/index.ts";
 import { createFakePi } from "./fake-pi.ts";
 
@@ -20,6 +20,35 @@ describe("added Go tests vs the selected run", () => {
 		expect(addedGoTests(diff)).toEqual(["TestLinearDiagnosis", "TestLinearFinalReportUnknown"]);
 		expect(addedGoTests("+func Testhelper(t *testing.T) {}\n+func Test(t *testing.T) {}\n+func TestÄ(t *testing.T) {}\n+func Testé(t *testing.T) {}")).toEqual(["Test", "TestÄ"]);
 		expect(git.mock.calls).toHaveLength(4);
+	});
+	it("maps go test's package arguments to the test files it compiles", () => {
+		expect(goTestPathspecs("go test -run TestA ./cmd/hive")).toEqual([":(glob)./cmd/hive/*_test.go"]);
+		expect(goTestPathspecs("go test -count=1 -timeout 5m ./internal/... ./cmd/hive/")).toEqual([":(glob)./internal/**/*_test.go", ":(glob)./cmd/hive/*_test.go"]);
+		expect(goTestPathspecs("go test -run TestA")).toEqual([":(glob)./*_test.go"]);
+		expect(goTestPathspecs("CGO_ENABLED=0 go test -race ./... -run X")).toEqual([":(glob)./**/*_test.go"]);
+		expect(goTestPathspecs("go test -run TestA github.com/x/y/pkg")).toBeNull();
+	});
+	// Eval 2026-10-20: a run of ./cmd/hive was told it "excludes" tests added in
+	// internal/hiveclient and to omit -run; the agent then ran a full -race package (4.5 min).
+	it("counts only tests added in the packages the invocation tests", async () => {
+		const cwd = temp();
+		const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" });
+		git("init", "-b", "main"); git("config", "user.email", "test@example.invalid"); git("config", "user.name", "Test");
+		writeFileSync(join(cwd, "base.txt"), "base"); git("add", "."); git("commit", "-m", "base");
+		git("update-ref", "refs/remotes/origin/main", "HEAD"); git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+		for (const [dir, name] of [["cmd/hive", "TestCmdAdded"], ["internal/client", "TestClientAdded"], ["internal/client/sub", "TestSubAdded"]]) {
+			execFileSync("mkdir", ["-p", join(cwd, dir)]);
+			writeFileSync(join(cwd, dir, "x_test.go"), `package x\nfunc ${name}(t *testing.T) {}\n`);
+		}
+		git("add", "."); git("commit", "-m", "tests");
+		expect(await goTestHint("go test ./cmd/hive -run 'TestCmdAdded'", cwd)).toBeNull();
+		const own = await goTestHint("go test ./cmd/hive -run 'TestOther'", cwd);
+		expect(own).toContain("TestCmdAdded"); expect(own).not.toContain("TestClientAdded");
+		expect(own).toContain("-run '^(TestCmdAdded)$'");
+		const shallow = await goTestHint("go test ./internal/client -run 'TestOther'", cwd);
+		expect(shallow).toContain("TestClientAdded"); expect(shallow).not.toContain("TestSubAdded");
+		const tree = await goTestHint("go test ./internal/... -run 'TestOther'", cwd);
+		expect(tree).toContain("TestClientAdded"); expect(tree).toContain("TestSubAdded"); expect(tree).not.toContain("TestCmdAdded");
 	});
 	it("handles quotes, equals flags, and the last repeated -run; not echo or -args", () => {
 		expect(goRunPatterns("cd api && go test -run='^TestA$' -run \"TestB\" ./...")).toEqual(["^TestA$", "TestB"]);
