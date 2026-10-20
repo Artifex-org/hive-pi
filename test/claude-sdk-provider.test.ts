@@ -611,7 +611,8 @@ describe("stream and lifecycle edge cases", () => {
 			expect(first.stopReason).toBe("toolUse");
 			// Pi can already have executed this handoff before cancellation or expiry.
 			if (boundary === "abort") controller.abort();
-			else await vi.advanceTimersByTimeAsync(5 * 60_000);
+			// The fixture lease lasts an hour; a parked query is kept until one minute before it expires.
+			else await vi.advanceTimersByTimeAsync(59 * 60_000);
 			await vi.waitFor(async () => expect(await readdir(f.root)).toEqual([]));
 			expect(close).toHaveBeenCalledOnce();
 			const replay = await f.provider.streamSimple(f.model, ctx).result();
@@ -1162,5 +1163,43 @@ describe("long-running Pi tool calls", () => {
 		})() }));
 		const out = await f.provider.streamSimple(f.model, context()).result();
 		expect(out).toMatchObject({ stopReason: "error", errorMessage: "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" });
+	});
+});
+
+describe("parked continuation lifetime", () => {
+	// A Pi tool can run far longer than a few minutes (a reviewer subagent, a test
+	// run). Disposing the parked query meanwhile forced a rebuild that the pinned
+	// CLI answers without the tool result, so the parked query must outlive it.
+	it("keeps a parked query for a tool that runs ten minutes, and delivers its result", async () => {
+		vi.useFakeTimers();
+		try {
+			const close = vi.fn(); let queries = 0;
+			const f = await fixture(() => { queries++; return { close, [Symbol.asyncIterator]: () => (async function* () {
+				yield* tools(["slow-call"]); yield* text("used the slow result");
+			})() }; });
+			const ctx = context();
+			const first = await f.provider.streamSimple(f.model, ctx).result();
+			expect(first.stopReason).toBe("toolUse");
+			await vi.advanceTimersByTimeAsync(10 * 60_000);
+			expect(close).not.toHaveBeenCalled();
+			ctx.messages.push(first, ...correlated(first));
+			const second = await f.provider.streamSimple(f.model, ctx).result();
+			expect(second).toMatchObject({ stopReason: "stop", content: [{ type: "text", text: "used the slow result" }] });
+			expect(queries).toBe(1);
+		} finally { vi.useRealTimers(); }
+	});
+
+	it("disposes a parked query one minute before its lease expires", async () => {
+		vi.useFakeTimers();
+		try {
+			const close = vi.fn();
+			const f = await fixture(() => ({ close, [Symbol.asyncIterator]: () => (async function* () { yield* tools(["slow-call"]); })() }),
+				vi.fn(async () => ({ ...lease(), expires_at: new Date(Date.now() + 30 * 60_000).toISOString() })));
+			expect((await f.provider.streamSimple(f.model, context()).result()).stopReason).toBe("toolUse");
+			await vi.advanceTimersByTimeAsync(29 * 60_000 - 1_000);
+			expect(close).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(close).toHaveBeenCalledOnce();
+		} finally { vi.useRealTimers(); }
 	});
 });

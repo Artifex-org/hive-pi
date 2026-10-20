@@ -260,8 +260,11 @@ written. Native subprocess behavior remains a separately unverified rollout gate
 A parked iterator is reused only for exact context/model/session/account/slot,
 unchanged tools, the same access token, and equal normalized effective query
 options (thinking/effort or token budget, output-token limit, tool choice and system
-prompt). Changed query options rebuild only after correlated Pi results have
-settled; historical tools are not replayed. Edits, compaction, fork/tree navigation,
+prompt). A handed-off query stays parked while Pi runs its tools, until one
+minute before its lease expires (the floor below which no turn starts), so a
+tool that runs for many minutes still continues the same query; it is disposed
+earlier on abort, replacement or session shutdown. Changed query options rebuild
+only after correlated Pi results have settled; historical tools are not replayed. Edits, compaction, fork/tree navigation,
 provider switch, account/token rotation or process loss rebuild from Pi's canonical
 history in fresh private state. Recorded tools are loaded as history, never sent
 to the bridge for re-execution. Unresolved historical calls and ambiguous failed
