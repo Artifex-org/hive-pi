@@ -242,14 +242,10 @@ export function hasLiveBacktick(value: string): boolean {
  * less can only turn blocks into ALLOWS: no command that works today starts
  * being refused. The residual is the reverse — a genuine gh body can now sit in
  * a segment this scan skips, wherever `splitCommands` breaks the string where
- * the shell would not. The concrete one: it treats a lone `&` as a separator,
- * so a redirect splits a segment, and `gh pr create 2>&1 --body "…`x`…"` leaves
- * the body in a segment with no `gh` token. Rare — a redirect after the body is
- * the normal ordering — and not fixed here, because the splitter is shared with
- * pr-attachments and changing its separators is a different change with its own
- * tests. It is the same fail-open posture declared at the top of this comment,
- * and it is the right way round: this guard exists to save a PR description,
- * and it must never cost a push.
+ * the shell would not. (The concrete one, a redirect's `&` in `2>&1` read as a
+ * separator, is fixed in the splitter.) It is the same fail-open posture
+ * declared at the top of this comment, and it is the right way round: this
+ * guard exists to save a PR description, and it must never cost a push.
  */
 export function ghBodyVerdict(command: string | undefined): GhBodyVerdict {
 	if (!command || !invokesGh(command)) return ALLOW;

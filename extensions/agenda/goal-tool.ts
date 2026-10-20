@@ -64,7 +64,8 @@ export function goalSetDecision(
 			text:
 				"This condition names nothing machine-checkable, so the judge could only grade your own " +
 				"self-report. Restate it with a command, a path, or a count — e.g. " +
-				'"PR created and `gh pr checks` exits 0" or "0 errors from the repo gate".',
+				'"PR created and `gh pr checks` exits 0", "Draft PR titled \'…\' is open for this branch" or ' +
+				'"0 errors from the repo gate".',
 		};
 	}
 	if (current && !isTerminal(current.state) && !params.replace) {

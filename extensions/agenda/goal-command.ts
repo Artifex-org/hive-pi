@@ -121,7 +121,10 @@ export function looksUnverifiable(condition: string): boolean {
 		// refused ("task PR exists and final-head hive/ci succeeded").
 		/\bsucceed(s|ed)?\b/i,
 		/\bmerged\b/i,
-		/\b(PR|pull request) (exists|is open|opened|created)\b/i,
+		// The PR may be described before its state — "Draft PR titled 'Fix x' is
+		// open for this branch" was refused (HIV-3906) — so up to ~80 characters
+		// of one clause may sit between the PR and the state that a judge checks.
+		/\b(PR|pull request)\b(?:'[^'\n]{0,80}'|"[^"\n]{0,80}"|[^.!?\n'"]){0,80}?\b(exists|is open|is opened|opened|created|is created)\b/i,
 		/\b[\w-]+\/(ci|checks?|build)\b/i, // a status-check name, e.g. hive/ci
 		/`[^`]+`/, // a quoted command
 		// A git/gh command written without backticks, a PR URL, a commit SHA (needs
