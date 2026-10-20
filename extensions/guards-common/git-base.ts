@@ -40,3 +40,22 @@ export function fetchedOriginBase(path: string, origin: string): string | null {
 	} catch { return null; }
 	finally { closeSync(fd); }
 }
+
+/** A git read that answers null when git fails (absent ref, timeout). */
+export type GitReader = (args: string[], cwd: string) => string | null;
+
+/**
+ * The commit HEAD forked from the delivery baseline: origin/HEAD, else a
+ * conventional origin/main|master, else an origin-matched FETCH_HEAD record.
+ * The same order `reviewdiff.ts` captures a delivery diff against.
+ */
+export function deliveryMergeBase(repo: string, git: GitReader): string | null {
+	const head = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo);
+	let base = knownBaseRef(head, head?.trim() ? "" : git(BASE_REF_SCAN, repo) ?? "");
+	if (!base) {
+		const fetchHead = git(["rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"], repo)?.trim();
+		const origin = git(["config", "--get", "remote.origin.url"], repo)?.trim();
+		base = fetchHead && origin ? fetchedOriginBase(fetchHead, origin) : null;
+	}
+	return base ? git(["merge-base", "HEAD", base], repo)?.trim() || null : null;
+}

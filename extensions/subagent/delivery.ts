@@ -1,10 +1,16 @@
 /** Default-on, overridable pre-delivery review checkpoint (HIV-3802). */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { splitCommands } from "../guards-common/shell-split.ts";
-import { literalWords } from "../toolhints/contextual.ts";
+import { splitCommandList, splitCommands, stripBenignRedirects, type CommandSegment } from "../guards-common/shell-split.ts";
+import { deliveryMergeBase, type GitReader } from "../guards-common/git-base.ts";
+import { literalProblem, literalWords } from "../toolhints/contextual.ts";
+import { appendHint } from "../toolhints/index.ts";
+import { BACKGROUND_JOB_CHANNEL, type BackgroundJobEvent } from "../background/channel.ts";
 import { captureDeliveryDiff, explainDeliveryDiffFailure, headCommit, reviewFingerprint, stampableReview, type ReviewDiff } from "./reviewdiff.ts";
+import { resultNotes, type SingleResult } from "./delegate.ts";
+import { backgroundStartedMessage } from "./background.ts";
 import { resolve, join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { accessSync, constants } from "node:fs";
 import { captureReleaseDiff, isReviewTarget, type ReviewTarget } from "./release-review.ts";
 
@@ -58,10 +64,16 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 		return splitCommands(command, true).some((segment) => /^\s*(?:\w+=\S+\s+)*(?:git|gh|hive)\s/.test(segment) && /\b(?:push|pr\s+create|ship)\b/.test(segment))
 			? [{ target: null, leg: clip(command.slice(0, 120)), cause: `the command is ${command.length} characters, over the 8192-character limit this preflight reads` }] : [];
 	}
-	let pipeline = false;
+	const list = splitCommandList(command, true);
+	const shape = pipelineShape(list);
+	const pipeline = shape.poisoned;
 	let precedingMutation = false;
 	let mutationLeg = "";
-	for (const segment of splitCommands(command, true, () => { pipeline = true; })) {
+	for (const [index, { text: raw }] of list.entries()) {
+		if (shape.filters.has(index)) continue;
+		// `2>&1`, `>/dev/null` and here-document operators neither read nor write
+		// a file; any other redirection is a leg whose effect cannot be read.
+		const { text: segment, other: redirected } = stripBenignRedirects(raw);
 		const words = literalWords(segment);
 		if (/^\s*cd\s/.test(segment)) {
 			dir = words?.length === 2 && dir ? resolve(dir, words[1]) : null;
@@ -80,7 +92,7 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 		// assignment words. Recognize the delivery tail, but do not guess it.
 		if (/^\s*[A-Za-z_]\w*=/.test(segment) && !/^(?:git|gh|hive)\s/.test(cleaned) &&
 			/\b(?:git\s+push|gh\s+pr\s+create|hive\s+ship)\b/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""))) {
-			targets.push({ target: null, leg: clip(segment), cause: "an assignment before the delivery verb holds a shell substitution, so what it changes cannot be read" }); precedingMutation = true; mutationLeg = clip(segment); continue;
+			targets.push({ target: null, leg: clip(raw), cause: "an assignment before the delivery verb holds a shell substitution, so what it changes cannot be read" }); precedingMutation = true; mutationLeg = clip(raw); continue;
 		}
 		const assignments = segment.slice(0, segment.length - cleaned.length);
 		const configuredEnv = !literalWords(assignments) || /\b(?:GIT_\w+|GH_REPO|GH_HOST|HOME|XDG_CONFIG_HOME|PATH)=/.test(assignments);
@@ -98,24 +110,24 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 		const dynamicGit = prefix?.[0] === "git" && !literalWords(cleaned);
 		// Preserve the common read-only body-file substitution, not arbitrary
 		// shell code that can reset HEAD before PR creation or a later push.
-		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) &&
-			!literalWords(cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body"));
-		const redirected = /[<>]/.test(cleaned.replace(/'[^']*'|"[^"\\]*"/g, ""));
+		const ghBodyFile = cleaned.replace(/\$\(\s*cat\s+[A-Za-z0-9_./-]+\s*\)/g, "body");
+		const dynamicGh = prefix?.[0] === "gh" && !literalWords(cleaned) && !literalWords(ghBodyFile);
+		const dynamicCause = (text: string) => `its arguments are dynamic: ${literalProblem(text) ?? "a substitution or variable"} cannot be read before it runs`;
 		if (!prefix || configuredEnv || gitWritesOutput || implicitStaging || dynamicGit || dynamicGh || redirected || !(prefix[0] === "git" && ["commit", "push"].includes(prefix[verb]) ||
-			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) { precedingMutation = true; mutationLeg ||= clip(segment); }
-		const leg = clip(segment);
+			prefix[0] === "gh" && prefix[1] === "pr" && prefix[2] === "create" || prefix[0] === "hive" && prefix[1] === "ship")) { precedingMutation = true; mutationLeg ||= clip(raw); }
+		const leg = clip(raw);
 		const why = (...checks: [unknown, string][]): DeliveryScan => ({ target: null, leg, cause: checks.find(([hit]) => hit)?.[1] ?? "its target cannot be resolved to one reviewed repo" });
 		const precedingCause = `an earlier leg (\`${precededBy}\`) can change HEAD or the files after review`;
 		const envCause = `\`${clip(assignments)}\` sets environment that can redirect or reconfigure the delivery`;
 		if (/^hive\s+ship\b/.test(cleaned)) {
 			const tokens = literalWords(cleaned);
 			const extra = tokens?.slice(2).find((token) => !["--no-pr", "--draft"].includes(token));
-			targets.push(preceded || configuredEnv || redirected || !tokens || extra !== undefined ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, "the leg redirects input or output"], [!tokens, "its arguments are dynamic (substitution or variable)"], [extra !== undefined, `argument \`${extra}\` is not supported (supported flags: \`--no-pr\`, \`--draft\`)`]) : ok(dir));
+			targets.push(preceded || configuredEnv || redirected || !tokens || extra !== undefined ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, REDIRECT_CAUSE], [!tokens, dynamicCause(cleaned)], [extra !== undefined, `argument \`${extra}\` is not supported (supported flags: \`--no-pr\`, \`--draft\`)`]) : ok(dir));
 			continue;
 		}
 		if (/^gh\s/.test(cleaned)) {
 			const tokens = literalWords(cleaned, true);
-			if (!tokens) { if (/\bpr\s+create\b/.test(cleaned)) targets.push(why([true, "its arguments are dynamic (substitution or variable)"])); continue; }
+			if (!tokens) { if (/\bpr\s+create\b/.test(cleaned)) targets.push(why([true, dynamicCause(ghBodyFile)])); continue; }
 			let i = 1, targetOverride: string | false = false;
 			while (tokens[i]?.startsWith("-")) {
 				targetOverride ||= tokens[i];
@@ -141,12 +153,12 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 			const explicit = Object.keys(selected).length > 0;
 			if (explicit && unsupportedOption) targetOverride ||= unsupportedOption;
 			if (explicit && !isReviewTarget(selected)) targetOverride ||= selected.base !== undefined ? "--base" : "--head";
-			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, "the leg redirects input or output"], [dynamicGh, "its arguments are dynamic (substitution or variable)"], [targetOverride, `\`${targetOverride}\` points at a repo/branch this preflight cannot match to the reviewed diff`]) : explicit ? { target: dir, reviewTarget: selected as ReviewTarget } : ok(dir));
+			targets.push(preceded || configuredEnv || redirected || dynamicGh || targetOverride ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, REDIRECT_CAUSE], [dynamicGh, dynamicCause(ghBodyFile)], [targetOverride, `\`${targetOverride}\` points at a repo/branch this preflight cannot match to the reviewed diff`]) : explicit ? { target: dir, reviewTarget: selected as ReviewTarget } : ok(dir));
 			continue;
 		}
 		if (!/^git\s/.test(cleaned)) continue;
 		const tokens = literalWords(cleaned);
-		if (!tokens) { if (/\bpush\b/.test(cleaned)) targets.push(why([true, "its arguments are dynamic (substitution or variable)"])); continue; }
+		if (!tokens) { if (/\bpush\b/.test(cleaned)) targets.push(why([true, dynamicCause(cleaned)])); continue; }
 		let target = dir, i = 1, targetCause = "";
 		while (tokens[i]?.startsWith("-")) {
 			if (tokens[i] === "-C") { target = target && tokens[i + 1] ? resolve(target, tokens[i + 1]) : null; if (!target) targetCause = "the `-C`/`cd` directory is not a literal path"; i += 2; }
@@ -162,43 +174,151 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 		const badFlag = args.find((t) => ["--all", "--mirror", "--tags", "--follow-tags", "--repo"].includes(t) || t.startsWith("--repo="));
 		const badRef = positional.slice(1).find((t) => !/^HEAD(?::.+)?$/.test(t));
 		if (badRemote !== undefined || badFlag !== undefined || badRef !== undefined) { target = null; targetCause = badRemote !== undefined ? `remote \`${badRemote}\` is not \`origin\`` : badFlag !== undefined ? `\`${badFlag}\` pushes more than the current HEAD` : `refspec \`${badRef}\` is not \`HEAD\` or \`HEAD:<branch>\``; }
-		targets.push(preceded || configuredEnv || redirected ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, "the leg redirects input or output"]) : target ? ok(target) : why([true, targetCause]));
+		targets.push(preceded || configuredEnv || redirected ? why([preceded, precedingCause], [configuredEnv, envCause], [redirected, REDIRECT_CAUSE]) : target ? ok(target) : why([true, targetCause]));
 	}
 	// Evaluate the LAST delivery verb first, but never let it conceal an
 	// earlier push to another repo or an unsupported target in the same chain.
-	return pipeline ? targets.map((scan) => scan.target === null ? scan : { target: null, leg: scan.leg, cause: "it runs inside a pipeline, whose earlier stages cannot be evaluated" }) : targets.reverse();
+	if (pipeline) return targets.map((scan) => scan.target === null ? scan : { target: null, leg: scan.leg, cause: "it runs inside a pipeline or background job this preflight cannot evaluate (supported: a delivery piped only into read-only filters such as `grep`, `head`, `tail`, `wc` or `sed -n …p`)" });
+	// A release-target PR stays fail-closed: it runs on its own, never piped.
+	if (shape.filters.size > 0) return targets.map((scan) => scan.reviewTarget ? { target: null, leg: scan.leg, cause: "an explicit --base/--head PR must run on its own, not in a pipeline" } : scan).reverse();
+	return targets.reverse();
 }
-/** Supported chains contain literal commits and HEAD delivery.
- * They are not arbitrary shell programs: executable mutation hooks, helpers,
- * dynamic arguments and unknown predecessors must run separately, then be reviewed. */
-/** The first leg whose hook can change bytes between legs (or whose hooks cannot be read), or null. */
-function chainHookProblem(command: string, cwd: string): { leg: string; hook: string } | null {
-	const segments = splitCommands(command, true);
-	if (segments.length < 2) return null;
-	let dir = cwd;
-	for (const segment of segments) {
-		const words = literalWords(segment);
-		if (!words || helpInvocation(words)) continue; // dynamic shapes are rejected by deliveryTargets; help runs no hook
-		while (/^[A-Za-z_]\w*=/.test(words[0] ?? "")) words.shift();
-		if (words[0] === "cd" && words.length === 2) { dir = resolve(dir, words[1]); continue; }
-		if (words[0] !== "git" && !(words[0] === "hive" && words[1] === "ship")) continue;
-		let i = 1, target = dir;
-		while (words[i] === "-C" && words[i + 1]) { target = resolve(target, words[i + 1]); i += 2; }
-		if (words[0] === "git" && !["commit", "push"].includes(words[i])) continue;
-		const hookNames = words[0] === "git" && words[i] === "commit"
-			? ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite"]
-			: ["pre-push"];
-		try {
-			const hooks = execFileSync("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], {
-				cwd: target, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"],
-			}).trim();
-			for (const name of hookNames) {
-				try { accessSync(join(hooks, name), constants.X_OK); return { leg: clip(segment), hook: `executable hooks (${name})` }; }
-				catch (error) { if (!["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) return { leg: clip(segment), hook: `a ${name} hook whose state cannot be read` }; }
-			}
-		} catch { return { leg: clip(segment), hook: "a hooks directory that git could not report" }; } // cannot establish that the compound commit preserves reviewed bytes
+
+const REDIRECT_CAUSE = "the leg redirects to or from a file (only fd duplication such as `2>&1`, output to `/dev/null` and here-documents are supported)";
+
+/** The literal words of a leg, after its environment assignments and benign redirects. */
+function commandWords(segment: string): string[] | null {
+	const { text, other } = stripBenignRedirects(segment);
+	const words = other ? null : literalWords(text);
+	while (words && /^[A-Za-z_]\w*=/.test(words[0] ?? "")) words.shift();
+	return words;
+}
+
+type LegKind = "commit" | "push" | "ship" | "pr";
+
+/** Which delivery-relevant verb a leg runs, and in which directory; null kind for anything else. */
+function legKind(words: readonly string[], dir: string): { kind: LegKind | null; target: string } {
+	if (words[0] === "hive" && words[1] === "ship") return { kind: "ship", target: dir };
+	if (words[0] === "gh") return { kind: words.includes("pr") && words[words.indexOf("pr") + 1] === "create" ? "pr" : null, target: dir };
+	if (words[0] !== "git") return { kind: null, target: dir };
+	let i = 1, target = dir;
+	while ((words[i] === "-C" || words[i] === "-c") && words[i + 1]) { if (words[i] === "-C") target = resolve(target, words[i + 1]); i += 2; }
+	if (words[i] === "commit") return { kind: "commit", target };
+	if (words[i] === "push" && !words.slice(i + 1).some((t) => t === "--dry-run" || t === "-n")) return { kind: "push", target };
+	return { kind: null, target };
+}
+
+/** A stage that only reads its stdin (and named files) and writes stdout. */
+export function readOnlyFilter(segment: string): boolean {
+	const words = commandWords(segment);
+	if (!words?.length) return false;
+	const args = words.slice(1);
+	switch (words[0]) {
+		case "grep": case "egrep": case "fgrep": case "head": case "tail": case "cat": case "wc": case "cut": case "tr": case "nl":
+			return true;
+		case "sort":
+			return !args.some((a) => /^(?:--output|-[^-]*o)/.test(a));
+		case "uniq":
+			return args.filter((a) => !a.startsWith("-")).length <= 1;
+		case "sed": {
+			// Print-only scripts: `sed -n 1,20p`, `sed -n '/x/p'`. No -i, no w/e commands.
+			if (!args.includes("-n") || args.some((a) => /^(?:-i|--in-place|-[^-]*i)/.test(a))) return false;
+			const scripts = args.filter((a) => !a.startsWith("-"));
+			return scripts.length >= 1 && /^(?:\d+|\$|\/[^/]*\/)?(?:,(?:\d+|\$|\/[^/]*\/))?p$/.test(scripts[0]);
+		}
+		default:
+			return false;
+	}
+}
+
+/**
+ * Pipelines and background jobs hide what the shell does with exit status and
+ * working directory, so they used to poison the whole command. One shape is
+ * plain to read: a delivery leg piped only into read-only filters
+ * (`git push 2>&1 | tail -5`). Those filter stages are returned to skip; any
+ * other pipeline or a background `&` poisons the command as before.
+ */
+function pipelineShape(list: readonly CommandSegment[]): { poisoned: boolean; filters: Set<number> } {
+	const filters = new Set<number>();
+	let poisoned = false;
+	for (let start = 0; start < list.length; start++) {
+		if (list[start].separator === "&") poisoned = true;
+		if (list[start].separator !== "|") continue;
+		let end = start;
+		while (list[end].separator === "|" && end + 1 < list.length) end++;
+		const head = commandWords(list[start].text);
+		const kind = head ? legKind(head, "/").kind : null;
+		const delivery = kind === "push" || kind === "pr" || kind === "ship";
+		const stages = list.slice(start + 1, end + 1);
+		if (delivery && stages.every((stage) => readOnlyFilter(stage.text))) for (let i = start + 1; i <= end; i++) filters.add(i);
+		else poisoned = true;
+		if (list[end].separator === "&") poisoned = true; // `git push | tail &`
+		start = end;
+	}
+	return { poisoned, filters };
+}
+/**
+ * A chain is checked before any of it runs, so a leg whose git hooks can
+ * rewrite bytes (a formatter in pre-commit, a commit made by post-rewrite or
+ * pre-push) leaves every LATER delivery leg acting on bytes nobody reviewed.
+ *
+ * Only that shape is refused: a hooked commit, push or `hive ship` followed by
+ * another delivery leg (`gh pr create`, `hive ship`, another push). A commit
+ * followed by the one push that sends it, or a chain whose hooked leg is the
+ * last delivery, is allowed — the push sends what the commit made, and any
+ * later standalone delivery is checked again against the new diff (a
+ * hook-made change then needs its own review before the PR can open). `cd`
+ * legs only move the directory. `--no-verify` is deliberately NOT read as "no
+ * hooks": skipping the repo's hooks must never be what makes a chain pass.
+ */
+function chainHookProblem(command: string, cwd: string): { leg: string; hook: string; later: string } | null {
+	const legs = chainLegs(command, cwd);
+	for (const [index, leg] of legs.entries()) {
+		if (leg.kind === "pr") continue;
+		const deliveries = legs.slice(index + 1).filter((later) => later.kind !== "commit");
+		// A commit's own push is how the commit is delivered, not a later leg.
+		const unreviewable = leg.kind === "commit" && deliveries[0]?.kind === "push" ? deliveries.slice(1) : deliveries;
+		if (unreviewable.length === 0) continue;
+		const hook = hookProblem(leg.kind === "commit" ? ["pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite"] : ["pre-push"], leg.target);
+		if (hook) return { leg: clip(leg.segment), hook, later: clip(unreviewable[0].segment) };
 	}
 	return null;
+}
+
+/** The commit, push, `hive ship` and `gh pr create` legs of a chain, in order, with their directories. */
+function chainLegs(command: string, cwd: string): { segment: string; kind: LegKind; target: string }[] {
+	const segments = splitCommands(command, true);
+	if (segments.length < 2) return [];
+	let dir = cwd;
+	const legs: { segment: string; kind: LegKind; target: string }[] = [];
+	for (const segment of segments) {
+		const words = commandWords(segment);
+		if (!words || helpInvocation(words)) continue; // dynamic shapes are rejected by deliveryTargets; help runs no hook
+		if (words[0] === "cd" && words.length === 2) { dir = resolve(dir, words[1]); continue; }
+		const { kind, target } = legKind(words, dir);
+		if (kind) legs.push({ segment, kind, target });
+	}
+	return legs;
+}
+
+/** Repositories where this chain commits and then pushes (or ships) the result. */
+function committedThenDelivered(command: string, cwd: string): string[] {
+	const legs = chainLegs(command, cwd);
+	return [...new Set(legs.filter((leg, i) => leg.kind === "commit" && legs.slice(i + 1).some((later) => later.kind === "push" || later.kind === "ship")).map((leg) => leg.target))];
+}
+
+/** Which of these hooks would run in `target` (or why that cannot be told), or null. */
+function hookProblem(hookNames: readonly string[], target: string): string | null {
+	try {
+		const hooks = execFileSync("git", ["--no-optional-locks", "rev-parse", "--path-format=absolute", "--git-path", "hooks"], {
+			cwd: target, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		for (const name of hookNames) {
+			try { accessSync(join(hooks, name), constants.X_OK); return `executable hooks (${name})`; }
+			catch (error) { if (!["ENOENT", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) return `a ${name} hook whose state cannot be read`; }
+		}
+		return null;
+	} catch { return "a hooks directory that git could not report"; } // cannot establish that the compound commit preserves reviewed bytes
 }
 
 export function deliveryCommand(command: string): boolean {
@@ -217,29 +337,170 @@ export { reviewFingerprint } from "./reviewdiff.ts";
 
 const short = (fingerprint: string) => fingerprint.slice(0, 8);
 
-export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDeliveryDiff): void {
+const treeGit: GitReader = (args, cwd) => {
+	try { return execFileSync("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8", timeout: 2000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
+	catch { return null; }
+};
+
+/**
+ * Fingerprint of WHAT the branch delivers — the net patch from the merge-base
+ * — independent of which part is committed, staged or still in the working
+ * tree. `reviewFingerprint` keys the evidence the reviewer was shown, layer by
+ * layer, so committing an already-reviewed tree changed it and demanded a
+ * second review of identical code. `worktree` reads the reviewed state;
+ * `head` reads what a push sends, and is only meaningful (and only consulted)
+ * when nothing is staged or modified, so a dirty revert cannot pass off an
+ * unreviewed commit.
+ */
+export function treeFingerprint(repo: string, source: "worktree" | "head", git: GitReader = treeGit): string | null {
+	const base = deliveryMergeBase(repo, git);
+	if (!base) return null;
+	// Plumbing on both sides: no rename detection, colour or external diff, so
+	// the same content prints the same patch from a tree or the working tree.
+	const patch = git(source === "head" ? ["diff-tree", "-r", "-p", "--no-color", "--no-ext-diff", base, "HEAD"] : ["diff-index", "-p", "--no-color", "--no-ext-diff", base], repo);
+	if (patch === null) return null;
+	return `tree:${createHash("sha256").update(JSON.stringify([repo, patch.replace(/^index .*$/gm, "")])).digest("hex")}`;
+}
+
+/** Only committed changes: what a push sends is the whole delivery diff. */
+function committedOnly(diff: ReviewDiff): boolean {
+	return !/^(?:Staged vs HEAD|Unstaged vs index)\b/m.test(diff.text);
+}
+
+/**
+ * A code-reviewer that could not start because no model it may use has a
+ * credential here: the refusal from `chooseWorkerModel`, or a worker that died
+ * on `No API key found`. Retrying cannot help, so delivery records that the
+ * review was unavailable instead of blocking forever.
+ */
+const REVIEWER_UNAVAILABLE = /nothing else is configured to fall back to|no catalog mode is configured here|No API key found[^\n]*/i;
+
+type ReviewResult = { agent?: string; exitCode?: number; stopReason?: string; errorMessage?: string; stderr?: string; midWork?: boolean; structuredError?: string; reviewFingerprint?: string };
+
+function reviewerUnavailable(result: ReviewResult): string | null {
+	const text = `${result.errorMessage ?? ""}\n${result.stderr ?? ""}`;
+	const match = REVIEWER_UNAVAILABLE.exec(text);
+	if (!match) return null;
+	const line = (text.split("\n").find((l) => l.includes(match[0])) ?? match[0]).trim().replace(/\s+/g, " ");
+	return line.length > 300 ? `${line.slice(0, 297)}...` : line;
+}
+
+/** The note a background reviewer's completion carries when it stopped mid-work. */
+const MID_WORK_NOTE = resultNotes({ midWork: true } as SingleResult).trim();
+
+/** The job id in a background delegation's start receipt (`backgroundStartedMessage`). */
+const JOB_ID = (() => {
+	const [before, after] = backgroundStartedMessage("\0", "", "").split("\0");
+	const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`${escape(before)}([^\\s${escape(after[0] ?? "`")}]+)${escape(after[0] ?? "`")}`);
+})();
+
+interface BackgroundReview { cwd: string; fingerprint: string | null }
+interface BackgroundJob { output: string; status?: string; review?: BackgroundReview }
+
+const resultText = (content: unknown) => Array.isArray(content) ? content.map((part) => typeof (part as { text?: unknown })?.text === "string" ? (part as { text: string }).text : "").join("\n") : "";
+
+export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDeliveryDiff, tree = treeFingerprint): void {
 	const reviewed = new Set<string>();
-	const pending = new Map<string, { cwd: string; reviewTarget?: ReviewTarget }>();
+	// Fingerprints stamped because no reviewer could run, with the reason.
+	const unavailable = new Map<string, string>();
+	const pending = new Map<string, { cwd: string; reviewTarget?: ReviewTarget; explicitModel: boolean }>();
 	// Why a fingerprint is not covered: the last review per repo (for "stale after
-	// commit X") and the repos where a review ran in the background (never counts).
+	// commit X") and what became of background reviews per cwd.
 	const lastReview = new Map<string, { fingerprint: string; head: string | null }>();
-	const backgroundReview = new Set<string>();
+	const backgroundState = new Map<string, string>();
+	// Background reviews by the tool call that dispatched them, until the start
+	// receipt names their job; reviewer jobs by id, whichever arrives first.
+	const dispatched = new Map<string, BackgroundReview>();
+	const jobs = new Map<string, BackgroundJob>();
+	// Notes owed to a delivery call's result: delivered on a "review unavailable"
+	// record, or a chained commit whose result must be re-checked against reviews.
+	const deliveryNotes = new Map<string, string>();
+	const chainedCommits = new Map<string, string[]>();
+
+	const stamp = (diff: ReviewDiff, source: "foreground" | "background" | "unavailable", reason?: string) => {
+		const fingerprint = reviewFingerprint(diff);
+		const head = headCommit(diff.repo);
+		// A release review is bound to its origin endpoints, never to a tree.
+		const treeKey = diff.scope === "explicit origin PR target" ? null : tree(diff.repo, "worktree");
+		reviewed.add(fingerprint);
+		if (treeKey) reviewed.add(treeKey);
+		for (const key of treeKey ? [fingerprint, treeKey] : [fingerprint]) {
+			if (reason) unavailable.set(key, reason);
+			else unavailable.delete(key); // a real review supersedes "unavailable"
+		}
+		lastReview.set(diff.repo, { fingerprint, head });
+		pi.appendEntry("delivery-review", { fingerprint, repo: diff.repo, head, ...(treeKey ? { tree: treeKey } : {}), ...(source !== "foreground" ? { source } : {}), ...(reason ? { unavailable: reason } : {}) });
+	};
+
+	/** The record covering this delivery diff (its evidence, or the tree it delivers), or null. */
+	const coveredBy = (diff: ReviewDiff): string | null => {
+		if (!stampableReview(diff)) return null;
+		const fingerprint = reviewFingerprint(diff);
+		if (reviewed.has(fingerprint)) return fingerprint;
+		const treeKey = committedOnly(diff) ? tree(diff.repo, "head") : null;
+		return treeKey && reviewed.has(treeKey) ? treeKey : null;
+	};
+
 	pi.on("session_start", (_event, ctx) => {
-		reviewed.clear(); pending.clear(); lastReview.clear(); backgroundReview.clear();
+		reviewed.clear(); unavailable.clear(); pending.clear(); lastReview.clear(); backgroundState.clear(); dispatched.clear(); jobs.clear(); deliveryNotes.clear(); chainedCommits.clear();
 		for (const raw of ctx.sessionManager.getBranch()) {
-			const entry = raw as { customType?: string; data?: { fingerprint?: string; repo?: string; head?: string | null } };
+			const entry = raw as { customType?: string; data?: { fingerprint?: string; repo?: string; head?: string | null; tree?: string; unavailable?: string } };
 			if (entry.customType !== "delivery-review" || typeof entry.data?.fingerprint !== "string") continue;
-			reviewed.add(entry.data.fingerprint);
+			const keys = [entry.data.fingerprint, ...(typeof entry.data.tree === "string" ? [entry.data.tree] : [])];
+			for (const key of keys) {
+				reviewed.add(key);
+				if (typeof entry.data.unavailable === "string") unavailable.set(key, entry.data.unavailable);
+				else unavailable.delete(key);
+			}
 			if (typeof entry.data.repo === "string") lastReview.set(entry.data.repo, { fingerprint: entry.data.fingerprint, head: entry.data.head ?? null });
 		}
 	});
+
+	// A background code-reviewer counts once it FINISHES cleanly on the diff it
+	// was dispatched against. The diff is fingerprinted at dispatch (the worker
+	// captures the same diff a moment later) and again at completion; a change
+	// in between voids it, exactly as a foreground review is voided. The job's
+	// completion does not carry the worker's own evidence fingerprint, so one
+	// residual gap remains: a worker whose own capture failed (2 s budget) and
+	// reviewed without the diff still counts if this side's captures agree.
+	const settle = (id: string, job: BackgroundJob) => {
+		const review = job.review;
+		if (!review || job.status === undefined) return;
+		jobs.delete(id);
+		if (job.status !== "done" || job.output.includes(MID_WORK_NOTE)) { backgroundState.set(review.cwd, `finished without a complete review (${job.status})`); return; }
+		const diff = capture(review.cwd, "");
+		if (!diff || !stampableReview(diff) || !review.fingerprint || reviewFingerprint(diff) !== review.fingerprint) { backgroundState.set(review.cwd, "finished, but the diff changed after it was dispatched (or cannot be stamped)"); return; }
+		backgroundState.delete(review.cwd);
+		stamp(diff, "background");
+	};
+	pi.events.on(BACKGROUND_JOB_CHANNEL, (payload) => {
+		const event = payload as BackgroundJobEvent;
+		if (event.action === "start") {
+			if (event.kind !== "subagent" || !event.detail.startsWith("code-reviewer:")) return;
+			if (!jobs.has(event.id)) jobs.set(event.id, { output: "" });
+			if (jobs.size > 32) jobs.delete(jobs.keys().next().value as string);
+			return;
+		}
+		const job = jobs.get(event.id);
+		if (!job) return;
+		if (event.action === "output") { job.output += event.chunk; return; }
+		job.status = event.status;
+		settle(event.id, job);
+	});
+
 	pi.on("tool_call", (event, ctx) => {
 		if (process.env.PI_DELIVERY_REVIEW === "0") return;
 		const input = event.input as Record<string, unknown>;
 		const cwd = typeof input.cwd === "string" ? input.cwd : ctx.cwd;
 		if (event.toolName === "subagent" && input.agent === "code-reviewer") {
-			if (input.background === true) backgroundReview.add(cwd);
-			else if (input.reviewTarget === undefined || isReviewTarget(input.reviewTarget)) pending.set(event.toolCallId, { cwd, reviewTarget: input.reviewTarget as ReviewTarget | undefined });
+			if (input.background === true) {
+				// What the worker captures: the task's named paths can select another
+				// repo, and then the stamp below (taken for cwd) can never match.
+				const diff = input.reviewTarget === undefined ? capture(cwd, typeof input.task === "string" ? input.task : "") : null;
+				dispatched.set(event.toolCallId, { cwd, fingerprint: diff && stampableReview(diff) ? reviewFingerprint(diff) : null });
+				backgroundState.set(cwd, "is still running");
+			} else if (input.reviewTarget === undefined || isReviewTarget(input.reviewTarget)) pending.set(event.toolCallId, { cwd, reviewTarget: input.reviewTarget as ReviewTarget | undefined, explicitModel: typeof input.model === "string" && input.model.trim() !== "" });
 			return;
 		}
 		if (event.toolName !== "bash" && event.toolName !== "background_bash") return;
@@ -249,37 +510,86 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		// a claim of review or a check passing, just an acknowledged skip.
 		if (/^\s*PI_DELIVERY_REVIEW=0\s/.test(command)) return;
 		const hook = chainHookProblem(command, cwd);
-		if (hook) return { block: true, reason: `Unsupported command shape: the chained leg \`${hook.leg}\` has ${hook.hook}, which can change bytes after review (or cannot be shown not to), so the legs after it cannot be reviewed by this preflight. Run \`${hook.leg}\` as its own command, then run a foreground code-reviewer on the resulting diff, then run the delivery (\`git push origin HEAD\`, \`hive ship --no-pr\` or \`gh pr create\`) standalone.` };
+		if (hook) return { block: true, reason: `Unsupported command shape: the chained leg \`${hook.leg}\` has ${hook.hook}, which can change bytes after review (or cannot be shown not to), so the later delivery leg \`${hook.later}\` cannot be reviewed by this preflight. Run \`${hook.leg}\` as its own command (a commit may keep its own push: \`git commit … && git push origin HEAD\`), then run \`${hook.later}\` standalone; it is checked against the resulting diff.` };
+		let unavailableReason: string | undefined;
 		for (const scan of scanDeliveryTargets(command, cwd)) {
 			const target = scan.target;
 			if (!target) return { block: true, reason: `Unsupported command shape: the leg \`${scan.leg ?? clip(command)}\` cannot be evaluated because ${scan.cause ?? "its target cannot be resolved to one reviewed repo"}. Run setup/mutation commands separately, then review and run a standalone \`git push origin HEAD\`, \`hive ship --no-pr\`, or \`gh pr create\` in the reviewed repo (without target overrides).` };
 			const release = scan.reviewTarget ? captureReleaseDiff(target, scan.reviewTarget) : undefined;
 			const diff = release ? release.diff : capture(target, "");
-			if (diff && ((!scan.reviewTarget && !needsDeliveryReview(diff)) || (stampableReview(diff) && reviewed.has(reviewFingerprint(diff))))) continue;
+			if (diff && !scan.reviewTarget && !needsDeliveryReview(diff)) continue;
+			const covered = diff && (scan.reviewTarget ? stampableReview(diff) && reviewed.has(reviewFingerprint(diff)) ? reviewFingerprint(diff) : null : coveredBy(diff));
+			if (covered) { unavailableReason ??= unavailable.get(covered); continue; }
 			if (scan.reviewTarget) return { block: true, reason: `Explicit PR target requires a matching foreground release review. ${release?.reason ?? "No matching review for the current origin repository and base/head SHAs."} Run subagent({agent:"code-reviewer", task:"Review the release", cwd:${JSON.stringify(target)}, reviewTarget:${JSON.stringify(scan.reviewTarget)}}), then retry. This review does not grant deployment approval.` };
-			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${blockCause(diff, target, lastReview, backgroundReview)}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` };
+			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${blockCause(diff, target, lastReview, backgroundState)}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` };
 		}
+		if (unavailableReason) deliveryNotes.set(event.toolCallId, unavailableReason);
+		// Only a foreground shell call's result follows the commit; a background
+		// job's result arrives when it starts.
+		const commits = event.toolName === "bash" ? committedThenDelivered(command, cwd) : [];
+		if (commits.length > 0) chainedCommits.set(event.toolCallId, commits);
 	});
+
 	pi.on("tool_result", (event) => {
+		const notes: string[] = [];
+		const reason = deliveryNotes.get(event.toolCallId);
+		deliveryNotes.delete(event.toolCallId);
+		if (reason !== undefined && !event.isError) notes.push(`This delivery ran WITHOUT a code review: no reviewer model could run in this session (${reason}). Say so in the PR description and in your final report.`);
+		// A commit's hooks run after the preflight; if they changed the reviewed
+		// code, the push that followed sent bytes no review covered. Say so now,
+		// while the PR can still wait for a review of the new diff.
+		const commits = chainedCommits.get(event.toolCallId);
+		chainedCommits.delete(event.toolCallId);
+		for (const target of commits ?? []) {
+			const diff = event.isError ? null : capture(target, "");
+			if (diff && needsDeliveryReview(diff) && !coveredBy(diff)) notes.push(`The commit in this command changed the code after its review (a commit hook rewrote it?): the delivered branch in ${diff.repo} now holds diff ${short(reviewFingerprint(diff))}, which no review covers. Run a code-reviewer on it before opening or updating the PR.`);
+		}
+		const background = dispatched.get(event.toolCallId);
+		dispatched.delete(event.toolCallId);
+		if (background) {
+			const id = event.isError ? undefined : JOB_ID.exec(resultText(event.content))?.[1];
+			if (id === undefined) backgroundState.delete(background.cwd); // refused before it started: no job will come
+			else {
+				const job = jobs.get(id) ?? { output: "" };
+				job.review = background;
+				jobs.set(id, job);
+				settle(id, job);
+			}
+		}
 		const request = pending.get(event.toolCallId);
 		pending.delete(event.toolCallId);
-		if (!request || event.isError) return;
-		const { cwd, reviewTarget } = request;
-		const details = event.details as { results?: { agent?: string; exitCode?: number; stopReason?: string; errorMessage?: string; midWork?: boolean; structuredError?: string; reviewFingerprint?: string }[] } | undefined;
-		const result = details?.results?.find((r) => r.agent === "code-reviewer" && r.exitCode === 0 && !r.errorMessage && !r.midWork && !r.structuredError && r.stopReason !== "error" && r.stopReason !== "aborted");
-		if (!result?.reviewFingerprint) return;
-		const diff = reviewTarget ? captureReleaseDiff(cwd, reviewTarget).diff : capture(cwd, "");
-		if (!diff || !stampableReview(diff) || reviewFingerprint(diff) !== result.reviewFingerprint) return;
-		const fingerprint = result.reviewFingerprint;
-		const head = headCommit(diff.repo);
-		reviewed.add(fingerprint);
-		lastReview.set(diff.repo, { fingerprint, head });
-		pi.appendEntry("delivery-review", { fingerprint, repo: diff.repo, head });
+		if (request) {
+			const reviewNote = recordReview(request, event.isError === true, event.details);
+			if (reviewNote) notes.push(reviewNote);
+		}
+		if (notes.length > 0) return { content: appendHint(event.content, notes.map((note) => `\n\n[harness] ${note}`).join("")) };
 	});
+
+	/** Stamp a finished foreground review (or a reviewer that could not run); returns a note for its result. */
+	function recordReview(request: { cwd: string; reviewTarget?: ReviewTarget; explicitModel: boolean }, isError: boolean, details: unknown): string | null {
+		const { cwd, reviewTarget } = request;
+		const results = (details as { results?: ReviewResult[] } | undefined)?.results ?? [];
+		const result = isError ? undefined : results.find((r) => r.agent === "code-reviewer" && r.exitCode === 0 && !r.errorMessage && !r.midWork && !r.structuredError && r.stopReason !== "error" && r.stopReason !== "aborted");
+		if (!result) {
+			// Not when the caller named a model: dropping `model` is the remedy then.
+			const failed = results.find((r) => r.agent === "code-reviewer");
+			const reason = failed && !reviewTarget && !request.explicitModel ? reviewerUnavailable(failed) : null;
+			if (!reason) return null;
+			const diff = capture(cwd, "");
+			if (!diff || !stampableReview(diff)) return null;
+			stamp(diff, "unavailable", reason);
+			return `Review unavailable: no reviewer model can run in this session (${reason}). Recorded for diff ${short(reviewFingerprint(diff))}; delivering exactly this diff will proceed WITHOUT a review, and the delivery result will say so. State it in the PR description.`;
+		}
+		if (!result.reviewFingerprint) return null;
+		const diff = reviewTarget ? captureReleaseDiff(cwd, reviewTarget).diff : capture(cwd, "");
+		if (!diff || !stampableReview(diff) || reviewFingerprint(diff) !== result.reviewFingerprint) return null;
+		stamp(diff, "foreground");
+		return null;
+	}
 }
 
 /** The one cause that applies to this refusal, with the fingerprints/files that prove it. */
-function blockCause(diff: ReviewDiff | null, target: string, lastReview: Map<string, { fingerprint: string; head: string | null }>, backgroundReview: Set<string>): string {
+function blockCause(diff: ReviewDiff | null, target: string, lastReview: Map<string, { fingerprint: string; head: string | null }>, backgroundState: Map<string, string>): string {
 	if (!diff) return `Complete delivery diff unavailable: ${explainDeliveryDiffFailure(target)}. `;
 	if (!stampableReview(diff)) {
 		const causes: string[] = [];
@@ -291,8 +601,9 @@ function blockCause(diff: ReviewDiff | null, target: string, lastReview: Map<str
 	const last = lastReview.get(diff.repo);
 	const head = headCommit(diff.repo);
 	const lines: string[] = [];
-	if (last) lines.push(`A review exists for diff ${short(last.fingerprint)}${last.head ? ` (HEAD ${last.head} then)` : ""} but the diff is now ${short(reviewFingerprint(diff))}${head ? ` (HEAD ${head} now)` : ""}: it went stale: ${last.head && head && last.head !== head ? `HEAD moved from ${last.head} to ${head} since the review` : "a later edit or amend"}.`);
-	if (backgroundReview.has(target) || backgroundReview.has(diff.repo)) lines.push("A code-reviewer ran in the background for this repo; only a foreground review counts.");
+	if (last) lines.push(`A review exists for diff ${short(last.fingerprint)}${last.head ? ` (HEAD ${last.head} then)` : ""} but the diff is now ${short(reviewFingerprint(diff))}${head ? ` (HEAD ${head} now)` : ""}: it went stale: ${last.head && head && last.head !== head ? `HEAD moved from ${last.head} to ${head} since the review, and the delivered content differs from what was reviewed` : "a later edit or amend"}.`);
+	const background = backgroundState.get(target) ?? backgroundState.get(diff.repo);
+	if (background) lines.push(`A background code-reviewer for this repo ${background}; it counts only once it completes cleanly on this same diff (wait for its completion notice), or run a foreground review.`);
 	if (lines.length === 0) lines.push("No code review has run for this diff fingerprint " + short(reviewFingerprint(diff)) + ".");
-	return `Delivery diff has no matching completed foreground review. ${lines.join(" ")} `;
+	return `Delivery diff has no matching completed review. ${lines.join(" ")} `;
 }

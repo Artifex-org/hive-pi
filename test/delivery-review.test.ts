@@ -39,7 +39,7 @@ describe("delivery review", () => {
 		const deliver = () => pi.emit({ type: "tool_call", toolName: "bash", input: { command, cwd } });
 		const refused = (await deliver())[0] as { block: boolean; reason: string };
 		expect(refused.block).toBe(true);
-		expect(refused.reason).toContain("no matching completed foreground review");
+		expect(refused.reason).toContain("no matching completed review");
 		expect(refused.reason).not.toContain("diff unavailable");
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
@@ -83,7 +83,8 @@ describe("delivery review", () => {
 		const hook = join(cwd, ".git", "hooks", hookName);
 		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' > generated.ts\ngit add generated.ts\n" +
 			(hookName === "post-rewrite" ? "git -c core.hooksPath=/dev/null commit -m generated\n" : "")); chmodSync(hook, 0o755);
-		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: hookName === "post-rewrite" ? "git commit --amend --no-edit && git push origin HEAD" : "git commit -m code && hive ship && git push", cwd } }))[0])
+		// A later delivery after the hooked commit's own push could act on hook-made bytes.
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: hookName === "post-rewrite" ? "git commit --amend --no-edit && git push origin HEAD && gh pr create" : "git commit -m code && hive ship && git push", cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("executable hooks") });
 		if (hookName === "post-rewrite") git("commit", "--amend", "--no-edit");
 		else git("commit", "-m", "hook generated");
@@ -231,10 +232,8 @@ describe("delivery review", () => {
 		for (const command of [`git -C '${b.cwd}' push`, `cd '${b.cwd}' && git push`]) expect((await push(command))[0]).toMatchObject({ block: true });
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd: b.cwd } });
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(b.cwd)!) }] } });
+		// Committing the reviewed tree changes the layered evidence, not what is delivered.
 		b.git("add", "."); b.git("commit", "-m", "code");
-		expect((await push(`git -C '${b.cwd}' push`))[0]).toMatchObject({ block: true });
-		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "final", input: { agent: "code-reviewer", cwd: b.cwd } });
-		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "final", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(b.cwd)!) }] } });
 		expect((await push(`git -C '${b.cwd}' push`))[0]).toBeUndefined();
 		writeFileSync(join(b.cwd, "code.ts"), substantive + "export const later = 1;\n");
 		expect((await push(`git -C '${b.cwd}' push`))[0]).toMatchObject({ block: true });
@@ -395,8 +394,9 @@ describe("delivery review", () => {
 			const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
 			const hook = join(cwd, ".git", "hooks", "pre-commit"); writeFileSync(hook, "#!/bin/sh\nexit 0\n"); chmodSync(hook, 0o755);
 			const pi = createFakePi(); registerDeliveryReview(pi.api);
-			const text = await reason(pi, "git commit -m code && git push origin HEAD", cwd);
+			const text = await reason(pi, "git commit -m code && git push origin HEAD && gh pr create", cwd);
 			expect(text).toContain("`git commit -m code`"); expect(text).toContain("executable hooks (pre-commit)"); expect(text).toContain("as its own command");
+			expect(text).toContain("later delivery leg `gh pr create`");
 		});
 		it("says no review has run for this fingerprint, naming it", async () => {
 			vi.stubEnv("PI_DELIVERY_REVIEW", "1"); const pi = createFakePi(); registerDeliveryReview(pi.api, () => diff);
@@ -404,11 +404,11 @@ describe("delivery review", () => {
 			expect(text).toContain("No code review has run for this diff fingerprint " + reviewFingerprint(diff).slice(0, 8));
 			expect(text).not.toContain("background"); expect(text).not.toContain("stale");
 		});
-		it("says a review ran in the background and does not count", async () => {
+		it("says a background review is still running and when it will count", async () => {
 			vi.stubEnv("PI_DELIVERY_REVIEW", "1"); const pi = createFakePi(); registerDeliveryReview(pi.api, () => diff);
 			await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", background: true, cwd: "/repo" } });
 			const text = await reason(pi, "git push", "/repo");
-			expect(text).toContain("ran in the background"); expect(text).toContain("only a foreground review counts");
+			expect(text).toContain("background code-reviewer for this repo is still running"); expect(text).toContain("completes cleanly on this same diff");
 		});
 		it("says a review went stale after a commit, with both fingerprints", async () => {
 			const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");

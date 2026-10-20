@@ -6,6 +6,10 @@
  *                           mutations, --no-verify (ask)
  *
  * The edit guard is NO LONGER bridged: it lives in `guards-common/worktree-guard.ts`, native.
+ * Also native, on shell calls: the gh PR-body guard, the git identity guard
+ * (`guards-common/identity-guard.ts`, blocks a borrowed author/committer), and
+ * the gate-baseline note (`guards-common/baseline-guard.ts`, warns on the
+ * result of a shell call or edit that loosened a gate baseline).
  * The old rule here said the bash scripts were the single source of truth and
  * must not be ported — but opencode had already carried its own TypeScript port
  * for as long as it has had plugins, and the bridge failed OPEN wherever
@@ -31,6 +35,8 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { decide, realProbe } from "./guards-common/worktree-guard.ts";
 import { ghBodyVerdict } from "./guards-common/gh-body-guard.ts";
+import { identityVerdict } from "./guards-common/identity-guard.ts";
+import { baselineCandidates, baselineNote, snapshotBaselines, type BaselineSnapshot } from "./guards-common/baseline-guard.ts";
 import { appendHint } from "./toolhints/index.ts";
 
 /** Matches toolhints' and toolcwd's tag: one way of speaking as the harness. */
@@ -58,6 +64,20 @@ function takeGuardNote(): string | null {
 	const note = pendingGuardNote;
 	pendingGuardNote = null;
 	return note;
+}
+
+/**
+ * Gate-baseline files as they were before each in-flight tool call, by call
+ * id, so the call's own result can say when it loosened one. Bounded: a call
+ * whose result never arrives must not pin file contents for the session.
+ */
+const baselineSnapshots = new Map<string, BaselineSnapshot>();
+
+function snapshotFor(toolCallId: string, toolName: string, input: Record<string, unknown>, cwd: string): void {
+	const paths = baselineCandidates(toolName, input, cwd);
+	if (paths.length === 0) return;
+	baselineSnapshots.set(toolCallId, snapshotBaselines(paths));
+	if (baselineSnapshots.size > 32) baselineSnapshots.delete(baselineSnapshots.keys().next().value as string);
 }
 
 const HOOKS_DIR = join(process.env.HOME ?? "", ".claude/hooks");
@@ -170,6 +190,10 @@ export default function (pi: ExtensionAPI) {
 			// therefore the bridged hook — does not exist.
 			const ghBody = ghBodyVerdict(input.command);
 			if (ghBody.kind === "block") return { block: true, reason: ghBody.reason };
+			// Native too: a borrowed git identity is wrong in every environment.
+			const cwd = typeof (input as { cwd?: unknown }).cwd === "string" ? (input as { cwd: string }).cwd : ctx.cwd;
+			const identity = identityVerdict(input.command, cwd);
+			if (identity.kind === "block") return { block: true, reason: identity.reason };
 			const verdict = interpret(
 				runHook(BASH_HOOK, { tool_name: "Bash", tool_input: { command: input.command } }),
 			);
@@ -198,6 +222,9 @@ export default function (pi: ExtensionAPI) {
 				// construction.
 				if (!ok) return { block: true, terminate: true, reason: `User declined: ${verdict.message}` };
 			}
+			// Not `background_bash`: its result arrives when the job STARTS, before
+			// the command could have changed anything to compare.
+			if (event.toolName === "bash") snapshotFor(event.toolCallId, event.toolName, input as Record<string, unknown>, cwd);
 			return;
 		}
 
@@ -209,6 +236,7 @@ export default function (pi: ExtensionAPI) {
 			// that documents itself and informs no one, so it is queued here and
 			// appended to this edit's own result below.
 			if (verdict.kind === "allow" && verdict.note) queueGuardNote(verdict.note);
+			snapshotFor(event.toolCallId, event.toolName, input as Record<string, unknown>, ctx.cwd);
 		}
 	});
 
@@ -218,9 +246,11 @@ export default function (pi: ExtensionAPI) {
 	// of the edit, so repeating it on every write in that directory would be pure
 	// noise — and noise is how a real warning stops being read.
 	pi.on("tool_result", (event) => {
-		const note = takeGuardNote();
-		if (!note) return;
-		return { content: appendHint(event.content, `\n\n[${GUARD_NOTE_TAG}] ${note}`) };
+		const snapshot = baselineSnapshots.get(event.toolCallId);
+		baselineSnapshots.delete(event.toolCallId);
+		const notes = [takeGuardNote(), snapshot ? baselineNote(snapshot) : null].filter((note): note is string => note !== null);
+		if (notes.length === 0) return;
+		return { content: appendHint(event.content, notes.map((note) => `\n\n[${GUARD_NOTE_TAG}] ${note}`).join("")) };
 	});
 
 	// `!` / `!!` user commands get the same bash checks (kubectl context etc.).

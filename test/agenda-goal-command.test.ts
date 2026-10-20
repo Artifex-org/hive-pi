@@ -169,11 +169,15 @@ describe("looksUnverifiable", () => {
 		"https://github.com/Artifex-org/hive-pi/pull/137 is open",
 		"HEAD is 9293442ab",
 		"local branch equals origin/main",
+		// Refused in the HIV-3906 eval: the PR described before its state.
+		"Draft PR titled 'fix(api): honour since/until in checks history' is open for this branch",
+		'A pull request for branch fix/x with the title "v1.2 parser. Faster" exists',
+		"PR for this branch created",
 	])("recognises a checkable condition: %s", (condition) => {
 		expect(looksUnverifiable(condition)).toBe(false);
 	});
 
-	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely", "the page no longer runs slowly", "users report no confusing issues", "no more manual steps for onboarding", "no issues", "the users have no issues", "the deadbeef feeling", "a decade of defaced"])(
+	it.each(["make the code better", "improve performance", "tidy things up", "fix 2 things", "handle the steps nicely", "the page no longer runs slowly", "users report no confusing issues", "no more manual steps for onboarding", "no issues", "the users have no issues", "the deadbeef feeling", "a decade of defaced", "write a really good PR", "a PR that people like. The code is open to change", "make the PR description nicer and more open"])(
 		"flags an ungradeable one: %s",
 		(condition) => {
 			expect(looksUnverifiable(condition)).toBe(true);

@@ -25,11 +25,98 @@ export async function boundedFile(path: string): Promise<string> {
 	} finally { await file.close(); }
 }
 
+/** The words of one simple command, and why they are not all literal (if they are not). */
+export interface ShellWords {
+	words: string[];
+	/** The first construct whose value only exists at run time, named for a reader; null when every word is literal. */
+	dynamic: string | null;
+	/** Why the text is not a complete command at all (an unbalanced quote); null when it is. */
+	malformed: string | null;
+}
+
+const EXPANDS = /[\w{(?!@#$*\-]/;
+
+function expansionName(text: string, at: number): string {
+	const next = text[at + 1];
+	if (next === "(") return "a command substitution `$(…)`";
+	if (next === "{") return "a parameter expansion `${…}`";
+	const name = /^\w+/.exec(text.slice(at + 1))?.[0];
+	return name ? `a variable \`$${name}\`` : `a special parameter \`$${next}\``;
+}
+
+/**
+ * Split ONE simple command into words under POSIX quoting: single quotes are
+ * literal, double quotes honour `\$ \` \" \\`, and a backslash outside quotes
+ * escapes the next character — so `'it'\''s'` is the one word `it's`.
+ * Substitutions and expansions (`$(…)`, backticks, `$VAR`, `${…}`, `$'…'`)
+ * outside single quotes make the command dynamic; their raw text is kept in
+ * the word.
+ */
+export function shellWords(segment: string): ShellWords {
+	const words: string[] = [];
+	let word = "";
+	let started = false;
+	let dynamic: string | null = null;
+	let malformed: string | null = null;
+	const note = (what: string) => { dynamic ??= what; };
+	for (let i = 0; i < segment.length; i++) {
+		const ch = segment[i];
+		if (/\s/.test(ch)) {
+			if (started) words.push(word);
+			word = "";
+			started = false;
+			continue;
+		}
+		started = true;
+		if (ch === "'") {
+			const close = segment.indexOf("'", i + 1);
+			if (close < 0) { malformed = "an unbalanced single quote"; word += segment.slice(i + 1); break; }
+			word += segment.slice(i + 1, close);
+			i = close;
+			continue;
+		}
+		if (ch === '"') {
+			let j = i + 1;
+			for (; j < segment.length && segment[j] !== '"'; j++) {
+				const c = segment[j];
+				if (c === "\\" && /[$`"\\\n]/.test(segment[j + 1] ?? "")) {
+					if (segment[j + 1] !== "\n") word += segment[j + 1];
+					j++;
+					continue;
+				}
+				if (c === "`") note("a backtick command substitution");
+				else if (c === "$" && EXPANDS.test(segment[j + 1] ?? "")) note(expansionName(segment, j));
+				word += c;
+			}
+			if (j >= segment.length) { malformed = "an unbalanced double quote"; break; }
+			i = j;
+			continue;
+		}
+		if (ch === "\\") {
+			if (i + 1 < segment.length && segment[i + 1] !== "\n") word += segment[i + 1];
+			i++;
+			continue;
+		}
+		if (ch === "`") note("a backtick command substitution");
+		else if (ch === "$" && (segment[i + 1] === "'" || segment[i + 1] === '"')) note("ANSI-C or locale quoting `$'…'`");
+		else if (ch === "$" && EXPANDS.test(segment[i + 1] ?? "")) note(expansionName(segment, i));
+		word += ch;
+	}
+	if (started && !malformed) words.push(word);
+	return { words, dynamic, malformed };
+}
+
+/** What makes this segment's words not literal (a substitution, a variable, an unbalanced quote), or null. */
+export function literalProblem(segment: string): string | null {
+	const parsed = shellWords(segment);
+	return parsed.malformed ?? parsed.dynamic;
+}
+
 /** Literal shell words only. Dynamic shell expressions are not guessed. */
 export function literalWords(segment: string, allowDynamicValues = false): string[] | null {
-	const words = segment.match(/(?:[^\s'"\\]+|'[^']*'|"[^"\\]*")+/g) ?? [];
-	if (words.join(" ").replace(/\s/g, "") !== segment.replace(/\s/g, "") || (!allowDynamicValues && words.some((w) => /\$(?:[\w{(?!@#$*\-])|`|\\/.test(w.replace(/'[^']*'/g, ""))))) return null;
-	return words.map((w) => w.replace(/'([^']*)'|"([^"]*)"/g, (_all, a, b) => a ?? b));
+	const parsed = shellWords(segment);
+	if (parsed.malformed || (parsed.dynamic && !allowDynamicValues)) return null;
+	return parsed.words;
 }
 
 export function goRunPatterns(command: string): string[] {
