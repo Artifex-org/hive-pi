@@ -357,8 +357,18 @@ retention/sweeping after verifying the launch/process is dead. Never use leftove
 SDK state as a source of truth or automatically resume it.
 
 Leases are memory-only, coalesced only while a GET is in flight, and reauthorized
-on each request. Acquisition is bounded to ten seconds and supports independent
-waiter cancellation. Leases with less than sixty seconds remaining are refused;
+on each request. Each acquisition attempt is bounded to ten seconds and supports
+independent waiter cancellation. Hive marks one refusal temporary: `503` with
+`Retry-After` and `X-Hive-Lease-Retryable: 1`, while the launch is otherwise
+admitted but its live node's SDK capability advert reads not ready (a harness
+update dips it until the next capability heartbeat, a minute plus its sample; as
+a 403 that killed live sessions), or the server's state read failed. Hive refuses
+it before binding an account or asking the broker. That refusal is retried,
+honouring `Retry-After` capped at 15 s, for up to 150 s per lease acquisition
+(the next attempt's 10 s included); then the request fails with "stayed
+temporarily refused for N s". Every other refusal, an unmarked 503 (a proxy's or
+the broker's) included, fails at once. The retries stop as soon as no caller
+waits for the lease. Leases with less than sixty seconds remaining are refused;
 authd is the sole refresh writer. The provider does not restart-loop on a near-
 expiry response containing the same token. A changed token/account rebuilds
 settled history instead of updating a running child's identity. Active inference

@@ -6,7 +6,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { accessLease, LOOPBACK_HOSTS, sandboxEgressEnv, type AccessLease } from "./options.ts";
-import { SdkProviderError } from "./events.ts";
+import { SdkLeaseRefused, SdkProviderError } from "./events.ts";
 import { assertTreeIdentityReadable, killTree, releaseTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 
 export const CLI_VERSION = "2.1.286";
@@ -40,29 +40,81 @@ export function hiveLease(config: LaunchConfig, fetcher: typeof fetch = fetch,
 			method: "GET", headers: { Authorization: `Bearer ${config.token}` }, redirect: "error",
 			signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
 		});
-		if (!response.ok) throw new SdkProviderError(`Claude SDK launch lease refused (HTTP ${response.status})`);
+		if (!response.ok) {
+			// Only Hive's marked 503 is temporary; a proxy's or broker's 503 is not.
+			const retryable = response.status === 503 && response.headers.get("x-hive-lease-retryable") === "1";
+			const retryAfter = Number(response.headers.get("retry-after"));
+			throw new SdkLeaseRefused(response.status, retryable, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined);
+		}
 		let value: unknown;
 		try { value = await response.json(); } catch { throw new SdkProviderError("Invalid access-only Claude lease response"); }
 		return accessLease(value, Date.now());
 	};
 }
 
-/** Coalesces concurrent GETs only; no cached authorization across model requests. */
 /** The least remaining lease validity a turn may start with. */
 export const LEASE_TURN_FLOOR_MS = 60_000;
+/**
+ * Hive marks one refusal temporary (503 + `X-Hive-Lease-Retryable`): the launch is otherwise
+ * admitted but its live node's SDK capability advert reads not ready (a harness update dips it
+ * until the next capability heartbeat, a minute plus its sample; as a 403 that killed live
+ * sessions), or its state read failed. Hive refuses it before binding an account or asking
+ * the broker, so it is retried until this much time, including the next attempt, has passed.
+ * Every other refusal fails the request at once.
+ */
+export const LEASE_UNAVAILABLE_GRACE_MS = 150_000;
+const LEASE_ATTEMPT_MS = 10_000;
+const LEASE_RETRY_MAX_MS = 15_000;
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) { reject(signal.reason); return; }
+		const abort = () => { clearTimeout(timer); reject(signal.reason); };
+		const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
+		signal.addEventListener("abort", abort, { once: true });
+	});
+}
+
+/** Coalesces concurrent GETs only; no cached authorization across model requests. */
 export class LeaseManager {
-	private flight?: Promise<AccessLease>;
+	private flight?: { promise: Promise<AccessLease>; controller: AbortController; waiters: number };
 	private readonly controller = new AbortController();
 	constructor(private readonly source: LeaseSource, private readonly now = Date.now) {}
+	private async acquire(signal: AbortSignal): Promise<AccessLease> {
+		// Wall time for both the deadline and the sleeps, whatever clock judges lease validity.
+		const started = Date.now();
+		for (let attempt = 1; ; attempt++) {
+			const bounded = AbortSignal.any([signal, AbortSignal.timeout(LEASE_ATTEMPT_MS)]);
+			try {
+				return accessLease(await cancellable(this.source(bounded), bounded), this.now());
+			} catch (error) {
+				if (!(error instanceof SdkLeaseRefused) || !error.retryable) throw error;
+				const wait = Math.min(LEASE_RETRY_MAX_MS, error.retryAfterMs ?? 5_000 * attempt);
+				if (Date.now() - started + wait + LEASE_ATTEMPT_MS > LEASE_UNAVAILABLE_GRACE_MS) {
+					throw new SdkProviderError(`Claude SDK lease stayed temporarily refused for ${Math.round((Date.now() - started) / 1000)} s (HTTP 503: the launch node does not advertise the SDK runtime)`);
+				}
+				await sleep(wait, signal);
+			}
+		}
+	}
 	async get(signal: AbortSignal, previous?: AccessLease): Promise<AccessLease> {
 		signal.throwIfAborted(); this.controller.signal.throwIfAborted();
-		if (!this.flight) {
-			const bounded = AbortSignal.any([this.controller.signal, AbortSignal.timeout(10_000)]);
-			const flight = cancellable(this.source(bounded), bounded).then(value => accessLease(value, this.now()));
+		if (!this.flight || this.flight.controller.signal.aborted) {
+			const controller = new AbortController();
+			const promise = this.acquire(AbortSignal.any([this.controller.signal, controller.signal]));
+			const flight = { promise, controller, waiters: 0 };
 			this.flight = flight;
-			void flight.finally(() => { if (this.flight === flight) this.flight = undefined; }).catch(() => {});
+			void promise.finally(() => { if (this.flight === flight) this.flight = undefined; }).catch(() => {});
 		}
-		const lease = await cancellable(this.flight, signal);
+		const flight = this.flight;
+		flight.waiters++;
+		let lease: AccessLease;
+		try {
+			lease = await cancellable(flight.promise, signal);
+		} finally {
+			// Nobody waits for it any more: stop asking Hive (a 503 wait can be long).
+			if (--flight.waiters === 0) flight.controller.abort();
+		}
 		// Never restart with a token whose remaining validity cannot support a turn.
 		if (Date.parse(lease.expires_at) - this.now() < LEASE_TURN_FLOOR_MS) throw new SdkProviderError("Claude SDK lease too near expiry; wait for authd renewal");
 		if (previous && lease.access_token === previous.access_token && Date.parse(previous.expires_at) <= this.now()) {
