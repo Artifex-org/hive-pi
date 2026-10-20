@@ -63,3 +63,16 @@ with no git and no filesystem. `realProbe` is the part that cannot be unit-teste
 anyway, and it makes **one** `git rev-parse` where the script made three — this
 runs inside a `tool_call` handler that pi awaits serially, so it sits directly in
 the agent loop on every edit.
+
+## Identity and baselines
+
+`identity-guard.ts` blocks a shell command that writes a git identity other
+than the one git resolves for the session (`git -c user.*=…` on a
+commit-creating verb, `git commit --author`, `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
+name/email, `git config user.name|user.email <value>`). Reads pass, and so does
+anything aimed at a repository outside the session's worktree. When no identity
+is configured the agent is told to stop and report it, never to set one.
+
+`baseline-guard.ts` only warns: it snapshots gate-baseline files (codemetrics
+debt baselines, coverage floors) before an edit, write or a shell command that
+mentions one, and notes on that call's result when it loosened them.
