@@ -116,6 +116,17 @@ const committedHead = (cwd: string, sha: string): boolean => {
 	} catch { return false; }
 };
 
+/**
+ * A command that may commit in its own directory but that commitCheckout could
+ * not parse: a multi-line or quote-heavy message, or a chain with another git
+ * verb first (`go vet && git diff --check && git add … && git commit`). Both
+ * shapes went unrecognized in the round-5 eval, so the conductor's "final
+ * review" reminder only fired once the PR was open and the review led to
+ * commits after delivery. Matching is only the trigger to sample HEAD; the
+ * reflog decides (see `requireReflog`).
+ */
+const MENTIONS_COMMIT = /\bgit\b(?:\s+-[Cc]\s+\S+)*\s+commit\b/;
+
 /** The checkpoint request a commit may be answering (checkpoint.ts). */
 export interface CheckpointCommits {
 	outstanding(): boolean;
@@ -127,13 +138,20 @@ export function registerDeliveryProgress(
 	checkpoint?: CheckpointCommits,
 ): (entries: readonly unknown[]) => void {
 	let seen = false;
-	const pending = new Map<string, { cwd: string; head: string | null }>();
+	// requireReflog: the command was not parsed, so a moved HEAD proves nothing
+	// by itself (a later checkout, reset or rebase moves it too). Only the
+	// newest reflog entry being a commit AT the new HEAD counts.
+	const pending = new Map<string, { cwd: string; head: string | null; requireReflog: boolean }>();
 	pi.on("tool_call", (event, ctx) => {
 		if (seen || event.toolName !== "bash") return;
 		const input = event.input as { command?: unknown; cwd?: unknown };
 		if (typeof input.command !== "string") return;
-		const cwd = commitCheckout(input.command, typeof input.cwd === "string" ? input.cwd : ctx.cwd);
-		if (cwd) pending.set(event.toolCallId, { cwd, head: head(cwd) });
+		const base = typeof input.cwd === "string" ? input.cwd : ctx.cwd;
+		const cwd = commitCheckout(input.command, base);
+		if (cwd) pending.set(event.toolCallId, { cwd, head: head(cwd), requireReflog: false });
+		else if (input.command.length <= 8192 && MENTIONS_COMMIT.test(input.command)) {
+			pending.set(event.toolCallId, { cwd: base, head: head(base), requireReflog: true });
+		}
 	});
 	pi.on("tool_result", event => {
 		const before = pending.get(event.toolCallId);
@@ -145,7 +163,8 @@ export function registerDeliveryProgress(
 		// A commit/PR may have succeeded before a later command failed. The
 		// concrete summary/URL, rather than the whole chain's exit, decides.
 		const after = before ? head(before.cwd) : null;
-		const commit = before && after && after !== before.head && (!event.isError || committedHead(before.cwd, after));
+		const commit = before && after && after !== before.head &&
+			(before.requireReflog || event.isError ? committedHead(before.cwd, after) : true);
 		const kind = milestoneKind(command, output, !event.isError) ?? (commit ? "commit" : null);
 		if (!kind) return;
 		// A commit the conductor asked for as a checkpoint is not the end of
