@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Dispatch } from "../extensions/agenda/plan-graph.ts";
 import type { WorkerResult } from "../extensions/agenda/executor.ts";
+import * as executor from "../extensions/agenda/executor.ts";
 import type { WorkerHandle, WorkerRegistry } from "../extensions/agenda/rpc-worker.ts";
 
 const runOneShot = vi.hoisted(() => vi.fn());
@@ -73,6 +74,7 @@ vi.mock("../extensions/agenda/rpc-worker.ts", async (importOriginal) => {
 import agenda from "../extensions/agenda/index.ts";
 import loadout from "../extensions/loadout/index.ts";
 import { createFakePi, type FakePi } from "./fake-pi.ts";
+import { OWN_WORK_CHANNEL, OWN_WORK_REQUEST_CHANNEL, trackOwnWork } from "../extensions/hive-common/own-work.ts";
 
 let pi: FakePi;
 beforeEach(() => {
@@ -337,6 +339,51 @@ describe("the orchestrate tool", () => {
 		expect(result.content[0].text).toContain("worker output");
 	});
 
+	it.each([false, true])("clears a foreground snapshot after its worker settles (failure=%s)", async (failure) => {
+		let finish = () => {};
+		runRoleAgent.mockImplementation(() => new Promise((resolve, reject) => {
+			finish = () => failure ? reject(new Error("worker failed")) : resolve({
+				text: "done", tokens: 1, exitCode: 0, timedOut: false, stderr: "",
+				usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+			});
+		}));
+		agenda(pi.api);
+		const work = trackOwnWork(pi.api);
+		const pending = orchestrate().execute("foreground", {
+			name: "foreground", description: "test",
+			nodes: [{ id: "a", kind: "agent", role: "research", prompt: "go", retries: 0 }],
+		}, undefined, undefined, ctx);
+		await vi.waitFor(() => expect(runRoleAgent).toHaveBeenCalledOnce());
+		expect(work.running()).toBe(1);
+		pi.api.events.emit(OWN_WORK_REQUEST_CHANNEL, {});
+		expect(work.running()).toBe(1);
+		finish();
+		await pending;
+		// No terminal request: subscribers must receive the transition themselves.
+		expect(work.running()).toBe(0);
+	});
+
+	it("clears a foreground snapshot when the orchestration itself throws", async () => {
+		let fail = () => {};
+		const run = vi.spyOn(executor, "runPlan").mockImplementationOnce(() => new Promise((_resolve, reject) => {
+			fail = () => reject(new Error("executor failed"));
+		}));
+		try {
+			agenda(pi.api);
+			const work = trackOwnWork(pi.api);
+			const pending = orchestrate().execute("foreground-error", {
+				name: "foreground", description: "test",
+				nodes: [{ id: "a", kind: "agent", role: "research", prompt: "go", retries: 0 }],
+			}, undefined, undefined, ctx);
+			expect(run).toHaveBeenCalledOnce();
+			pi.api.events.emit(OWN_WORK_REQUEST_CHANNEL, {});
+			expect(work.running()).toBe(1);
+			fail();
+			await expect(pending).rejects.toThrow("executor failed");
+			expect(work.running()).toBe(0);
+		} finally { run.mockRestore(); }
+	});
+
 	it("returns control for a durable run, keeps its worker steerable, then pushes and retains completion", async () => {
 		agenda(pi.api);
 		const started = await orchestrate().execute(
@@ -356,6 +403,19 @@ describe("the orchestrate tool", () => {
 		expect(runId).toMatch(/^run-[0-9a-f-]{36}$/);
 		expect(durableHarness.ids).toHaveLength(1);
 
+		// Lifecycle and pull snapshots must reflect the live registry, not a
+		// startup zero cached before this run existed.
+		for (const event of ["session_start", "session_tree"]) {
+			pi.busEvents.length = 0;
+			await pi.emit({ type: event });
+			expect(pi.busEvents.filter((entry) => entry.name === OWN_WORK_CHANNEL))
+				.toEqual([{ name: OWN_WORK_CHANNEL, payload: { by: "orchestrate", running: 1 } }]);
+		}
+		pi.busEvents.length = 0;
+		pi.api.events.emit(OWN_WORK_REQUEST_CHANNEL, {});
+		expect(pi.busEvents.filter((entry) => entry.name === OWN_WORK_CHANNEL))
+			.toEqual([{ name: OWN_WORK_CHANNEL, payload: { by: "orchestrate", running: 1 } }]);
+
 		const workerId = durableHarness.ids[0];
 		const listed = await tool("worker_send").execute("workers", {});
 		expect(listed.content[0].text).toContain(workerId);
@@ -372,6 +432,10 @@ describe("the orchestrate tool", () => {
 
 		const retained = await tool("orchestrate_result").execute("result", { id: runId });
 		expect(retained.content[0].text).toContain(`result:${workerId}`);
+		pi.busEvents.length = 0;
+		pi.api.events.emit(OWN_WORK_REQUEST_CHANNEL, {});
+		expect(pi.busEvents.filter((entry) => entry.name === OWN_WORK_CHANNEL))
+			.toEqual([{ name: OWN_WORK_CHANNEL, payload: { by: "orchestrate", running: 0 } }]);
 	});
 
 	it("stops one durable worker intentionally and lets its run complete without a failure", async () => {

@@ -122,7 +122,7 @@ import {
 import { ATTENDED_ENTRY_TYPE, type AttendedEntry, rehydrateAttended, reopenForInstruction } from "./attendance.ts";
 import { operatorInputDigest } from "../hive-common/operator-input.ts";
 import { classifyHandback } from "../hive-common/handback.ts";
-import { announceOwnWork, trackOwnWork } from "../hive-common/own-work.ts";
+import { announceOwnWork, OWN_WORK_REQUEST_CHANNEL, trackOwnWork } from "../hive-common/own-work.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import { runOneShot } from "./spawn.ts";
 import { DECK_SECTION_CHANNEL, DECK_SYNC_CHANNEL, type DeckSectionEvent } from "../deck/protocol.ts";
@@ -879,6 +879,7 @@ export default function (pi: ExtensionAPI) {
 		// Cancel run drivers before killing their workers, so an intentional
 		// session shutdown cannot be reported as a correctness failure.
 		runs.cancelAll();
+		announceDurableRuns();
 		// An orphaned child outlives the session that made it and holds its
 		// worktree lock invisibly to the next one.
 		workers.stopAll();
@@ -1636,6 +1637,11 @@ export default function (pi: ExtensionAPI) {
 	// A durable orchestration is the agent's own pending work (hive-common/own-work.ts).
 	const announceDurableRuns = () =>
 		announceOwnWork(pi, "orchestrate", runs.list().filter((run) => run.status === "running").length);
+	// The registry is live in this factory, not hydrated from session entries.
+	// Publish even when orchestration is inactive or this is a worker session.
+	pi.on("session_start", announceDurableRuns);
+	pi.on("session_tree", announceDurableRuns);
+	pi.events.on(OWN_WORK_REQUEST_CHANNEL, announceDurableRuns);
 
 	// The trio moves together: worker_send addresses workers only an orchestrate
 	// run creates, so offering it alone is a tool that can only ever answer "no
@@ -2109,16 +2115,19 @@ export default function (pi: ExtensionAPI) {
 			if (signal?.aborted) controller.abort();
 			else signal?.addEventListener("abort", forwardAbort, { once: true });
 			runs.start(runId, plan.name, () => controller.abort());
+			announceDurableRuns();
 			let result: DurableRunResult;
 			try {
 				result = await executeRun(controller.signal);
 			} catch (error) {
 				runs.fail(runId, error);
+				announceDurableRuns();
 				throw error;
 			} finally {
 				signal?.removeEventListener("abort", forwardAbort);
 			}
 			runs.complete(runId, result);
+			announceDurableRuns();
 			runs.markNotified(runId);
 			return {
 				content: [{ type: "text", text: firstPage(runId, result, RESULT_PAGE_CHARS) }],

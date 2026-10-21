@@ -60,7 +60,7 @@ import { registerGuardedTool } from "../guards-common/capability.ts";
 import { resolveAuth } from "../hive-common/identity.ts";
 import { killTree as signalChildTree, trackTree, treeSpawnOptions, TREE_TOKEN } from "../hive-common/child-tree.ts";
 import { isOverflowWedged } from "../hive-common/overflow.ts";
-import { announceOwnWork } from "../hive-common/own-work.ts";
+import { announceOwnWork, OWN_WORK_REQUEST_CHANNEL } from "../hive-common/own-work.ts";
 import { createdPullURL } from "../hive-common/pull-delivery.ts";
 import { createWaker } from "../hive-common/waker.ts";
 import {
@@ -189,11 +189,17 @@ export default function background(pi: ExtensionAPI) {
 		}
 	};
 
-	const paintFooter = (): void => {
-		// Every job state change passes through here, so the shared running count
-		// (hive-common/own-work.ts) is announced from the same place.
+	const announceJobs = (): void => {
+		// Before restoration (or after a persistence fault) no count is authoritative.
+		if (sessionId === undefined) return;
 		const running = allJobs().filter((job) => job.status === "running");
 		announceOwnWork(pi, "background", running.length, running.map((job) => job.what));
+	};
+	pi.events.on(OWN_WORK_REQUEST_CHANNEL, announceJobs);
+
+	const paintFooter = (): void => {
+		// Every job state change and restore passes through here.
+		announceJobs();
 		const segment = footerSegment(allJobs());
 		withCtx((ctx) => ctx.ui.setStatus("background", segment ?? undefined));
 	};
