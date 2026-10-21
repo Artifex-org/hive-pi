@@ -1,7 +1,7 @@
 /** Default-on, overridable pre-delivery review checkpoint (HIV-3802). */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { splitCommandList, splitCommands, stripBenignRedirects, type CommandSegment } from "../guards-common/shell-split.ts";
-import { deliveryMergeBase, type GitReader } from "../guards-common/git-base.ts";
+import { deliveryBaseBranch, deliveryMergeBase, type GitReader } from "../guards-common/git-base.ts";
 import { literalProblem, literalWords } from "../toolhints/contextual.ts";
 import { appendHint } from "../toolhints/index.ts";
 import { BACKGROUND_JOB_CHANNEL, type BackgroundJobEvent } from "../background/channel.ts";
@@ -157,6 +157,10 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 				if (/^-[BHR].+/.test(tokens[i]) && !["-B", "-H", "-R"].includes(option)) targetOverride ||= option;
 				if (!tokens[i].includes("=") && ["--repo", "--head", "--base", "-R", "-H", "-B", "--title", "--body", "--body-file", "-t", "-b", "-F", "--assignee", "--reviewer", "--label", "--milestone", "--project", "--template"].includes(option)) i++;
 			}
+			// `--base <default branch>` alone names exactly what gh targets when
+			// `--base` is omitted (round-5 eval: a correct `gh pr create --draft
+			// --base main` was refused). Unresolvable defaults keep refusing.
+			if (selected.base !== undefined && selected.head === undefined && targetOverride === false && dir !== null && selected.base === defaultBranch(dir)) delete selected.base;
 			const explicit = Object.keys(selected).length > 0;
 			if (explicit && unsupportedOption) targetOverride ||= unsupportedOption;
 			if (explicit && !isReviewTarget(selected)) targetOverride ||= selected.base !== undefined ? "--base" : "--head";
@@ -193,8 +197,16 @@ export function scanDeliveryTargets(command: string, cwd: string): DeliveryScan[
 }
 
 const REDIRECT_CAUSE = "the leg redirects to or from a file (only fd duplication such as `2>&1`, output to `/dev/null` and here-documents are supported). To write a PR body, run `cat > /tmp/pr-body.md <<'EOF' … EOF` as its own command first, then `gh pr create --title … --body-file /tmp/pr-body.md` standalone";
-// `--base` alone is neither the default target nor a release target, and is usually meant as the default branch.
+// `--base` alone, naming anything but the default branch, is neither the default target nor a release target.
 const BASE_ONLY_CAUSE = "`--base` without `--head` cannot be matched to the reviewed diff. For the repository's default branch, omit `--base` (gh targets it by default); a release PR names both `--base` and `--head`";
+
+/** The branch the delivery diff is measured against (guards-common/git-base.ts), or undefined. */
+function defaultBranch(dir: string): string | undefined {
+	return deliveryBaseBranch(dir, (args, cwd) => {
+		try { return execFileSync("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8", timeout: 1000, maxBuffer: 8192, stdio: ["ignore", "pipe", "ignore"] }); }
+		catch { return null; }
+	}) ?? undefined;
+}
 
 /** The literal words of a leg, after its environment assignments and benign redirects. */
 function commandWords(segment: string): string[] | null {
