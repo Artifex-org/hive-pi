@@ -104,6 +104,41 @@ describe("credential recovery", () => {
 		} finally { await f.close(); }
 	});
 
+	// SDK-Pi: the session model is claude-sdk, whose Claude access lease comes
+	// from claude-auth, while the store holds only the helpers' providers. A
+	// renewal for claude-sdk has nothing to renew; it used to report "Account
+	// renewal failed: The session credential disappeared" every ten minutes.
+	it("does not renew a model provider the session store never held", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		const f = await fixture();
+		const sdk = { ...model, provider: "claude-sdk" } as unknown as Model<"openai-codex-responses">;
+		try {
+			await f.pi.emit({ type: "turn_start" }, { model: sdk });
+			await f.pi.emit({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }] }, { model: sdk });
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+			// renew() finishes asynchronously (lock, read, write); give it the time
+			// the vanished-credential case below needs to report, then look.
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			expect(f.requests).toEqual([]);
+			const states = f.pi.busEvents.filter((e) => e.name === RECOVERY_CHANNEL).map((e) => (e.payload as { state: string }).state);
+			expect(states).not.toContain("error");
+			expect(f.pi.statuses.at(-1)?.text ?? "").not.toContain("Account renewal failed");
+			expect(JSON.parse(await readFile(f.path, "utf8"))).toEqual({ "openai-codex": oldAccount, xai: { type: "api_key", key: "keep" } });
+		} finally { await f.close(); }
+	});
+
+	it("still reports a stored credential that disappears", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		const f = await fixture();
+		try {
+			await f.pi.emit({ type: "turn_start" }, { model });
+			await writeFile(f.path, JSON.stringify({ xai: { type: "api_key", key: "keep" } }));
+			await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+			await vi.waitFor(() => expect(f.pi.statuses.at(-1)?.text).toContain("The session credential disappeared during renewal"));
+			expect(f.requests).toEqual([]);
+		} finally { await f.close(); }
+	});
+
 	it("reports an unidentifiable account as unavailable without changing credentials", async () => {
 		const f = await fixture(422);
 		try {
