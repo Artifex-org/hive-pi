@@ -7,6 +7,8 @@ import { literalWords } from "../toolhints/contextual.ts";
 
 export const DELIVERY_PROGRESS_ENTRY = "agenda-delivery-progress";
 export const ADVICE_GIVEN_ENTRY = "agenda-advice-given";
+/** Every successful PR opening (`gh pr create`, `hive ship`), unlike the once-only delivery milestone. */
+export const PR_OPENED_ENTRY = "agenda-pr-opened";
 
 /** Which milestone a command reached: a commit, a PR opening, or none. A PR anywhere in the chain wins. */
 export type MilestoneKind = "commit" | "pr";
@@ -187,10 +189,14 @@ export function registerDeliveryProgress(
 		pending.delete(event.toolCallId);
 		// The background job's own result is its start, not its outcome.
 		if (!deferred.has(event.toolCallId)) settleDeferred();
-		if (seen || event.toolName !== "bash") return;
+		if (event.toolName !== "bash") return;
 		const command = (event.input as { command?: unknown }).command;
 		if (typeof command !== "string") return;
 		const output = event.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+		// The closing-report check (report.ts) needs to know a PR opened in THIS
+		// run, so this is recorded on every opening, not once per session.
+		if (milestoneKind(command, output, !event.isError) === "pr") pi.appendEntry(PR_OPENED_ENTRY, { at: Date.now() });
+		if (seen) return;
 		// A commit/PR may have succeeded before a later command failed. The
 		// concrete summary/URL, rather than the whole chain's exit, decides.
 		const after = before ? head(before.cwd) : null;

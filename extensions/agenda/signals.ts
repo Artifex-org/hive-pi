@@ -15,7 +15,7 @@
  */
 
 import { PLAN_ENTRY_TYPE, rehydratePlan, type PlanPhase } from "../plan/state.ts";
-import { DELIVERY_PROGRESS_ENTRY } from "./delivery-progress.ts";
+import { DELIVERY_PROGRESS_ENTRY, PR_OPENED_ENTRY } from "./delivery-progress.ts";
 
 export interface TasksSignal {
 	total: number;
@@ -89,6 +89,8 @@ export interface SessionSignals {
 	toolCallsSinceUser: number;
 	/** Tool calls since the newest user prompt OR conductor kick, whichever is later. */
 	toolCallsSinceInjection: number;
+	/** A PR was opened since the newest user prompt (delivery-progress PR_OPENED_ENTRY). */
+	prOpenedSinceUser: boolean;
 }
 
 export const emptyContextSignal: ContextSignal = { tokens: null, window: 0, percent: null };
@@ -102,6 +104,7 @@ export const emptySignals: SessionSignals = {
 	userTurns: 0,
 	toolCallsSinceUser: 0,
 	toolCallsSinceInjection: 0,
+	prOpenedSinceUser: false,
 };
 
 type RawEntry = {
@@ -237,8 +240,10 @@ export function deriveSignals(
 	let userTurns = 0;
 	let toolCallsSinceUser = 0;
 	let toolCallsSinceInjection = 0;
+	let prOpenedSinceUser = false;
 	for (const raw of branch) {
 		const entry = raw as RawEntry;
+		if (entry?.customType === PR_OPENED_ENTRY) { prOpenedSinceUser = true; continue; }
 		// Only a conductor kick restarts the count: a goal continuation or a
 		// restored-after-compaction note between the frame kick and the frame
 		// decision must not make a late agent look early.
@@ -260,6 +265,7 @@ export function deriveSignals(
 		lastUserPrompt = text;
 		toolCallsSinceUser = 0;
 		toolCallsSinceInjection = 0;
+		prOpenedSinceUser = false;
 	}
 
 	return {
@@ -271,5 +277,6 @@ export function deriveSignals(
 		userTurns,
 		toolCallsSinceUser,
 		toolCallsSinceInjection,
+		prOpenedSinceUser,
 	};
 }
