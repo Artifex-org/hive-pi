@@ -583,7 +583,9 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 			const deltaNote = anchor && !anchor.deltaUsed && delta && delta.files.length > 0
 				? `Since the full review ${short(anchor.fingerprint)}, ${delta.files.length} file(s) changed (${delta.files.slice(0, 5).join(", ")}${delta.files.length > 5 ? ", …" : ""}): a foreground code-reviewer now reviews ONLY that change, once; a later change needs a full review. `
 				: "";
-			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${blockCause(diff, target, lastReview, backgroundState)}${deltaNote}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` };
+			const recovery = diff ? `Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` :
+				"Resolve the Git capture failure, then retry this standalone delivery. This refusal did not evaluate or discard completed review receipts.";
+			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${blockCause(diff, target, lastReview, backgroundState)}${deltaNote}${recovery}` };
 		}
 		if (unavailableReason) deliveryNotes.set(event.toolCallId, unavailableReason);
 		// Only a foreground shell call's result follows the commit; a background
