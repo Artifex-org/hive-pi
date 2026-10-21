@@ -53,6 +53,11 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 	let generation = 0;
 	let intention = 0;
 	let captured: { provider: string; identity: string } | undefined;
+	// Providers this session's store has held a credential for. A model whose
+	// credential never lives here (claude-sdk: its Claude access comes from
+	// claude-auth, and the store holds only the helpers' providers) has nothing
+	// to renew; one that WAS here and is gone still reports the loss.
+	const stored = new Set<string>();
 	let recovering = false;
 	let waiting = false;
 	let retryProvider: string | undefined;
@@ -78,6 +83,7 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		retryProvider = undefined;
 		authPath = undefined;
 		transport = undefined;
+		stored.clear();
 		ready = Promise.resolve();
 		unreachable = false;
 		const path = join(getAgentDir(), "auth.json");
@@ -139,7 +145,10 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		latestCtx = ctx;
 		if (!authPath || !ctx.model) return;
 		const credential = readStoredCredential(ctx.model.provider, authPath);
-		if (credential) captured = { provider: ctx.model.provider, identity: identity(credential) };
+		if (credential) {
+			stored.add(ctx.model.provider);
+			captured = { provider: ctx.model.provider, identity: identity(credential) };
+		}
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
@@ -228,6 +237,8 @@ export default function credentialRecovery(pi: ExtensionAPI): void {
 		const gen = generation;
 		const intent = intention;
 		const provider = ctx.model.provider;
+		if (readStoredCredential(provider, authPath)) stored.add(provider);
+		else if (!stored.has(provider)) return; // not this store's credential: nothing to renew
 		recovering = true;
 		try {
 			let exhausted: "exhausted" | "unavailable" | undefined;
