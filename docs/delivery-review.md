@@ -69,10 +69,11 @@ Oversized `code-reviewer` reviews can continue in the **same private persisted
 conversation**, retaining the artifact and observed read coverage. The runner
 plans contiguous pages under both read limits (40KiB and 1,000 lines), assigns
 eight pages per invocation, and separates ingestion from semantic integration.
-The coverage allowance is `min(56, max(4, ceil(pageCount / 8) + 1))`
+The coverage allowance is `min(54, max(4, ceil(pageCount / 8) + 1))`
 continuations; eight additional continuations are reserved exclusively for
-integration, keeping the combined hard maximum at 64. These counts exclude the
-initial invocation. Unread evidence cannot spend the integration reserve, and
+integration and two for narrowly bounded producer format correction, keeping the
+combined hard maximum at 64. Unused correction slots cannot buy more paging or
+semantic passes. These counts exclude the initial invocation. Unread evidence cannot spend the integration reserve, and
 paging still requires newly observed coverage. Once every byte has been read,
 the same reviewer may use up to eight integration continuations to trace changed
 code, callers, failure paths and regression tests. Targeted repository searches
@@ -102,8 +103,24 @@ compaction. Human recaps are presentation, never finding identity, so rephrasing
 cannot invent a finding ID. The structured fields must contain all supporting
 details, not references to prose that may be compacted away.
 
-Malformed frames and unknown/duplicate IDs fail immediately; their full raw
-reports remain in failure diagnostics, never silently repaired into approval.
+Malformed output never counts as a ledger or approval. A final report with exactly
+one inline-backticked `REVIEW_LEDGER {...}` line outside Markdown fences may
+receive a format-correction prompt in the **still-live same private session**.
+There are at most two distinct recoverable incidents across the review, with
+one correction attempt each, counted in the total 64 independently of paging
+and integration. Each asks the producer to reissue
+its exact entire report, removing only the two inline backticks. The harness
+never dequotes or parses the rejected line into canonical state: it re-quotes the
+NEW authoritative response and requires exact equality with every rejected byte,
+including prose and finding support. Repeated malformed output, any payload/prose
+change, missing private identity or changed evidence fails closed. Even a valid
+correction cannot itself approve; a subsequent ordinary semantic conclusion is
+required within the remaining limits. No-progress ingestion, canonical evidence
+and the combined rejected-report/continuation-data 64KiB cap still apply. Failed
+sessions are never restored from saved copies.
+
+All other malformed frames and unknown/duplicate IDs remain terminal; full raw
+reports stay in failure diagnostics, never silently repaired into approval.
 Missing dispositions, explicit `complete:false`, bare ID mentions and quoted/code
 examples cannot complete a review. Canonical finding state and
 retained continuation prompt data are capped at 64KiB; overflow fails explicitly,

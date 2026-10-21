@@ -76,6 +76,105 @@ describe("ReviewContinuation", () => {
 		}
 		cover(5, 1); expect(advance(c, incomplete, true).error).toContain("budget exhausted");
 	});
+	it("requests live format correction without accepting or discarding a quoted finding", () => {
+		const { c, cover, persist } = fixture(); cover(1, 1);
+		const record = fresh("code.ts:7", "quoted but not yet accepted", "ORIGINAL-QUOTED-SUPPORT");
+		const valid = `DELIVERY_REVIEW_INCOMPLETE: callers remain\nREVIEW_LEDGER ${JSON.stringify({ complete: false, findings: [record] })}`;
+		const rejected = valid.split("\n").map(line => line.startsWith("REVIEW_LEDGER ") ? `\`${line}\`` : line).join("\n");
+		persist(rejected); const correction = advance(c, rejected, true);
+		expect(correction.error).toBeUndefined(); expect(correction.findings).toBeUndefined();
+		expect(correction.prompt).toContain("format correction 1/2");
+		expect(correction.prompt).toContain("ORIGINAL-QUOTED-SUPPORT");
+		persist(valid); const continued = advance(c, valid, true);
+		expect(continued.error).toBeUndefined(); expect(continued.findings).toBeUndefined();
+		expect(continued.prompt).toContain("Coverage work for this invocation");
+		expect(continued.prompt).toContain("F1"); expect(continued.prompt).toContain("ORIGINAL-QUOTED-SUPPORT");
+		cover(); const final = advance(c, frame([disposition("F1", "code.ts:7", "withdrawn")]), true);
+		expect(JSON.parse(final.findings!)[0].scenario).toBe(record.scenario);
+	});
+	it("cannot approve from the format-correction response even with full coverage and complete:true", () => {
+		const { c, cover, persist } = fixture(); cover();
+		const valid = `Full review conclusion.\n${frame()}`;
+		const rejected = `Full review conclusion.\n\`${frame()}\``;
+		persist(rejected); expect(advance(c, rejected, true).prompt).toContain("format correction 1/2");
+		persist(valid); const corrected = advance(c, valid, true);
+		expect(corrected.findings).toBeUndefined(); expect(corrected.error).toBeUndefined();
+		expect(corrected.prompt).toContain("Semantic integration continuation 1/8");
+		expect(advance(c, frame(), true).findings).toBe("[]");
+	});
+	it("re-quotes only the authoritative line, leaving an identical fenced example untouched", () => {
+		const { c, cover, persist } = fixture(); cover();
+		const line = frame();
+		const prose = `Full review conclusion.\n\`\`\`text\n${line}\n\`\`\``;
+		const rejected = `${prose}\n\`${line}\``;
+		const valid = `${prose}\n${line}`;
+		persist(rejected); expect(advance(c, rejected, true).prompt).toContain("format correction 1/2");
+		persist(valid); const corrected = advance(c, valid, true);
+		expect(corrected.error).toBeUndefined(); expect(corrected.findings).toBeUndefined();
+		expect(corrected.prompt).toContain("Semantic integration continuation 1/8");
+		expect(advance(c, frame(), true).findings).toBe("[]");
+	});
+	it.each(["payload", "prose", "still-quoted"])("rejects a format response that changes the rejected bytes: %s", kind => {
+		const { c, cover, persist } = fixture(); cover(1, 1);
+		const line = 'REVIEW_LEDGER {"complete":false,"findings":[]}';
+		const valid = `DELIVERY_REVIEW_INCOMPLETE: callers remain\n${line}`;
+		const rejected = `DELIVERY_REVIEW_INCOMPLETE: callers remain\n\`${line}\``;
+		persist(rejected); expect(advance(c, rejected, true).prompt).toBeDefined();
+		const changed = kind === "payload" ? valid.replace('"complete":false', '"complete":true') : kind === "prose" ? valid.replace("callers remain", "done") : rejected;
+		persist(changed); const next = advance(c, changed, true);
+		expect(next.error).toContain("format correction changed"); expect(next.findings).toBeUndefined(); expect(next.prompt).toBeUndefined();
+	});
+	it.each(["fenced", "ambiguous"])("does not request correction for nonauthoritative examples: %s", kind => {
+		const { c, cover, persist } = fixture(); cover(1, 1);
+		const quoted = '`REVIEW_LEDGER {"complete":false,"findings":[]}`';
+		const rejected = kind === "fenced" ? `\`\`\`text\n${quoted}\n\`\`\`` : `${quoted}\n${quoted}`;
+		persist(rejected); const next = advance(c, rejected, true);
+		expect(next.error).toContain("invalid ledger protocol"); expect(next.prompt).toBeUndefined(); expect(next.findings).toBeUndefined();
+	});
+	it("bounds distinct format corrections across the same conversation", () => {
+		const { c, cover, persist } = fixture(false, "line\n".repeat(30));
+		const line = 'REVIEW_LEDGER {"complete":false,"findings":[]}';
+		for (let round = 1; round <= 2; round++) {
+			cover(round, 1); const valid = `DELIVERY_REVIEW_INCOMPLETE: pass ${round}\n${line}`;
+			persist(`DELIVERY_REVIEW_INCOMPLETE: pass ${round}\n\`${line}\``);
+			expect(advance(c, `DELIVERY_REVIEW_INCOMPLETE: pass ${round}\n\`${line}\``, true).prompt).toContain(`format correction ${round}/2`);
+			persist(valid); expect(advance(c, valid, true).prompt).toContain(`used: ${round}`);
+		}
+		cover(3, 1); const rejected = `DELIVERY_REVIEW_INCOMPLETE: pass 3\n\`${line}\``; persist(rejected);
+		expect(advance(c, rejected, true).error).toContain("format correction budget exhausted (2/2)");
+	});
+	it("keeps correction, paging and semantic allowances distinct inside the total bound", () => {
+		const { c, cover, persist } = fixture(false, "line\n".repeat(30));
+		const line = 'REVIEW_LEDGER {"complete":false,"findings":[]}';
+		expect(c.maxRounds).toBe(14);
+		for (let round = 1; round <= 4; round++) {
+			cover(round, 1); const valid = `DELIVERY_REVIEW_INCOMPLETE: pass ${round}\n${line}`;
+			if (round <= 2) {
+				const rejected = `DELIVERY_REVIEW_INCOMPLETE: pass ${round}\n\`${line}\``; persist(rejected);
+				expect(advance(c, rejected, true).prompt).toContain(`format correction ${round}/2`);
+			}
+			persist(valid); expect(advance(c, valid, true).prompt).toContain(`used: ${round}`);
+		}
+		cover(); const partial = `DELIVERY_REVIEW_INCOMPLETE: integrate\n${line}`;
+		for (let round = 1; round <= 8; round++) {
+			persist(partial); expect(advance(c, partial, true).prompt).toContain(`Semantic integration continuation ${round}/8`);
+		}
+		expect(advance(c, frame(), true).findings).toBe("[]");
+	});
+	it.each(["missing-session", "changed-evidence"])("does not correct a report without matching identity/evidence: %s", kind => {
+		const { c, cwd, cover, persist } = fixture(); cover(1, 1);
+		const rejected = '`REVIEW_LEDGER {"complete":false,"findings":[]}`'; persist(rejected);
+		if (kind === "missing-session") c.cleanup(); else fs.writeFileSync(join(cwd, "change.ts"), "export const value = 3;\n");
+		const next = advance(c, rejected, true);
+		expect(next.error).toContain(kind === "missing-session" ? "matching persisted reviewer transcript" : "evidence changed");
+		expect(next.prompt).toBeUndefined(); expect(next.findings).toBeUndefined();
+	});
+	it("fails rather than truncating a rejected report in the correction prompt", () => {
+		const { c, cover, persist } = fixture(); cover(1, 1);
+		const rejected = `${"support ".repeat(10000)}\n\`REVIEW_LEDGER {"complete":false,"findings":[]}\``; persist(rejected);
+		const next = advance(c, rejected, true);
+		expect(next.error).toContain("64KiB"); expect(next.prompt).toBeUndefined(); expect(next.findings).toBeUndefined();
+	});
 	it("permits multiple bounded semantic passes after early full coverage", () => {
 		const { c, cover, persist } = fixture(); cover();
 		const partial = 'DELIVERY_REVIEW_INCOMPLETE: tracing callers and tests\nREVIEW_LEDGER {"complete":false,"findings":[]}';

@@ -12,6 +12,8 @@ The change under review is the diff appended to your task (working tree or branc
 
 For a paged review, reading the artifact is evidence intake, not semantic completion. Trace relevant callers and regression tests as code hunks arrive, using targeted repository searches and rereads in addition to the mandatory artifact pages. Keep cumulative partial reports explicit about semantic work completed and still pending; use the bounded integration phase for remaining cross-file checks, never declare completion merely because every page was read.
 
+If runtime feedback requests an exact format-only reissue, do no new review work in that invocation. Reissue the exact previous report, removing only the specified inline backticks from its protocol line; do not change JSON, finding support or prose. Refuse if the quoted line was merely an example, not your authoritative report. A correction is not semantic completion and cannot waive the ordinary full-review conclusion.
+
 The task may describe the author's intent or design ("X is acceptable", "the ticket permits Y"). Treat that as a claim to test, not a conclusion to confirm. Your job is to find where the code does something other than what its author believes.
 
 ## Hunt, category by category

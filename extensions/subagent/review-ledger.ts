@@ -23,20 +23,38 @@ interface Finding {
 const nonempty = (value: unknown): value is string => typeof value === "string" && !!value.trim();
 const location = (value: unknown): value is string => nonempty(value) && /^[\s\S]+:[1-9]\d*(?:[–-][1-9]\d*)?$/.test(value);
 
-/** Only a real protocol line counts, not an example inside Markdown. */
-export function reviewLedgerFrames(output: string): string[] {
-	const found: string[] = [];
+function unfencedReviewLines(output: string): { text: string; index: number }[] {
+	const found: { text: string; index: number }[] = [];
 	let fence: { marker: string; length: number } | undefined;
-	for (const line of output.split("\n")) {
+	for (const [index, line] of output.split("\n").entries()) {
 		const boundary = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
 		if (boundary) {
 			if (!fence) fence = { marker: boundary[1][0], length: boundary[1].length };
 			else if (fence.marker === boundary[1][0] && boundary[1].length >= fence.length && /^[ \t]*$/.test(boundary[2])) fence = undefined;
 			continue;
 		}
-		if (!fence && line.startsWith("REVIEW_LEDGER ")) found.push(line.slice("REVIEW_LEDGER ".length));
+		if (!fence) found.push({ text: line, index });
 	}
 	return found;
+}
+
+/** Only a real protocol line counts, not an example inside Markdown. */
+export function reviewLedgerFrames(output: string): string[] {
+	return unfencedReviewLines(output).filter(line => line.text.startsWith("REVIEW_LEDGER ")).map(line => line.text.slice("REVIEW_LEDGER ".length));
+}
+
+/** Raw rejected bytes eligible for producer feedback, NEVER ledger acceptance. */
+export function quotedReviewLedgerFrames(output: string): string[] {
+	return unfencedReviewLines(output).filter(line => /^`REVIEW_LEDGER \{.*\}`$/.test(line.text)).map(line => line.text);
+}
+
+/** Re-quote only the NEW authoritative line for exact rejected-byte comparison. */
+export function requoteReviewLedgerFrame(output: string): string | undefined {
+	const frames = unfencedReviewLines(output).filter(line => line.text.startsWith("REVIEW_LEDGER "));
+	if (frames.length !== 1) return undefined;
+	const lines = output.split("\n");
+	lines[frames[0].index] = `\`${frames[0].text}\``;
+	return lines.join("\n");
 }
 
 export class ReviewLedger {

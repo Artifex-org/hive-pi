@@ -234,6 +234,8 @@ describe("TerminalSurfaceBridge", () => {
 			JSON.stringify({ id: "desktop-abcdef0123456789", generation: 1, expires_at: Date.now() + 60_000 }),
 			{ mode: 0o644 },
 		);
+		// The intentionally unsafe fixture must not be masked private by umask 077.
+		fs.chmodSync(path.join(fixture.dir, "lease.json"), 0o644);
 		expect(bridge.hasLease()).toBe(false);
 		bridge.stop();
 	});
