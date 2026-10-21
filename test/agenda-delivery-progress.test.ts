@@ -57,6 +57,37 @@ describe("delivery milestones", () => {
 		await call(); head = "new"; await result();
 		expect(pi.entries).toEqual([{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }]);
 	});
+	// Round-5 eval shapes that commitCheckout cannot parse: the commit still
+	// marks delivery when the reflog proves it, and a mere mention does not.
+	it.each([
+		["an edit heredoc, then a commit whose message is a heredoc", (cwd: string) => `cd ${cwd} && python3 - <<'EOF'
+open("code.ts", "a").write("export const more = 3;\\n")
+EOF
+git add -A && git commit -q -F - <<'EOF'
+fix(mcp): derive project
+
+the reply's key isn't 'ambiguous'
+EOF
+git log --oneline -1`, true],
+		["another git verb before the commit", (_cwd: string) => `true && git diff --check && git add code.ts && git commit -q -m change`, true],
+		["a command that only mentions commit while a checkout moves HEAD", (_cwd: string) => `echo 'git commit' && git checkout -q -f -b other HEAD~1`, false],
+	])("observes %s only on reflog commit evidence", async (_name, commandFor, expected) => {
+		const cwd = mkdtempSync(join(tmpdir(), "milestone-unparsed-"));
+		const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+		try {
+			git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 0;\n"); git("add", "."); git("commit", "-qm", "initial");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 1;\n"); git("add", "."); git("commit", "-qm", "second");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 2;\n");
+			const pi = createFakePi(); registerDeliveryProgress(pi.api);
+			const command = commandFor(cwd);
+			const input = { cwd, command };
+			await pi.emit({ type: "tool_call", toolName: "bash", toolCallId: "u", input });
+			const output = execFileSync("bash", ["-c", command], { cwd, encoding: "utf8" });
+			await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "u", input, content: [{ type: "text", text: output }], isError: false });
+			expect(pi.entries).toEqual(expected ? [{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }] : []);
+		} finally { rmSync(cwd, { recursive: true, force: true }); }
+	});
 	it.each([
 		["git commit -m change", "[work abc1234] change"],
 		["git commit -m change 2>&1", "[work abc1234] change"],
