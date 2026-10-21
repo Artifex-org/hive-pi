@@ -1,3 +1,4 @@
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,7 +21,7 @@ describe.runIf(process.platform === "linux")("Stop hook process lifetime", () =>
 		const root = join(launch.root, "repo"), marker = join(launch.root, "sleeper"), runs = join(launch.root, "runs");
 		mkdirSync(join(root, ".pi"), { recursive: true });
 		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({
-			check: `printf x >> ${runs}; timeout 20s bash -c 'trap "" TERM HUP; echo $$ > ${marker}; sleep 20' & wait`,
+			check: `printf x >> ${shellQuote(runs)}; timeout 20s bash -c ${shellQuote(`trap "" TERM HUP; echo $$ > ${shellQuote(marker)}; sleep 20`)} & wait`,
 			checkTimeoutMs: 200_000,
 		}));
 		execFileSync("git", ["init", "-q", root]);
@@ -59,7 +60,7 @@ describe.runIf(process.platform === "linux")("Stop hook process lifetime", () =>
 		const launch = makeLaunch(), root = join(launch.root, "repo"), runs = join(launch.root, "runs"), ready = join(launch.root, "ready");
 		const transcript = writeTranscript(join(launch.root, "t.jsonl"), [{ user: "fix it" }, { assistant: "Implementation changed." }]);
 		mkdirSync(join(root, ".pi"), { recursive: true });
-		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `printf x >> ${runs}; echo BOOM; exit 1`, checkTimeoutMs: 10_000, maxInjections: 1 }));
+		writeFileSync(join(root, ".pi", "harness.json"), JSON.stringify({ check: `printf x >> ${shellQuote(runs)}; echo BOOM; exit 1`, checkTimeoutMs: 10_000, maxInjections: 1 }));
 		execFileSync("git", ["init", "-q", root]);
 		execFileSync("git", ["add", "."], { cwd: root });
 		execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=t@example.invalid", "commit", "-qm", "input"], { cwd: root });

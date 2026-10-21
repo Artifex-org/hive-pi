@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, mkdtempSync, opendirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { TREE_TOKEN } from "../extensions/hive-common/child-tree.ts";
 
 type Identity = { pid: number; start: string };
@@ -51,9 +51,16 @@ function ownerAt(path: string): Owner {
 }
 
 export function tempRoot(): string {
-	const root = process.env.HIVE_PI_TEST_TMP_ROOT ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "hive-pi", "tests");
+	const root = process.env.HIVE_PI_TEST_TMP_ROOT ?? join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "hive-pi", "tests");
 	if (!isAbsolute(root)) throw new Error("HIVE_PI_TEST_TMP_ROOT must be absolute");
 	return resolve(root);
+}
+function managedAncestor(start: string): string | undefined {
+	for (let parent = start; parent !== dirname(parent); parent = dirname(parent)) {
+		if (!/^(r-|reap-)/.test(basename(parent))) continue;
+		try { ownerAt(parent); return parent; }
+		catch (error) { if (!missing(error)) throw error; }
+	}
 }
 export function prepareRoot(root: string): void {
 	// Procfs escapes control characters in pathnames; don't accept ambiguous roots.
@@ -63,6 +70,9 @@ export function prepareRoot(root: string): void {
 		try { if (realpathSync(ancestor) !== ancestor) throw new Error("Symlink in test temporary root"); break; }
 		catch (error) { if (!missing(error)) throw error; ancestor = dirname(ancestor); }
 	}
+	// Protect nested bootstrap and recovery, before writing beneath a parent run.
+	const parent = managedAncestor(root);
+	if (parent) registerReader(parent);
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	privateDirectory(root);
 	const type = Number(statfsSync(root).type);
@@ -80,15 +90,35 @@ export function createRun(root: string, token: string): TempRun {
 /** Register BEFORE artifact access/handoff. A native child must be held until admission. */
 export function registerReader(path: string, pid = process.pid): void {
 	if (process.platform !== "linux") return; // isolation still works; cleanup retains
+	const published: string[] = [];
+	try { admitReader(path, pid, published); }
+	catch (error) {
+		const failures: unknown[] = [];
+		for (const file of published.reverse()) { try { rmSync(file, { force: true }); } catch (failure) { failures.push(failure); } }
+		if (failures.length) throw new AggregateError([error, ...failures], "Reader admission and lease rollback failed");
+		throw error;
+	}
+}
+function admitReader(path: string, pid: number, published: string[]): void {
 	const before = privateDirectory(path);
 	const owner = ownerAt(path);
+	const here = domain();
+	if (owner.domain && (!here || owner.domain.boot !== here.boot || owner.domain.namespace !== here.namespace)) throw new Error("Reader identity domain differs from test run");
+	// A parent owns recursive deletion, so admission must fence every enclosing run.
+	// Discover these from the filesystem: intentional readers may clear their env.
+	const parent = managedAncestor(dirname(path));
+	if (parent) admitReader(parent, pid, published);
 	const reader = identity(pid);
 	if (!reader) throw new Error("Reader exited before test-run admission");
 	const readers = join(path, "readers");
 	privateDirectory(readers);
-	const pending = join(readers, `pending-${randomUUID()}`);
+	const nonce = randomUUID();
+	const pending = join(readers, `pending-${nonce}`);
+	const lease = join(readers, `reader-${nonce}.json`);
 	writeFileSync(pending, JSON.stringify(reader), { mode: 0o600, flag: "wx" });
-	renameSync(pending, join(readers, `${reader.pid}-${reader.start}.json`));
+	published.push(pending);
+	renameSync(pending, lease);
+	published[published.length - 1] = lease;
 	// Publish BEFORE checking the closing barrier. Cleanup creates the barrier
 	// BEFORE inspecting leases. Thus an admitted reader is in its snapshot;
 	// a late publisher must fail before accessing any artifact.

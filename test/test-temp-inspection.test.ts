@@ -143,3 +143,17 @@ it("a publisher racing the cleaner's lease snapshot cannot become an admitted re
 	if (process.platform === "linux") { expect(rejected).toBe(true); expect(result.status).toBe("removed"); }
 	else expect(result.status).toBe("retained");
 });
+
+it("rolls back new ancestor leases if the inner scope closes after ancestor publication", () => {
+	const outer = fixture();
+	const inner = createRun(join(outer.path, "tmp", "runs"), outer.token);
+	const before = actual.readdirSync(join(outer.path, "readers")).sort();
+	vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+		actual.renameSync(from, to);
+		if (String(to).startsWith(join(outer.path, "readers") + "/")) actual.writeFileSync(join(inner.path, "closing"), "claimed");
+	});
+	if (process.platform === "linux") expect(() => registerReader(inner.path)).toThrow(/closing/);
+	else registerReader(inner.path);
+	expect(actual.readdirSync(join(outer.path, "readers")).sort()).toEqual(before);
+	expect(actual.readdirSync(join(inner.path, "readers"))).toEqual([]);
+});

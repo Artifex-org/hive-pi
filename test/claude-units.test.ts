@@ -190,7 +190,7 @@ describe("process-group kill for a Claude helper's children", () => {
 	it("kills the grandchild too", async () => {
 		const marker = join(tmp(), "grandchild.pid");
 		const tree = treeSpawnOptions({ HIVE_PI_HELPER_CHILD: "1" });
-		const child = spawn("bash", ["-c", `sleep 30 & echo $! > ${marker}; wait`], { stdio: "ignore", ...tree });
+		const child = spawn("bash", ["-c", `sleep 30 & echo $! > ${shellQuote(marker)}; wait`], { stdio: "ignore", ...tree });
 		const deadline = Date.now() + 5_000;
 		while (Date.now() < deadline) {
 			try {
@@ -322,7 +322,7 @@ describe("quality_gate's buffered fallback runner", () => {
 		const previous = process.env.HIVE_PI_HELPER_CHILD;
 		process.env.HIVE_PI_HELPER_CHILD = "1";
 		try {
-			const res = await nodeGateHost.exec("bash", ["-c", `sleep 30 & echo $! > ${marker}; wait`], { timeout: 300, cwd: tmp() });
+			const res = await nodeGateHost.exec("bash", ["-c", `sleep 30 & echo $! > ${shellQuote(marker)}; wait`], { timeout: 300, cwd: tmp() });
 			expect(res).toMatchObject({ code: null, killed: true });
 			const grandchild = Number.parseInt(readFileSync(marker, "utf8"), 10);
 			await new Promise((r) => setTimeout(r, 100));

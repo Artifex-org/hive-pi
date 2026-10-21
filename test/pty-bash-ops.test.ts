@@ -9,6 +9,7 @@
  * the environment IS part of the contract.
  */
 
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -337,7 +338,7 @@ describe.runIf(canRunPty)("a command running on a real pty", () => {
 			const ac = new AbortController();
 			setTimeout(() => ac.abort(), 1_500);
 			await expect(
-				run(`bash -c 'trap "" HUP TERM; echo $$ > ${pidFile}; sleep 30' & sleep 30`, {
+				run(`bash -c ${shellQuote(`trap "" HUP TERM; echo $$ > ${shellQuote(pidFile)}; sleep 30`)} & sleep 30`, {
 					signal: ac.signal,
 				}),
 			).rejects.toThrow("aborted");

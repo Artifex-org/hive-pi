@@ -1,3 +1,4 @@
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,7 +22,7 @@ describe.runIf(process.platform === "linux")("non-helper check owner shutdown", 
 	it.each(["exit", "SIGTERM", "SIGHUP", "SIGINT"] as const)("reaps a detached check on owner %s", async mode => {
 		const dir = mkdtempSync(join(tmpdir(), "check-owner-exit-")), marker = join(dir, "pid"), extraMarker = join(dir, "extra"), quit = join(dir, "quit");
 		const source = pathToFileURL(resolve("extensions/agenda/gate.ts")).href;
-		const command = `${readerAdmissionCommand()} || exit; printf '%s' "$$" > '${marker}'; exec sleep 20`;
+		const command = `${readerAdmissionCommand()} || exit; printf '%s' "$$" > ${shellQuote(marker)}; exec sleep 20`;
 		const replica = pathToFileURL(resolve("extensions/hive-common/child-tree.ts")).href + "?replica";
 		const code = `import {runCheck} from ${JSON.stringify(source)};
 			import {spawn} from 'node:child_process'; import {existsSync, writeFileSync} from 'node:fs';

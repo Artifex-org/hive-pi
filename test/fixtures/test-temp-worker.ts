@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
@@ -17,6 +17,13 @@ if (process.argv[2] !== "worker") {
 	const artifact = mkdtempSync(join(tmpdir(), "fixture-"));
 	writeFileSync(join(artifact, "data"), "owned");
 	let descendant: number | undefined;
+	let nested: { wrapper: number; pid: number; descendant: number; artifact: string; run: string } | undefined;
+	if (mode === "nested-reader") {
+		const nestedState = join(artifact, "nested-state");
+		const child = spawn(process.execPath, [self, join(artifact, "roots"), "registered-reader", nestedState], { stdio: "ignore" });
+		for (let i = 0; i < 200 && !existsSync(nestedState); i++) await delay(25);
+		nested = { ...JSON.parse(readFileSync(nestedState, "utf8")), wrapper: child.pid };
+	}
 	if (["orphan", "fd-reader", "cwd-reader", "socket-reader", "registered-reader"].includes(mode)) {
 		const fd = mode === "fd-reader" ? openSync(join(artifact, "data"), "r") : undefined;
 		const source = mode === "registered-reader"
@@ -42,8 +49,8 @@ if (process.argv[2] !== "worker") {
 		const server = createServer(socket => socket.end("live"));
 		await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(join(artifact, "s"), resolve); });
 	}
-	writeFileSync(state, JSON.stringify({ pid: process.pid, descendant, artifact, tmp: tmpdir(), run: process.env.HIVE_PI_TEST_RUN_DIR, compile: process.env.NODE_COMPILE_CACHE }));
-	if (["hang", "orphan", "fd-reader", "cwd-reader", "socket-reader", "registered-reader", "stubborn"].includes(mode)) {
+	writeFileSync(state, JSON.stringify({ pid: process.pid, descendant, nested, artifact, tmp: tmpdir(), run: process.env.HIVE_PI_TEST_RUN_DIR, compile: process.env.NODE_COMPILE_CACHE }));
+	if (["hang", "orphan", "fd-reader", "cwd-reader", "socket-reader", "registered-reader", "nested-reader", "stubborn"].includes(mode)) {
 		if (mode === "stubborn") process.on("SIGTERM", () => {});
 		setInterval(() => {}, 1000);
 	} else {

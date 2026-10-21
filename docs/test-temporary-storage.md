@@ -26,7 +26,14 @@ A test-only Node `--import` preload also publishes durable PID/start-time reader
 leases before Node descendants execute their test/application modules. Hermetic
 fixture environments retain the preload, run directory and temp settings through
 `test/temp-env.ts`. Intentional native/session-changing fixtures explicitly
-register before accessing run artifacts. A native subprocess must remain covered
+register before accessing run artifacts. Readers in nested runs also admit into
+every enclosing managed run, discovered from ownership metadata even with an
+empty environment; otherwise a parent could delete a protected child recursively.
+Nested bootstrap/recovery admits the owning process before creating directories.
+Admission proceeds outermost first, rejects incompatible PID namespaces, and rolls
+back only its own uniquely named leases if any scope refuses admission. Existing
+leases are never removed by another admission's rollback.
+A native subprocess must remain covered
 by its live registered owner/group until exit, or be registered before handoff.
 
 Admission has a per-run barrier, not a whole-host liveness requirement:

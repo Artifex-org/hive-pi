@@ -327,7 +327,7 @@ describe("tail", () => {
 		const full = Array.from({ length: 50 }, (_, i) => `line${i}`).join("\n");
 		const out = tail(full, 10);
 		expect(out).not.toContain("verbose");
-		const path = /full output: (\S+\.log)/.exec(out)?.[1];
+		const path = /full output: ([^\n]+\.log)/.exec(out)?.[1];
 		expect(path).toBeDefined();
 		expect(readFileSync(path as string, "utf8")).toBe(full);
 	});

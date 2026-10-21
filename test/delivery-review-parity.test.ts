@@ -3,6 +3,7 @@
  * without friction must pass here too, while the genuinely unreviewable
  * shapes keep their refusal.
  */
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -52,7 +53,7 @@ describe("delivery guard: shapes from the eval", () => {
 	it("passes `cd X && git push` when the hooked push is the last delivery", async () => {
 		const { cwd, git } = repo(["pre-push"]); writeFileSync(join(cwd, "code.ts"), substantive); git("commit", "-qam", "code");
 		const pi = createFakePi(); registerDeliveryReview(pi.api); await reviewed(pi, cwd);
-		expect(await deliver(pi, `cd ${cwd} && git push --no-verify -u origin HEAD`, tmpdir())).toBeUndefined();
+		expect(await deliver(pi, `cd ${shellQuote(cwd)} && git push --no-verify -u origin HEAD`, tmpdir())).toBeUndefined();
 	});
 
 	it.each(["git commit --no-verify -m m && git push --no-verify", "git commit -m m && git push origin HEAD"])(

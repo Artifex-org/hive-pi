@@ -6,7 +6,7 @@ import { expect, it } from "vitest";
 
 it("npm test contains the original fixture leaks and preserves Vitest startup failure", () => {
 	const base = mkdtempSync(join(tmpdir(), "e-"));
-	const root = join(base, "runs");
+	const root = join(base, "runs with spaces");
 	const ambient = join(base, "ambient");
 	mkdirSync(ambient);
 	try {

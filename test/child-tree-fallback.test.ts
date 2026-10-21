@@ -1,3 +1,4 @@
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -19,7 +20,7 @@ describe.runIf(process.platform === "linux")("group fallback without procfs", ()
 	it("kills a surviving original group after its wrapper exited", async () => {
 		const dir = fs.mkdtempSync(join(tmpdir(), "tree-fallback-")), file = join(dir, "pid");
 		const tree = { ...treeSpawnOptions(), detached: true };
-		const child = spawn("bash", ["-c", `sleep 10 & echo $! > ${file}; exit 0`], { ...tree, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn("bash", ["-c", `sleep 10 & echo $! > ${shellQuote(file)}; exit 0`], { ...tree, stdio: ["ignore", "pipe", "pipe"] });
 		trackTree(child, true, tree.env[TREE_TOKEN]); child.stdout.resume(); child.stderr.resume();
 		let pid = 0;
 		const running = () => {

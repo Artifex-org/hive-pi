@@ -222,7 +222,7 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		expect(shot.isError).toBe(false);
 		expect(shot.content.map((block) => block.type)).toEqual(["image", "text"]);
 		expect(shot.content[0].mimeType).toBe("image/png");
-		const file = /Saved to (\S+) \[after\]/.exec(shot.text)?.[1];
+		const file = /Saved to (.+) \[after\]/.exec(shot.text)?.[1];
 		expect(file).toBeDefined();
 		expect(readFileSync(file as string).subarray(1, 4).toString()).toBe("PNG");
 		expect(Buffer.from(shot.content[0].data as string, "base64").equals(readFileSync(file as string))).toBe(true);

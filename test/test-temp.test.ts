@@ -1,11 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanRun, prepareRoot, recoverRuns } from "../scripts/test-temp.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanRun, prepareRoot, recoverRuns, tempRoot } from "../scripts/test-temp.ts";
 
 const fixture = fileURLToPath(new URL("./fixtures/test-temp-worker.ts", import.meta.url));
 const dirs: string[] = [];
@@ -34,6 +34,7 @@ async function stateAt(path: string): Promise<State> {
 	return waitFor(() => { try { return JSON.parse(readFileSync(path, "utf8")) as State; } catch { return undefined; } });
 }
 afterEach(async () => {
+	vi.unstubAllEnvs();
 	for (const child of children.splice(0)) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
 	for (const pid of orphans.splice(0)) { try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ } }
 	await delay(50);
@@ -41,6 +42,11 @@ afterEach(async () => {
 });
 
 describe("test invocation temporary ownership", () => {
+	it("uses the HOME cache fallback for an empty XDG_CACHE_HOME", () => {
+		vi.stubEnv("HIVE_PI_TEST_TMP_ROOT", undefined);
+		vi.stubEnv("XDG_CACHE_HOME", "");
+		expect(tempRoot()).toBe(join(homedir(), ".cache", "hive-pi", "tests"));
+	});
 	it.each([["success", 0], ["fail", 7]] as const)("cleans %s and preserves the child's exit code", async (mode, code) => {
 		const { base, root } = setup();
 		const state = join(base, "state");
@@ -111,6 +117,26 @@ describe("test invocation temporary ownership", () => {
 		expect(await fourth.done, fourth.stderr()).toBe(0);
 		if (process.platform === "linux") expect(existsSync(state.run)).toBe(false);
 		else expect(existsSync(state.run)).toBe(true);
+	});
+
+	it("preserves a nested admitted reader after both wrapper levels are killed", async () => {
+		const { base, root } = setup();
+		const first = launch(root, "nested-reader", join(base, "first"));
+		const state = await stateAt(join(base, "first")) as State & { nested: State & { wrapper: number } };
+		const nested = state.nested;
+		orphans.push(state.pid, nested.wrapper, nested.pid, nested.descendant!);
+		first.child.kill("SIGKILL");
+		await waitFor(() => first.child.signalCode === "SIGKILL" ? true : undefined);
+		for (const pid of [nested.wrapper, nested.pid, state.pid]) process.kill(pid, "SIGKILL");
+		await first.done;
+		const second = launch(root, "success", join(base, "second"));
+		expect(await second.done, second.stderr()).toBe(0);
+		expect(existsSync(nested.artifact)).toBe(true);
+		process.kill(nested.descendant!, "SIGKILL");
+		await delay(100);
+		const third = launch(root, "success", join(base, "third"));
+		expect(await third.done, third.stderr()).toBe(0);
+		expect(existsSync(state.run)).toBe(process.platform !== "linux");
 	});
 
 	it("does not follow root, run, manifest or interior symlinks", async () => {
