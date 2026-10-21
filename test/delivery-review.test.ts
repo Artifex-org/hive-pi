@@ -458,9 +458,19 @@ describe("delivery review", () => {
 		};
 		it("tells a base-only PR to omit --base instead of naming it unmatchable", async () => {
 			const { cwd } = repo();
-			const text = await shape("gh pr create --base main --title t --body b", cwd);
+			const text = await shape("gh pr create --base release --title t --body b", cwd);
 			expect(text).toContain("omit `--base`"); expect(text).not.toContain("points at a repo/branch");
 			expect(scanDeliveryTargets("gh pr create --base main --head work", cwd)[0]).toMatchObject({ reviewTarget: { base: "main", head: "work" } });
+		});
+		// Round-5 eval: `gh pr create --draft --base main …` named the default
+		// target explicitly and was refused; it now reads as the default.
+		it("treats --base naming the delivery base branch as the default target", async () => {
+			const { cwd } = repo(); // refs/remotes/origin/main, no origin/HEAD: the bare-repo worktree layout
+			const text = await shape("gh pr create --draft --base main --title t --body-file /tmp/body.md", cwd);
+			expect(text).not.toContain("Unsupported command shape");
+			expect(scanDeliveryTargets("gh pr create --draft --base main --title t", cwd)[0]).toEqual({ target: cwd });
+			expect(scanDeliveryTargets("gh pr create --base main --repo a/b", cwd)[0]).toMatchObject({ target: null });
+			expect(await shape("gh pr create --base release --title t --body b", cwd)).toContain("omit `--base`");
 		});
 		it("never treats a leg that can run code or write as inert", async () => {
 			const { cwd } = repo();
@@ -503,7 +513,7 @@ describe("delivery review", () => {
 			["git push other HEAD", "remote `other` is not `origin`"],
 			["git push origin feature-branch", "refspec `feature-branch`"],
 			["git push --all", "`--all` pushes more than the current HEAD"],
-			["gh pr create --base main", "`--base`"],
+			["gh pr create --base release", "`--base`"],
 			["gh pr create --repo a/b", "`--repo`"],
 			["GIT_DIR=/x git push", "GIT_DIR=/x"],
 			["hive ship --force", "argument `--force`"],
