@@ -134,6 +134,10 @@ function discover(tree: Tree): void {
 		// A surviving original group also owns env-cleared children after root
 		// exit. Reject a reused leader PID and validate member identities below.
 		if (ownGroup && item.pgid === tree.root!.pid && Number(item.start) >= Number(tree.root!.start)) tree.members.set(pid, item);
+		// Token/ancestry membership survives environ teardown. Keep the row for
+		// descendants, but reuse ownership only after the fresh starttime check;
+		// each signal revalidates identity again.
+		if (tree.requireIdentity && tree.members.get(pid)?.start === item.start) continue;
 		// A per-spawn inherited token cannot belong to an older process. Avoid
 		// faulting unrelated workloads' environment pages on every Git close.
 		if (tree.token && (!tree.root || Number(item.start) >= Number(tree.root.start))) {
