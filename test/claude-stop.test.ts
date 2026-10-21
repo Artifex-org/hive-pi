@@ -4,6 +4,7 @@
  * stdout, what persists, and what the driver reads from the spool.
  */
 
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -243,7 +244,7 @@ describe("hook stop terminated mid-check", () => {
 		mkdirSync(join(repo, ".pi"), { recursive: true });
 		execFileSync("git", ["init", "-q", repo]);
 		const marker = join(launch.root, "gate-child.pid");
-		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: `sleep 60 & echo $! > ${marker}; wait` }));
+		writeFileSync(join(repo, ".pi", "harness.json"), JSON.stringify({ check: `sleep 60 & echo $! > ${shellQuote(marker)}; wait` }));
 		const hook = spawn(process.execPath, [CLI, "hook", "stop"], { cwd: REPO, env: launch.env, stdio: ["pipe", "ignore", "ignore"] });
 		hook.stdin.end(JSON.stringify({ transcript_path: transcript, cwd: repo }));
 		const deadline = Date.now() + 15_000;

@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { ReviewContinuation } from "../extensions/subagent/review-continuation.ts";
 import { ReviewArtifactReads } from "../extensions/subagent/review-artifact.ts";
 import { captureDeliveryDiff, reviewFingerprint } from "../extensions/subagent/reviewdiff.ts";
+import { testTempEnv } from "./temp-env.ts";
 import { buildSubagentWorkerArgs } from "../extensions/subagent/worker.ts";
 
 it.each(["ordinary", "format-correction"] as const)("the actual CLI resumes the configured private reviewer conversation (%s)", async mode => {
@@ -43,7 +44,7 @@ it.each(["ordinary", "format-correction"] as const)("the actual CLI resumes the 
 		const args = buildSubagentWorkerArgs("fixture/review", ["read"]); continuation.configure(args);
 		const cli = resolve("node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js");
 		const run = (prompt: string) => new Promise<string>((resolve, reject) => {
-			const child = spawn(process.execPath, [cli, ...args], { cwd: root, env: { PATH: process.env.PATH, HOME: root, PI_CODING_AGENT_DIR: root, PI_OFFLINE: "1" }, stdio: ["pipe", "pipe", "pipe"] });
+			const child = spawn(process.execPath, [cli, ...args], { cwd: root, env: { ...testTempEnv(), PATH: process.env.PATH, HOME: root, PI_CODING_AGENT_DIR: root, PI_OFFLINE: "1" }, stdio: ["pipe", "pipe", "pipe"] });
 			let stdout = "", stderr = "";
 			const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("CLI fixture timed out")); }, 60000);
 			child.stdout.on("data", data => { stdout += data; }); child.stderr.on("data", data => { stderr += data; });

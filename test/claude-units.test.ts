@@ -9,6 +9,8 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realp
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { readerAdmissionCommand } from "./temp-env.ts";
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import * as verification from "../extensions/harness/verify.ts";
 
 import { recapTranscript } from "../extensions/agenda/recap.ts";
@@ -188,7 +190,7 @@ describe("process-group kill for a Claude helper's children", () => {
 	it("kills the grandchild too", async () => {
 		const marker = join(tmp(), "grandchild.pid");
 		const tree = treeSpawnOptions({ HIVE_PI_HELPER_CHILD: "1" });
-		const child = spawn("bash", ["-c", `sleep 30 & echo $! > ${marker}; wait`], { stdio: "ignore", ...tree });
+		const child = spawn("bash", ["-c", `sleep 30 & echo $! > ${shellQuote(marker)}; wait`], { stdio: "ignore", ...tree });
 		const deadline = Date.now() + 5_000;
 		while (Date.now() < deadline) {
 			try {
@@ -209,7 +211,8 @@ describe("process-group kill for a Claude helper's children", () => {
 	it.runIf(process.platform === "linux")("kills a TERM-resistant GNU-timeout descendant outside the original group", async () => {
 		const dir = tmp(), marker = join(dir, "escaped.pid"), outerMarker = join(dir, "outer.pid");
 		const abort = new AbortController();
-		const command = `echo $$ > ${outerMarker}; timeout 20s setsid sh -c 'trap "" TERM; echo $$ > ${marker}; while :; do sleep 1; done' & wait`;
+		const escaped = `${readerAdmissionCommand()} || exit; trap "" TERM; echo $$ > ${shellQuote(marker)}; while :; do sleep 1; done`;
+		const command = `echo $$ > ${shellQuote(outerMarker)}; timeout 20s setsid sh -c ${shellQuote(escaped)} & wait`;
 		const result = nodeGateHost.exec("bash", ["-c", command], { cwd: process.cwd(), timeout: 5_000, signal: abort.signal });
 		let pid = 0;
 		const running = () => {
@@ -319,7 +322,7 @@ describe("quality_gate's buffered fallback runner", () => {
 		const previous = process.env.HIVE_PI_HELPER_CHILD;
 		process.env.HIVE_PI_HELPER_CHILD = "1";
 		try {
-			const res = await nodeGateHost.exec("bash", ["-c", `sleep 30 & echo $! > ${marker}; wait`], { timeout: 300, cwd: tmp() });
+			const res = await nodeGateHost.exec("bash", ["-c", `sleep 30 & echo $! > ${shellQuote(marker)}; wait`], { timeout: 300, cwd: tmp() });
 			expect(res).toMatchObject({ code: null, killed: true });
 			const grandchild = Number.parseInt(readFileSync(marker, "utf8"), 10);
 			await new Promise((r) => setTimeout(r, 100));

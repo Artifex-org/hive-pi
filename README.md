@@ -136,8 +136,13 @@ workspace releases the server-side pin.
 
 ```bash
 npm ci --ignore-scripts
-npm run check      # tsc --noEmit && vitest run
+npm run check      # full typecheck, then the owned Vitest invocation
 ```
+
+`npm test -- <vitest arguments>` establishes a private disk-backed temporary
+scope before Vitest starts and cleans verified, finished runs. Use this entrypoint
+rather than invoking Vitest directly. See [test temporary storage](docs/test-temporary-storage.md)
+for root configuration, signal handling, and conservative recovery limits.
 
 Keep the root for the README, license/security notices, and package/tooling
 configuration. Maintained guides belong in `docs/` (or beside the component they

@@ -194,7 +194,7 @@ update_pi_binaries() {
   # and silently leaves the real one stale. Deriving it means a second install,
   # or a differently-configured machine, is handled without editing this script.
   local bin real prefix
-  for bin in $(type -a -P pi 2>/dev/null | sort -u); do
+  while IFS= read -r bin; do
     real="$(readlink -f "${bin}" 2>/dev/null)" || continue
     case "${real}" in
       */lib/node_modules/@earendil-works/pi-coding-agent/*) ;;
@@ -216,7 +216,7 @@ update_pi_binaries() {
     esac
     npm i -g --prefix "${prefix}" "@earendil-works/pi-coding-agent@latest" \
       || echo "hive-pi-update: npm pi upgrade in ${prefix} failed (continuing)" >&2
-  done
+  done < <(type -a -P pi 2>/dev/null | sort -u)
 }
 update_pi_binaries
 

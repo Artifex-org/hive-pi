@@ -560,7 +560,7 @@ describe("the orchestrate tool", () => {
 			ctx,
 		);
 		const reconcilePrompt = runRoleAgent.mock.calls.map(([options]) => options.prompt as string).find((prompt) => prompt.startsWith("do reconcile"));
-		const file = /written in full to (\S+?) —/.exec(reconcilePrompt ?? "")?.[1];
+		const file = /written in full to (.+?) —/.exec(reconcilePrompt ?? "")?.[1];
 		expect(file?.startsWith(store), reconcilePrompt).toBe(true);
 		expect(readFileSync(file!, "utf8")).toBe(big);
 	});

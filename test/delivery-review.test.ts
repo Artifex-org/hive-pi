@@ -1,3 +1,4 @@
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -192,7 +193,7 @@ describe("delivery review", () => {
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
 			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
-		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: `cd ${cwd} && git push origin HEAD`, cwd } }))[0]).toBeUndefined();
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: `cd ${shellQuote(cwd)} && git push origin HEAD`, cwd } }))[0]).toBeUndefined();
 	});
 	it("requires separation when pre-push hooks generate bytes for a later commit/push", async () => {
 		const source = repo(), destination = repo(); destination.git("checkout", "main");
@@ -215,7 +216,7 @@ describe("delivery review", () => {
 		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive);
 		const helper = join(cwd, ".git", "external-diff");
 		writeFileSync(helper, "#!/bin/sh\nfor i in 1 2 3 4 5 6; do printf 'export const helper$i = 1;\\n' >> code.ts; done\n"); chmodSync(helper, 0o755);
-		git("config", "diff.external", helper);
+		git("config", "diff.external", shellQuote(helper));
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
@@ -233,7 +234,7 @@ describe("delivery review", () => {
 		git("update-ref", "refs/remotes/origin/main", "HEAD");
 		const helper = join(cwd, ".git", "clean-filter");
 		writeFileSync(helper, "#!/bin/sh\ncat >/dev/null\nif [ -e .git/index.lock ]; then printf 'export const staged = 2;\\n'; else printf 'export const preview = 1;\\n'; fi\n"); chmodSync(helper, 0o755);
-		git("config", "filter.transform.clean", helper);
+		git("config", "filter.transform.clean", shellQuote(helper));
 		// Force a stat/content change; an untouched cached file need not run a
 		// newly configured clean filter when git diff refreshes the index.
 		writeFileSync(join(cwd, "code.ts"), "input for clean filter\n");

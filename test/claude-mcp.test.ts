@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { readerAdmissionCommand } from "./temp-env.ts";
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { abortedText, CANCELLED_BY_CALLER, opModeRefusal } from "../claude/mcp/subagent-tool.ts";
 import { negotiateVersion } from "../claude/mcp/protocol.ts";
 import { makeLaunch, McpClient, REPO, startFakeHive, writeTranscript, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
@@ -416,7 +418,8 @@ describe("hive_watch_run", () => {
 	it.runIf(process.platform === "linux")("cleans up a pipe-holding escaped worker after the hive wrapper exits", async () => {
 		const cli = fakeHiveCli(0, 0);
 		const marker = join(launch.root, "escaped-worker");
-		writeFileSync(join(launch.root, "bin", "hive"), `#!/bin/bash\nsetsid bash -c 'echo $$ > ${marker}; trap "" TERM HUP; sleep 10' &\nsleep 0.1\nexit 0\n`);
+		const escaped = `${readerAdmissionCommand()} || exit; echo $$ > ${shellQuote(marker)}; trap "" TERM HUP; sleep 10`;
+		writeFileSync(join(launch.root, "bin", "hive"), `#!/bin/bash\nsetsid bash -c ${shellQuote(escaped)} &\nsleep 0.1\nexit 0\n`);
 		const c = await connect(cli.env);
 		let pid = 0;
 		const running = () => {

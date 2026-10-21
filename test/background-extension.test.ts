@@ -11,6 +11,7 @@
  * The commands are `sleep`/`echo`/`exit`, so the suite costs about a second.
  */
 
+import { shellQuote } from "../extensions/toolcwd/cwd.ts";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -277,7 +278,7 @@ describe.runIf(realBashAvailable())("reaping on shutdown", () => {
 		const pi = boot();
 		await pi.emit({ type: "session_start" }, { mode: "tui" });
 		await call(pi, "background_bash", {
-			command: `sleep 30 & echo $! > ${pidFile}; wait`,
+			command: `sleep 30 & echo $! > ${shellQuote(pidFile)}; wait`,
 			what: "a job with a grandchild",
 		});
 
@@ -332,7 +333,7 @@ describe.runIf(realBashAvailable())("a command whose output outlives it", () => 
 		const pi = boot();
 		await pi.emit({ type: "session_start" }, { mode: "tui" });
 		await call(pi, "background_bash", {
-			command: `sleep 30 & echo $! > ${pidFile}; echo gate-done; exit 0`,
+			command: `sleep 30 & echo $! > ${shellQuote(pidFile)}; echo gate-done; exit 0`,
 			what: "a gate that leaves a worker behind",
 			timeout_seconds: 4,
 		});

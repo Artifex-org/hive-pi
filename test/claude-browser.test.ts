@@ -24,6 +24,7 @@ import { BROWSER_TOOL_NAMES, BROWSER_TOOLS, BrowserTools, checkArgs } from "../c
 import { browserInstallCommand, describeLaunchError, SessionBrowser } from "../extensions/browser/core.ts";
 import browserExtension from "../extensions/browser/index.ts";
 import { makeLaunch, McpClient, REPO, startFakeHive, type FakeHive, type LaunchEnv } from "./claude-harness.ts";
+import { registerTestReader, testTempEnv } from "./temp-env.ts";
 import { createFakePi } from "./fake-pi.ts";
 
 const BROWSERS_PATH = join(homedir(), ".cache", "ms-playwright");
@@ -39,7 +40,7 @@ if (!BROWSER_INSTALLED) {
  * The environment an in-process browser gets: never this test process's own,
  * which may be a Hive launch whose live-view dir must not be written to.
  */
-const CLEAN_ENV: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: homedir(), PLAYWRIGHT_BROWSERS_PATH: BROWSERS_PATH };
+const CLEAN_ENV: NodeJS.ProcessEnv = { ...testTempEnv(), PATH: process.env.PATH, HOME: homedir(), PLAYWRIGHT_BROWSERS_PATH: BROWSERS_PATH };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -221,7 +222,7 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		expect(shot.isError).toBe(false);
 		expect(shot.content.map((block) => block.type)).toEqual(["image", "text"]);
 		expect(shot.content[0].mimeType).toBe("image/png");
-		const file = /Saved to (\S+) \[after\]/.exec(shot.text)?.[1];
+		const file = /Saved to (.+) \[after\]/.exec(shot.text)?.[1];
 		expect(file).toBeDefined();
 		expect(readFileSync(file as string).subarray(1, 4).toString()).toBe("PNG");
 		expect(Buffer.from(shot.content[0].data as string, "base64").equals(readFileSync(file as string))).toBe(true);
@@ -261,6 +262,7 @@ describe.skipIf(!BROWSER_INSTALLED || process.platform !== "linux")("the session
 		// A helper group of this process, started first, that must not be taken for the browser.
 		const { spawn } = await import("node:child_process");
 		const decoy = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
+		registerTestReader(decoy.pid);
 		const { chromium } = await import("playwright-core");
 		const browser = new SessionBrowser({ chromium: async () => chromium, env: CLEAN_ENV, handleSignals: false });
 		try {

@@ -105,7 +105,7 @@ describe("a large upstream result is bounded: spilled to a file the worker can r
 
 		expect(prompts.reconcile).not.toContain(big);
 		expect(Buffer.byteLength(prompts.reconcile)).toBeLessThan(INLINE_INPUT_BYTES);
-		const file = /written in full to (\S+?) —/.exec(prompts.reconcile)?.[1];
+		const file = /written in full to (.+?) —/.exec(prompts.reconcile)?.[1];
 		expect(file, prompts.reconcile).toBeDefined();
 		expect(file!.startsWith(dir)).toBe(true);
 		expect(readFileSync(file!, "utf8")).toBe(big);
@@ -143,6 +143,6 @@ describe("a fanout's items share one rendering of its inputs", () => {
 		});
 		expect(prompts).toHaveLength(3);
 		expect(readdirSync(dir)).toHaveLength(1);
-		expect(new Set(prompts.map((prompt) => /written in full to (\S+?) —/.exec(prompt)?.[1])).size).toBe(1);
+		expect(new Set(prompts.map((prompt) => /written in full to (.+?) —/.exec(prompt)?.[1])).size).toBe(1);
 	});
 });
