@@ -32,6 +32,7 @@ import {
 	MAX_ADVISOR_INJECTIONS,
 } from "./advisor-watch.ts";
 import { createDriftPolicy, driftJevClient } from "./drift.ts";
+import { createReportPolicy } from "./report.ts";
 import { createGatePolicy } from "./gate.ts";
 import { looksUnverifiable, parseGoalCommand } from "./goal-command.ts";
 import { buildHandoffSeed, captureHandoffOrigin, legacyHandoffPath, shouldHandoffInsteadOfCompact, writeHandoff } from "./handoff.ts";
@@ -364,6 +365,9 @@ export default function (pi: ExtensionAPI) {
 	};
 	const conductorPolicy = createConductorPolicy(conductorHooks);
 	const conductorAdvicePolicy = createConductorAdvicePolicy(conductorHooks);
+	// After the milestone advice (a pending pre-delivery review still runs
+	// first) and before the goal, whose per-settle continuation would starve it.
+	const reportPolicy = createReportPolicy();
 	// Checkpoint commits on long uncommitted stretches of execute (checkpoint.ts).
 	// A turn policy: a multi-hour execute phase may never settle.
 	const checkpoint = createCheckpoint({ enabled: () => conductorEnabled, stage: () => conductor?.stage ?? null });
@@ -453,7 +457,7 @@ export default function (pi: ExtensionAPI) {
 	// (delivery verification still waits for it), the conductor, and the timer. Pinned by
 	// test/agenda-conductor.test.ts.
 	const driver = installDriver(pi, {
-		policies: [gatePolicy, askPolicy, driftPolicy, advisorWatchPolicy, conductorAdvicePolicy, goalPolicy, conductorPolicy, loopPolicy],
+		policies: [gatePolicy, askPolicy, driftPolicy, advisorWatchPolicy, conductorAdvicePolicy, reportPolicy, goalPolicy, conductorPolicy, loopPolicy],
 		turnPolicies: [conductorAdvicePolicy, checkpoint.policy],
 		isWorker: IS_WORKER,
 		checkpoint,
