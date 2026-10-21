@@ -15,6 +15,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type Handback, NO_HANDBACK } from "./handback.ts";
 
 export const OWN_WORK_CHANNEL = "hive.ownwork";
+/**
+ * Subscribe to OWN_WORK_CHANNEL before emitting this request (payload ignored).
+ * Each initialized owner replies on OWN_WORK_CHANNEL with its current snapshot,
+ * including zero. Request after session_start/session_tree restoration completes;
+ * an absent owner response is unknown, never evidence of zero running work.
+ */
+export const OWN_WORK_REQUEST_CHANNEL = "hive.ownwork.request";
 
 export interface OwnWorkEvent {
 	/** The announcing extension — an enum-like name. */
