@@ -438,7 +438,7 @@ const JOB_ID = (() => {
 	return new RegExp(`${escape(before)}([^\\s${escape(after[0] ?? "`")}]+)${escape(after[0] ?? "`")}`);
 })();
 
-interface BackgroundReview { cwd: string; fingerprint: string | null }
+interface BackgroundReview { cwd: string; fingerprint: string | null; unstampable?: string | null }
 interface BackgroundJob { output: string; status?: string; review?: BackgroundReview; reviewFingerprint?: string }
 
 const resultText = (content: unknown) => Array.isArray(content) ? content.map((part) => typeof (part as { text?: unknown })?.text === "string" ? (part as { text: string }).text : "").join("\n") : "";
@@ -447,7 +447,7 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 	const reviewed = new Set<string>();
 	// Fingerprints stamped because no reviewer could run, with the reason.
 	const unavailable = new Map<string, string>();
-	const pending = new Map<string, { cwd: string; reviewTarget?: ReviewTarget; explicitModel: boolean }>();
+	const pending = new Map<string, { cwd: string; reviewTarget?: ReviewTarget; explicitModel: boolean; unstampable?: string | null }>();
 	// Why a fingerprint is not covered: the last review per repo (for "stale after
 	// commit X") and what became of background reviews per cwd.
 	const lastReview = new Map<string, { fingerprint: string; head: string | null }>();
@@ -521,7 +521,12 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		if (!review || job.status === undefined) return;
 		jobs.delete(id);
 		if (job.status !== "done" || job.output.includes(MID_WORK_NOTE)) { backgroundState.set(review.cwd, `finished without a complete review (${job.status})`); return; }
-		if (!job.reviewFingerprint) { backgroundState.set(review.cwd, "finished, but the reviewer could not capture the diff it reviewed"); return; }
+		if (!job.reviewFingerprint) {
+			backgroundState.set(review.cwd, review.unstampable
+				? `finished, but it reviewed a diff that could not be stamped (${review.unstampable.replace(/^This review cannot clear delivery: /, "").replace(/\. Fix that.*$/, "")})`
+				: "finished, but the reviewer could not capture the diff it reviewed");
+			return;
+		}
 		const diff = capture(review.cwd, "");
 		if (!diff || !stampableReview(diff) || !review.fingerprint || job.reviewFingerprint !== review.fingerprint || reviewFingerprint(diff) !== review.fingerprint) { backgroundState.set(review.cwd, "finished, but the diff changed after it was dispatched (or cannot be stamped)"); return; }
 		backgroundState.delete(review.cwd);
@@ -552,16 +557,16 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 				// What the worker captures: the task's named paths can select another
 				// repo, and then the stamp below (taken for cwd) can never match.
 				const diff = input.reviewTarget === undefined ? capture(cwd, typeof input.task === "string" ? input.task : "") : null;
-				dispatched.set(event.toolCallId, { cwd, fingerprint: diff && stampableReview(diff) ? reviewFingerprint(diff) : null });
+				dispatched.set(event.toolCallId, { cwd, fingerprint: diff && stampableReview(diff) ? reviewFingerprint(diff) : null, unstampable: unstampableReviewNote(diff) });
 				if (diff) withdrawDelta(diff.repo); // its capture must not take a foreground delta offer
 				backgroundState.set(cwd, "is still running");
 			} else if (input.reviewTarget === undefined || isReviewTarget(input.reviewTarget)) {
-				pending.set(event.toolCallId, { cwd, reviewTarget: input.reviewTarget as ReviewTarget | undefined, explicitModel: typeof input.model === "string" && input.model.trim() !== "" });
+				// One capture serves the dispatch note and the delta offer below.
+				const diff = input.reviewTarget === undefined ? capture(cwd, typeof input.task === "string" ? input.task : "") : null;
+				pending.set(event.toolCallId, { cwd, reviewTarget: input.reviewTarget as ReviewTarget | undefined, explicitModel: typeof input.model === "string" && input.model.trim() !== "",
+					unstampable: unstampableReviewNote(diff) });
 				// Only a foreground delivery review may see just the delta (background settles on full fingerprints).
-				if (input.reviewTarget === undefined && hasAnchors() && !backgroundState.has(cwd)) {
-					const diff = capture(cwd, typeof input.task === "string" ? input.task : "");
-					if (diff && !backgroundState.has(diff.repo)) offerDelta(diff.repo);
-				}
+				if (diff && hasAnchors() && !backgroundState.has(cwd) && !backgroundState.has(diff.repo)) offerDelta(diff.repo);
 			}
 			return;
 		}
@@ -626,6 +631,7 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		const background = dispatched.get(event.toolCallId);
 		dispatched.delete(event.toolCallId);
 		if (background) {
+			if (background.unstampable && !event.isError) notes.push(background.unstampable);
 			const id = event.isError ? undefined : JOB_ID.exec(resultText(event.content))?.[1];
 			if (id === undefined) backgroundState.delete(background.cwd); // refused before it started: no job will come
 			else {
@@ -640,6 +646,7 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		if (request) {
 			const reviewNote = recordReview(request, event.isError === true, event.details);
 			if (reviewNote) notes.push(reviewNote);
+			else if (request.unstampable && !event.isError) notes.push(request.unstampable);
 		}
 		if (notes.length > 0) return { content: appendHint(event.content, notes.map((note) => `\n\n[harness] ${note}`).join("")) };
 	});
@@ -684,16 +691,32 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 	}
 }
 
+/** Why a captured diff cannot be stamped as reviewed, with the remedy for each cause; empty when it can. */
+function unstampableCauses(diff: ReviewDiff): string[] {
+	if (stampableReview(diff)) return [];
+	const causes: string[] = [];
+	if (diff.untracked.length > 0) causes.push(`untracked file(s) ${diff.untracked.slice(0, 5).map((f) => `\`${f}\``).join(", ")}${diff.untracked.length > 5 ? ` and ${diff.untracked.length - 5} more` : ""} are not in the diff: \`git add\` them (or delete them) before the review`);
+	if (diff.truncatedBytes > 0) causes.push(`the diff exceeds the capture budget (${diff.truncatedBytes} bytes not captured${diff.omitted?.length ? `; no or partial patch for ${diff.omitted.slice(0, 8).join(", ")}${diff.omitted.length > 8 ? ", ..." : ""}` : ""}) and a truncated review cannot be stamped: PI_DELIVERY_REVIEW=0 is the explicit override`);
+	if (/^(?:Binary files|GIT binary patch)/m.test(diff.text)) causes.push("the diff contains binary changes that cannot be stamped: PI_DELIVERY_REVIEW=0 is the explicit override");
+	return causes.length > 0 ? causes : ["the captured diff cannot be stamped"];
+}
+
+/**
+ * The note a code-reviewer gets at dispatch when its diff cannot be stamped
+ * (round-6/7 harness evals: pi+Sol started a background review while its new
+ * test file was untracked; the review ran to completion, could never count,
+ * and the push then asked for a second one). Saying so at dispatch costs
+ * nothing and saves a whole review.
+ */
+function unstampableReviewNote(diff: ReviewDiff | null): string | null {
+	if (!diff || stampableReview(diff)) return null;
+	return `This review cannot clear delivery: ${unstampableCauses(diff).join("; ")}. Fix that and review again before pushing; the push guard accepts only a review of a stampable diff.`;
+}
+
 /** The one cause that applies to this refusal, with the fingerprints/files that prove it. */
 function blockCause(diff: ReviewDiff | null, target: string, lastReview: Map<string, { fingerprint: string; head: string | null }>, backgroundState: Map<string, string>): string {
 	if (!diff) return `Complete delivery diff unavailable: ${explainDeliveryDiffFailure(target)}. `;
-	if (!stampableReview(diff)) {
-		const causes: string[] = [];
-		if (diff.untracked.length > 0) causes.push(`untracked file(s) ${diff.untracked.slice(0, 5).map((f) => `\`${f}\``).join(", ")}${diff.untracked.length > 5 ? ` and ${diff.untracked.length - 5} more` : ""} are not in the diff: \`git add\` them (or delete them) before the review`);
-		if (diff.truncatedBytes > 0) causes.push(`the diff exceeds the capture budget (${diff.truncatedBytes} bytes not captured${diff.omitted?.length ? `; no or partial patch for ${diff.omitted.slice(0, 8).join(", ")}${diff.omitted.length > 8 ? ", ..." : ""}` : ""}) and a truncated review cannot be stamped: PI_DELIVERY_REVIEW=0 is the explicit override`);
-		if (/^(?:Binary files|GIT binary patch)/m.test(diff.text)) causes.push("the diff contains binary changes that cannot be stamped: PI_DELIVERY_REVIEW=0 is the explicit override");
-		return `Delivery diff is not stampable: ${causes.join("; ")}. `;
-	}
+	if (!stampableReview(diff)) return `Delivery diff is not stampable: ${unstampableCauses(diff).join("; ")}. `;
 	const last = lastReview.get(diff.repo);
 	const head = headCommit(diff.repo);
 	const lines: string[] = [];
