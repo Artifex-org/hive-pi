@@ -246,3 +246,18 @@ Chain mode and `orchestrate` stages are not wired yet.
 ### Review roles are handed the diff (`reviewdiff.ts`, HIV-3421)
 
 A role whose name says *review* or *verify* gets the change it is reviewing appended to its task — working tree against HEAD (untracked, non-ignored new files included: `git diff HEAD` never lists them), else the branch against its base (only when the remote publishes a HEAD; guessing `main` on a `feature`-default repo would diff the wrong branch) — with the file list and the diff delimited as data. The list helps the worker find the change and never narrows the caller's scope: paths the task names stay in scope, and the change is read from the repo that holds the absolute paths the task names (no scoping at all when they are in no single repo — a non-git model workspace). Afterwards, any source path the review cites that is neither in the change nor named by the task is flagged on the result. Measured: four reviews in one week returned findings only for files that were not in `git diff`; later, reviews refused the caller's own new files as "not among the files authorized for this review".
+
+### Delivery capture limits
+
+Delivery capture reads the complete committed, staged and unstaged layers with
+lock-free Git commands. Collection has a ten-second total deadline and a
+five-second per-command limit; late output is rejected even on the final read.
+The boundary remains synchronous, so a slow scan can briefly pause the session.
+Failure diagnostics run a separate scan with the same allowance; these limits
+are not an end-to-end preflight deadline. These are execution allowances, not review exemptions: truncated evidence,
+untracked code and unmatched fingerprints still block delivery.
+
+An unavailable capture blocks the command before review receipts are evaluated;
+it does not discard completed receipts. Resolve the Git failure and retry the
+standalone delivery rather than repeating an unchanged review. Changed content
+still requires a matching new review.
