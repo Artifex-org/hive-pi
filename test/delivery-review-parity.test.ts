@@ -171,6 +171,43 @@ describe("delivery review: tree fingerprint, background and unavailable reviewer
 		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true, reason: expect.stringContaining("could not capture the diff it reviewed") });
 	});
 
+	// Round-7 eval (pi+Sol, HIV-3912): the review started while the new test file
+	// was untracked, ran to completion, and the push then said only that the
+	// reviewer "could not capture the diff". The cause is told at dispatch now.
+	it("says at dispatch that a review with untracked files cannot clear delivery, and why at the push", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		writeFileSync(join(cwd, "new.test.ts"), substantive);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "bg", input: { agent: "code-reviewer", background: true, what: "review", task: "Review", cwd } });
+		pi.api.events.emit(BACKGROUND_JOB_CHANNEL, { action: "start", id: "sub-1", sessionId: "s", executionId: "e", what: "review", kind: "subagent", detail: "code-reviewer: Review" });
+		const [dispatched] = await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "bg", input: {}, isError: false, content: [{ type: "text", text: backgroundStartedMessage("sub-1", "review", "code-reviewer") }], details: { results: [] } }) as { content: { text: string }[] }[];
+		const note = dispatched.content.map((c) => c.text).join("\n");
+		expect(note).toContain("This review cannot clear delivery");
+		expect(note).toContain("`new.test.ts`");
+		expect(note).toContain("`git add` them");
+		finish(pi, "sub-1", "done");
+		git("add", "."); git("commit", "-qm", "code"); // as in the eval: committed after the review started
+		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true, reason: expect.stringMatching(/reviewed a diff that could not be stamped \(untracked file\(s\) `new\.test\.ts`/) });
+	});
+
+	it("says at dispatch that a foreground review with untracked files cannot clear delivery", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		writeFileSync(join(cwd, "new.test.ts"), substantive);
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "fg", input: { agent: "code-reviewer", task: "Review", cwd } });
+		const [result] = await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "fg", input: {}, isError: false, content: [{ type: "text", text: "Looks good." }],
+			details: { results: [{ agent: "code-reviewer", exitCode: 0 }] } }) as ({ content: { text: string }[] } | undefined)[];
+		expect(result?.content.map((c) => c.text).join("\n")).toContain("`new.test.ts`");
+	});
+
+	it("adds no dispatch note to a review of a stampable diff", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
+		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "bg", input: { agent: "code-reviewer", background: true, what: "review", task: "Review", cwd } });
+		const [dispatched] = await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "bg", input: {}, isError: false, content: [{ type: "text", text: backgroundStartedMessage("sub-1", "review", "code-reviewer") }], details: { results: [] } }) as ({ content: { text: string }[] } | undefined)[];
+		expect(JSON.stringify(dispatched ?? "")).not.toContain("cannot clear delivery");
+	});
+
 	it("does not accept a background review of a different diff than the one dispatched", async () => {
 		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
