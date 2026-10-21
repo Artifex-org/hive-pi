@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import agenda from "../extensions/agenda/index.ts";
 import { announceOwnWork } from "../extensions/hive-common/own-work.ts";
-import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL, OPERATOR_INPUT_CHANNEL } from "../extensions/hive-common/channels.ts";
+import { HIVE_SESSION_CHANNEL, HIVE_SESSION_END_CHANNEL, OPERATOR_INPUT_CHANNEL, OP_MODE_STATE_CHANNEL } from "../extensions/hive-common/channels.ts";
 import hiveRemote, { type RemoteDeps } from "../extensions/hive-remote/index.ts";
 import { operatorInputDigest } from "../extensions/hive-common/operator-input.ts";
 import type { RemoteConfig } from "../extensions/hive-remote/config.ts";
@@ -795,8 +795,22 @@ describe("attach", () => {
 		for (const cap of ["can_steer", "can_interrupt", "can_kill", "can_set_mode", "can_message"]) {
 			expect(typeof body[cap]).toBe("boolean");
 		}
-		// Declared false, never true, until this build can honour it (HIV-1088).
+		// No posture enforcer announced itself, so mode consent is unavailable.
 		expect(body.can_approve).toBe(false);
+	});
+
+	it.each([false, true])("advertises mode consent only with operator opt-in and preserves it on refresh (enabled=%s)", async enabled => {
+		const hive = fakeHive({});
+		hiveRemote(fake.api, deps(config({ allowSetOpMode: enabled })));
+		await attachAndSettle(fake);
+		expect(hive.attaches()[0]?.body?.can_approve).toBe(false);
+		fake.api.events.emit(OP_MODE_STATE_CHANNEL, { mode: "discuss", modes: ["build", "discuss", "orchestrate"] });
+		await vi.advanceTimersByTimeAsync(0);
+		await fake.emit({ type: "session_info_changed" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(hive.attaches().length).toBeGreaterThan(1);
+		for (const attached of hive.attaches().slice(1)) expect(attached.body?.can_approve).toBe(enabled);
+		await fake.emit({ type: "session_shutdown" });
 	});
 
 	// The inverse of the rule above: `can_add_workspace` must be ABSENT when off,

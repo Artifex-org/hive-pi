@@ -111,6 +111,7 @@ import registerSessionIdentity from "./sessionIdentity.ts";
 import { IdentitySync, IDENTITY_SYNC_ENTRY } from "./identitySync.ts";
 import { loadConfig, writeConfig, type RemoteConfig } from "./config.ts";
 import { registerWorkspaceTools } from "./workspace.ts";
+import { registerModeRequestTool } from "./mode-request.ts";
 import { CredentialReceiver, credentialConsumersReady, registerCredentialTools } from "./credentials.ts";
 import { collectPatch, collectWorktree, type WorktreePayload } from "./worktree.ts";
 import { createDeltaQueue, type DeltaQueue } from "./deltaQueue.ts";
@@ -2006,10 +2007,9 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 				// Team messages enter the context like a steer does, so they ride the
 				// same consent rather than growing a separate flag.
 				can_message: cfg.allowSteer,
-				// Browser approvals are a separate, later opt-in (HIV-1088). Never
-				// declare a capability this build cannot honour: the UI renders
-				// controls from these, so a false claim is a button that hangs.
-				can_approve: false,
+				// The approval consumer has an exact allowlist: request_mode only.
+				// It cannot approve shell calls or arbitrary tool execution.
+				can_approve: cfg.allowSetOpMode && opModeLoaded(),
 				// Compaction aborts a turn, so it is gated on the same explicit remote
 				// control consent as a steer. Spread-only for older Hive servers.
 				...(cfg.allowSteer ? { can_compact: true } : {}),
@@ -2183,7 +2183,7 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 						// Same whole-record-PUT rule as the terminal above: omitting
 						// can_message here would erase it on the first title refresh.
 						can_message: cfg.allowSteer,
-						can_approve: false,
+						can_approve: cfg.allowSetOpMode && opModeLoaded(),
 						// Kept in lockstep with the attach above — a whole-record PUT,
 						// so a title refresh must not withdraw compaction support.
 						...(cfg.allowSteer ? { can_compact: true } : {}),
@@ -2808,6 +2808,11 @@ export default function (pi: ExtensionAPI, deps: RemoteDeps = {}) {
 	registerSessionIdentity(pi);
 	registerSessionTitleTool(pi);
 	registerSendAttachmentTool(pi, attachmentDeps);
+	registerModeRequestTool(pi, {
+		enabled: cfg.allowSetOpMode,
+		getAuth: () => cfg.enabled ? auth : null,
+		getSessionID: () => sessionID,
+	});
 	registerWorkspaceTools(pi, {
 		enabled: workspaceEnabled,
 		getAuth: () => auth,
