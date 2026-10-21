@@ -24,6 +24,8 @@ import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { testTempEnv } from "./temp-env.ts";
+
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const CLI = join(REPO, "claude", "cli.ts");
 
@@ -103,6 +105,7 @@ export function makeLaunch(options: { providers?: string[] } = {}): LaunchEnv {
 	const spool = join(root, "aux-spool.jsonl");
 
 	const env: Record<string, string> = {
+		...testTempEnv(),
 		PATH: process.env.PATH ?? "",
 		HOME: root,
 		HIVE_PI_BIN: piBin,

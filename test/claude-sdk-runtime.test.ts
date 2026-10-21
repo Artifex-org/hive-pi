@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
 import { cancellable, hiveLease, LEASE_UNAVAILABLE_GRACE_MS, LeaseManager, processScope } from "../extensions/claude-sdk/runtime.ts";
+import { testTempEnv } from "./temp-env.ts";
 import { SdkLeaseRefused } from "../extensions/claude-sdk/events.ts";
 
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -125,7 +126,7 @@ it.runIf(process.platform === "linux")("the real process launcher inherits umask
 		fs.writeFileSync(process.env.STATE + '/child/state', 'synthetic state');
 		console.log(process.umask());
 		setInterval(() => {}, 10000);
-	`], cwd: dir, env: { STATE: dir }, signal: new AbortController().signal });
+	`], cwd: dir, env: { ...testTempEnv(), STATE: dir }, signal: new AbortController().signal });
 	const exited = new Promise(resolve => child.once("exit", resolve));
 	const [bytes] = await once(child.stdout, "data");
 	expect(String(bytes).trim()).toBe("63"); expect(process.umask()).toBe(mask);
@@ -142,7 +143,7 @@ it.runIf(process.platform === "linux")("finds a token-owned detached Node descen
 		require('node:fs').writeFileSync(process.env.STATE + '/leader', String(process.pid));
 		cp.spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(process.env.STATE + '/pid', String(process.pid)); console.log('ready'); setInterval(()=>{},10000)"],
 			{detached:true, stdio:['ignore','inherit','ignore']}).unref();
-	`], cwd: dir, env: { STATE: dir }, signal: new AbortController().signal });
+	`], cwd: dir, env: { ...testTempEnv(), STATE: dir }, signal: new AbortController().signal });
 	const exited = new Promise(resolve => child.once("exit", resolve));
 	await once(child.stdout, "data"); await exited;
 	const descendant = Number(await readFile(join(dir, "pid"), "utf8"));
@@ -167,7 +168,7 @@ it.runIf(process.platform === "linux")("cleanup escalates to SIGKILL for a synth
 		const child = cp.spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},10000)"], {stdio:['ignore','pipe','ignore']});
 		child.stdout.once('data', () => { require('node:fs').writeFileSync(process.env.STATE + '/pid', String(child.pid)); console.log('ready'); });
 		setInterval(()=>{},10000);
-	`], cwd: dir, env: { STATE: dir }, signal: new AbortController().signal });
+	`], cwd: dir, env: { ...testTempEnv(), STATE: dir }, signal: new AbortController().signal });
 	const exited = new Promise(resolve => child.once("exit", resolve));
 	await once(child.stdout, "data");
 	const descendant = Number(await readFile(join(dir, "pid"), "utf8"));
@@ -185,7 +186,7 @@ it.runIf(process.platform === "linux")("cleanup escalates to SIGKILL for a synth
 		const worker = require('node:child_process').spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(process.env.STATE + '/pid', String(process.pid)); setInterval(()=>{},10000)"], {detached:true, stdio:'ignore'});
 		worker.unref();
 		const ready = setInterval(() => { if (require('node:fs').existsSync(process.env.STATE + '/pid')) clearInterval(ready); }, 5);
-	`], cwd: dir, env: { STATE: dir }, signal: new AbortController().signal });
+	`], cwd: dir, env: { ...testTempEnv(), STATE: dir }, signal: new AbortController().signal });
 	const leaderExited = new Promise(resolve => child.once("exit", resolve));
 	const outputClosed = once(child.stdout, "close"); child.stdout.resume();
 	await Promise.all([leaderExited, outputClosed]);
