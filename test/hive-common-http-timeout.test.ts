@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { request } from "../extensions/hive-common/http.ts";
 
 const auth = { token: "test", url: "https://hive.example" };
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 // Like fetch, the body stays attached to the request's signal after headers.
 // A headers-only timeout would never abort this stream.
@@ -35,6 +35,22 @@ it("propagates caller cancellation through body decoding", async () => {
 		return stalledBody(init.signal!, 200);
 	}));
 	expect(await request(auth, "GET", "/x", undefined, 10_000, caller.signal)).toMatchObject({ ok: false, error: "timeout" });
+});
+
+it.each(["deadline", "caller"] as const)("rejects a late success from a non-cooperative transport after %s cancellation", async kind => {
+	vi.useFakeTimers();
+	let release!: (response: Response) => void;
+	const held = new Promise<Response>(resolve => { release = resolve; });
+	const fetch = vi.fn(() => held); // Intentionally ignores init.signal.
+	vi.stubGlobal("fetch", fetch);
+	const caller = new AbortController();
+	const pending = request(auth, "GET", "/late", undefined, 20, caller.signal);
+	expect(fetch).toHaveBeenCalledTimes(1);
+	if (kind === "caller") caller.abort();
+	else await vi.advanceTimersByTimeAsync(21);
+
+	release(new Response("{}"));
+	expect(await pending).toMatchObject({ ok: false, error: "timeout" });
 });
 
 it("does not send a request whose caller already aborted", async () => {
