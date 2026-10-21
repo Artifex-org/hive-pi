@@ -22,6 +22,8 @@ function repo() {
 	return { cwd, git };
 }
 const substantive = Array.from({ length: 12 }, (_, i) => `export const n${i} = ${i};`).join("\n") + "\n";
+// More than a carried-forward change (<=5 lines in one file): it needs another review.
+const laterChange = Array.from({ length: 6 }, (_, i) => `export const later${i} = ${i};`).join("\n") + "\n";
 
 describe("delivery review", () => {
 	it.each([
@@ -45,7 +47,7 @@ describe("delivery review", () => {
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
 			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
 		expect((await deliver())[0]).toBeUndefined();
-		writeFileSync(join(cwd, "code.ts"), substantive + "export const later = 1;\n"); git("add", ".");
+		writeFileSync(join(cwd, "code.ts"), substantive + laterChange); git("add", ".");
 		expect((await deliver())[0]).toMatchObject({ block: true, reason: expect.stringContaining("no matching") });
 	});
 	it("checks the last delivery first without hiding earlier unsupported pushes", () => {
@@ -81,7 +83,8 @@ describe("delivery review", () => {
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
 			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
 		const hook = join(cwd, ".git", "hooks", hookName);
-		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' > generated.ts\ngit add generated.ts\n" +
+		// More than a carried-forward change (<=5 lines in one file): it needs another review.
+		writeFileSync(hook, "#!/bin/sh\nfor i in 1 2 3 4 5 6; do printf 'export const generated$i = 1;\\n'; done > generated.ts\ngit add generated.ts\n" +
 			(hookName === "post-rewrite" ? "git -c core.hooksPath=/dev/null commit -m generated\n" : "")); chmodSync(hook, 0o755);
 		// A later delivery after the hooked commit's own push could act on hook-made bytes.
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: hookName === "post-rewrite" ? "git commit --amend --no-edit && git push origin HEAD && gh pr create" : "git commit -m code && hive ship && git push", cwd } }))[0])
@@ -111,7 +114,7 @@ describe("delivery review", () => {
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
 			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(source.cwd)!) }] } });
 		const hook = join(source.cwd, ".git", "hooks", "pre-push");
-		writeFileSync(hook, "#!/bin/sh\nprintf 'export const generated = 1;\\n' >> code.ts\n"); chmodSync(hook, 0o755);
+		writeFileSync(hook, "#!/bin/sh\nfor i in 1 2 3 4 5 6; do printf 'export const generated$i = 1;\\n' >> code.ts; done\n"); chmodSync(hook, 0o755);
 		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD && git add code.ts && git commit -m generated && git push origin HEAD", cwd: source.cwd } }))[0])
 			.toMatchObject({ block: true, reason: expect.stringContaining("executable hooks") });
 		source.git("push", "origin", "HEAD");
@@ -122,7 +125,7 @@ describe("delivery review", () => {
 	it("rejects a reviewed chain whose external-diff helper can change code", async () => {
 		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive);
 		const helper = join(cwd, ".git", "external-diff");
-		writeFileSync(helper, "#!/bin/sh\nprintf 'export const helper = 1;\\n' >> code.ts\n"); chmodSync(helper, 0o755);
+		writeFileSync(helper, "#!/bin/sh\nfor i in 1 2 3 4 5 6; do printf 'export const helper$i = 1;\\n' >> code.ts; done\n"); chmodSync(helper, 0o755);
 		git("config", "diff.external", helper);
 		const pi = createFakePi(); registerDeliveryReview(pi.api);
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
@@ -235,7 +238,7 @@ describe("delivery review", () => {
 		// Committing the reviewed tree changes the layered evidence, not what is delivered.
 		b.git("add", "."); b.git("commit", "-m", "code");
 		expect((await push(`git -C '${b.cwd}' push`))[0]).toBeUndefined();
-		writeFileSync(join(b.cwd, "code.ts"), substantive + "export const later = 1;\n");
+		writeFileSync(join(b.cwd, "code.ts"), substantive + laterChange);
 		expect((await push(`git -C '${b.cwd}' push`))[0]).toMatchObject({ block: true });
 	});
 	it("never lets a dirty or staged revert erase committed delivery evidence", () => {
@@ -417,7 +420,7 @@ describe("delivery review", () => {
 			await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
 			await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(before) }] } });
 			const reviewedHead = git("rev-parse", "--short", "HEAD").trim();
-			git("commit", "-m", "code"); writeFileSync(join(cwd, "code.ts"), substantive + "export const later = 1;\n"); git("add", ".");
+			git("commit", "-m", "code"); writeFileSync(join(cwd, "code.ts"), substantive + laterChange); git("add", ".");
 			const text = await reason(pi, "git push", cwd);
 			expect(text).toContain(`A review exists for diff ${reviewFingerprint(before).slice(0, 8)}`);
 			expect(text).toContain(`is now ${reviewFingerprint(captureDeliveryDiff(cwd)!).slice(0, 8)}`);

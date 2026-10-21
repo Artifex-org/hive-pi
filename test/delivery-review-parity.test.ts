@@ -121,7 +121,8 @@ describe("delivery review: tree fingerprint, background and unavailable reviewer
 	it("does not let a dirty revert pass off an unreviewed commit", async () => {
 		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", ".");
 		const pi = createFakePi(); registerDeliveryReview(pi.api); await reviewed(pi, cwd);
-		writeFileSync(join(cwd, "code.ts"), substantive + "export const unreviewed = 1;\n"); git("commit", "-qam", "more");
+		// More than a carried-forward change (<=5 lines in one file), and hidden by the revert below.
+		writeFileSync(join(cwd, "code.ts"), substantive + Array.from({ length: 6 }, (_, i) => `export const unreviewed${i} = 1;`).join("\n") + "\n"); git("commit", "-qam", "more");
 		writeFileSync(join(cwd, "code.ts"), substantive); // the working tree now matches the review, HEAD does not
 		expect(treeFingerprint(cwd, "worktree")).not.toBe(treeFingerprint(cwd, "head"));
 		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true });
@@ -256,7 +257,7 @@ describe("delivery review: tree fingerprint, background and unavailable reviewer
 		const [clean] = await pi.emit({ type: "tool_result", toolName: "bash", toolCallId: "push2", input: {}, isError: false, content: [{ type: "text", text: "pushed" }] });
 		expect(clean).toBeUndefined();
 		// The record is for this diff only: an edit needs another attempt.
-		writeFileSync(join(cwd, "code.ts"), substantive + "export const later = 1;\n"); git("add", ".");
+		writeFileSync(join(cwd, "code.ts"), substantive + Array.from({ length: 6 }, (_, i) => `export const later${i} = ${i};`).join("\n") + "\n"); git("add", ".");
 		expect(await deliver(pi, "git push origin HEAD", cwd)).toMatchObject({ block: true });
 	});
 

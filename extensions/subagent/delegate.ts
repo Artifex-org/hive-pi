@@ -52,6 +52,7 @@ import {
 	stoppedMidWork,
 	type WorkerModelEnv,
 } from "./model.ts";
+import { captureDelta, reviewTaskWithDelta, takeDeltaOffer } from "./review-anchor.ts";
 import { captureDeliveryDiff, captureReviewDiff, withReviewCallers, citedOutsideDiff, isReviewRole, neutralReviewTask, outsideDiffWarning, reviewFingerprint, reviewScopeFiles, reviewTaskWithDiff, stampableReview, reviewDeclaresIncomplete, DELIVERY_INLINE_BYTES } from "./reviewdiff.ts";
 import { buildSubagentWorkerArgs, workerMcpEnv } from "./worker.ts";
 import { ReviewArtifactReads, reviewArtifactText } from "./review-artifact.ts";
@@ -142,6 +143,8 @@ export interface SingleResult {
 	reviewFiles?: string[];
 	/** Complete diff fingerprint captured when the review prompt was built. */
 	reviewFingerprint?: string;
+	/** Set when this review saw only the delta since the full review with this fingerprint (review-anchor.ts). */
+	reviewDelta?: string;
 	/** Paths the review cited that are not in that change. */
 	outsideDiff?: string[];
 }
@@ -722,7 +725,16 @@ export async function runSingleAgent(
 			if (reviewTarget && (!release || !release.diff)) throw new Error(release?.reason ?? "reviewTarget is only supported for code-reviewer");
 			const captured = release ? release.diff : agent.name === "code-reviewer" ? captureDeliveryDiff(executionCwd, task) : captureReviewDiff(executionCwd, task);
 			const diff = captured ? withReviewCallers(captured) : null;
-			if (diff) {
+			// A foreground re-review the delivery checkpoint offered (review-anchor.ts): only the
+			// change since the last full review, with its findings.
+			const anchor = diff && agent.name === "code-reviewer" && !reviewTarget && stampableReview(diff) ? takeDeltaOffer(diff.repo) : undefined;
+			const delta = anchor && diff ? captureDelta(anchor, diff) : null;
+			if (diff && anchor && delta && delta.files.length > 0) {
+				effectiveTask = reviewTaskWithDelta(neutralize ? neutralReviewTask(task) : task, anchor, delta, diff);
+				currentResult.reviewFiles = reviewScopeFiles(diff);
+				currentResult.reviewFingerprint = delta.fingerprint;
+				currentResult.reviewDelta = anchor.fingerprint;
+			} else if (diff) {
 				if (Buffer.byteLength(diff.text) > DELIVERY_INLINE_BYTES) {
 					const artifact = reviewArtifactText(diff.text);
 					tmpReviewPatch = await writePromptToTempFile("review-diff", artifact.text);
