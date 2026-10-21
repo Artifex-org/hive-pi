@@ -53,6 +53,8 @@ export interface ReviewDiff {
 	text: string;
 	/** What was diffed, for the sentence the worker reads. */
 	scope: "working tree vs HEAD" | "branch vs its base" | "branch and working tree vs merge-base" | "explicit origin PR target";
+	/** The merge-base a delivery diff was taken from (delivery captures only). */
+	base?: string;
 	truncatedBytes: number;
 	/** Tracked files whose patch is absent or cut short because the diff exceeded the capture budget. */
 	omitted?: string[];
@@ -306,7 +308,7 @@ export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = del
 	const files = [...changed].sort();
 	const untracked = parseStatusZ(status).untracked.filter((path) => !isEphemeralNote(path));
 	const callerNamed = citedPaths(task).filter((p) => ![...files, ...untracked].some((f) => samePath(f, p)));
-	const result: ReviewDiff = { repo, files, untracked, callerNamed, text, scope: "branch and working tree vs merge-base", truncatedBytes };
+	const result: ReviewDiff = { repo, files, untracked, callerNamed, text, scope: "branch and working tree vs merge-base", truncatedBytes, base };
 	if (omitted.size > 0) result.omitted = [...omitted].sort();
 	return result;
 }
@@ -328,6 +330,9 @@ export function explainDeliveryDiffFailure(cwd: string, git: GitRunner = deliver
 	if (!git(["merge-base", "HEAD", head], repo)?.trim()) return `no merge-base between HEAD and ${head}`;
 	return "git status/diff failed or exceeded the 2 s scan budget";
 }
+
+/** A documentation path: changes to these alone need no delivery review. */
+export function isDocsPath(path: string): boolean { return /\.(?:md|rst|txt)$/i.test(path); }
 
 /** The commit HEAD points at, short; null when git cannot say. */
 export function headCommit(repo: string, git: GitRunner = deliveryGit): string | null {

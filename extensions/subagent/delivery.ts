@@ -5,8 +5,9 @@ import { deliveryMergeBase, type GitReader } from "../guards-common/git-base.ts"
 import { literalProblem, literalWords } from "../toolhints/contextual.ts";
 import { appendHint } from "../toolhints/index.ts";
 import { BACKGROUND_JOB_CHANNEL, type BackgroundJobEvent } from "../background/channel.ts";
-import { captureDeliveryDiff, explainDeliveryDiffFailure, headCommit, reviewFingerprint, stampableReview, type ReviewDiff } from "./reviewdiff.ts";
-import { resultNotes, type SingleResult } from "./delegate.ts";
+import { captureDeliveryDiff, explainDeliveryDiffFailure, headCommit, isDocsPath, reviewFingerprint, stampableReview, type ReviewDiff } from "./reviewdiff.ts";
+import { getFinalOutput, resultNotes, type SingleResult } from "./delegate.ts";
+import { anchorFor, captureAnchor, captureDelta, clearAnchors, dropAnchor, hasAnchors, markDeltaUsed, offerDelta, setAnchor, withdrawDelta, type ReviewAnchor } from "./review-anchor.ts";
 import { backgroundStartedMessage } from "./background.ts";
 import { resolve, join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -358,7 +359,7 @@ export function deliveryCommand(command: string): boolean {
 export function needsDeliveryReview(diff: ReviewDiff): boolean {
 	const files = [...diff.files, ...diff.untracked];
 	if (/^(?:Binary files|GIT binary patch)/m.test(diff.text)) return true;
-	if (files.length === 0 || files.every((p) => /\.(?:md|rst|txt)$/i.test(p))) return false;
+	if (files.length === 0 || files.every(isDocsPath)) return false;
 	const changedLines = diff.text.split("\n").filter((l) => /^[+-]/.test(l) && !/^(?:---|\+\+\+)/.test(l)).length;
 	return diff.untracked.length > 0 || diff.truncatedBytes > 0 || files.length > 1 || changedLines > 5;
 }
@@ -405,7 +406,7 @@ function committedOnly(diff: ReviewDiff): boolean {
  */
 const REVIEWER_UNAVAILABLE = /nothing else is configured to fall back to|no catalog mode is configured here|No API key found[^\n]*/i;
 
-type ReviewResult = { agent?: string; exitCode?: number; stopReason?: string; errorMessage?: string; stderr?: string; midWork?: boolean; structuredError?: string; reviewFingerprint?: string };
+type ReviewResult = { agent?: string; exitCode?: number; stopReason?: string; errorMessage?: string; stderr?: string; midWork?: boolean; structuredError?: string; reviewFingerprint?: string; reviewDelta?: string; messages?: SingleResult["messages"] };
 
 function reviewerUnavailable(result: ReviewResult): string | null {
 	const text = `${result.errorMessage ?? ""}\n${result.stderr ?? ""}`;
@@ -446,9 +447,11 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 	// Notes owed to a delivery call's result: delivered on a "review unavailable"
 	// record, or a chained commit whose result must be re-checked against reviews.
 	const deliveryNotes = new Map<string, string>();
+	// Delivery calls whose stamp was carried forward from a full review, by tool call.
+	const carriedNotes = new Map<string, string[]>();
 	const chainedCommits = new Map<string, string[]>();
 
-	const stamp = (diff: ReviewDiff, source: "foreground" | "background" | "unavailable", reason?: string) => {
+	const stamp = (diff: ReviewDiff, source: "foreground" | "background" | "unavailable" | "carried" | "delta", reason?: string) => {
 		const fingerprint = reviewFingerprint(diff);
 		const head = headCommit(diff.repo);
 		// A release review is bound to its origin endpoints, never to a tree.
@@ -474,7 +477,15 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 
 	pi.on("session_start", (_event, ctx) => {
 		reviewed.clear(); unavailable.clear(); pending.clear(); lastReview.clear(); backgroundState.clear(); dispatched.clear(); jobs.clear(); deliveryNotes.clear(); chainedCommits.clear();
+		clearAnchors();
 		for (const raw of ctx.sessionManager.getBranch()) {
+			const anchorEntry = raw as { customType?: string; data?: { anchor?: ReviewAnchor; deltaOf?: string; repo?: string; dropped?: string } };
+			if (anchorEntry.customType === "delivery-review-anchor") {
+				if (anchorEntry.data?.anchor && typeof anchorEntry.data.anchor.repo === "string") setAnchor(anchorEntry.data.anchor);
+				else if (typeof anchorEntry.data?.dropped === "string") dropAnchor(anchorEntry.data.dropped);
+				else if (typeof anchorEntry.data?.deltaOf === "string" && typeof anchorEntry.data.repo === "string") markDeltaUsed(anchorEntry.data.repo, anchorEntry.data.deltaOf);
+				continue;
+			}
 			const entry = raw as { customType?: string; data?: { fingerprint?: string; repo?: string; head?: string | null; tree?: string; unavailable?: string } };
 			if (entry.customType !== "delivery-review" || typeof entry.data?.fingerprint !== "string") continue;
 			const keys = [entry.data.fingerprint, ...(typeof entry.data.tree === "string" ? [entry.data.tree] : [])];
@@ -530,8 +541,16 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 				// repo, and then the stamp below (taken for cwd) can never match.
 				const diff = input.reviewTarget === undefined ? capture(cwd, typeof input.task === "string" ? input.task : "") : null;
 				dispatched.set(event.toolCallId, { cwd, fingerprint: diff && stampableReview(diff) ? reviewFingerprint(diff) : null });
+				if (diff) withdrawDelta(diff.repo); // its capture must not take a foreground delta offer
 				backgroundState.set(cwd, "is still running");
-			} else if (input.reviewTarget === undefined || isReviewTarget(input.reviewTarget)) pending.set(event.toolCallId, { cwd, reviewTarget: input.reviewTarget as ReviewTarget | undefined, explicitModel: typeof input.model === "string" && input.model.trim() !== "" });
+			} else if (input.reviewTarget === undefined || isReviewTarget(input.reviewTarget)) {
+				pending.set(event.toolCallId, { cwd, reviewTarget: input.reviewTarget as ReviewTarget | undefined, explicitModel: typeof input.model === "string" && input.model.trim() !== "" });
+				// Only a foreground delivery review may see just the delta (background settles on full fingerprints).
+				if (input.reviewTarget === undefined && hasAnchors() && !backgroundState.has(cwd)) {
+					const diff = capture(cwd, typeof input.task === "string" ? input.task : "");
+					if (diff && !backgroundState.has(diff.repo)) offerDelta(diff.repo);
+				}
+			}
 			return;
 		}
 		if (event.toolName !== "bash" && event.toolName !== "background_bash") return;
@@ -551,8 +570,20 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 			if (diff && !scan.reviewTarget && !needsDeliveryReview(diff)) continue;
 			const covered = diff && (scan.reviewTarget ? stampableReview(diff) && reviewed.has(reviewFingerprint(diff)) ? reviewFingerprint(diff) : null : coveredBy(diff));
 			if (covered) { unavailableReason ??= unavailable.get(covered); continue; }
+			const anchor = diff && !scan.reviewTarget ? anchorFor(diff.repo) : undefined;
+			const delta = anchor && diff ? captureDelta(anchor, diff) : null;
+			if (diff && anchor && delta?.kind) {
+				stamp(diff, "carried");
+				carriedNotes.set(event.toolCallId, [...(carriedNotes.get(event.toolCallId) ?? []),
+					`Review carried forward in ${diff.repo}: the change since the full review ${short(anchor.fingerprint)} is ${delta.kind === "docs" ? "docs-only" : "at most five lines in one file"} (${delta.files.join(", ")}).`]);
+				continue;
+			}
 			if (scan.reviewTarget) return { block: true, reason: `Explicit PR target requires a matching foreground release review. ${release?.reason ?? "No matching review for the current origin repository and base/head SHAs."} Run subagent({agent:"code-reviewer", task:"Review the release", cwd:${JSON.stringify(target)}, reviewTarget:${JSON.stringify(scan.reviewTarget)}}), then retry. This review does not grant deployment approval.` };
-			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${blockCause(diff, target, lastReview, backgroundState)}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` };
+			carriedNotes.delete(event.toolCallId); // this call does not deliver
+			const deltaNote = anchor && !anchor.deltaUsed && delta && delta.files.length > 0
+				? `Since the full review ${short(anchor.fingerprint)}, ${delta.files.length} file(s) changed (${delta.files.slice(0, 5).join(", ")}${delta.files.length > 5 ? ", …" : ""}): a foreground code-reviewer now reviews ONLY that change, once; a later change needs a full review. `
+				: "";
+			return { block: true, reason: `${DELIVERY_REVIEW_GUIDANCE}\n${blockCause(diff, target, lastReview, backgroundState)}${deltaNote}Run a foreground subagent({agent:"code-reviewer", task:"Review the change", cwd:${JSON.stringify(target)}}), then retry.` };
 		}
 		if (unavailableReason) deliveryNotes.set(event.toolCallId, unavailableReason);
 		// Only a foreground shell call's result follows the commit; a background
@@ -566,6 +597,9 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		const reason = deliveryNotes.get(event.toolCallId);
 		deliveryNotes.delete(event.toolCallId);
 		if (reason !== undefined && !event.isError) notes.push(`This delivery ran WITHOUT a code review: no reviewer model could run in this session (${reason}). Say so in the PR description and in your final report.`);
+		const carried = carriedNotes.get(event.toolCallId);
+		carriedNotes.delete(event.toolCallId);
+		if (carried && !event.isError) notes.push(...carried);
 		// A commit's hooks run after the preflight; if they changed the reviewed
 		// code, the push that followed sent bytes no review covered. Say so now,
 		// while the PR can still wait for a review of the new diff.
@@ -613,8 +647,25 @@ export function registerDeliveryReview(pi: ExtensionAPI, capture = captureDelive
 		}
 		if (!result.reviewFingerprint) return null;
 		const diff = reviewTarget ? captureReleaseDiff(cwd, reviewTarget).diff : capture(cwd, "");
-		if (!diff || !stampableReview(diff) || reviewFingerprint(diff) !== result.reviewFingerprint) return null;
+		if (!diff || !stampableReview(diff)) return null;
+		if (result.reviewDelta) {
+			// A delta review covers the current diff only if the same delta, from the same full review, is still what is delivered.
+			const anchor = anchorFor(diff.repo);
+			const delta = anchor && anchor.fingerprint === result.reviewDelta ? captureDelta(anchor, diff) : null;
+			if (!delta || delta.fingerprint !== result.reviewFingerprint) return null;
+			stamp(diff, "delta");
+			markDeltaUsed(diff.repo, result.reviewDelta);
+			pi.appendEntry("delivery-review-anchor", { deltaOf: result.reviewDelta, repo: diff.repo });
+			return null;
+		}
+		if (reviewFingerprint(diff) !== result.reviewFingerprint) return null;
 		stamp(diff, "foreground");
+		if (reviewTarget) return null;
+		// Anchor first, then confirm the delivered diff is still the reviewed one: bytes changed in between are not "reviewed content".
+		const anchor = captureAnchor(diff, result.messages ? getFinalOutput(result.messages) : "");
+		const after = anchor ? capture(cwd, "") : null;
+		if (anchor && after && reviewFingerprint(after) === anchor.fingerprint) { setAnchor(anchor); pi.appendEntry("delivery-review-anchor", { anchor }); }
+		else { dropAnchor(diff.repo); pi.appendEntry("delivery-review-anchor", { dropped: diff.repo }); }
 		return null;
 	}
 }

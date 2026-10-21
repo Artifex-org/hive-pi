@@ -20,6 +20,26 @@ fingerprint (carried on the job's finish event), and this side's capture at
 completion. A launch receipt alone, a worker that stopped mid-work, and a worker
 that could not capture the diff it reviewed never count.
 
+### Re-reviews after review fixes (operator decision, 2026-10-21)
+
+A full foreground review leaves an anchor: the reviewed content of every changed
+file, stored as blobs (`hash-object -w --no-filters`) with the merge-base. A
+later change is judged against it cumulatively:
+
+- docs-only, or at most five changed lines in one file (the same rule that
+  exempts a whole change): the stamp carries forward, and the delivery result
+  says "Review carried forward";
+- otherwise the next foreground `code-reviewer` reviews ONLY the change since
+  the full review, with the full review's report, once. A further change needs
+  a full review again. Background reviewers always get the full diff.
+
+A delta review stamps the current diff only when, at completion, the same
+delta from the same full review is still what is delivered. Content is
+compared blob to blob (`--no-ext-diff --no-textconv`), so no clean/smudge
+filter or diff driver runs. Binary, symlinked or over-budget changes fall back
+to a full review. Measured in eval wave 2: 3–4 full re-reviews per delivery
+were ~70% of pi+Opus's extra time against Claude Code's single review.
+
 When no reviewer model can run in the session, the checkpoint records "review
 unavailable" for that exact diff and lets delivery of it proceed, with a visible
 note on the delivery result; state it in the PR description.

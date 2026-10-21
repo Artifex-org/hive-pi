@@ -199,8 +199,8 @@ describe("large delivery review evidence (HIV-3868)", () => {
 		expect(existsSync(log.path)).toBe(false);
 		expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(expected));
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false, details: { results: outcome.results } });
-		expect(pi.entries).toHaveLength(1); expect((await deliver())[0]).toBeUndefined();
-		writeFileSync(join(launch.root, "frozen.json"), frozen.replace('"i": 11999', '"i": 99999')); git("add", "frozen.json"); git("commit", "-m", "later edit");
+		expect(pi.entries.filter((e) => e.customType === "delivery-review")).toHaveLength(1); expect((await deliver())[0]).toBeUndefined();
+		writeFileSync(join(launch.root, "frozen.json"), frozen.replace(/"i": 1199(\d)/g, '"i": 9999$1')); git("add", "frozen.json"); git("commit", "-m", "later edit");
 		expect((await deliver())[0]).toMatchObject({ block: true, reason: expect.stringContaining("stale") });
 	});
 	it("transports an oversized minified JSON line losslessly in readable chunks", async () => {
@@ -477,7 +477,7 @@ setInterval(() => {},1000);
 		if (incomplete) expect(outcome.results[0].reviewFingerprint).toBeUndefined();
 		else expect(outcome.results[0].reviewFingerprint).toBe(reviewFingerprint(captureDeliveryDiff(launch.root)!));
 		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: !!outcome.isError, details: { results: outcome.results } });
-		expect(pi.entries).toHaveLength(incomplete ? 0 : 1);
+		expect(pi.entries.filter((e) => e.customType === "delivery-review")).toHaveLength(incomplete ? 0 : 1);
 	});
 	it("rejects an inline refusal in a later assistant text block", async () => {
 		git("rm", "frozen.json"); git("commit", "-m", "small inline fixture");
