@@ -575,7 +575,7 @@ export default function background(pi: ExtensionAPI) {
 			return textResult(`Could not start background job: ${(err as Error).message}`, true);
 		}
 
-		trackTree(proc, true);
+		trackTree(proc, true, process.env.HIVE_PI_TREE_TOKENS?.split(",").at(-1));
 		procs.set(id, proc);
 
 		const appendSafe = (chunk: Buffer): void => {
