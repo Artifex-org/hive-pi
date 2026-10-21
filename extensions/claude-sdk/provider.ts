@@ -316,6 +316,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 					break;
 				}
 			} catch (error) {
+				try { (await import("node:fs")).appendFileSync(process.env.RC_LOG ?? "/tmp/claude/sdkrc/rc.log", `[provider THREW] ${(error as Error)?.stack ?? error}\n`); } catch {}
 				let cleanupFailed = cleanupError;
 				if (attemptedPrefix) ambiguous.add(fingerprint(transcript(attemptedPrefix)));
 				if (state) {
