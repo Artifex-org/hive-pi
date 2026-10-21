@@ -9,7 +9,7 @@ import { ReviewArtifactReads } from "../extensions/subagent/review-artifact.ts";
 import { captureDeliveryDiff, reviewFingerprint } from "../extensions/subagent/reviewdiff.ts";
 import { buildSubagentWorkerArgs } from "../extensions/subagent/worker.ts";
 
-it("the actual CLI resumes the configured private reviewer conversation", async () => {
+it.each(["ordinary", "format-correction"] as const)("the actual CLI resumes the configured private reviewer conversation (%s)", async mode => {
 	const root = mkdtempSync(join(tmpdir(), "review-cli-"));
 	const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
 	git("init", "-b", "main"); git("config", "user.email", "test@example.com"); git("config", "user.name", "test");
@@ -26,10 +26,12 @@ it("the actual CLI resumes the configured private reviewer conversation", async 
 	const first = "DELIVERY_REVIEW_INCOMPLETE: " + finding + "\nREVIEW_LEDGER " + JSON.stringify({ complete: false, findings: [{ id: null, status: "new", location: "code0.ts:1", issue: finding, scenario: "An unchecked input crosses the boundary.", evidence: "The caller forwards the unchecked input." }] });
 	const integration = "DELIVERY_REVIEW_INCOMPLETE: caller traced; regression coverage pending\nREVIEW_LEDGER " + JSON.stringify({ complete: false, findings: [{ id: "F1", status: "upheld", location: "code0.ts:1", evidence: "The caller still forwards the unchecked input." }] });
 	const final = "Complete cumulative review: " + finding + "\nREVIEW_LEDGER " + JSON.stringify({ complete: true, findings: [{ id: "F1", status: "upheld", location: "code0.ts:1", evidence: "The caller still forwards the unchecked input." }] });
+	const rejected = first.split("\n").map(line => line.startsWith("REVIEW_LEDGER ") ? `\`${line}\`` : line).join("\n");
+	const replies = mode === "format-correction" ? [rejected, first, integration, final] : [first, integration, final];
 	const server = createServer(async (req, res) => {
 		let body = ""; for await (const chunk of req) body += chunk;
 		requests.push(JSON.parse(body));
-		const text = requests.length === 1 ? first : requests.length === 2 ? integration : final;
+		const text = replies[requests.length - 1] ?? "Unexpected extra fixture request";
 		res.writeHead(200, { "Content-Type": "text/event-stream" });
 		res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "review", choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] })}\n\n`);
 		res.end(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "review", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
@@ -55,8 +57,15 @@ it("the actual CLI resumes the configured private reviewer conversation", async 
 		reads.observe({ type: "tool_execution_start", toolName: "read", toolCallId: "page", args: { path: patch, offset: 1, limit: diff.text.split("\n").length } });
 		reads.observe({ type: "tool_execution_end", toolName: "read", toolCallId: "page", result: { content: [{ type: "text", text: diff.text }] } });
 		expect(reads.complete()).toBe(true);
-		const next = continuation.next([{ role: "assistant", content: [{ type: "text", text: first }], stopReason: "stop" }], true);
+		let next = continuation.next([{ role: "assistant", content: [{ type: "text", text: replies[0] }], stopReason: "stop" }], true);
 		expect(next.error).toBeUndefined(); expect(next.prompt).toContain("SAME delivery review");
+		if (mode === "format-correction") {
+			expect(next.prompt).toContain("format correction 1/2"); expect(next.findings).toBeUndefined();
+			expect(await run(next.prompt!)).toContain(JSON.stringify(first));
+			next = continuation.next([{ role: "assistant", content: [{ type: "text", text: first }], stopReason: "stop" }], true);
+			expect(next.error).toBeUndefined(); expect(next.findings).toBeUndefined();
+			expect(next.prompt).toContain("Semantic integration continuation 1/8");
+		}
 		expect(await run(next.prompt!)).toContain("regression coverage pending");
 		const last = continuation.next([{ role: "assistant", content: [{ type: "text", text: integration }], stopReason: "stop" }], true);
 		expect(last.error).toBeUndefined(); expect(last.findings).toBeUndefined();
@@ -65,9 +74,13 @@ it("the actual CLI resumes the configured private reviewer conversation", async 
 		const completed = continuation.next([{ role: "assistant", content: [{ type: "text", text: final }], stopReason: "stop" }], true);
 		expect(completed.error).toBeUndefined(); expect(completed.prompt).toBeUndefined();
 		expect(JSON.parse(completed.findings!)).toHaveLength(1); expect(completed.findings).toContain(finding);
-		expect(requests).toHaveLength(3);
-		expect(requests[2].messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(finding))).toBe(true);
-		expect(requests[2].messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes("regression coverage pending"))).toBe(true);
+		expect(requests).toHaveLength(mode === "format-correction" ? 4 : 3);
+		expect(requests.at(-1)!.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes(finding))).toBe(true);
+		expect(requests.at(-1)!.messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes("regression coverage pending"))).toBe(true);
+		if (mode === "format-correction") {
+			expect(requests[1].messages.some(message => message.role === "assistant" && JSON.stringify(message.content).includes("`REVIEW_LEDGER"))).toBe(true);
+			expect(requests[1].messages.some(message => message.role === "user" && JSON.stringify(message.content).includes("format correction 1/2"))).toBe(true);
+		}
 	} finally {
 		server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
 		continuation.cleanup(); expect(existsSync(continuation.dir)).toBe(false);
