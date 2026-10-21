@@ -88,6 +88,8 @@ const READ_ONLY_TOOLS = new Set([
 	// before a declined plan may be re-presented, so without it the mode would
 	// deny the one call the operator explicitly asked for.
 	"ask_user_question",
+	// Requests human consent; it never changes posture on an agent decision.
+	"request_mode",
 	"TodoWrite",
 	"TaskList",
 	"TaskGet",

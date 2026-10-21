@@ -143,6 +143,28 @@ its project, and the transcript follows it live.
 | `/hive-remote-off` | stop reporting; keeps the credential |
 | `/hive-remote-status` | enabled / attached / queued events / capabilities / **last attach error** |
 
+### Operating-mode consent
+
+When a request needs a different posture, call `request_mode` with the canonical
+`mode` (`build` for execution, `orchestrate` for team coordination, or `plan`,
+`discuss`, `bugfix`) and a non-empty `reason`. The tool remains callable in
+restricted modes and uses the existing Hive approval card to show the current
+mode, requested mode, enforcement and reason. It does not create a plan.
+
+This requires an attached Hive session, `allowSetOpMode`, a loaded posture
+enforcer and a mode offered by the server. Approval must be explicit; handsfree
+question/plan timers do not approve it. The approval consumer accepts only this
+exact request, not shell calls or arbitrary tool execution. The existing server
+ownership, collaborator and launched-agent self-approval restrictions apply.
+
+The tool waits up to five minutes. Denial, interruption, a queued user message,
+expiry, failed/malformed responses or an intervening mode/session change leave
+the mode unchanged. Deadlines and cancellation cover response bodies as well as
+headers; cleanup has its own one-second bound. Pending cards are retired on exit
+where possible. Approval
+is not application: the tool reports success only after the enforcer announces
+the requested posture. Without Hive consent, the operator can still use `/mode`.
+
 ### Credential receipt
 
 The catalog exposes names, service/database descriptions, environment mappings

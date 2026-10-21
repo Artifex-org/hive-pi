@@ -332,16 +332,22 @@ callbacks (also after scope release): each individual PID's starttime is checked
 immediately before signalling. TERM-to-KILL escalation and normal close rediscover
 ancestry/token descendants and recheck identities. Closed leaders' handles remain
 owned until scope close, including silent detached descendants inheriting the token.
-An inaccessible environment is not, alone, proof of lost live ownership: Linux
-can remove a task's memory before its state becomes zombie. Strict discovery
-ignores that environment denial only after fresh matching PID/starttime and
+A descendant already verified by token or ancestry remains owned while its
+PID/starttime still matches. Discovery refreshes that identity and signalling
+revalidates it again; retained members need not expose their environment during
+kernel teardown. Their rows still seed discovery of surviving descendants.
+For an unverified candidate, an inaccessible environment is not, alone, proof of
+lost live ownership: Linux can remove a task's memory before its state becomes
+zombie. Strict discovery ignores that environment denial only after fresh matching
+PID/starttime and
 exit-state evidence plus `Threads: 1` prove no surviving user thread. A zombie
 leader with other threads remains a live cleanup concern; unavailable or malformed
 thread-count evidence fails closed. Ancestor rows and surviving descendants remain
 part of discovery, and known members still receive independently checked signals.
 Diagnostics contain only fixed operations, allowlisted errno and numeric PIDs,
 never raw OS messages or environment/argument content.
-Loss of live procfs visibility or a signal failure is sticky: event-close, abort and
+Loss of identity visibility, unprovable live-candidate ownership or a signal
+failure is sticky: event-close, abort and
 shutdown observers do not throw, but explicit tree cleanup/scope close reports
 **operator cleanup required**. Restored visibility does not erase the failure.
 All other resource cleanup is still attempted and the provider refuses new requests.

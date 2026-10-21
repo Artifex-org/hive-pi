@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deliveryCommand, deliveryTargets, scanDeliveryTargets, needsDeliveryReview, registerDeliveryReview, reviewFingerprint } from "../extensions/subagent/delivery.ts";
 import { BASE_REF_SCAN, fetchedBaseRef, knownBaseRef } from "../extensions/guards-common/git-base.ts";
-import { captureDeliveryDiff, explainDeliveryDiffFailure, neutralReviewTask, reviewTaskWithDiff, stampableReview, type ReviewDiff } from "../extensions/subagent/reviewdiff.ts";
+import { captureDeliveryDiff, explainDeliveryDiffFailure, neutralReviewTask, reviewTaskWithDiff, stampableReview, type GitRunner, type ReviewDiff } from "../extensions/subagent/reviewdiff.ts";
 import { createFakePi } from "./fake-pi.ts";
 const diff: ReviewDiff = { repo: "/repo", files: ["a.ts", "b.ts"], untracked: [], callerNamed: [], text: "diff --git a/a.ts b/a.ts\n+code\n-code", scope: "working tree vs HEAD", truncatedBytes: 0 };
 const repos: string[] = [];
@@ -24,6 +24,95 @@ function repo() {
 const substantive = Array.from({ length: 12 }, (_, i) => `export const n${i} = ${i};`).join("\n") + "\n";
 // More than a carried-forward change (<=5 lines in one file): it needs another review.
 const laterChange = Array.from({ length: 6 }, (_, i) => `export const later${i} = ${i};`).join("\n") + "\n";
+
+describe("bounded delivery capture", () => {
+	afterEach(() => vi.restoreAllMocks());
+	const readGit: GitRunner = (args, cwd) => {
+		try { return execFileSync("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); }
+		catch { return null; }
+	};
+
+	it("captures every layer when a legitimate status exceeds one second and the scan exceeds two", () => {
+		const { cwd, git } = repo();
+		writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		writeFileSync(join(cwd, "staged.ts"), "export const staged = 1;\n"); git("add", "staged.ts");
+		writeFileSync(join(cwd, "README.md"), "unstaged documentation\n");
+		let elapsed = 0, statusAllowance = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+		const slow: GitRunner = (args, dir, timeout) => {
+			const cost = args[0] === "status" ? 1400 : args[0] === "diff" ? 250 : 30;
+			if (args[0] === "status") statusAllowance = timeout!;
+			elapsed += cost;
+			return cost > timeout! ? null : readGit(args, dir);
+		};
+		const captured = captureDeliveryDiff(cwd, "", slow)!;
+		expect(captured).not.toBeNull(); expect(stampableReview(captured)).toBe(true);
+		expect(captured.files).toEqual(["README.md", "code.ts", "staged.ts"]);
+		for (const label of ["Committed", "Staged vs HEAD", "Unstaged vs index"]) expect(captured.text).toContain(label);
+		expect(statusAllowance).toBeGreaterThan(1400); expect(elapsed).toBeGreaterThan(2000);
+	});
+
+	it("passes integer subprocess allowances after fractional scan time", () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		let elapsed = 0, calls = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+		const fractional: GitRunner = (args, dir, timeout) => {
+			try {
+				const result = execFileSync("git", ["--no-optional-locks", ...args], { cwd: dir, encoding: "utf8", timeout, stdio: ["ignore", "pipe", "ignore"] });
+				if (++calls <= 4) elapsed += 1400.125;
+				return result;
+			} catch { return null; }
+		};
+		const captured = captureDeliveryDiff(cwd, "", fractional)!;
+		expect(elapsed).toBe(5600.5); expect(calls).toBeGreaterThan(4);
+		expect(captured).not.toBeNull(); expect(stampableReview(captured)).toBe(true);
+	});
+
+	it("does not accept a late final patch after the shared deadline", () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		let elapsed = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+		const calls: { args: string[]; timeout: number }[] = [];
+		const slow: GitRunner = (args, dir, timeout) => {
+			calls.push({ args, timeout: timeout! }); elapsed += 1100;
+			return readGit(args, dir);
+		};
+		const captured = captureDeliveryDiff(cwd, "", slow)!;
+		expect(captured).not.toBeNull(); expect(captured.files).toEqual(["code.ts"]);
+		expect(captured.truncatedBytes).toBeGreaterThan(0); expect(stampableReview(captured)).toBe(false);
+		expect(calls.at(-1)!.args).toContain("-p"); expect(calls.at(-1)!.timeout).toBeLessThan(1100);
+	});
+
+	it("lets an actual Git subprocess finish beyond the former one-second command limit", () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		const delayed: GitRunner = (args, dir, timeout) => {
+			if (args[0] !== "status") return readGit(args, dir);
+			try {
+				return execFileSync(process.execPath, ["-e", "setTimeout(() => process.stdout.write(require('node:child_process').execFileSync('git', JSON.parse(process.argv[1]), {encoding:'utf8'})), 1200)", JSON.stringify(["--no-optional-locks", ...args])], { cwd: dir, encoding: "utf8", timeout, stdio: ["ignore", "pipe", "ignore"] });
+			} catch { return null; }
+		};
+		const captured = captureDeliveryDiff(cwd, "", delayed)!;
+		expect(captured).not.toBeNull(); expect(captured.text).toContain("export const n11");
+		expect(stampableReview(captured)).toBe(true);
+	}, 10_000);
+
+	it("keeps completed review receipts when a later Git capture is unavailable", async () => {
+		const { cwd, git } = repo(); writeFileSync(join(cwd, "code.ts"), substantive); git("add", "."); git("commit", "-m", "code");
+		let available = true;
+		const capture = (dir: string) => available ? captureDeliveryDiff(dir) : null;
+		const pi = createFakePi(); registerDeliveryReview(pi.api, capture);
+		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });
+		await pi.emit({ type: "tool_result", toolName: "subagent", toolCallId: "r", input: {}, isError: false,
+			details: { results: [{ agent: "code-reviewer", exitCode: 0, reviewFingerprint: reviewFingerprint(captureDeliveryDiff(cwd)!) }] } });
+		available = false;
+		const refused = (await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD", cwd } }))[0] as { block: boolean; reason: string };
+		expect(refused.block).toBe(true); expect(refused.reason).toContain("Complete delivery diff unavailable");
+		expect(refused.reason).not.toContain('Run a foreground subagent(');
+		expect(refused.reason).toContain("completed review receipts");
+		available = true;
+		expect((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD", cwd } }))[0]).toBeUndefined();
+	});
+});
 
 describe("delivery review", () => {
 	it.each([
@@ -500,7 +589,9 @@ describe("delivery review", () => {
 		expect(Buffer.byteLength(change!.text)).toBeLessThanOrEqual(260 * 1024);
 		expect(reviewTaskWithDiff("Review", change!)).toContain("Files with no or only a partial patch above: huge.ts");
 		expect(needsDeliveryReview(change!)).toBe(true);
-		const pi = createFakePi(); registerDeliveryReview(pi.api);
+		// The real capture above proves the byte cap. Reuse that exact evidence
+		// for receipt policy instead of rereading the 17MiB fixture three times.
+		const pi = createFakePi(); registerDeliveryReview(pi.api, () => change);
 		const text = ((await pi.emit({ type: "tool_call", toolName: "bash", input: { command: "git push origin HEAD", cwd } }))[0] as { reason: string }).reason;
 		expect(text).toContain("exceeds the capture budget"); expect(text).toContain("huge.ts"); expect(text).toContain("PI_DELIVERY_REVIEW=0");
 		await pi.emit({ type: "tool_call", toolName: "subagent", toolCallId: "r", input: { agent: "code-reviewer", cwd } });

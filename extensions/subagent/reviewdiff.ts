@@ -242,6 +242,27 @@ const DELIVERY_CAPTURE_BYTES = 16 * 1024 * 1024;
 const DELIVERY_DIFF_BUDGET = DELIVERY_INLINE_BYTES;
 const DELIVERY_FILE_BUDGET = 16 * 1024;
 const DELIVERY_STAT_CAP = 32 * 1024;
+// A clean large worktree's status alone can take 1.4s (HIV-3922). The old
+// 1s command / 2s scan limits discarded valid evidence before review. Keep
+// collection bounded without changing any scope, byte cap or receipt rule.
+const DELIVERY_SCAN_MS = 10_000;
+const DELIVERY_COMMAND_MS = 5_000;
+
+function boundedDeliveryGit(runner: GitRunner): GitRunner {
+	const started = performance.now();
+	return (args, cwd) => {
+		const callStarted = performance.now();
+		// Subprocess timeouts require integer milliseconds; zero means unbounded.
+		const remaining = Math.floor(DELIVERY_SCAN_MS - (callStarted - started));
+		if (remaining <= 0) return null;
+		const timeout = Math.min(DELIVERY_COMMAND_MS, remaining);
+		const result = runner(args, cwd, timeout);
+		const finished = performance.now();
+		// A late final read must not escape the deadline merely because there
+		// is no subsequent Git call to notice that the budget was exhausted.
+		return finished - callStarted > timeout || finished - started >= DELIVERY_SCAN_MS ? null : result;
+	};
+}
 
 /** Keep committed, staged and unstaged evidence separate: a dirty revert must
  * never cancel a commit (or staged content) that the delivery will send.
@@ -251,11 +272,7 @@ const DELIVERY_STAT_CAP = 32 * 1024;
  * and as many per-file patches as fit, marked truncated (never stampable) with
  * the files that lack a full patch in `omitted`. */
 export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = deliveryGit): ReviewDiff | null {
-	const started = Date.now(), runner = git;
-	git = (args, dir) => {
-		const remaining = 2000 - (Date.now() - started);
-		return remaining <= 0 ? null : runner(args, dir, Math.min(1000, remaining));
-	};
+	git = boundedDeliveryGit(git);
 	const repo = reviewRepoFor(cwd, task, git);
 	if (!repo) return null;
 	// Default pushes must send this branch's HEAD, not matching/all configured
@@ -319,6 +336,7 @@ export function captureDeliveryDiff(cwd: string, task = "", git: GitRunner = del
  * after a null capture, so it may spend a few more git calls.
  */
 export function explainDeliveryDiffFailure(cwd: string, git: GitRunner = deliveryGit): string {
+	git = boundedDeliveryGit(git);
 	const repo = reviewRepoFor(cwd, "", git);
 	if (!repo) return `${cwd} is not inside a git repository`;
 	const config = git(["config", "--null", "--list"], repo);
@@ -328,7 +346,7 @@ export function explainDeliveryDiffFailure(cwd: string, git: GitRunner = deliver
 	const head = baseRef(repo, git);
 	if (!head) return "no remote base ref: origin/HEAD is unset and there is no origin FETCH_HEAD for main/master";
 	if (!git(["merge-base", "HEAD", head], repo)?.trim()) return `no merge-base between HEAD and ${head}`;
-	return "git status/diff failed or exceeded the 2 s scan budget";
+	return `git status/diff failed or exceeded the ${DELIVERY_SCAN_MS / 1000} s scan budget (${DELIVERY_COMMAND_MS / 1000} s per Git command)`;
 }
 
 /** A documentation path: changes to these alone need no delivery review. */
@@ -339,10 +357,10 @@ export function headCommit(repo: string, git: GitRunner = deliveryGit): string |
 	return git(["rev-parse", "--short", "HEAD"], repo)?.trim() || null;
 }
 
-// Rare delivery boundary: lock-free commands, each <=1s / 16MiB. Capture is
+// Rare delivery boundary: lock-free commands, each <=5s / 16MiB, <=10s per scan. Capture is
 // separate from the inline prompt budget: large complete patches travel in a
 // private worker-lifetime artifact. Incomplete captures are never stamped.
-const deliveryGit: GitRunner = (args, cwd, timeoutMs = 1000) => {
+const deliveryGit: GitRunner = (args, cwd, timeoutMs = DELIVERY_COMMAND_MS) => {
 	try { return execFileSync("git", [LOCK_FREE, ...args], { cwd, encoding: "utf8", timeout: timeoutMs, maxBuffer: DELIVERY_CAPTURE_BYTES, stdio: ["ignore", "pipe", "ignore"] }); }
 	catch { return null; }
 };

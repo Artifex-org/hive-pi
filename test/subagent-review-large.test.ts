@@ -158,11 +158,11 @@ describe("large delivery review evidence (HIV-3868)", () => {
 		// Inject scan costs, not a flaky sleep: reproduce an ENOBUFS followed by
 		// fallback consuming the budget before the next layer's inventory.
 		let elapsed = 0;
-		vi.spyOn(Date, "now").mockImplementation(() => elapsed);
+		vi.spyOn(performance, "now").mockImplementation(() => elapsed);
 		const calls: string[][] = [];
 		const runner: GitRunner = (args, cwd, timeout) => {
 			calls.push(args);
-			if (args.includes("-p")) elapsed += args.includes("--") ? 90 : 400;
+			if (args.includes("-p")) elapsed += args.includes("--") ? 1000 : 8000;
 			try { return execFileSync("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8", timeout, maxBuffer: 256 * 1024, stdio: ["ignore", "pipe", "ignore"] }); }
 			catch { return null; }
 		};

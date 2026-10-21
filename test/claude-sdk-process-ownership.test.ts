@@ -175,6 +175,43 @@ describe.runIf(process.platform === "linux")("SDK scope reuses procfs child-tree
 	child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
  });
 
+it.runIf(process.platform === "linux").each(["S", "Z"])("retains verified descendant ownership when its %s environment becomes unreadable", async state => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request());
+	killTree(child, "SIGTERM", true); // Discover and verify the descendant first.
+	send.mockClear();
+	fixture.missingRoot = true; fixture.deniedEnvironment = true;
+	fixture.memberState = state; fixture.memberFlags = state === "Z" ? "4" : "0";
+	fixture.memberThreads = state === "Z" ? "2" : "1";
+	fixture.leaf = true; // A new, env-cleared child still needs ancestry discovery.
+	try {
+		await expect(scope.close()).resolves.toBeUndefined();
+		for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+			expect(send).toHaveBeenCalledWith(fixture.member, signal);
+			expect(send).toHaveBeenCalledWith(fixture.member + 1, signal);
+		}
+		expect(send.mock.calls.every(([pid]) => pid > 0)).toBe(true);
+		expect(child.kill).not.toHaveBeenCalled();
+	} finally {
+		child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+	}
+});
+
+it.runIf(process.platform === "linux")("does not reuse retained ownership for an unreadable recycled descendant PID", async () => {
+	const child = syntheticChild(); const scope = processScope();
+	const send = vi.spyOn(process, "kill").mockReturnValue(true);
+	scope.spawn(request()); killTree(child, "SIGTERM", true);
+	send.mockClear(); fixture.missingRoot = true;
+	fixture.memberStart = "201"; fixture.deniedEnvironment = true;
+	try {
+		await expect(scope.close()).rejects.toThrow(/operator cleanup required/);
+		expect(send).not.toHaveBeenCalled(); expect(child.kill).not.toHaveBeenCalled();
+	} finally {
+		child.emit("close", 0); child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+	}
+});
+
  it.runIf(process.platform === "linux")("fails closed when an own-UID orphan candidate environment becomes unreadable", async () => {
 	const child = syntheticChild(); const scope = processScope();
 	const send = vi.spyOn(process, "kill").mockReturnValue(true);

@@ -307,7 +307,13 @@ function fakeHive() {
 				});
 			}
 			if (url.includes("/api/v1/runs")) {
-				if (holding) await new Promise<void>((resolve) => held.push(resolve));
+				if (holding) await new Promise<void>((resolve, reject) => {
+					const signal = init?.signal;
+					const abort = () => reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+					if (signal?.aborted) { abort(); return; }
+					signal?.addEventListener("abort", abort, { once: true });
+					held.push(() => { signal?.removeEventListener("abort", abort); resolve(); });
+				});
 				if (crash) throw new TypeError("fetch failed");
 				if (failure) return new Response("{}", { status: failure.status, headers: failure.headers });
 				return json({ runs: [] });
@@ -535,15 +541,41 @@ describe("HiveWatcher refresh limiting", () => {
 		await settle();
 		expect(server.refreshes()).toBe(base + 1);
 
-		// The gap elapses while that refresh is still open, and another event lands.
-		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS + 1_000);
+		// Another event arrives during a valid request. Release it before its
+		// six-second deadline, then let the fifteen-second refresh gap elapse.
 		server.event();
 		await settle();
 		expect(server.refreshes()).toBe(base + 1);
 
 		server.release();
 		await settle();
+		expect(server.refreshes()).toBe(base + 1);
+		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS);
 		expect(server.refreshes()).toBe(base + 2);
+		watcher.stop();
+	});
+
+	it("backs off after a held request is cancelled and retries only at the refresh gap", async () => {
+		const { server, watcher, base } = await watching();
+		server.hold();
+		server.event();
+		await settle();
+
+		// The request expires before the refresh gap allows a retry.
+		await vi.advanceTimersByTimeAsync(MIN_REFRESH_GAP_MS - 1);
+		expect(watcher.get().status).toBe("error");
+		expect(watcher.get().error).toBe("timeout");
+		expect(watcher.get().retryAt).toBeGreaterThan(Date.now());
+		expect(server.refreshes()).toBe(base + 1);
+
+		server.release();
+		await settle();
+		expect(watcher.get().status).toBe("error");
+		expect(server.refreshes()).toBe(base + 1);
+
+		await vi.advanceTimersByTimeAsync(1);
+		expect(server.refreshes()).toBe(base + 2);
+		expect(watcher.get().retryAt).toBeNull();
 		watcher.stop();
 	});
 

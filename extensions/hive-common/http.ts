@@ -95,12 +95,16 @@ async function serverError(res: Response): Promise<string | undefined> {
 	}
 }
 
-export async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>, parentSignal?: AbortSignal): Promise<T> {
 	const controller = new AbortController();
+	const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
 	const timer = setTimeout(() => controller.abort(), ms);
 	timer.unref?.();
 	try {
-		return await fn(controller.signal);
+		signal.throwIfAborted();
+		const value = await fn(signal);
+		signal.throwIfAborted();
+		return value;
 	} finally {
 		clearTimeout(timer);
 	}
@@ -125,10 +129,14 @@ export async function request<T = unknown>(
 	path: string,
 	body?: unknown,
 	timeoutMs = DEFAULT_TIMEOUT_MS,
+	parentSignal?: AbortSignal,
 ): Promise<RequestResult<T>> {
+	// Headers remain authoritative even when the explanatory body stalls.
+	let rejection: RequestResult<T> | undefined;
 	try {
-		const res = await withTimeout(timeoutMs, (signal) =>
-			fetch(`${auth.url}/api/v1${path}`, {
+		// Keep the timeout alive through body decoding, not just response headers.
+		return await withTimeout(timeoutMs, async (signal) => {
+			const res = await fetch(`${auth.url}/api/v1${path}`, {
 				method,
 				headers: {
 					Authorization: `Bearer ${auth.token}`,
@@ -137,38 +145,35 @@ export async function request<T = unknown>(
 				},
 				body: body === undefined ? undefined : JSON.stringify(body),
 				signal,
-			}),
-		);
-		if (!res.ok) {
-			const { authFailed, permanent } = classify(res.status);
-			// Identity PUT uses 409 to return the authoritative revision alongside
-			// its conflict. Preserve that structured body for the caller without
-			// consuming the response before the normal error extraction.
-			let conflictBody: T | undefined;
-			if (res.status === 409) {
-				try { conflictBody = (await res.clone().json()) as T; } catch { /* status/error remains authoritative */ }
+			});
+			if (!res.ok) {
+				rejection = { ok: false, status: res.status, ...classify(res.status), retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")) };
+				// Identity PUT uses 409 to return the authoritative revision alongside
+				// its conflict. Preserve that structured body for the caller without
+				// consuming the response before the normal error extraction.
+				let conflictBody: T | undefined;
+				if (res.status === 409) {
+					try { conflictBody = (await res.clone().json()) as T; } catch { /* status/error remains authoritative */ }
+				}
+				return {
+					...rejection,
+					error: await serverError(res),
+					...(conflictBody === undefined ? {} : { body: conflictBody }),
+				};
 			}
-			return {
-				ok: false,
-				status: res.status,
-				authFailed,
-				permanent,
-				retryAfterMs: parseRetryAfterMs(res.headers.get("retry-after")),
-				error: await serverError(res),
-				...(conflictBody === undefined ? {} : { body: conflictBody }),
-			};
-		}
-		let parsed: T | undefined;
-		if (res.status !== 204) {
-			try {
-				parsed = (await res.json()) as T;
-			} catch {
-				/* a 2xx with no/!json body is still a success */
+			let parsed: T | undefined;
+			if (res.status !== 204) {
+				try {
+					parsed = (await res.json()) as T;
+				} catch {
+					/* a 2xx with no/!json body is still a success */
+				}
 			}
-		}
-		return { ok: true, status: res.status, authFailed: false, permanent: false, retryAfterMs: null, body: parsed };
+			return { ok: true, status: res.status, authFailed: false, permanent: false, retryAfterMs: null, body: parsed };
+		}, parentSignal);
 	} catch (err) {
-		return { ok: false, status: null, authFailed: false, permanent: false, retryAfterMs: null, error: redact(err) };
+		return rejection ? { ...rejection, error: redact(err) } :
+			{ ok: false, status: null, authFailed: false, permanent: false, retryAfterMs: null, error: redact(err) };
 	}
 }
 
