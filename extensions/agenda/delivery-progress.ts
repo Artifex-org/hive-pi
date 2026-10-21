@@ -127,6 +127,9 @@ const committedHead = (cwd: string, sha: string): boolean => {
  */
 const MENTIONS_COMMIT = /\bgit\b(?:\s+-[Cc]\s+\S+)*\s+commit\b/;
 
+/** How long a background commit candidate is re-checked before it is dropped. */
+const DEFERRED_COMMIT_MS = 30 * 60 * 1000;
+
 /** The checkpoint request a commit may be answering (checkpoint.ts). */
 export interface CheckpointCommits {
 	outstanding(): boolean;
@@ -142,20 +145,48 @@ export function registerDeliveryProgress(
 	// by itself (a later checkout, reset or rebase moves it too). Only the
 	// newest reflog entry being a commit AT the new HEAD counts.
 	const pending = new Map<string, { cwd: string; head: string | null; requireReflog: boolean }>();
+	// A `background_bash` commit finishes after its tool result (which only says
+	// the job started): round-6 eval, pi+Sol committed that way and the
+	// conductor's pre-delivery review again fired only at PR open. Such a
+	// candidate stays here and is re-checked after every later tool result and
+	// at turn end, on reflog evidence only, until it lands or goes stale.
+	const deferred = new Map<string, { cwd: string; head: string | null; since: number }>();
+	const record = () => { seen = true; deferred.clear(); pi.appendEntry(DELIVERY_PROGRESS_ENTRY, { reached: true }); };
+	const settleDeferred = () => {
+		if (seen) return;
+		const now = Date.now();
+		for (const [id, job] of deferred) {
+			if (now - job.since > DEFERRED_COMMIT_MS) { deferred.delete(id); continue; }
+			const after = head(job.cwd);
+			if (!after || after === job.head || !committedHead(job.cwd, after)) continue;
+			if (checkpoint?.outstanding()) { deferred.delete(id); continue; }
+			record();
+			return;
+		}
+	};
 	pi.on("tool_call", (event, ctx) => {
-		if (seen || event.toolName !== "bash") return;
+		if (seen || (event.toolName !== "bash" && event.toolName !== "background_bash")) return;
 		const input = event.input as { command?: unknown; cwd?: unknown };
 		if (typeof input.command !== "string") return;
 		const base = typeof input.cwd === "string" ? input.cwd : ctx.cwd;
+		if (event.toolName === "background_bash") {
+			if (input.command.length <= 8192 && MENTIONS_COMMIT.test(input.command)) {
+				deferred.set(event.toolCallId, { cwd: base, head: head(base), since: Date.now() });
+			}
+			return;
+		}
 		const cwd = commitCheckout(input.command, base);
 		if (cwd) pending.set(event.toolCallId, { cwd, head: head(cwd), requireReflog: false });
 		else if (input.command.length <= 8192 && MENTIONS_COMMIT.test(input.command)) {
 			pending.set(event.toolCallId, { cwd: base, head: head(base), requireReflog: true });
 		}
 	});
+	pi.on("turn_end", () => settleDeferred());
 	pi.on("tool_result", event => {
 		const before = pending.get(event.toolCallId);
 		pending.delete(event.toolCallId);
+		// The background job's own result is its start, not its outcome.
+		if (!deferred.has(event.toolCallId)) settleDeferred();
 		if (seen || event.toolName !== "bash") return;
 		const command = (event.input as { command?: unknown }).command;
 		if (typeof command !== "string") return;
@@ -170,11 +201,11 @@ export function registerDeliveryProgress(
 		// A commit the conductor asked for as a checkpoint is not the end of
 		// execution; a PR opening always is.
 		if (kind === "commit" && checkpoint?.outstanding()) return;
-		seen = true;
-		pi.appendEntry(DELIVERY_PROGRESS_ENTRY, { reached: true });
+		record();
 	});
 	return entries => {
 		pending.clear();
+		deferred.clear();
 		seen = entries.some(entry => (entry as { customType?: string }).customType === DELIVERY_PROGRESS_ENTRY);
 	};
 }

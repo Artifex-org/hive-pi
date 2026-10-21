@@ -88,6 +88,56 @@ git log --oneline -1`, true],
 			expect(pi.entries).toEqual(expected ? [{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }] : []);
 		} finally { rmSync(cwd, { recursive: true, force: true }); }
 	});
+	// Round-6 eval: pi+Sol committed through background_bash, whose tool result
+	// only says the job started. The commit lands later and is picked up on the
+	// next tool result or turn end, on reflog evidence only.
+	describe("background_bash commits", () => {
+		const setup = () => {
+			const cwd = mkdtempSync(join(tmpdir(), "milestone-bg-"));
+			const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+			git("init"); git("config", "user.email", "test@example.com"); git("config", "user.name", "Test");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 0;\n"); git("add", "."); git("commit", "-qm", "initial");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 1;\n"); git("add", "."); git("commit", "-qm", "second");
+			writeFileSync(join(cwd, "code.ts"), "export const code = 2;\n");
+			const pi = createFakePi(); registerDeliveryProgress(pi.api);
+			const start = async (command: string) => {
+				const input = { cwd, command, what: "committing" };
+				await pi.emit({ type: "tool_call", toolName: "background_bash", toolCallId: "bg", input });
+				await pi.emit({ type: "tool_result", toolName: "background_bash", toolCallId: "bg", input, content: [{ type: "text", text: "Started bg-3" }], isError: false });
+			};
+			const later = () => pi.emit({ type: "tool_result", toolName: "read", toolCallId: "r", input: { path: "code.ts" }, content: [{ type: "text", text: "x" }], isError: false });
+			return { cwd, git, pi, start, later };
+		};
+		const reached = [{ customType: DELIVERY_PROGRESS_ENTRY, data: { reached: true } }];
+		it("records the commit on the next tool result once the job has committed", async () => {
+			const { cwd, git, pi, start, later } = setup();
+			try {
+				await start("go vet ./... && git add -A && git commit -q -F /tmp/msg");
+				expect(pi.entries).toEqual([]); // the job has only started
+				git("add", "-A"); git("commit", "-qm", "background commit"); // the job finishes
+				await later();
+				expect(pi.entries).toEqual(reached);
+			} finally { rmSync(cwd, { recursive: true, force: true }); }
+		});
+		it("records it at turn end when no tool call follows", async () => {
+			const { cwd, git, pi, start } = setup();
+			try {
+				await start("git commit -qam change");
+				git("commit", "-qam", "background commit");
+				await pi.emit({ type: "turn_end" });
+				expect(pi.entries).toEqual(reached);
+			} finally { rmSync(cwd, { recursive: true, force: true }); }
+		});
+		it("never counts a HEAD move that is not a commit", async () => {
+			const { cwd, git, pi, start, later } = setup();
+			try {
+				await start("echo 'git commit' && git checkout -q -f -b other HEAD~1");
+				git("checkout", "-q", "-f", "-b", "other", "HEAD~1");
+				await later(); await pi.emit({ type: "turn_end" });
+				expect(pi.entries).toEqual([]);
+			} finally { rmSync(cwd, { recursive: true, force: true }); }
+		});
+	});
 	it.each([
 		["git commit -m change", "[work abc1234] change"],
 		["git commit -m change 2>&1", "[work abc1234] change"],
