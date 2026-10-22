@@ -19,6 +19,11 @@ Run by the plugin as `$HIVE_NODE $HIVE_PI_BASE/claude/cli.ts <command>` —
 plain Node 24 with type stripping. Nothing here imports `@earendil-works/*` at
 runtime; pi's frontmatter parser and conversation serializer are loaded from
 the **pinned** pi install that `HIVE_PI_BIN` points into (`pi-runtime.ts`).
+That import is pi's unbundled public entry, so a dependency that floated away
+from pi's own breaks it (and the advisor/subagent tools) while the bundled CLI
+keeps working. The error names the install; `hive-agent workstation harness
+install` repairs it, and a failed load is retried on the next call, so the
+running MCP server picks up the repaired graph without a restart.
 Automatic-gate admission likewise resolves `proper-lockfile` (pi's direct
 4.1.2 dependency) from that pinned install, never checkout-local dependencies.
 The runtime test executes lease acquisition with checkout bare imports refused,

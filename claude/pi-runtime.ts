@@ -55,28 +55,49 @@ function entryOf(root: string): string {
 
 let loaded: Promise<PinnedPi> | undefined;
 
+/**
+ * The pinned pi, loaded once. A FAILED load is not kept: the harness repairs a
+ * broken pi by swapping `bin/pi` onto a new graph (`hive-agent workstation
+ * harness install`), and the next call resolves that new path. Keeping the
+ * rejection made the advisor and subagent tools fail for the rest of the
+ * session even after the repair.
+ */
 export function loadPinnedPi(piBin: string, agentDir: string): Promise<PinnedPi> {
-	loaded ??= (async () => {
-		const root = piPackageRoot(piBin);
-		const pi = (await import(pathToFileURL(entryOf(root)).href)) as {
-			parseFrontmatter?: (content: string) => { frontmatter: Record<string, unknown>; body: string };
-			serializeConversation?: (messages: readonly unknown[]) => string;
-			CONFIG_DIR_NAME?: unknown;
-		};
-		const { parseFrontmatter, serializeConversation, CONFIG_DIR_NAME } = pi;
-		if (typeof parseFrontmatter !== "function" || typeof serializeConversation !== "function" || typeof CONFIG_DIR_NAME !== "string") {
-			throw new Error(`the pinned pi at ${root} does not export parseFrontmatter, serializeConversation and CONFIG_DIR_NAME`);
-		}
-		return {
-			root,
-			serializeConversation,
-			roles: {
-				parseFrontmatter,
-				// The LEASED store, never pi's own default (~/.pi/agent).
-				agentDir: () => agentDir,
-				configDirName: CONFIG_DIR_NAME,
-			},
-		};
-	})();
+	if (!loaded) {
+		const attempt = load(piBin, agentDir);
+		loaded = attempt;
+		attempt.catch(() => { if (loaded === attempt) loaded = undefined; });
+	}
 	return loaded;
+}
+
+async function load(piBin: string, agentDir: string): Promise<PinnedPi> {
+	const root = piPackageRoot(piBin);
+	let module: unknown;
+	try { module = await import(pathToFileURL(entryOf(root)).href); }
+	catch (error) {
+		// A dependency that floated away from pi's own (pi-codemode 1.3.0 under pi 1.1.0) breaks this
+		// unbundled entry while the bundled CLI keeps working, so name the install, not just the symbol.
+		throw new Error(`the pinned pi at ${root} cannot be imported (${error instanceof Error ? error.message : String(error)}); ` +
+			"repair the harness with `hive-agent workstation harness install`", { cause: error });
+	}
+	const pi = module as {
+		parseFrontmatter?: (content: string) => { frontmatter: Record<string, unknown>; body: string };
+		serializeConversation?: (messages: readonly unknown[]) => string;
+		CONFIG_DIR_NAME?: unknown;
+	};
+	const { parseFrontmatter, serializeConversation, CONFIG_DIR_NAME } = pi;
+	if (typeof parseFrontmatter !== "function" || typeof serializeConversation !== "function" || typeof CONFIG_DIR_NAME !== "string") {
+		throw new Error(`the pinned pi at ${root} does not export parseFrontmatter, serializeConversation and CONFIG_DIR_NAME`);
+	}
+	return {
+		root,
+		serializeConversation,
+		roles: {
+			parseFrontmatter,
+			// The LEASED store, never pi's own default (~/.pi/agent).
+			agentDir: () => agentDir,
+			configDirName: CONFIG_DIR_NAME,
+		},
+	};
 }
