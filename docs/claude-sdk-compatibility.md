@@ -160,6 +160,7 @@ stable `error.code` / `details.kind`:
 | `stream_protocol` | the converter refused a frame (missing partials, subagent output, compaction, invalid blocks); `details.frame` is the frame's `type`/`subtype` and whether it carried `parent_tool_use_id`, never content or IDs |
 | `stream_ended` | the SDK iterator ended without a result |
 | `bridge_correlation` | the Pi tool bridge refused a call, batch or result |
+| `usage_credits` | the CLI reported the turn as charged to usage credits (§Usage credits) |
 | `provider_refusal` | the provider's own refusal or runtime failure, such as uncorrelated tool results on a claimed continuation, an ambiguous previous attempt, or a lease refused after a continuation was claimed |
 | `cli_exit` | the CLI child exited or was killed without this provider or the SDK signalling it; `details.cliExit` has the code and signal |
 | `lease_expired` | the lease-expiry timer stopped a running inference |
@@ -189,8 +190,12 @@ diagnostic carries the end of that tail, at most 500 characters, as
 (`sanitizeDiagnosticText`), using the lease token and the Hive token as known
 secrets. Raw stderr is never logged.
 
+Every diagnostic also carries `details.rateLimit` once the query has reported a
+`rate_limit_event`: the latest status, allowlisted as in §Usage credits.
+
 `errorMessage` is unchanged: it is generic after the SDK starts, and is the
-provider's own message before that. Diagnostics never change retry or
+provider's own message before that. The one exception is a billing stop
+(§Usage credits), whose message names billing. Diagnostics never change retry or
 quarantine behaviour.
 
 Known codes do **not** prove pre-effect rejection: the inspected SDK type contract
@@ -208,7 +213,10 @@ have run:
    `unrecognized`, `rate_limit`, `overloaded` or `server_error`. Account,
    credential, billing, model and `invalid_request` codes would fail the same
    way again and are not retried. (The HIV-3906 refusals that a replay served
-   arrived as `unknown`.)
+   arrived as `unknown`.) A usage-credit refusal is not retried whatever its
+   code: Anthropic classifies it by the request's content, so the same prompt
+   is refused again (§Usage credits). Nor is a failure on a query that already
+   reported usage-credit billing: the new request would be charged.
 2. The query was opened by this request for a **user prompt**. A reused parked
    continuation, or any request whose input is tool results, is never retried:
    the tools already ran in Pi.
@@ -229,6 +237,43 @@ including synchronous query-launch throws. There is no other automatic SDK
 post-start failure retry, either here or through Pi's retry classifier, absent a
 verified protocol guarantee of nonexecution. Diagnostics preserve failure
 classification without authorizing replay; private state is still cleaned up.
+
+## Usage credits
+
+A Claude SDK turn must draw from the subscription's plan limits, never from
+usage credits (Anthropic's "extra usage"). The pinned CLI turns each response's
+`anthropic-ratelimit-unified-*` headers into a `rate_limit_event` frame, sent only
+when the status changes. The provider keeps the latest one per query
+(`extensions/claude-sdk/billing.ts`) and checks it whenever a turn completes:
+a final answer, or a tool batch before it is handed to Pi.
+
+- **Charged turn.** When the CLI reports the turn as billed to usage credits, the
+  turn fails with `usage_credits` and
+  `Claude SDK billing: Anthropic charged this turn to usage credits …`. The response
+  is already charged; stopping keeps Pi from issuing further charged turns, and a
+  tool batch is never handed to Pi. The classification is the pinned CLI's own
+  (2.1.308): `overageInUse` true (its `queryTracking.billedToUsageCredits`), or
+  `isUsingOverage` true outside the `seven_day_overage_included` window.
+- **Refused request.** An assistant error whose sanitized API text says the request
+  must draw from extra usage or usage credits (`Third-party apps now draw from your
+  extra usage`, `out of extra usage`, `draws from your usage credits`) fails with
+  `Claude SDK billing: Anthropic refused this request on the plan limits …` and is
+  not retried (§Pre-effect retry).
+
+Both messages contain "billing", which Pi's retry classifier never repeats. There
+is no opt-in: the transport has no paid path. To recover, turn off extra usage
+for the account, or wait for the plan window to reset; a charged turn quarantines
+its context like any other post-start failure, so continue with a new prompt.
+
+The diagnostic copies only these `rate_limit_info` fields: `status`,
+`rateLimitType`, `utilization`, `resetsAt`, `overageStatus`,
+`overageDisabledReason`, `isUsingOverage` and `overageInUse`. Enumerated values
+are copied when they are one of the pinned SDK's values, otherwise as
+`unrecognized`. Everything else, such as an admin's contact or the spend scope,
+is dropped.
+
+A charged turn surfaces once the CLI reports it. A status change that arrives
+after a tool batch was handed to Pi is checked at the next turn of that query.
 
 ## Reasoning capabilities
 
@@ -463,9 +508,9 @@ tools, all Hive extensions, skills and MCP): with Pi's docs block removed, a
 `read` tool round trip completed on the subscription; with the block present it
 was refused.
 
-Anthropic can change this classification. A refusal surfaces as the generic
-SDK failure, with the sanitized API error in its diagnostics, not as a silent
-fallback to paid billing.
+Anthropic can change this classification. A refusal surfaces as a billing
+failure (§Usage credits), not retried, with the sanitized API error in its
+diagnostics, not as a silent fallback to paid billing.
 
 ## References
 

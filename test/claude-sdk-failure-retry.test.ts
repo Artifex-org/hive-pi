@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { normalizeContext, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError, normalizeContext, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createClaudeSdkRuntime, type QueryFactory } from "../extensions/claude-sdk/provider.ts";
 import { emptyUsage, sdkFailureDetail } from "../extensions/claude-sdk/events.ts";
@@ -35,7 +35,8 @@ function* text(value: string) {
 	yield { type: "result", subtype: "success", is_error: false } as SDKMessage;
 }
 const REFUSAL = 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage"},"request_id":"req_011CUsecretrequestid"}';
-const failure = (code: string, apiText = REFUSAL): SDKMessage => ({
+const TRANSIENT = 'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_011CUsecretrequestid"}';
+const failure = (code: string, apiText = TRANSIENT): SDKMessage => ({
 	type: "assistant", error: code, parent_tool_use_id: null, uuid: "u", session_id: "s",
 	message: { id: "failed", content: [{ type: "text", text: apiText }], stop_reason: null, model: "m" },
 }) as unknown as SDKMessage;
@@ -94,13 +95,13 @@ describe("sdkFailureDetail — a sanitized cause, never raw SDK text", () => {
 });
 
 describe("one automatic retry before any content or tool call", () => {
-	it("retries the eval's up-front refusal once and records its cause", async () => {
+	it("retries an up-front failure once and records its cause", async () => {
 		const sdk = await runtime(attempt => attempt === 1 ? [failure("unknown")] : text("ok"));
 		const result = await sdk.provider.streamSimple(sdk.model, prompt(), { sessionId: "eval" }).result();
 		expect(sdk.queries()).toBe(2);
 		expect(result).toMatchObject({ stopReason: "stop", content: [{ type: "text", text: "ok" }] });
 		expect(result.diagnostics).toEqual([{ type: "claude_sdk_assistant_failure", timestamp: expect.any(Number),
-			error: { code: "unknown", message: "API Error 400: invalid_request_error: Third-party apps now draw from your extra usage" },
+			error: { code: "unknown", message: "API Error 500: api_error: Internal server error" },
 			details: { retrySafe: false, phase: "post_start", continuation: "fresh_prompt", retriedOnce: expect.any(String) } }]);
 		expect(JSON.stringify(result)).not.toContain("req_011CU");
 		expect(await readdir(sdk.root)).toEqual([]);
@@ -123,6 +124,26 @@ describe("one automatic retry before any content or tool call", () => {
 		const result = await sdk.provider.streamSimple(sdk.model, prompt()).result();
 		expect(sdk.queries()).toBe(1);
 		expect(result.diagnostics).toMatchObject([{ error: { code }, details: { retrySafe: false } }]);
+	});
+
+	it("does not repeat a usage-credit refusal, which is classified by content and fails the same way", async () => {
+		// 2026-10-20 A/B (docs/claude-sdk-compatibility.md §Pi documentation section): the refusal
+		// followed the prompt's content on every attempt; a second query would only spend a turn.
+		const sdk = await runtime(() => [failure("unknown", REFUSAL)]);
+		const result = await sdk.provider.streamSimple(sdk.model, prompt()).result();
+		expect(sdk.queries()).toBe(1);
+		expect(result.errorMessage).toMatch(/^Claude SDK billing: Anthropic refused this request on the plan limits/);
+		expect(result.diagnostics).toMatchObject([{ type: "claude_sdk_assistant_failure",
+			error: { code: "unknown", message: "API Error 400: invalid_request_error: Third-party apps now draw from your extra usage" } }]);
+		expect(isRetryableAssistantError(result)).toBe(false);
+	});
+
+	it("does not retry once the query reported usage-credit billing: the new request would be charged", async () => {
+		const overage = { type: "rate_limit_event", rate_limit_info: { status: "rejected", isUsingOverage: true, overageInUse: true }, uuid: "u", session_id: "s" } as unknown as SDKMessage;
+		const sdk = await runtime(() => [overage, failure("server_error")]);
+		const result = await sdk.provider.streamSimple(sdk.model, prompt()).result();
+		expect(sdk.queries()).toBe(1);
+		expect(result.diagnostics).toMatchObject([{ error: { code: "server_error" }, details: { rateLimit: { isUsingOverage: true, overageInUse: true } } }]);
 	});
 
 	it("does not retry a failure on tool-result input, even when nothing was streamed", async () => {
