@@ -11,6 +11,8 @@ import { PiToolBridge } from "./tool-bridge.ts";
 import type { PilotQueryBudget } from "./pilot-budget.ts";
 import { EventConverter, emptyUsage, SdkAssistantFailure, SdkProtocolError, SdkProviderError, streamFailure, type FailureCode } from "./events.ts";
 import { failureDiagnostic, SdkLeaseExpired, type Continuation, type FailureContext, type ParkedEndReason } from "./diagnostics.ts";
+import { billedToUsageCredits, rateLimitSnapshot, SdkUsageCreditsCharged, USAGE_CREDITS_CHARGED_MESSAGE, USAGE_CREDITS_REJECTED_MESSAGE,
+	usageCreditsRejected, type RateLimitSnapshot } from "./billing.ts";
 import { assertSettledHistory, fingerprint, seedHistory, transcript, userMessage } from "./history.ts";
 import { cancellable, hiveLease, LEASE_TURN_FLOOR_MS, LeaseManager, privateDirectory, processScope, removePrivateDirectory,
 	validateExecutable, type LaunchConfig, type LeaseSource } from "./runtime.ts";
@@ -38,6 +40,8 @@ interface Parked {
 	resumes?: boolean;
 	/** When the model batch was handed to Pi; diagnostics only. */
 	parkedAt?: number;
+	/** The latest `rate_limit_event` of this query; the CLI emits one only when the status changes. */
+	rateLimit?: RateLimitSnapshot;
 }
 /** Parked queries whose disposal a later tool-result request is matched against, for diagnostics. */
 const PARKED_END_LIMIT = 64;
@@ -142,6 +146,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 			let parkedEnd: FailureContext["parkedEnd"];
 			let scope: Parked["processes"] | undefined;
 			let leaseExpired = false;
+			let rateLimit: RateLimitSnapshot | undefined;
 			const secrets = [config.token];
 			const signal = AbortSignal.any([options.signal ?? new AbortController().signal, shutdown.signal]);
 			let abortParked: (() => void) | undefined;
@@ -183,7 +188,7 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				if (candidates.length > 1) throw new SdkProviderError("Ambiguous SDK tool continuation");
 				if (candidates[0]?.busy) throw new SdkProviderError("SDK continuation already active");
 				state = candidates[0];
-				if (state) { continuation = "parked"; scope = state.processes; }
+				if (state) { continuation = "parked"; scope = state.processes; rateLimit = state.rateLimit; }
 				else if (continuation === "tool_results") {
 					let handoff = context.messages.length;
 					while (handoff > 0 && context.messages[handoff - 1].role === "toolResult") handoff--;
@@ -314,9 +319,12 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 								AbortSignal.any([signal, owned.controller.signal]));
 							signal.throwIfAborted(); owned.controller.signal.throwIfAborted();
 							if (next.value.type === "result") deps.pilot?.observeResult(next.value.num_turns, next.value.subtype === "success");
+							if (next.value.type === "rate_limit_event") rateLimit = owned.rateLimit = rateLimitSnapshot(next.value.rate_limit_info) ?? owned.rateLimit;
 							let action: ReturnType<EventConverter["consume"]>;
 							try { action = converter.consume(next.value); }
 							catch (failure) { throw streamFailure(failure, next.value, secrets); }
+							// The response is already charged; stopping before Pi sees it keeps further turns off usage credits.
+							if (action !== "continue" && owned.rateLimit && billedToUsageCredits(owned.rateLimit)) throw new SdkUsageCreditsCharged(owned.rateLimit);
 							if (action === "tools") {
 								// Reserve the result-free attempt at handoff, across session IDs,
 								// before Pi can execute it or a replacement can pass admission.
@@ -343,11 +351,12 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 						// proposed, so nothing can have run. The failed query is discarded, not
 						// quarantined; a second failure takes the conservative path below.
 						const retry = attempt === 0 && openedHere && !deps.pilot && error instanceof SdkAssistantFailure &&
-							PRE_EFFECT_RETRY_CODES.has(error.code) && context.messages.at(-1)?.role === "user" &&
+							PRE_EFFECT_RETRY_CODES.has(error.code) && !usageCreditsRejected(error.detail) && !(owned.rateLimit && billedToUsageCredits(owned.rateLimit)) &&
+							context.messages.at(-1)?.role === "user" &&
 							output.content.length === 0 && owned.bridge.idle && !signal.aborted && !owned.controller.signal.aborted;
 						if (!retry) throw error;
 						output.diagnostics = [...output.diagnostics ?? [], failureDiagnostic(error, { phase: "post_start", continuation, parkedEnd, aborted: false,
-							leaseExpired: false, cleanupFailed: false, evidence: await scope?.evidence(), secrets, retried: true }, now())];
+							leaseExpired: false, cleanupFailed: false, evidence: await scope?.evidence(), secrets, retried: true, rateLimit }, now())];
 						state = undefined;
 						await dispose(owned);
 						state = await openQuery();
@@ -369,11 +378,16 @@ export function createClaudeSdkRuntime(config: LaunchConfig, deps: Dependencies 
 				}
 				output.stopReason = signal.aborted ? "aborted" : "error";
 				// SDK classification does not promise nonexecution. Keep all post-start
-				// failures generic/nonretryable for Pi; the kind and cause are diagnostics only.
+				// failures nonretryable for Pi and, billing stops aside, generic; the kind
+				// and cause are diagnostics only.
 				output.diagnostics = [...output.diagnostics ?? [], failureDiagnostic(error, { phase, continuation, parkedEnd, aborted,
-					leaseExpired, cleanupFailed, evidence, secrets }, now())];
-				output.errorMessage = cleanupFailed ? "Claude SDK failed to remove private state; operator cleanup required" : state || sdkStarted ? "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" :
-					(error instanceof Error ? error.message : "Claude SDK request failed");
+					leaseExpired, cleanupFailed, evidence, secrets, rateLimit }, now())];
+				// A billing stop says "billing", which Pi's retry classifier never repeats.
+				const billing = aborted ? undefined : error instanceof SdkUsageCreditsCharged ? USAGE_CREDITS_CHARGED_MESSAGE :
+					error instanceof SdkAssistantFailure && usageCreditsRejected(error.detail) ? USAGE_CREDITS_REJECTED_MESSAGE : undefined;
+				output.errorMessage = cleanupFailed ? "Claude SDK failed to remove private state; operator cleanup required" : billing ??
+					(state || sdkStarted ? "Claude SDK interrupted or failed; reconcile any pending side effects before retrying" :
+						(error instanceof Error ? error.message : "Claude SDK request failed"));
 				events.push({ type: "error", reason: output.stopReason, error: output });
 			} finally {
 				if (pilotRequest) deps.pilot?.endRequest();

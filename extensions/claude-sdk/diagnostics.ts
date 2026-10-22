@@ -7,6 +7,7 @@
 import type { AssistantMessageDiagnostic, JsonObject } from "@earendil-works/pi-ai";
 import { boundedDetail, sanitizeDiagnosticText, SdkAssistantFailure, SdkProtocolError, SdkProviderError, SdkResultFailure } from "./events.ts";
 import { BridgeError } from "./tool-bridge.ts";
+import { rateLimitDetails, SdkUsageCreditsCharged, type RateLimitSnapshot } from "./billing.ts";
 import type { ProcessEvidence } from "./runtime.ts";
 
 /** Characters of sanitized CLI stderr a diagnostic carries (the end of the tail). */
@@ -40,10 +41,12 @@ export interface FailureContext {
 	evidence?: ProcessEvidence;
 	secrets: readonly string[];
 	retried?: boolean;
+	/** The latest `rate_limit_event` the query reported, allowlisted fields only. */
+	rateLimit?: RateLimitSnapshot;
 }
 
 export type FailureKind = "aborted" | "lease_expired" | "result_error" | "bridge_correlation" | "stream_protocol" | "stream_ended"
-	| "provider_refusal" | "cli_exit" | "thrown_error";
+	| "usage_credits" | "provider_refusal" | "cli_exit" | "thrown_error";
 
 /**
  * Error text from outside this provider (the SDK, its transport, Node) is copied
@@ -69,6 +72,7 @@ function kindOf(error: unknown, context: FailureContext): FailureKind {
 	if (context.leaseExpired || error instanceof SdkLeaseExpired) return "lease_expired";
 	if (error instanceof SdkResultFailure) return "result_error";
 	if (error instanceof BridgeError) return "bridge_correlation";
+	if (error instanceof SdkUsageCreditsCharged) return "usage_credits";
 	const kind = error instanceof SdkProtocolError ? error.kind : error instanceof SdkProviderError ? "provider_refusal" : "thrown_error";
 	// A CLI that died on its own surfaces as a thrown SDK error or an ended stream.
 	const exit = context.evidence?.exit;
@@ -97,6 +101,7 @@ function contextDetails(context: FailureContext): JsonObject {
 	if (context.parkedEnd) details.parkedEnd = { ...context.parkedEnd };
 	if (context.retried) details.retriedOnce = "failed before any content or tool call; the query was opened again";
 	if (context.cleanupFailed) details.cleanupFailed = true;
+	if (context.rateLimit) details.rateLimit = rateLimitDetails(context.rateLimit);
 	const exit = context.evidence?.exit;
 	if (exit) details.cliExit = { code: exit.code, signal: exit.signal && SAFE_SIGNAL.test(exit.signal) ? exit.signal : exit.signal ? "unknown" : null, requested: exit.requested };
 	const stderr = sanitizeDiagnosticText(context.evidence?.stderr ?? "", context.secrets);

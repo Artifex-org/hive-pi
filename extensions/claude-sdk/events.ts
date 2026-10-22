@@ -68,7 +68,7 @@ const startupFailures = ["org_pin_api_key_conflict", "provider_not_allowed", "or
 	"cwd_unavailable", "shell_tool_missing", "session_held_by_background", "worktree_resume_refused", "worktree_unverified",
 	"cli_version_too_old", "bypass_root"] as const;
 /** Enumerated SDK values are copied only when they are a known member. */
-const known = <T extends string>(values: readonly T[], value: unknown): T | "unrecognized" | undefined =>
+export const known = <T extends string>(values: readonly T[], value: unknown): T | "unrecognized" | undefined =>
 	value === undefined || value === null ? undefined : values.find(v => v === value) ?? "unrecognized";
 
 /**
