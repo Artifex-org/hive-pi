@@ -80,6 +80,15 @@ Anatomy: discrete step slots (dots or short segments) + current-step label; cont
 
 ## 6. Input / Select / Textarea
 
+**Mobile sizing contract:** prevent focus-triggered page zoom with at least
+16 CSS px on the actual editable text, before focus. Apply this in the shared
+form/editor layer on touch devices, including landscape phones and rich-text
+`contenteditable` surfaces (`true`, empty, or `plaintext-only`, not `false`).
+Check computed styles after utility classes and editor themes: a 16px wrapper
+can still contain a smaller typing surface. Retain larger field sizes; keep
+compact desktop type only for the desktop input modality. Preserve user pinch
+zoom; never shrink a 16px control with a transform or lock/reset the viewport.
+
 | State | Spec |
 |---|---|
 | rest | inset well (`--card-2`, hairline border, faint inner shadow) — visibly *below* the surface, fields are slots |

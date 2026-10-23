@@ -37,6 +37,7 @@ Two modes, one shared discipline: design twice (plan, then critique the plan) be
    - Theme correctness: `getComputedStyle` on the token-sensitive elements in each theme state.
    - Mid-flight animation: sample the animated transform partway through (e.g. a return-to-zero should read past-zero at the overshoot) — a before/after screenshot pair proves nothing about the travel.
    - No horizontal overflow: `scrollWidth - clientWidth === 0` at the narrow width.
+   - Mobile input zoom: with touch/coarse-pointer emulation, inspect `getComputedStyle(...).fontSize` on native text fields AND the real contenteditable/editor surface; require ≥16 CSS px before focus in portrait and landscape. Exercise focus → type → blur and keyboard dismissal on real iOS Safari when available, checking that page scale stays unchanged and pinch zoom still works. Emulated Chromium proves CSS sizing, not Safari's native focus/keyboard zoom; report the latter as unverified if no iOS device is available.
 5. Critique against this checklist, then fix and re-shoot:
    - Are all five states of every touched control visibly distinct? (Hover and press with the pointer; tab to check focus.)
    - Contrast: any text you have to squint at? Any mid-gray-on-gray? Compute ratios for status-colored text and text-on-accent (white-on-accent is a repeat offender: ~4:1, fails small text).
