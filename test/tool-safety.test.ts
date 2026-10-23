@@ -129,6 +129,16 @@ describe("classification contract and advisory policy (stubbed Jev, not an accur
 			expect(JSON.stringify(fake.entries)).not.toMatch(/curl|example\.com|opaque-secret|unique-environment-secret/);
 		} finally { vi.unstubAllEnvs(); }
 	});
+	it("redacts overlapping environment secrets longest-first before egress", async () => {
+		const secret = "sk-" + "abcdefghijklmnopqrstuvwxyz012345";
+		vi.stubEnv("TEST_SECRET_PREFIX", "sk-");
+		vi.stubEnv("TEST_FULL_API_KEY", secret);
+		try {
+			const { call, classify } = setup();
+			await call(`printf '%s' '${secret}'`);
+			expect(classify.mock.calls[0][1].state).toEqual({ command: "printf '%s' '[REDACTED]'" });
+		} finally { vi.unstubAllEnvs(); }
+	});
 	it("skips a short command when redaction expansion would truncate its destructive tail", async () => {
 		vi.stubEnv("PASSWORD", "pw");
 		try {
