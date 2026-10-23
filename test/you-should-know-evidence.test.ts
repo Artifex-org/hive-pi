@@ -7,6 +7,15 @@ describe("you-should-know evidence", () => {
 		expect(out).not.toMatch(/ghp_|AKIA|Bearer abc|token=secret/);
 		expect(redactEvidence("private", ["private"])).toContain("[REDACTED]");
 	});
+	it("merges overlapping literal/shape matches on the original input without mutating known secrets", () => {
+		const known = ["abc", "bcde", "sk-"];
+		expect(redactEvidence("safe abcde end", known)).toBe("safe [REDACTED] end");
+		expect(redactEvidence("safe abcde end", [...known].reverse())).toBe("safe [REDACTED] end");
+		const inline = "sk-" + "abcdefghijklmnopqrstuvwxyz012345";
+		expect(redactEvidence(`safe ${inline} end`, known)).toBe("safe [REDACTED] end");
+		expect(known).toEqual(["abc", "bcde", "sk-"]);
+		expect(redactEvidence("public".repeat(6000))).toHaveLength(32_000);
+	});
 	it("redacts environment assignments and quoted JSON credentials before truncation", () => {
 		for (const input of ['HIVE_TOKEN=opaque-value', 'AWS_SECRET_ACCESS_KEY=opaque-value', 'api_key: opaque-value', '{"access_token":"opaque-value"}', "{'password': 'opaque-value'}"]) {
 			expect(redactEvidence(input), input).not.toContain("opaque-value");

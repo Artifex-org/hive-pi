@@ -129,10 +129,10 @@ describe("classification contract and advisory policy (stubbed Jev, not an accur
 			expect(JSON.stringify(fake.entries)).not.toMatch(/curl|example\.com|opaque-secret|unique-environment-secret/);
 		} finally { vi.unstubAllEnvs(); }
 	});
-	it("redacts overlapping environment secrets longest-first before egress", async () => {
+	it.each([true, false])("redacts a shaped inline token even with a known prefix (full secret known: %s)", async fullKnown => {
 		const secret = "sk-" + "abcdefghijklmnopqrstuvwxyz012345";
 		vi.stubEnv("TEST_SECRET_PREFIX", "sk-");
-		vi.stubEnv("TEST_FULL_API_KEY", secret);
+		if (fullKnown) vi.stubEnv("TEST_FULL_API_KEY", secret);
 		try {
 			const { call, classify } = setup();
 			await call(`printf '%s' '${secret}'`);

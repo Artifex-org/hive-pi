@@ -21,10 +21,30 @@ const SECRET_PATTERNS: readonly RegExp[] = [
 
 /** Redact before any evidence can be sent outside the process. */
 export function redactEvidence(text: string, knownSecrets: readonly string[] = [], maxChars = 32_000): string {
-	let result = text;
-	// A short value (for example a token prefix) must not hide a longer secret
-	// from its own replacement or from the shape patterns below.
-	for (const secret of [...knownSecrets].sort((a, b) => b.length - a.length)) if (secret) result = result.split(secret).join("[REDACTED]");
-	for (const pattern of SECRET_PATTERNS) result = result.replace(pattern, "[REDACTED]");
-	return result.slice(0, maxChars);
+	// Match the ORIGINAL input: replacing a short known value first could hide
+	// an inline token's prefix from shape matching, or break an overlapping
+	// known secret. Merge overlapping spans, then replace each range once.
+	const matches: [number, number][] = [];
+	for (const secret of new Set(knownSecrets)) {
+		if (!secret) continue;
+		for (let at = text.indexOf(secret); at !== -1; at = text.indexOf(secret, at + 1)) matches.push([at, at + secret.length]);
+	}
+	for (const pattern of SECRET_PATTERNS) {
+		for (const match of text.matchAll(pattern)) matches.push([match.index, match.index + match[0].length]);
+	}
+	matches.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+	const ranges: [number, number][] = [];
+	for (const span of matches) {
+		const previous = ranges.at(-1);
+		if (previous && span[0] < previous[1]) previous[1] = Math.max(previous[1], span[1]);
+		else ranges.push(span);
+	}
+	const parts: string[] = [];
+	let cursor = 0;
+	for (const [start, end] of ranges) {
+		parts.push(text.slice(cursor, start), "[REDACTED]");
+		cursor = end;
+	}
+	parts.push(text.slice(cursor));
+	return parts.join("").slice(0, maxChars);
 }
