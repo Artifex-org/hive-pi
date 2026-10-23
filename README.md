@@ -26,6 +26,17 @@ We do not fork pi. The short version:
 - MIT plus git means the fork option never expires. Exercising it is the only
   thing that costs.
 
+## Reviewed Pi SDK
+
+The development SDK pins are aligned at **Pi 1.3.0**, published on
+2026-10-15 at 19:13 UTC: the newest stable release past the seven-day
+quarantine on 2026-10-22 at 23:36 UTC. Pi 1.4.0 is still quarantined.
+All locked registry artifacts clear that cutoff; no release-age exclusions
+were added. Regenerate the npm lock with `--min-release-age=7` and a fixed
+`--before` cutoff, then check publication timestamps for the complete graph.
+Workstations get their runtime from Hive's reviewed harness lock, not this
+repository's development install.
+
 ## Layout
 
 | Path | Loaded as | Notes |
