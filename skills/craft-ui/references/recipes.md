@@ -104,6 +104,7 @@ Anatomy: surface from the elevation ramp, optional silkscreen header row, conten
 
 - Elevation by ramp (`--card` → `--card-2` → `--card-3`), not by growing shadows; hairline `--border` everywhere.
 - Header: silkscreen caption + optional LED/status right-aligned — an instrument's panel section, not a headline.
+- Narrow layout: keep identity and action clusters coherent, but allow clusters/badges to wrap; let long labels shrink or wrap inside bounded flex/grid tracks. An unbroken header's fixed-width controls must never widen the card or its page scroller. Include invisible touch-hit extensions in width measurements; clipping them away is not a layout fix. Wide panel content gets a local horizontal scroller, not permission to pan the app frame.
 - Interactive cards (links) behave as buttons: hover lifts one ramp step, press compresses. Static cards never hover-lift (a panel that reacts but isn't pressable is a lie).
 - Radius from the profile scale; nested elements step the radius down (outer 8 → inner 6 → controls 4), never up.
 
