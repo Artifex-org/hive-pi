@@ -814,10 +814,10 @@ describe("catalog-driven SDK reasoning options", () => {
 		["claude-sonnet-5", true, true, true, true, true],
 		["claude-fable-5", true, true, true, false, true],
 		["claude-fable-5-1", true, true, true, false, true],
-		["claude-opus-5", true, true, true, false, true],
+		["claude-opus-5", true, true, true, true, true],
 		["claude-opus-5-5", true, true, true, false, false],
 		["claude-sonnet-5-5", true, true, true, false, false],
-		["claude-haiku-5-5", true, true, true, false, false],
+		["claude-haiku-5-5", true, true, true, true, false],
 	] as const;
 	it.each(capabilities)("translates every advertised level for %s", async (id, adaptive, xhigh, max, off, minimal) => {
 		const f = await fixture(); const model = f.provider.getModels().find(m => m.id === id)!;

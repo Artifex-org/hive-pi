@@ -39,8 +39,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event) => {
-		if (nudged) return;
-		const nudge = classify(event.prompt ?? "");
+		if (nudged || !("prompt" in event)) return;
+		const nudge = classify(event.prompt);
 		if (!nudge) return; // not task-like — stay armed for a later prompt
 		nudged = true;
 		return {
