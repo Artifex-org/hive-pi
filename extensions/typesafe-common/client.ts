@@ -280,6 +280,11 @@ function finite(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
+function probabilityMap(value: unknown): value is Record<string, number> {
+	return value !== null && typeof value === "object" && !Array.isArray(value) &&
+		Object.values(value).every(p => finite(p) && p >= 0 && p <= 1);
+}
+
 /**
  * One answer, checked against the question that was ASKED.
  *
@@ -304,10 +309,9 @@ export function decodeAnswer(asked: Question, raw: unknown): DecodeResult {
 		// A missing confidence is malformed, NOT zero. Defaulting it would
 		// recreate the noul trap on the one question type that does report it.
 		if (!finite(body.confidence)) return { ok: false, reason: "choice answer has no numeric confidence" };
-		const probabilities =
-			body.probabilities && typeof body.probabilities === "object"
-				? (body.probabilities as Record<string, number>)
-				: {};
+		if (body.confidence < 0 || body.confidence > 1) return { ok: false, reason: "choice confidence is outside 0..1" };
+		const probabilities = body.probabilities === undefined ? {} : body.probabilities;
+		if (!probabilityMap(probabilities)) return { ok: false, reason: "choice probabilities must be finite numbers in 0..1" };
 		return { ok: true, answer: { type: "choice", choice, confidence: body.confidence, probabilities } };
 	}
 
@@ -325,6 +329,10 @@ export function decodeAnswer(asked: Question, raw: unknown): DecodeResult {
 			return { ok: false, reason: `score ${body.score} is outside the 0..${top} levels supplied` };
 		}
 		if (!finite(body.confidence)) return { ok: false, reason: "score answer has no numeric confidence" };
+		if (body.confidence < 0 || body.confidence > 1) return { ok: false, reason: "score confidence is outside 0..1" };
+		if (body.probabilities !== undefined && !probabilityMap(body.probabilities)) {
+			return { ok: false, reason: "score probabilities must be finite numbers in 0..1" };
+		}
 		const answer: ScoreAnswer = {
 			type: "score",
 			score: body.score,

@@ -143,6 +143,18 @@ describe("decodeEnvelope — success-shaped nothing is an ERROR", () => {
 		if (!result.ok) expect(result.reason).toContain("no numeric confidence");
 	});
 
+	it.each([-0.1, 1.2, Infinity, NaN, "0.9"])("rejects invalid choice/score confidence %s", confidence => {
+		for (const [question, answer] of [
+			[CHOICE_Q, { type: "choice", choice: "alpha", confidence }],
+			[scoreQuestion("severity", ["low", "high"]), { type: "score", score: 1, confidence }],
+		] as const) expect(decodeAnswer(question, answer).ok).toBe(false);
+	});
+
+	it.each([null, [], "0.9", { alpha: -0.1 }, { alpha: 1.5 }, { alpha: NaN }, { alpha: Infinity }, { alpha: "0.95" }])("rejects invalid choice/score probability maps %j", probabilities => {
+		expect(decodeAnswer(CHOICE_Q, { type: "choice", choice: "alpha", confidence: 0.9, probabilities }).ok).toBe(false);
+		expect(decodeAnswer(scoreQuestion("severity", ["low", "high"]), { type: "score", score: 1, confidence: 0.9, probabilities }).ok).toBe(false);
+	});
+
 	it("a noul outside 0..1 and a score outside its levels are malformed", () => {
 		expect(decodeEnvelope({ answers: { q: { type: "noul", noul: 1.4 } } }, { q: NOUL_Q }).ok).toBe(false);
 		const score = scoreQuestion("how bad", ["fine", "bad", "terrible"]);

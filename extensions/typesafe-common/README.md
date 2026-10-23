@@ -4,7 +4,9 @@ The typed client for the TypeSafe ("Jev") System One API, and the two-stage tool
 router built on it.
 
 **Consumers:** agenda drift and prose-question probes use `native.ts` and
-`ctx.modelRegistry.classify()`. Standalone replay/eval tools retain the HTTP
+`ctx.modelRegistry.classify()`. The opt-in [shell safety observer](../guards-common/tool-safety.md)
+uses the same native transport for advisory risk warnings, never permissions.
+Standalone replay/eval tools retain the HTTP
 client in `client.ts`; agenda has no HTTP fallback. Drift retains its incumbent
 `pi -p` probe when classification cannot answer; a failed question classification
 never produces a nudge.
@@ -16,7 +18,8 @@ request-time credentials and provider routing. Missing context/catalog is
 exposes error prose, not structured HTTP status/Retry-After, so these failures
 are redacted `transport_error`, not fabricated HTTP categories. Native
 `bool.probability` is checked and normalized to the existing advisory `noul`
-domain; choice/score checks are unchanged. Reported native token counts and
+domain. Choice/score confidence and probability values must be finite and in
+0..1; malformed numeric responses are never thresholded as answers. Reported native token counts and
 catalog costs are retained, not estimated. This does not itself add classifier
 costs to pi's session footer.
 
@@ -47,7 +50,7 @@ asserts both facts so the next person cannot undo them by accident.
 | `key.ts` | `readApiKey()` — `$TYPESAFE_API_KEY`, else pi's auth store, vetted |
 | `config.ts` | `configFrom`/`loadConfig`, with `enabled: raw.enabled === true` |
 | `client.ts` | questions, answer validation, outcomes, standalone HTTP client |
-| `native.ts` | agenda's registry transport, opt-in, deadlines, validated answers |
+| `native.ts` | shared registry transport, opt-in, deadlines, validated answers |
 | `liveness.ts` | the outcome tally that tells "agreed" apart from "never called" |
 | `router.ts` | `<server>/<group>` categories and the structural floor |
 | `replay.ts` | the foldable half of `scripts/typesafe-route-replay.ts` |

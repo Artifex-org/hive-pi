@@ -38,6 +38,7 @@ import { ghBodyVerdict } from "./guards-common/gh-body-guard.ts";
 import { identityVerdict } from "./guards-common/identity-guard.ts";
 import { baselineCandidates, baselineNote, snapshotBaselines, type BaselineSnapshot } from "./guards-common/baseline-guard.ts";
 import { appendHint } from "./toolhints/index.ts";
+import { wireToolSafety } from "./guards-common/tool-safety.ts";
 
 /** Matches toolhints' and toolcwd's tag: one way of speaking as the harness. */
 const GUARD_NOTE_TAG = "harness";
@@ -181,6 +182,7 @@ function interpret(v: HookVerdict | null): { kind: "allow" } | { kind: "block"; 
 }
 
 export default function (pi: ExtensionAPI) {
+	const observeSafety = wireToolSafety(pi);
 	pi.on("tool_call", async (event, ctx) => {
 		if (SHELL_TOOLS.has(event.toolName)) {
 			const input = event.input as { command?: string };
@@ -222,6 +224,8 @@ export default function (pi: ExtensionAPI) {
 				// construction.
 				if (!ok) return { block: true, terminate: true, reason: `User declined: ${verdict.message}` };
 			}
+			// Advisory only, after native/bridged denials and human confirmation.
+			await observeSafety(event, ctx);
 			// Not `background_bash`: its result arrives when the job STARTS, before
 			// the command could have changed anything to compare.
 			if (event.toolName === "bash") snapshotFor(event.toolCallId, event.toolName, input as Record<string, unknown>, cwd);

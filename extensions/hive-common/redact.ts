@@ -20,9 +20,9 @@ const SECRET_PATTERNS: readonly RegExp[] = [
 ];
 
 /** Redact before any evidence can be sent outside the process. */
-export function redactEvidence(text: string, knownSecrets: readonly string[] = []): string {
+export function redactEvidence(text: string, knownSecrets: readonly string[] = [], maxChars = 32_000): string {
 	let result = text;
 	for (const secret of knownSecrets) if (secret) result = result.split(secret).join("[REDACTED]");
 	for (const pattern of SECRET_PATTERNS) result = result.replace(pattern, "[REDACTED]");
-	return result.slice(0, 32_000);
+	return result.slice(0, maxChars);
 }
