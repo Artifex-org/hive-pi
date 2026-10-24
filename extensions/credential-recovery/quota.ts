@@ -54,6 +54,14 @@ const QUOTA_PATTERNS: readonly RegExp[] = [
 	// that does not recover until someone buys credits.
 	/\bout of credits\b/i,
 	/need a grok subscription/i,
+	// Kimi Code, plan window spent: a hard 403 "You've reached your weekly
+	// (7-day) usage limit. Your quota will reset when the current 7-day window
+	// ends." (verbatim from MoonshotAI/kimi-code#3951, 2026-09-21). Anchored on
+	// "reached your … usage limit" so the 5-hour and monthly windows match too;
+	// a curly apostrophe is tolerated. Kimi's own CLI files this under
+	// provider.auth_error, but it names no credential fault and AUTH_PATTERNS
+	// has nothing it would veto on.
+	/you[’']?ve reached your [\w() -]{0,40}usage limit/i,
 	// OpenRouter key limits — the 402 that froze five pyERP agents on
 	// 2026-08-15 (daily) and stranded a smoke agent on 2026-09-02 (weekly).
 	// `limit_source` is the field OpenRouter puts the cause in, and it is the
