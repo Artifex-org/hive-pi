@@ -108,11 +108,13 @@ source_git() {
   local role="$1" checkout="$2" remote metadata helper
   shift 2
   metadata="${XDG_CONFIG_HOME:-${HOME}/.config}/hive-pi/update-sources.json"
-  remote="$(git -C "${checkout}" config --get remote.origin.url)" || return 1
+  remote="$(git -C "${checkout}" config --get-all remote.origin.url)" || return 1
   if [[ -f "${metadata}" || "${remote}" == *"/origin/"* ]]; then
     [[ -f "${metadata}" ]] || { echo "hive-pi-update: native source needs verified provisioning metadata; reprovision before retrying" >&2; return 1; }
     helper="$(dirname "${BASH_SOURCE[0]}")/../lib/hive-pi/source-git.mjs"
     node "${helper}" "${metadata}" "${role}" "${checkout}" "$@"
+  elif [[ "$1" == remote-head ]]; then
+    git -C "${checkout}" rev-parse --verify 'refs/remotes/origin/main^{commit}'
   else
     git -C "${checkout}" "$@"
   fi
@@ -120,16 +122,16 @@ source_git() {
 
 source_git base "${repo}" fetch --prune origin main
 head_revision="$(git -C "${repo}" rev-parse HEAD)"
-remote_revision="$(git -C "${repo}" rev-parse origin/main)"
-if git -C "${repo}" merge-base --is-ancestor HEAD origin/main; then
+remote_revision="$(source_git base "${repo}" remote-head)"
+if git -C "${repo}" merge-base --is-ancestor "${head_revision}" "${remote_revision}"; then
   available_revision="${remote_revision}"
-elif git -C "${repo}" merge-base --is-ancestor origin/main HEAD; then
+elif git -C "${repo}" merge-base --is-ancestor "${remote_revision}" "${head_revision}"; then
   # A local checkout ahead of the remote is already newer; reporting the older
   # remote as available would make readiness falsely claim it was unactivated.
   available_revision="${head_revision}"
 else
-  echo "refusing update: ${repo} diverged from origin/main" >&2
-  record_run failed "diverged from origin/main"
+  echo "refusing update: ${repo} diverged from the selected source branch" >&2
+  record_run failed "diverged from the selected source branch"
   exit 1
 fi
 mkdir -p "${state_dir}"

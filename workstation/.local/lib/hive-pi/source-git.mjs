@@ -41,7 +41,7 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 	if (typeof source.local_branch !== "string" || !source.local_branch) throw new Error("updater needs its provisioner-verified local branch; reprovision before retrying");
 	const localRef = "refs/heads/" + source.local_branch;
 	runGit(["check-ref-format", localRef], {});
-	if (!["fetch", "pull"].includes(operation[0]) || operation.slice(1).some(arg => !["--prune", "--ff-only", "origin", "main"].includes(arg))) throw new Error("unsupported updater Git operation");
+	if (!["fetch", "pull", "remote-head"].includes(operation[0]) || (operation[0] === "remote-head" && operation.length !== 1) || operation.slice(1).some(arg => !["--prune", "--ff-only", "origin", "main"].includes(arg))) throw new Error("unsupported updater Git operation");
 	for (const entry of config.split("\0")) {
 		const split = entry.indexOf("\n");
 		const key = entry.slice(0, split).toLowerCase();
@@ -70,10 +70,10 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 		flags.push("-c", "credential.helper=");
 	}
 	// Never let branch.<name>.remote or an alternate upstream choose the
-	// network source. Both operations name the exact verified URL and branch.
-	const selectedOperation = operation[0] === "fetch"
-		? ["fetch", "--prune", "--no-recurse-submodules", source.url, "+refs/heads/" + branch + ":refs/remotes/origin/" + branch]
-		: ["pull", "--ff-only", "--no-recurse-submodules", source.url, branch];
+	// network source. Network operations name the exact verified URL and branch.
+	let selectedOperation = ["rev-parse", "--verify", "refs/remotes/origin/" + branch + "^{commit}"];
+	if (operation[0] === "fetch") selectedOperation = ["fetch", "--prune", "--no-recurse-submodules", source.url, "+refs/heads/" + branch + ":refs/remotes/origin/" + branch];
+	if (operation[0] === "pull") selectedOperation = ["pull", "--ff-only", "--no-recurse-submodules", source.url, branch];
 	return { args: [...flags, "-C", checkout, ...selectedOperation], env, localRef };
 }
 
@@ -88,7 +88,7 @@ if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[
 		const [metadataPath, role, checkout, ...operation] = process.argv.slice(2);
 		const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
 		const probeEnv = sourceGitEnvironment(metadata, role, process.env);
-		const actual = runGit(["-C", checkout, "config", "--get", "remote.origin.url"], probeEnv);
+		const actual = runGit(["-C", checkout, "config", "--get-all", "remote.origin.url"], probeEnv);
 		const config = runGit(["-C", checkout, "config", "--null", "--list"], probeEnv);
 		const selected = prepareSourceGit(metadata, role, checkout, actual, config, operation);
 		const currentRef = runGit(["-C", checkout, "symbolic-ref", "--quiet", "HEAD"], selected.env).trim();
