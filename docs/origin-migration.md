@@ -26,6 +26,9 @@ checks the ordinary inherited configuration for rewrites and HTTP settings that
 affect the approved URL. This is a handoff-time check, not a promise that later
 user edits to Git configuration remain safe. Credential repair reinstalls the
 scoped helper after the generic reset, so old section order cannot disable it.
+Isolated clone and updater transports carry only the approved URL’s effective
+`http.sslCAInfo`, `http.sslCAPath`, and `http.version` settings from inherited
+configuration. Headers, helpers, and URL rewrites are not carried across.
 Existing files and unpushed work are not reset.
 
 A source identity conflict needs fresh consent: call `request_workspace` with

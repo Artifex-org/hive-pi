@@ -94,14 +94,18 @@ describe("provisioner-bound timer source", () => {
 		const bin = join(root, "bin");
 		mkdirSync(bin);
 		const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+		const ca = join(root, "fixture-ca.pem");
+		writeFileSync(ca, "fixture CA path");
+		const global = join(root, "global.config");
+		git(root, "config", "--file", global, role === "base" ? "http.sslCAInfo" : "http." + selectedURL + ".sslCAInfo", ca);
 		// Replace only the verified transport endpoint with a local fixture.
 		// Git still parses the flags, upstream and refspec and performs the merge.
-		writeFileSync(join(bin, "git"), `#!/bin/bash\nargs=("$@")\nfor i in "\${!args[@]}"; do\n if [[ "\${args[$i]}" == ${JSON.stringify(selectedURL)} ]]; then args[$i]=${JSON.stringify(origin)}; fi\ndone\nexec ${JSON.stringify(realGit)} "\${args[@]}"\n`, { mode: 0o755 });
+		writeFileSync(join(bin, "git"), `#!/bin/bash\nargs=("$@")\nfor i in "\${!args[@]}"; do\n if [[ "\${args[$i]}" == pull ]]; then [[ "$(${JSON.stringify(realGit)} "\${args[@]:0:$i}" config --get http.sslCAInfo)" == ${JSON.stringify(ca)} ]] || exit 66; fi\n if [[ " \${args[*]} " != *" config "* && "\${args[$i]}" == ${JSON.stringify(selectedURL)} ]]; then args[$i]=${JSON.stringify(origin)}; fi\ndone\nexec ${JSON.stringify(realGit)} "\${args[@]}"\n`, { mode: 0o755 });
 		const installedHelper = join(root, "installed-source-git.mjs");
 		symlinkSync(helper.pathname, installedHelper);
 		const path = join(root, "update-sources.json");
 		writeFileSync(path, JSON.stringify({ ...metadata, [role]: { ...(role === "base" ? metadata.base : metadata.overlay), branch, local_branch: local } }));
-		const env = { ...process.env, HOME: root, PATH: bin + ":" + process.env.PATH, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.url", GIT_CONFIG_VALUE_0: "https://wrong.invalid/repo.git", GIT_DIR: join(author, ".git"), GIT_WORK_TREE: author };
+		const env = { ...process.env, HOME: root, PATH: bin + ":" + process.env.PATH, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "remote.origin.url", GIT_CONFIG_VALUE_0: "https://wrong.invalid/repo.git", GIT_DIR: join(author, ".git"), GIT_WORK_TREE: author };
 		const replacement = join(root, "replacement.config");
 		writeFileSync(replacement, '[remote "origin"]\n url = ' + selectedURL + '\n');
 		const foreign = join(root, "unapproved.git");

@@ -270,6 +270,32 @@ describe("native workspace grant provisioning", () => {
 		expect(fill.stdout).toContain("password=fixture");
 	});
 
+	it.each([false, true])("passes the global fixture CA to isolated clone transport (scoped=%s)", async (scoped) => {
+		const f = fixture();
+		const global = join(f.root, "global.config");
+		const ca = join(f.root, "fixture-ca.pem");
+		writeFileSync(ca, "fixture CA path");
+		execFileSync("git", ["config", "--file", global, scoped ? "http." + f.grant.clone_url + ".sslCAInfo" : "http.sslCAInfo", ca]);
+		const env = { ...process.env, GIT_CONFIG_GLOBAL: global };
+		let observed = "";
+		f.exec.mockImplementation(async (command, args) => {
+			const clone = args.indexOf("clone");
+			if (clone >= 0) {
+				const transport = spawnSync(command, [...args.slice(0, clone), "config", "--get", "http.sslCAInfo"], { env, encoding: "utf8" });
+				observed = transport.stdout.trim();
+				const dest = join(f.root, "harness");
+				execFileSync("git", ["init", dest]);
+				execFileSync("git", ["-C", dest, "remote", "add", "origin", f.grant.clone_url!]);
+				return { code: 0, stdout: "", stderr: "" };
+			}
+			const result = spawnSync(command, args, { env, encoding: "utf8" });
+			return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+		});
+		const result = await f.tools.get("request_workspace")!.execute("tls", { repo: "harness" });
+		expect(result.content[0].text).toContain("cloned https://origin.hiveci.io/");
+		expect(observed).toBe(ca);
+	});
+
 	it("catalog displays the approved transport instead of an empty GitHub slug", async () => {
 		const f = fixture();
 		const result = await f.tools.get("list_workspace_catalog")!.execute("call", {});

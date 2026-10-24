@@ -180,10 +180,11 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 				? `- ${r.name}: already present at ${dest} — scoped Git configuration verified; files and refs preserved.`
 				: `- ${r.name}: already present at ${dest} — left as-is (nothing re-cloned).`;
 		}
-		if (source.native && !await ordinaryNativeTransportSafe(pi, root, source, signal)) {
+		const tls = source.native ? await ordinaryNativeTransportSafe(pi, root, source, signal) : [];
+		if (!tls) {
 			return `- ${r.name}: refused — conflicting inherited Git transport configuration; no clone was attempted.`;
 		}
-		const args = [...prefix, ...git, "clone"];
+		const args = [...prefix, ...git, ...tls.flatMap(([key, value]) => ["-c", key + "=" + value]), "clone"];
 		if (r.branch) args.push("--branch=" + r.branch);
 		args.push("--", source.url, dest);
 		const res = await pi.exec("env", args, { signal, timeout: CLONE_TIMEOUT_MS });
@@ -203,27 +204,31 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 	}
 }
 
-async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<boolean> {
+async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<Array<[string, string]> | undefined> {
 	const effective = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--show-scope", "--null", "--list"], { signal, timeout: CLONE_TIMEOUT_MS });
-	if (effective.code !== 0) return false;
+	if (effective.code !== 0) return undefined;
 	const entries = effective.stdout.split("\0");
 	for (let i = 0; i + 1 < entries.length; i += 2) {
 		const split = entries[i + 1].indexOf("\n");
 		const key = entries[i + 1].slice(0, split).toLowerCase();
-		if (key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entries[i + 1].slice(split + 1))) return false;
+		if (key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entries[i + 1].slice(split + 1))) return undefined;
 		// Command-scope resets run after the persisted helper, regardless of URL specificity.
-		if (entries[i] === "command" && /^credential\.[^.]+$/.test(key)) return false;
+		if (entries[i] === "command" && /^credential\.[^.]+$/.test(key)) return undefined;
 	}
 	const credential = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--show-scope", "--null", "--get-urlmatch", "credential", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
-	if (credential.code !== 0 && credential.code !== 1) return false;
-	if (credential.stdout.split("\0").some((entry, index) => index % 2 === 0 && entry === "command")) return false;
+	if (credential.code !== 0 && credential.code !== 1) return undefined;
+	if (credential.stdout.split("\0").some((entry, index) => index % 2 === 0 && entry === "command")) return undefined;
 	// Let Git resolve URL patterns and precedence rather than approximating them.
 	const http = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--null", "--get-urlmatch", "http", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
-	if (http.code !== 0 && http.code !== 1) return false;
-	return !http.stdout.split("\0").some(entry => {
-		const [key, value] = entry.split("\n");
-		return (key === "http.extraheader" && Boolean(value)) || (key === "http.followredirects" && value !== "false");
-	});
+	if (http.code !== 0 && http.code !== 1) return undefined;
+	const tls: Array<[string, string]> = [];
+	for (const entry of http.stdout.split("\0")) {
+		const split = entry.indexOf("\n");
+		const key = entry.slice(0, split), value = entry.slice(split + 1);
+		if ((key === "http.extraheader" && Boolean(value)) || (key === "http.followredirects" && value !== "false")) return undefined;
+		if (["http.sslcainfo", "http.sslcapath", "http.version"].includes(key)) tls.push([key, value]);
+	}
+	return tls;
 }
 
 async function configureNativeCheckout(pi: ExtensionAPI, prefix: string[], dest: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<boolean> {

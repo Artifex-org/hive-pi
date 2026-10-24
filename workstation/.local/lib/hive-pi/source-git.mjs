@@ -14,10 +14,10 @@ function canonicalURL(raw) {
 	return url;
 }
 
-function sourceGitEnvironment(metadata, role, environment) {
+function sourceGitEnvironment(metadata, role, environment, isolate = true) {
 	const env = { ...environment, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "" };
 	for (const key of ["GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_TEMPLATE_DIR"]) delete env[key];
-	if (NATIVE_PATH.test(canonicalURL(metadata[role]?.url).pathname)) {
+	if (isolate && NATIVE_PATH.test(canonicalURL(metadata[role]?.url).pathname)) {
 		delete env.GIT_CONFIG_PARAMETERS;
 		Object.assign(env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "0" });
 		if (role === "base") delete env.HIVE_TOKEN;
@@ -77,8 +77,9 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 	return { args: [...flags, "-C", checkout, ...selectedOperation], env, localRef };
 }
 
-function runGit(args, env) {
+function runGit(args, env, missingOK = false) {
 	const result = spawnSync("git", args, { env, encoding: "utf8", timeout: 300_000, maxBuffer: 1024 * 1024 });
+	if (!result.error && missingOK && result.status === 1) return "";
 	if (result.error || result.status !== 0) throw new Error("verified updater Git operation failed; inspect source permissions without changing the selected provider");
 	return result.stdout;
 }
@@ -93,6 +94,12 @@ if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[
 		const selected = prepareSourceGit(metadata, role, checkout, actual, config, operation);
 		const currentRef = runGit(["-C", checkout, "symbolic-ref", "--quiet", "HEAD"], selected.env).trim();
 		if (currentRef !== selected.localRef) throw new Error("checkout branch differs from verified metadata; preserve local work and reprovision explicitly");
+		const http = runGit(["-C", checkout, "config", "--null", "--get-urlmatch", "http", metadata[role].url], sourceGitEnvironment(metadata, role, process.env, false), true);
+		for (const entry of http.split("\0")) {
+			const split = entry.indexOf("\n");
+			const key = entry.slice(0, split);
+			if (["http.sslcainfo", "http.sslcapath", "http.version"].includes(key)) selected.args.unshift("-c", key + "=" + entry.slice(split + 1));
+		}
 		process.stdout.write(runGit(selected.args, selected.env));
 	} catch (error) {
 		console.error("hive-pi-update: " + (error instanceof Error ? error.message : "source verification failed"));

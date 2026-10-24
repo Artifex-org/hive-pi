@@ -190,7 +190,7 @@ describe("hive-pi-update", () => {
 		const tools = stubTools(home);
 		symlinkSync(process.execPath, join(tools.bin, "node"));
 		const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-		writeFileSync(join(tools.bin, "git"), `#!${process.execPath}\nconst {spawnSync}=require('node:child_process'); const args=process.argv.slice(2).map(a=>a===${JSON.stringify(url)}?${JSON.stringify(origin)}:a); const r=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'}); process.exit(r.status??1);\n`, { mode: 0o755 });
+		writeFileSync(join(tools.bin, "git"), `#!${process.execPath}\nconst {spawnSync}=require('node:child_process'); const args=process.argv.slice(2).map(a=>!process.argv.includes("config")&&a===${JSON.stringify(url)}?${JSON.stringify(origin)}:a); const r=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'}); process.exit(r.status??1);\n`, { mode: 0o755 });
 		const installed = join(home, ".local/bin/hive-pi-update");
 		const helper = join(home, ".local/lib/hive-pi/source-git.mjs");
 		mkdirSync(join(home, ".local/bin"), { recursive: true });
