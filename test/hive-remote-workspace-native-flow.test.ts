@@ -193,6 +193,71 @@ describe("native workspace grant provisioning", () => {
 		expect(execFileSync("git", ["-C", dest, "config", "--get", key], { encoding: "utf8" }).trim()).toBe("");
 	});
 
+	it.each(["new", "existing", "conditional"])("refuses inherited rewrites before ordinary Git use (%s)", async (mode) => {
+		const existing = mode === "existing";
+		const f = fixture();
+		const dest = join(f.root, "harness");
+		const foreign = join(f.root, "foreign");
+		execFileSync("git", ["init", "-b", "main", foreign]);
+		writeFileSync(join(foreign, "unapproved"), "not the approved source");
+		execFileSync("git", ["-C", foreign, "add", "."]);
+		execFileSync("git", ["-C", foreign, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "foreign"]);
+		const global = join(f.root, "global.config");
+		execFileSync("git", ["config", "--file", global, "url." + foreign + ".insteadOf", f.grant.clone_url!]);
+		if (mode === "conditional") {
+			const included = join(f.root, "included.config");
+			writeFileSync(included, readFileSync(global));
+			writeFileSync(global, "");
+			execFileSync("git", ["config", "--file", global, "includeIf.gitdir:" + dest + "/.path", included]);
+		}
+		const env = { ...process.env, HOME: f.root, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+		if (existing) {
+			execFileSync("git", ["init", dest]);
+			execFileSync("git", ["-C", dest, "remote", "add", "origin", f.grant.clone_url!]);
+			writeFileSync(join(dest, "local-work"), "preserve me");
+		}
+		f.exec.mockImplementation(async (command, args) => {
+			if (args.includes("clone")) {
+				execFileSync("git", ["init", dest]);
+				execFileSync("git", ["-C", dest, "remote", "add", "origin", f.grant.clone_url!]);
+				return { code: 0, stdout: "", stderr: "" };
+			}
+			const result = spawnSync(command, args, { encoding: "utf8", env });
+			return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+		});
+		const result = await f.tools.get("request_workspace")!.execute("rewrite", { repo: "harness" });
+		// A claimed usable checkout must not silently read the rewritten source.
+		if (!result.content[0].text.includes("refused")) {
+			execFileSync("git", ["-C", dest, "fetch", "origin"], { env });
+			expect(spawnSync("git", ["-C", dest, "rev-parse", "--verify", "refs/remotes/origin/main"], { env }).status).not.toBe(0);
+		}
+		expect(result.content[0].text).toContain("conflicting inherited Git transport configuration");
+		expect(f.exec.mock.calls.some(([, args]) => args.includes("clone"))).toBe(mode === "conditional");
+		if (existing) expect(readFileSync(join(dest, "local-work"), "utf8")).toBe("preserve me");
+	});
+
+	it("repairs reversed credential sections for ordinary private Git reads", async () => {
+		const f = fixture(false);
+		const dest = join(f.root, "harness");
+		execFileSync("git", ["init", dest]);
+		execFileSync("git", ["-C", dest, "remote", "add", "origin", f.grant.clone_url!]);
+		execFileSync("git", ["-C", dest, "config", "credential." + f.grant.clone_url + ".helper", "!false"]);
+		execFileSync("git", ["-C", dest, "config", "credential.helper", ""]);
+		const bin = join(f.root, "bin");
+		mkdirSync(bin);
+		writeFileSync(join(bin, "hive"), '#!/bin/sh\nprintf "username=fixture\\npassword=fixture\\n"\n', { mode: 0o755 });
+		const env = { ...process.env, HOME: f.root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", PATH: bin + ":" + process.env.PATH };
+		f.exec.mockImplementation(async (command, args) => {
+			const result = spawnSync(command, args, { encoding: "utf8", env });
+			return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+		});
+		const result = await f.tools.get("request_workspace")!.execute("repair", { repo: "harness" });
+		expect(result.content[0].text).toContain("scoped Git configuration verified");
+		const fill = spawnSync("git", ["-C", dest, "credential", "fill"], { env, encoding: "utf8", input: "url=" + f.grant.clone_url + "\n\n" });
+		expect(fill.status, fill.stderr).toBe(0);
+		expect(fill.stdout).toContain("password=fixture");
+	});
+
 	it("catalog displays the approved transport instead of an empty GitHub slug", async () => {
 		const f = fixture();
 		const result = await f.tools.get("list_workspace_catalog")!.execute("call", {});

@@ -36,7 +36,7 @@ import type { HiveAuth } from "../hive-common/http.ts";
 import { fetchWorkspaceCatalog, requestAndWait, type WorkspaceGrantValue, type WorkspaceRepoGrant } from "./client.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { exposureFor } from "../loadout/policy.ts";
-import { nativeWorkspaceSource, nativeWorkspaceGitConfig, nativeWorkspaceGitEnv, nativeWorkspaceTransportConflict, type WorkspaceCloneSource } from "./workspace-origin.ts";
+import { nativeWorkspaceSource, nativeWorkspaceGitConfig, nativeWorkspaceGitContextEnv, nativeWorkspaceGitEnv, nativeWorkspaceTransportConflict, type WorkspaceCloneSource } from "./workspace-origin.ts";
 
 /** How often the pending request is polled while waiting for a decision. */
 const POLL_MS = 3_000;
@@ -169,6 +169,9 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 				if (existing.code !== 0 || nativeWorkspaceTransportConflict(source, existing.stdout)) {
 					return `- ${r.name}: refused — existing checkout has conflicting Git transport configuration; local work was preserved.`;
 				}
+				if (!await ordinaryNativeTransportSafe(pi, dest, source, signal)) {
+					return `- ${r.name}: refused — conflicting inherited Git transport configuration; local work was preserved.`;
+				}
 				if (!await configureNativeCheckout(pi, prefix, dest, source, signal)) {
 					return `- ${r.name}: scoped Git configuration failed; local work was preserved. Do not use the checkout until repaired.`;
 				}
@@ -176,6 +179,9 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 			return source.native
 				? `- ${r.name}: already present at ${dest} — scoped Git configuration verified; files and refs preserved.`
 				: `- ${r.name}: already present at ${dest} — left as-is (nothing re-cloned).`;
+		}
+		if (source.native && !await ordinaryNativeTransportSafe(pi, root, source, signal)) {
+			return `- ${r.name}: refused — conflicting inherited Git transport configuration; no clone was attempted.`;
 		}
 		const args = [...prefix, ...git, "clone"];
 		if (r.branch) args.push("--branch=" + r.branch);
@@ -188,13 +194,35 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 		if (source.native && !await configureNativeCheckout(pi, prefix, dest, source, signal)) {
 			return `- ${r.name}: cloned into ${dest}, but scoped Git configuration failed; do not use the checkout until repaired.`;
 		}
+		if (source.native && !await ordinaryNativeTransportSafe(pi, dest, source, signal)) {
+			return `- ${r.name}: refused — cloned into ${dest}, but conflicting inherited Git transport configuration prevents ordinary use. Do not use the checkout until repaired.`;
+		}
 		return `- ${r.name}: cloned ${source.native ? source.url : r.repo}${r.branch ? ` (branch ${r.branch})` : ""} into ${dest}`;
 	} catch (err) {
 		return `- ${r.name}: clone failed: ${err instanceof Error ? err.message : "error"}`;
 	}
 }
 
+async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<boolean> {
+	const effective = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--null", "--list"], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (effective.code !== 0 || effective.stdout.split("\0").some(entry => {
+		const split = entry.indexOf("\n");
+		const key = entry.slice(0, split).toLowerCase();
+		return key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entry.slice(split + 1));
+	})) return false;
+	// Let Git resolve URL patterns and precedence rather than approximating them.
+	const http = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--null", "--get-urlmatch", "http", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (http.code !== 0 && http.code !== 1) return false;
+	return !http.stdout.split("\0").some(entry => {
+		const [key, value] = entry.split("\n");
+		return (key === "http.extraheader" && Boolean(value)) || (key === "http.followredirects" && value !== "false");
+	});
+}
+
 async function configureNativeCheckout(pi: ExtensionAPI, prefix: string[], dest: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<boolean> {
+	// Recreate the scoped helper after the generic reset, not in its old section.
+	const removed = await pi.exec("env", [...prefix, "git", "-C", dest, "config", "--local", "--unset-all", "credential." + source.url + ".helper"], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (removed.code !== 0 && removed.code !== 5) return false;
 	for (const [key, value] of nativeWorkspaceGitConfig(source)) {
 		const configured = await pi.exec("env", [...prefix, "git", "-C", dest, "config", "--local", "--replace-all", key, value], { signal, timeout: CLONE_TIMEOUT_MS });
 		if (configured.code !== 0) return false;

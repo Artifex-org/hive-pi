@@ -42,6 +42,11 @@ export function nativeWorkspaceSource(grant: WorkspaceRepoGrant): WorkspaceClone
 	return { url: url.href, native: true, helper };
 }
 
+/** Select the intended checkout without masking ordinary inherited Git settings. */
+export function nativeWorkspaceGitContextEnv(): string[] {
+	return ["GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_TEMPLATE_DIR"].flatMap(key => ["-u", key]);
+}
+
 /** No inherited helper, URL rewrite, object alternate or HTTP header may escape
  * the approved clone identity. The helper reads auth itself: no secret in argv. */
 export function nativeWorkspaceGitEnv(apiURL: string, environment: NodeJS.ProcessEnv = process.env, credentialed = true): string[] {
@@ -54,9 +59,7 @@ export function nativeWorkspaceGitEnv(apiURL: string, environment: NodeJS.Proces
 		throw new Error("Inherited Hive credentials are not bound to this API URL; use matching managed session credentials.");
 	}
 	return [
-		"-u", "GIT_CONFIG", "-u", "GIT_CONFIG_PARAMETERS", "-u", "GIT_CONFIG_SYSTEM",
-		"-u", "GIT_DIR", "-u", "GIT_WORK_TREE", "-u", "GIT_COMMON_DIR",
-		"-u", "GIT_INDEX_FILE", "-u", "GIT_OBJECT_DIRECTORY", "-u", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "-u", "GIT_TEMPLATE_DIR",
+		...nativeWorkspaceGitContextEnv(), "-u", "GIT_CONFIG_PARAMETERS", "-u", "GIT_CONFIG_SYSTEM",
 		...(!credentialed ? ["-u", "HIVE_TOKEN"] : []),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0",
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "HIVE_URL=" + base,

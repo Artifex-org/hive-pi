@@ -21,7 +21,12 @@ read-credential approval. Ordinary workspace consent or an automatic verdict
 does not widen a launch token's project scope. The per-repository helper is
 read-only and bound to that request; it stores no token in Git configuration.
 Native reads refuse redirects, inherited Git rewrites/headers and a mismatched
-existing remote. Existing files and unpushed work are not reset.
+existing remote. Before handing off a new or reused checkout, provisioning also
+checks the ordinary inherited configuration for rewrites and HTTP settings that
+affect the approved URL. This is a handoff-time check, not a promise that later
+user edits to Git configuration remain safe. Credential repair reinstalls the
+scoped helper after the generic reset, so old section order cannot disable it.
+Existing files and unpushed work are not reset.
 
 A source identity conflict needs fresh consent: call `request_workspace` with
 a new explicit `request_id`, and reuse that ID while its approval is pending.
