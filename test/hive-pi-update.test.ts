@@ -48,10 +48,11 @@ function stubTools(home: string): { bin: string; log: string } {
 	return { bin, log };
 }
 
-function runUpdater(home: string, extraPath?: string, overlay = "", script = SCRIPT): void {
+function runUpdater(home: string, extraPath?: string, overlay = "", script = SCRIPT, environment: NodeJS.ProcessEnv = {}): void {
 	execFileSync(script, [], {
 		env: {
 			...process.env,
+			...environment,
 			HOME: home,
 			XDG_STATE_HOME: join(home, "state"),
 			// And the CONFIG home, or this inherits the machine's and sources its
@@ -153,6 +154,21 @@ function checkout(root: string, origin: string, name: string) {
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })));
 
 describe("hive-pi-update", () => {
+	it("cannot mask a native source as legacy GitHub with replacement Git config", () => {
+		const { root, origin } = fixture();
+		const { home, repo } = checkout(root, origin, "masked-native");
+		const url = "https://origin.hiveci.io/origin/tenant/base.git";
+		git(repo, "remote", "set-url", "origin", url);
+		// Keep the old, vulnerable transport entirely local.
+		git(repo, "config", "url." + origin + ".insteadOf", url);
+		const replacement = join(root, "replacement.config");
+		writeFileSync(replacement, '[remote "origin"]\n url = https://github.com/example/base.git\n');
+		const tools = stubTools(home);
+		const before = git(repo, "rev-parse", "HEAD");
+		expect(() => runUpdater(home, tools.bin, "", SCRIPT, { GIT_CONFIG: replacement })).toThrow(/native source needs verified provisioning metadata/);
+		expect(git(repo, "rev-parse", "HEAD")).toBe(before);
+	});
+
 	it.each([false, true])("updates a selected production base with stale origin/main=%s through installed scripts", (staleMain) => {
 		const { root, origin, source } = fixture();
 		git(source, "checkout", "-b", "production");
@@ -187,7 +203,7 @@ describe("hive-pi-update", () => {
 		expect(() => runUpdater(home, tools.bin, "", installed)).toThrow(/origin differs/);
 		expect(git(repo, "rev-parse", "HEAD")).toBe(before);
 		git(repo, "config", "--replace-all", "remote.origin.url", url);
-		runUpdater(home, tools.bin, "", installed);
+		runUpdater(home, tools.bin, "", installed, { GIT_DIR: join(source, ".git"), GIT_WORK_TREE: source });
 		expect(git(repo, "rev-parse", "HEAD")).toBe(expected);
 		expect(git(repo, "branch", "--show-current")).toBe("maintenance");
 		expect(readFileSync(join(home, "state/hive-pi-update/available-revision"), "utf8").trim()).toBe(expected);

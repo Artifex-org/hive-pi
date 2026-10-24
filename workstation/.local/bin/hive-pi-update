@@ -42,6 +42,10 @@ if [[ -f "${env_file}" ]]; then
   unset _base_arg _overlay_arg
 fi
 
+# Every Git call, including pre-helper probes, must inspect the selected checkout.
+unset GIT_CONFIG GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_TEMPLATE_DIR
+
 repo="${HIVE_PI_BASE:-${HOME}/repos/hive-pi__worktrees/main}"
 overlay="${HIVE_PI_OVERLAY:-}"
 state_dir="${XDG_STATE_HOME:-${HOME}/.local/state}/hive-pi-update"
