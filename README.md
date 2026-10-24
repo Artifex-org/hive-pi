@@ -211,6 +211,8 @@ automatically resumed when capacity returns.
 
 `meta-media` does two things. It declares the **Meta (Muse Spark) provider in the base harness** so Muse Spark is launchable wherever pi runs — workstation launches and the Code Factory image alike (it previously lived only in the artifex-pi workstation overlay, which is why a factory run that demoted onto a meta rung died with `Model "meta/…" not found`). Models only, over the built-in OpenAI-Responses transport — no `/compat` wrap. And it adds a pi-native `watch_media` tool: an agent on any model hands it a media URL and Hive's server-side watcher (`/media/describe`) returns a timeline, transcript and triage verdict as text, so it works even on providers whose sandbox cannot reach api.meta.ai.
 
+`kimi-coding` wraps pi's native Kimi Code provider and adds the subscription models pi does not ship yet (`k3.1-pro`, `k3.1-pro-highspeed`), declared in `extensions/kimi-coding/models.json` on top of pi's `k3` entry. pi's OAuth and transport are unchanged, and a pi release that ships an id takes precedence. Without it, an undeclared `kimi-coding/<id>` runs as a custom id cloned from `kimi-for-coding`, capped at 32768 output tokens. Workers load it through `WORKER_EXTENSIONS`.
+
 `ratelimit-backoff` is the layer above pi's in-turn retry. pi retries a
 retryable provider error inside the turn (`settings.retry`: now 5 attempts from a
 5 s base in the fleet default, up from 3 from 2 s) and then the turn fails and
