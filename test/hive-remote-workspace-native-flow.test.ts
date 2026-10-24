@@ -21,7 +21,7 @@ function fixture(publicRead = true, existingRemote?: string) {
 		workspace_grant_id: "33333333-3333-4333-8333-333333333333", public_read: publicRead,
 	};
 	const tools = new Map<string, { execute: (id: string, args: unknown) => Promise<{ content: Array<{ text: string }> }> }>();
-	const exec = vi.fn(async (_command: string, args: string[]) => ({ code: 0, stdout: args.includes("--get") ? existingRemote ?? "" : "", stderr: "" }));
+	const exec = vi.fn(async (_command: string, args: string[]) => ({ code: 0, stdout: args.includes("--get-all") ? existingRemote ?? "" : "", stderr: "" }));
 	vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
 		const path = String(url);
 		const body = path.endsWith("/workspace-catalog") ? { entries: [{ ...grant, default_branch: grant.branch }] } :
@@ -76,7 +76,7 @@ describe("native workspace grant provisioning", () => {
 		expect(result.content[0].text).toContain("local work was preserved");
 		expect(readFileSync(work, "utf8")).toBe("do not reset");
 		expect(f.exec).toHaveBeenCalledTimes(1);
-		expect(f.exec.mock.calls[0][1]).toContain("--get");
+		expect(f.exec.mock.calls[0][1]).toContain("--get-all");
 	});
 
 	it("accepts an explicit GitHub clone URL ending in .git", async () => {
@@ -96,7 +96,7 @@ describe("native workspace grant provisioning", () => {
 				fail = false;
 				return { code: 1, stdout: "", stderr: "config locked" };
 			}
-			return { code: 0, stdout: args.includes("--get") ? f.grant.clone_url! : "", stderr: "" };
+			return { code: 0, stdout: args.includes("--get-all") ? f.grant.clone_url! : "", stderr: "" };
 		});
 		const first = await f.tools.get("request_workspace")!.execute("first", { repo: "harness" });
 		expect(first.content[0].text).toContain("scoped Git configuration failed");
@@ -132,6 +132,25 @@ describe("native workspace grant provisioning", () => {
 		expect(readFileSync(join(dest, "local-work"), "utf8")).toBe("preserve me");
 		expect(f.exec.mock.calls.some(([, args]) => args.includes("clone") || args.includes("fetch"))).toBe(false);
 		if (key) expect(execFileSync("git", ["-C", dest, "config", "--get", key], { encoding: "utf8" }).trim()).toBe(value);
+	});
+
+	it("refuses multiple origin URLs without changing checkout configuration or work", async () => {
+		const f = fixture(false);
+		const dest = join(f.root, "harness");
+		execFileSync("git", ["init", dest]);
+		execFileSync("git", ["-C", dest, "remote", "add", "origin", "https://other.example/unapproved.git"]);
+		execFileSync("git", ["-C", dest, "config", "--add", "remote.origin.url", f.grant.clone_url!]);
+		const config = readFileSync(join(dest, ".git/config"), "utf8");
+		writeFileSync(join(dest, "local-work"), "preserve me");
+		f.exec.mockImplementation(async (command, args) => {
+			const result = spawnSync(command, args, { encoding: "utf8" });
+			return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+		});
+		const result = await f.tools.get("request_workspace")!.execute("multiple", { repo: "harness" });
+		expect(result.content[0].text).toContain("existing checkout does not match the approved Origin URL");
+		expect(readFileSync(join(dest, ".git/config"), "utf8")).toBe(config);
+		expect(readFileSync(join(dest, "local-work"), "utf8")).toBe("preserve me");
+		expect(f.exec.mock.calls.some(([, args]) => args.includes("clone") || args.includes("fetch") || args.includes("--local"))).toBe(false);
 	});
 
 	it("requires fresh consent when identity changes before approved grant delivery", async () => {

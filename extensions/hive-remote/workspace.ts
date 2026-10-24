@@ -161,7 +161,7 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 		const git = ["git", ...config.flatMap(([key, value]) => ["-c", key + "=" + value])];
 		if (existsSync(dest)) {
 			if (source.native) {
-				const remote = await pi.exec("env", [...prefix, ...git, "-C", dest, "config", "--get", "remote.origin.url"], { signal, timeout: CLONE_TIMEOUT_MS });
+				const remote = await pi.exec("env", [...prefix, ...git, "-C", dest, "config", "--get-all", "remote.origin.url"], { signal, timeout: CLONE_TIMEOUT_MS });
 				if (remote.code !== 0 || remote.stdout.trim() !== source.url) {
 					return `- ${r.name}: refused — existing checkout does not match the approved Origin URL; local work was preserved.`;
 				}
