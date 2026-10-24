@@ -102,7 +102,23 @@ clear_stale_index_lock() {
 
 clear_stale_index_lock
 
-git -C "${repo}" fetch --prune origin main
+# A native source is bound to non-secret metadata written after provisioning
+# verifies it. Never fall back to a raw remote or a GitHub credential.
+source_git() {
+  local role="$1" checkout="$2" remote metadata helper
+  shift 2
+  metadata="${XDG_CONFIG_HOME:-${HOME}/.config}/hive-pi/update-sources.json"
+  remote="$(git -C "${checkout}" config --get remote.origin.url)" || return 1
+  if [[ -f "${metadata}" || "${remote}" == *"/origin/"* ]]; then
+    [[ -f "${metadata}" ]] || { echo "hive-pi-update: native source needs verified provisioning metadata; reprovision before retrying" >&2; return 1; }
+    helper="$(dirname "${BASH_SOURCE[0]}")/../lib/hive-pi/source-git.mjs"
+    node "${helper}" "${metadata}" "${role}" "${checkout}" "$@"
+  else
+    git -C "${checkout}" "$@"
+  fi
+}
+
+source_git base "${repo}" fetch --prune origin main
 head_revision="$(git -C "${repo}" rev-parse HEAD)"
 remote_revision="$(git -C "${repo}" rev-parse origin/main)"
 if git -C "${repo}" merge-base --is-ancestor HEAD origin/main; then
@@ -160,7 +176,7 @@ git -C "${repo}" diff --quiet HEAD -- . || {
 if [[ "${head_revision}" != "${remote_revision}" && "${available_revision}" == "${remote_revision}" ]]; then
   # Nothing to reset first: the guard above already rejected every local change,
   # and this checkout has no file pi writes to.
-  git -C "${repo}" pull --ff-only
+  source_git base "${repo}" pull --ff-only
 fi
 
 # ...AND THE BINARY THEY RUN AGAINST. `--extensions` is exactly what it says: it
@@ -260,7 +276,7 @@ update_overlay() {
     overlay_note=" (overlay has local changes; left alone)"
     return 0
   fi
-  git -C "${overlay}" fetch --prune origin >/dev/null 2>&1 || {
+  source_git overlay "${overlay}" fetch --prune origin >/dev/null 2>&1 || {
     overlay_note=" (overlay fetch failed)"
     return 0
   }
@@ -272,7 +288,7 @@ update_overlay() {
     && git -C "${overlay}" ls-files --error-unmatch -- "${overlay_settings}" >/dev/null 2>&1; then
     git -C "${overlay}" checkout -- "${overlay_settings}" >/dev/null 2>&1 || true
   fi
-  git -C "${overlay}" pull --ff-only >/dev/null 2>&1 || overlay_note=" (overlay pull failed)"
+  source_git overlay "${overlay}" pull --ff-only >/dev/null 2>&1 || overlay_note=" (overlay pull failed)"
 }
 update_overlay
 
