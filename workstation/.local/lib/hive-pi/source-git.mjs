@@ -2,6 +2,8 @@
 // non-secret metadata is stored; the private helper revalidates the live source.
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { userInfo } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const NATIVE_PATH = /^\/origin\/[a-z0-9][a-z0-9_-]{0,62}\/[a-z0-9][a-z0-9_-]{0,62}\.git$/;
@@ -18,6 +20,10 @@ function sourceGitEnvironment(metadata, role, environment, isolate = true) {
 	const env = { ...environment, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "" };
 	for (const key of ["GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_TEMPLATE_DIR"]) delete env[key];
 	if (isolate && NATIVE_PATH.test(canonicalURL(metadata[role]?.url).pathname)) {
+		const home = environment.HOME || userInfo().homedir;
+		if (environment.NETRC || [".netrc", "_netrc"].some(name => existsSync(join(home, name)))) {
+			throw new Error("native updater refuses netrc authentication; remove that fallback before using the approved helper");
+		}
 		delete env.GIT_CONFIG_PARAMETERS;
 		Object.assign(env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "0" });
 		if (role === "base") delete env.HIVE_TOKEN;

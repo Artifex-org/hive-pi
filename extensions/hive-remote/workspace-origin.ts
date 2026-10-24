@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { userInfo } from "node:os";
+import { join } from "node:path";
 import type { WorkspaceRepoGrant } from "./client.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -50,6 +53,10 @@ export function nativeWorkspaceGitContextEnv(): string[] {
 /** No inherited helper, URL rewrite, object alternate or HTTP header may escape
  * the approved clone identity. The helper reads auth itself: no secret in argv. */
 export function nativeWorkspaceGitEnv(apiURL: string, environment: NodeJS.ProcessEnv = process.env, credentialed = true): string[] {
+	const home = environment.HOME || userInfo().homedir;
+	if (environment.NETRC || [".netrc", "_netrc"].some(name => existsSync(join(home, name)))) {
+		throw new Error("Native Git refuses netrc authentication; remove that fallback before using the approved helper.");
+	}
 	const api = new URL(apiURL);
 	if (api.username || api.password || api.search || api.hash || !["http:", "https:"].includes(api.protocol)) {
 		throw new Error("Hive credential helper API URL is invalid.");

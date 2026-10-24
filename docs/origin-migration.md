@@ -29,6 +29,12 @@ scoped helper after the generic reset, so old section order cannot disable it.
 Isolated clone and updater transports carry only the approved URL’s effective
 `http.sslCAInfo`, `http.sslCAPath`, and `http.version` settings from inherited
 configuration. Headers, helpers, and URL rewrites are not carried across.
+Native workspace and updater operations refuse a configured `NETRC` path or an
+existing `.netrc`/`_netrc` in the effective home directory, even for public reads:
+Git/libcurl can otherwise authenticate outside the approved helper. The guard
+checks presence without reading credential contents and does not change HOME,
+so managed helper authentication remains available. Worktree/command-scoped
+credential overrides are also refused before a checkout is handed back.
 Existing files and unpushed work are not reset.
 
 A source identity conflict needs fresh consent: call `request_workspace` with
