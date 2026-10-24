@@ -39,7 +39,7 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 	const native = NATIVE_PATH.test(url.pathname);
 	const same = native ? actual.trim() === source.url : actual.trim().replace(/\.git$/, "").toLowerCase() === source.url.replace(/\.git$/, "").toLowerCase();
 	if (!same) throw new Error("updater origin differs from its verified source; preserve local work and reprovision explicitly");
-	if (!native && (url.hostname !== "github.com" || !/^\/[^/]+\/[^/]+\.git$/.test(url.pathname))) throw new Error("unsupported updater source");
+	if (!native && (url.hostname !== "github.com" || !/^\/[^/]+\/[^/]+$/.test(url.pathname))) throw new Error("unsupported updater source");
 	if (source.ref) throw new Error("configured source is pinned; use the Hive-managed revision verifier instead of this timer");
 	const branch = source.branch;
 	if (typeof branch !== "string" || !branch) throw new Error("updater needs the provisioner-verified branch; reprovision before retrying");

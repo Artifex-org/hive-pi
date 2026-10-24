@@ -17,6 +17,12 @@ function git(cwd: string, ...args: string[]) { return execFileSync("git", args, 
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe("provisioner-bound timer source", () => {
+	it.each(["", ".git"])("accepts metadata-backed GitHub URLs with suffix %s", (suffix) => {
+		const url = "https://github.com/Artifex-org/hive-pi" + suffix;
+		const meta = { ...metadata, base: { ...metadata.base, url } };
+		const selected = prepare("base", "https://github.com/Artifex-org/hive-pi.git", "", ["pull", "--ff-only"], {}, meta);
+		expect(selected.args.slice(-5)).toEqual(["pull", "--ff-only", "--no-recurse-submodules", url, "refs/heads/main"]);
+	});
 	it("uses the verified URL and explicit branch, never an implicit upstream", () => {
 		const selected = prepare("base", source, "branch.main.remote\nevil\0", ["pull", "--ff-only"], { HIVE_TOKEN: "not-a-real-test-token", GIT_CONFIG_PARAMETERS: "bad", GIT_OBJECT_DIRECTORY: "/foreign" });
 		expect(selected.args.slice(-5)).toEqual(["pull", "--ff-only", "--no-recurse-submodules", source, "refs/heads/main"]);
