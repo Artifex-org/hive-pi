@@ -23,6 +23,9 @@ const CODEX_QUOTA = "Codex error: The usage limit has been reached";
 /** xAI with no credits on the credential (2026-08-26). */
 const XAI_CREDITS =
 	'403 "You have run out of credits or need a Grok subscription to continue."';
+/** Kimi Code with its weekly window spent (MoonshotAI/kimi-code#3951). */
+const KIMI_WEEKLY =
+	"403 You've reached your weekly (7-day) usage limit. Your quota will reset when the current 7-day window ends.";
 /** The OpenRouter 402 that froze five pyERP agents (2026-08-15). */
 const OPENROUTER_402 =
 	'402 This request requires more credits, or fewer max_tokens. You requested up to 128000 tokens, but can only afford 72902. "limit_source":"openrouter_key_limit"';
@@ -37,6 +40,9 @@ describe("isQuotaExhaustedText", () => {
 		expect(isQuotaExhaustedText(CODEX_QUOTA)).toBe(true);
 		expect(isQuotaExhaustedText(XAI_CREDITS)).toBe(true);
 		expect(isQuotaExhaustedText(OPENROUTER_402)).toBe(true);
+		expect(isQuotaExhaustedText(KIMI_WEEKLY)).toBe(true);
+		expect(isQuotaExhaustedText(KIMI_WEEKLY.replace("'", "’"))).toBe(true);
+		expect(isQuotaExhaustedText("403 You've reached your 5-hour usage limit.")).toBe(true);
 		expect(isQuotaExhaustedText("You've hit your usage limit. Try again at May 30th, 2026 8:12 PM")).toBe(true);
 		expect(isQuotaExhaustedText("insufficient_quota: You exceeded your current quota")).toBe(true);
 	});
@@ -96,6 +102,8 @@ describe("isQuotaExhaustedText", () => {
 			"tool error: could not open the credits page",
 			"the limit column is null for this row",
 			"AssertionError: expected quota to be 100",
+			"docs: explain what happens once a user has reached the usage limit page",
+			"you've reached your destination; the usage limit is documented elsewhere",
 		]) {
 			expect(isQuotaExhaustedText(text), text).toBe(false);
 		}
