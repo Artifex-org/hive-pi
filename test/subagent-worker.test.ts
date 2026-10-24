@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import registerMetaProvider from "../extensions/meta-media/provider-only.ts";
+import registerKimiProvider from "../extensions/kimi-coding/index.ts";
 import { createFakePi } from "./fake-pi.ts";
 import {
 	WORKER_BUILTIN_MCP_EXTENSIONS,
@@ -120,7 +121,10 @@ describe("subagent worker invocation", () => {
 		// with real SDK role-grant coverage in public-fetch-worker.test.ts.
 		// One launch-gated transport added; its exact lifecycle-only surface is pinned below.
 		// One bounded cybersecurity-error recovery hook, pinned below; no agenda policies.
-		expect(workerExtensionPaths().length).toBeLessThanOrEqual(9);
+		// Raised 9 -> 10 for kimi-coding/index.ts: provider only, no hooks or tools,
+		// pinned below — the advisor and every delegation on kimi-coding/k3.1-pro
+		// run in a worker.
+		expect(workerExtensionPaths().length).toBeLessThanOrEqual(10);
 	});
 
 	it("loads the fast worker module, with its one hook and no tools or commands", () => {
@@ -149,6 +153,19 @@ describe("subagent worker invocation", () => {
 		registerMetaProvider(pi.api);
 		expect(register).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: "meta" }));
 		expect(source, "a worker provider module must not add tools").not.toMatch(/\bregisterTool\(/);
+	});
+
+	it("loads the kimi-coding provider, with no hooks or tools", () => {
+		// Without it a worker resolves kimi-coding/k3.1-pro as a custom id cloned
+		// from kimi-for-coding, capped at 32768 output tokens.
+		const provider = workerExtensionPaths().find((path) => path.endsWith("/extensions/kimi-coding/index.ts"));
+		expect(provider, "worker must load the kimi-coding provider").toBeDefined();
+		const source = readFileSync(provider as string, "utf8");
+		const pi = createFakePi();
+		const register = vi.spyOn(pi.api, "registerProvider");
+		registerKimiProvider(pi.api);
+		expect(register).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: "kimi-coding" }));
+		expect(source).not.toMatch(/\bpi\.on\(|\bregisterTool\(|\bregisterCommand\(|\bregisterFlag\(/);
 	});
 
 	it("loads the loadout module, whose hooks append the on-demand tool index and reject a codemode script that calls a nonexistent discovery member", () => {

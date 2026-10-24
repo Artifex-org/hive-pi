@@ -68,6 +68,10 @@ import { ensureWorkerAgentDir } from "../mcp-common/config.ts";
  *   OpenRouter's `404 … Paid model training violation` while readiness said
  *   ready (22 papercuts, 2026-09-20..22). Any provider that exists only via
  *   `registerProvider` must be listed here for workers to run on it.
+ * - `kimi-coding/index.ts` — registers the `kimi-coding` PROVIDER only, with
+ *   the K3.1 models pi does not ship yet. A worker without it runs
+ *   `kimi-coding/k3.1-pro` as a custom id cloned from kimi-for-coding, capped
+ *   at 32768 output tokens.
  * - `fast/worker.ts` — OpenAI Fast mode for delegations, when the launch sets
  *   `PI_SUBAGENT_FAST=1` (otherwise it returns before registering anything). It
  *   wraps the OpenAI providers only — no tools, no commands — and needs ONE hook,
@@ -86,6 +90,7 @@ const WORKER_EXTENSIONS = [
 	"../edit-common/rowtool.ts",
 	"../opmode/index.ts",
 	"../meta-media/provider-only.ts",
+	"../kimi-coding/index.ts",
 	// Launch-gated provider and cleanup only; no tool execution or policy hooks.
 	"../claude-sdk/index.ts",
 	"../fast/worker.ts",
