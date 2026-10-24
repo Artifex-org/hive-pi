@@ -35,6 +35,36 @@ function fixture(publicRead = true, existingRemote?: string) {
 }
 
 describe("native workspace grant provisioning", () => {
+	it("refuses inherited cookie files before cloning", async () => {
+		const f = fixture();
+		const global = join(f.root, "gitconfig");
+		execFileSync("git", ["config", "--file", global, "http.cookieFile", "/fixture/cookies"]);
+		vi.stubEnv("GIT_CONFIG_GLOBAL", global);
+		f.exec.mockImplementation(async (command, args) => {
+			const r = spawnSync(command, args, { encoding: "utf8" });
+			return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+		});
+		const result = await f.tools.get("request_workspace")!.execute("cookie", { repo: "harness" });
+		expect(result.content[0].text).toContain("conflicting inherited Git transport");
+		expect(f.exec.mock.calls.some(([, args]) => args.includes("clone"))).toBe(false);
+	});
+	it("creates an approved missing scratch root before real Git preflight", async () => {
+		const f = fixture();
+		const root = join(f.root, "missing", "scratch");
+		f.grant.target_dir = root;
+		f.exec.mockImplementation(async (command, args) => {
+			if (args.includes("clone")) {
+				expect(existsSync(root)).toBe(true);
+				execFileSync("git", ["init", join(root, "harness")]);
+				return { code: 0, stdout: "", stderr: "" };
+			}
+			const r = spawnSync(command, args, { encoding: "utf8" });
+			return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+		});
+		const result = await f.tools.get("request_workspace")!.execute("missing-root", { repo: "harness" });
+		expect(result.content[0].text).toContain("cloned https://origin.hiveci.io/");
+	});
+
 	it("uses exact Origin URL with no GitHub fallback or credentials for public code", async () => {
 		const f = fixture();
 		const result = await f.tools.get("request_workspace")!.execute("call", { repo: "harness" });
@@ -115,6 +145,8 @@ describe("native workspace grant provisioning", () => {
 		["rewrite", "url.https://other.example/.insteadOf", "https://origin.hiveci.io/"],
 		["masked-rewrite", "url.https://other.example/.insteadOf", "https://origin.hiveci.io/"],
 		["header", "http.https://origin.hiveci.io/.extraHeader", "X-Unwanted: yes"],
+		["cookie", "http.cookieFile", "/fixture/cookies"],
+		["scoped cookie", "http.https://origin.hiveci.io/.cookieFile", "/fixture/cookies"],
 		["redirect", "http.https://origin.hiveci.io/.followRedirects", "true"],
 		["helper", "credential.https://origin.hiveci.io/.helper", "!unwanted-helper"],
 	])("checks real Git configuration before reusing a checkout: %s", async (_name, key, value) => {

@@ -83,7 +83,8 @@ export function nativeWorkspaceTransportConflict(source: WorkspaceCloneSource, c
 		const key = entry.slice(0, split).toLowerCase();
 		// Scoped redirects/headers override generic flags; includes can restore
 		// them. Other settings, such as a custom TLS CA, retain their meaning.
-		return key.startsWith("url.") || key.startsWith("include.") || key.startsWith("includeif.") ||
+		return (key.startsWith("http.") && key.endsWith(".cookiefile") && Boolean(entry.slice(split + 1))) ||
+			key.startsWith("url.") || key.startsWith("include.") || key.startsWith("includeif.") ||
 			(key.startsWith("http.") && (key.endsWith(".followredirects") || key.endsWith(".extraheader")) && !["http.followredirects", "http.extraheader"].includes(key)) ||
 			(key.startsWith("credential.") && !["credential.helper", "credential.usehttppath", scopedHelper].includes(key)) ||
 			(key.startsWith("remote.origin.") && !["remote.origin.url", "remote.origin.fetch", "remote.origin.tagopt"].includes(key));

@@ -54,7 +54,7 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 		const key = entry.slice(0, split).toLowerCase();
 		const value = entry.slice(split + 1);
 		if ((key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(value)) ||
-			(key.startsWith("http.") && key.endsWith("extraheader") && value) ||
+			(key.startsWith("http.") && (key.endsWith(".extraheader") || key.endsWith(".cookiefile")) && value) ||
 			(key.startsWith("http.") && key.endsWith(".followredirects") && key !== "http.followredirects")) {
 			throw new Error("inherited Git URL rewrite, HTTP header or scoped HTTP configuration prevents verified source access");
 		}

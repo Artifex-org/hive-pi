@@ -25,7 +25,7 @@
  * the agent can read and adapt to.
  */
 
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -184,6 +184,7 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 				? `- ${r.name}: already present at ${dest} — scoped Git configuration verified; files and refs preserved.`
 				: `- ${r.name}: already present at ${dest} — left as-is (nothing re-cloned).`;
 		}
+		if (source.native) mkdirSync(root, { recursive: true });
 		const tls = source.native ? await ordinaryNativeTransportSafe(pi, root, source, signal) : [];
 		if (!tls) {
 			return `- ${r.name}: refused — conflicting inherited Git transport configuration; no clone was attempted.`;
@@ -232,7 +233,7 @@ async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, 
 	for (const entry of http.stdout.split("\0")) {
 		const split = entry.indexOf("\n");
 		const key = entry.slice(0, split), value = entry.slice(split + 1);
-		if ((key === "http.extraheader" && Boolean(value)) || (key === "http.followredirects" && value !== "false")) return undefined;
+		if ((["http.extraheader", "http.cookiefile"].includes(key) && Boolean(value)) || (key === "http.followredirects" && value !== "false")) return undefined;
 		if (["http.sslcainfo", "http.sslcapath", "http.version"].includes(key)) tls.push([key, value]);
 	}
 	return tls;
