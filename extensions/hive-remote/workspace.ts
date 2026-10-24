@@ -36,6 +36,7 @@ import type { HiveAuth } from "../hive-common/http.ts";
 import { fetchWorkspaceCatalog, requestAndWait, type WorkspaceGrantValue, type WorkspaceRepoGrant } from "./client.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { exposureFor } from "../loadout/policy.ts";
+import { nativeWorkspaceSource, nativeWorkspaceGitConfig, nativeWorkspaceGitEnv, type WorkspaceCloneSource } from "./workspace-origin.ts";
 
 /** How often the pending request is polled while waiting for a decision. */
 const POLL_MS = 3_000;
@@ -122,7 +123,7 @@ export function isSafeRepoSlug(repo: unknown): repo is string {
  * GIT_TERMINAL_PROMPT=0` so a private repo with no working credential fails fast
  * instead of blocking on a prompt no one can answer inside the sandbox.
  */
-async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, signal: AbortSignal | undefined): Promise<string> {
+async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth, signal: AbortSignal | undefined): Promise<string> {
 	const root = expandTargetDir(r.target_dir);
 	if (!root) {
 		return `- ${r.name}: could not resolve a scratch directory (target_dir=${JSON.stringify(r.target_dir)}). Clone ${r.repo} yourself under ~/.hive/scratch/.`;
@@ -140,25 +141,48 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, signal: AbortSi
 	if (!isSafeGrantName(r.name)) {
 		return `- ${r.name}: refused — a grant name must be a single path segment, not a path.`;
 	}
-	if (!isSafeRepoSlug(r.repo)) {
-		return `- ${r.name}: refused — ${JSON.stringify(r.repo)} is not an owner/name slug.`;
+	let source: WorkspaceCloneSource;
+	try {
+		if (r.source_provider === "hive") source = nativeWorkspaceSource(r);
+		else {
+			if (r.source_provider !== undefined && r.source_provider !== "github") throw new Error("Unsupported repository provider.");
+			if (!isSafeRepoSlug(r.repo)) throw new Error("Repository is not an owner/name slug.");
+			const expected = `https://github.com/${r.repo}`;
+			if (r.clone_url && r.clone_url.replace(/\\.git$/, "") !== expected) throw new Error("GitHub clone URL does not match the approved repository.");
+			source = { url: r.clone_url || expected, native: false };
+		}
+	} catch (error) {
+		return `- ${r.name}: refused — ${error instanceof Error ? error.message : "invalid workspace identity"}`;
 	}
 	const dest = join(root, r.name);
-	if (existsSync(dest)) {
-		return `- ${r.name}: already present at ${dest} — left as-is (nothing re-cloned).`;
-	}
-
-	const args = ["GIT_TERMINAL_PROMPT=0", "git", "clone"];
-	if (r.branch) args.push("--branch", r.branch);
-	args.push(`https://github.com/${r.repo}`, dest);
-
 	try {
+		const prefix = source.native ? nativeWorkspaceGitEnv(auth.url, process.env, Boolean(source.helper)) : ["GIT_TERMINAL_PROMPT=0"];
+		const config = source.native ? nativeWorkspaceGitConfig(source) : [["http.followRedirects", "false"]];
+		const git = ["git", ...config.flatMap(([key, value]) => ["-c", key + "=" + value])];
+		if (existsSync(dest)) {
+			if (source.native) {
+				const remote = await pi.exec("env", [...prefix, ...git, "-C", dest, "config", "--get", "remote.origin.url"], { signal, timeout: CLONE_TIMEOUT_MS });
+				if (remote.code !== 0 || remote.stdout.trim() !== source.url) {
+					return `- ${r.name}: refused — existing checkout does not match the approved Origin URL; local work was preserved.`;
+				}
+			}
+			return `- ${r.name}: already present at ${dest} — left as-is (nothing re-cloned).`;
+		}
+		const args = [...prefix, ...git, "clone"];
+		if (r.branch) args.push("--branch=" + r.branch);
+		args.push("--", source.url, dest);
 		const res = await pi.exec("env", args, { signal, timeout: CLONE_TIMEOUT_MS });
 		if (res.code !== 0) {
 			const why = (res.stderr || res.stdout || "").trim().slice(0, 300);
-			return `- ${r.name}: clone failed (git exit ${res.code})${why ? `: ${why}` : ""}`;
+			return source.native ? `- ${r.name}: native clone failed (git exit ${res.code}); check explicit workspace read approval and the exact project source. No GitHub fallback was attempted.` : `- ${r.name}: clone failed (git exit ${res.code})${why ? `: ${why}` : ""}`;
 		}
-		return `- ${r.name}: cloned ${r.repo}${r.branch ? ` (branch ${r.branch})` : ""} into ${dest}`;
+		if (source.native) {
+			for (const [key, value] of nativeWorkspaceGitConfig(source)) {
+				const configured = await pi.exec("env", [...prefix, "git", "-C", dest, "config", "--local", key, value], { signal, timeout: CLONE_TIMEOUT_MS });
+				if (configured.code !== 0) return `- ${r.name}: cloned into ${dest}, but scoped Git configuration failed; do not use the checkout until repaired.`;
+			}
+		}
+		return `- ${r.name}: cloned ${source.native ? source.url : r.repo}${r.branch ? ` (branch ${r.branch})` : ""} into ${dest}`;
 	} catch (err) {
 		return `- ${r.name}: clone failed: ${err instanceof Error ? err.message : "error"}`;
 	}
@@ -202,7 +226,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 			if (!catalog.ok) return fail(`Could not read the workspace catalog: ${catalog.error}.`);
 			if (catalog.entries.length === 0) return ok("No repos are configured as grantable in this Hive.");
 			const lines = catalog.entries.map(
-				(e) => `- ${e.name} (${e.repo}${e.default_branch ? `, default branch ${e.default_branch}` : ""})${e.description ? ` — ${e.description}` : ""}`,
+				(e) => `- ${e.name} (${e.clone_url || e.repo}${e.default_branch ? `, default branch ${e.default_branch}` : ""})${e.description ? ` — ${e.description}` : ""}`,
 			);
 			return ok(["Grantable repos:", ...lines].join("\n"));
 		},
@@ -269,7 +293,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 				case "timeout":
 					return fail(`No decision on "${repoName}" within the wait window — it may still be pending. Continue with other work; request it again later to rejoin the decision.`);
 				case "error":
-					return fail(`The workspace request for "${repoName}" could not be completed: ${decision.error ?? "unknown error"}.`);
+					return fail(`The workspace request for "${repoName}" could not be completed: ${decision.error ?? "unknown error"}.${decision.status === 409 ? " The approved source identity changed. Open fresh consent with a new explicit request_id; reuse that ID while pending. The old grant was not retargeted." : ""}`);
 			}
 
 			// approve | auto. A failed value fetch retains the approved verdict.
@@ -286,7 +310,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 
 			const clones: string[] = [];
 			for (const r of grant.repos) {
-				clones.push(await cloneOne(pi, r, signal));
+				clones.push(await cloneOne(pi, r, auth, signal));
 			}
 			return ok([`Workspace granted (${decision.verdict}).`, ...clones, "", DEPS_NOTE].join("\n"));
 		},
