@@ -74,6 +74,10 @@ import { ensureWorkerAgentDir } from "../mcp-common/config.ts";
  *   session_start, because the model registry is unreachable before a ctx
  *   exists. Without it a delegation could never run at the priority tier, since
  *   the parent's wrapped provider lives in the parent's process.
+ * - `cybersecurity-fallback/index.ts` — bounded provider-error recovery, not
+ *   agenda re-entry. A worker must recover its own failed inference; the parent
+ *   cannot switch a model inside the child process. The native settle boundary
+ *   allows one continuation, preserving completed tools and user cancellation.
  */
 const WORKER_EXTENSIONS = [
 	"../loadout/index.ts",
@@ -85,6 +89,7 @@ const WORKER_EXTENSIONS = [
 	// Launch-gated provider and cleanup only; no tool execution or policy hooks.
 	"../claude-sdk/index.ts",
 	"../fast/worker.ts",
+	"../cybersecurity-fallback/index.ts",
 ];
 
 /**

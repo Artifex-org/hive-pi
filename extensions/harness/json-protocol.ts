@@ -159,6 +159,9 @@ export function foldJsonLine(state: JsonRunState, line: string): JsonRunState {
 		// record of what actually answered first.
 		model: state.model ?? message.model,
 		stopReason: message.stopReason ?? state.stopReason,
-		errorMessage: message.errorMessage ?? state.errorMessage,
+		// A successful response supersedes a recovered failure. Keep the old
+		// diagnostic if a malformed event omits stopReason altogether.
+		errorMessage: message.stopReason === "stop" || message.stopReason === "toolUse" || message.stopReason === "length"
+			? undefined : message.errorMessage ?? state.errorMessage,
 	};
 }

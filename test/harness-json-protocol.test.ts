@@ -88,7 +88,17 @@ describe("terminal metadata", () => {
 		expect(state.errorMessage).toBe("no such model");
 	});
 
-	it("does not let a later clean message erase an earlier error", () => {
+	it("clears a recovered terminal error while preserving its historical message", () => {
+		const state = feed([
+			assistant("", { stopReason: "error", errorMessage: "cybersecurity policy refusal" }),
+			assistant("recovered", { stopReason: "stop", model: "glm-5.3-flash" }),
+		]);
+		expect(state.stopReason).toBe("stop");
+		expect(state.errorMessage).toBeUndefined();
+		expect(state.messages[0]).toMatchObject({ errorMessage: "cybersecurity policy refusal" });
+	});
+
+	it("does not let a malformed message without stopReason erase an earlier error", () => {
 		const state = feed([assistant("", { stopReason: "error", errorMessage: "boom" }), assistant("recovered")]);
 		expect(state.errorMessage).toBe("boom");
 	});
