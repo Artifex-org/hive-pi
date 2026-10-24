@@ -25,7 +25,7 @@
  * the agent can read and adapt to.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -164,6 +164,10 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 				const remote = await pi.exec("env", [...prefix, ...git, "-C", dest, "config", "--get-all", "remote.origin.url"], { signal, timeout: CLONE_TIMEOUT_MS });
 				if (remote.code !== 0 || remote.stdout.trim() !== source.url) {
 					return `- ${r.name}: refused — existing checkout does not match the approved Origin URL; local work was preserved.`;
+				}
+				const top = await pi.exec("env", [...prefix, "git", "-C", dest, "rev-parse", "--show-toplevel"], { signal, timeout: CLONE_TIMEOUT_MS });
+				if (top.code !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(dest)) {
+					return `- ${r.name}: refused — destination is not the checkout root; local work was preserved.`;
 				}
 				const existing = await pi.exec("env", [...prefix, "git", "-C", dest, "config", "--null", "--list"], { signal, timeout: CLONE_TIMEOUT_MS });
 				if (existing.code !== 0 || nativeWorkspaceTransportConflict(source, existing.stdout)) {

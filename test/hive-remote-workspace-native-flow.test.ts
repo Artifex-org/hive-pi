@@ -96,7 +96,7 @@ describe("native workspace grant provisioning", () => {
 				fail = false;
 				return { code: 1, stdout: "", stderr: "config locked" };
 			}
-			return { code: 0, stdout: args.includes("--get-all") ? f.grant.clone_url! : "", stderr: "" };
+			return { code: 0, stdout: args.includes("--get-all") ? f.grant.clone_url! : args.includes("--show-toplevel") ? join(f.root, "harness") : "", stderr: "" };
 		});
 		const first = await f.tools.get("request_workspace")!.execute("first", { repo: "harness" });
 		expect(first.content[0].text).toContain("scoped Git configuration failed");
@@ -294,6 +294,22 @@ describe("native workspace grant provisioning", () => {
 		const result = await f.tools.get("request_workspace")!.execute("tls", { repo: "harness" });
 		expect(result.content[0].text).toContain("cloned https://origin.hiveci.io/");
 		expect(observed).toBe(ca);
+	});
+
+	it("refuses a plain subdirectory without modifying its matching parent checkout", async () => {
+		const f = fixture();
+		execFileSync("git", ["init", f.root]);
+		execFileSync("git", ["-C", f.root, "remote", "add", "origin", f.grant.clone_url!]);
+		execFileSync("git", ["-C", f.root, "config", "credential.helper", "!parent-helper"]);
+		mkdirSync(join(f.root, "harness"));
+		const before = readFileSync(join(f.root, ".git/config"), "utf8");
+		f.exec.mockImplementation(async (command, args) => {
+			const r = spawnSync(command, args, { encoding: "utf8" });
+			return { code: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+		});
+		const result = await f.tools.get("request_workspace")!.execute("parent", { repo: "harness" });
+		expect(result.content[0].text).toContain("destination is not the checkout root");
+		expect(readFileSync(join(f.root, ".git/config"), "utf8")).toBe(before);
 	});
 
 	it("catalog displays the approved transport instead of an empty GitHub slug", async () => {
