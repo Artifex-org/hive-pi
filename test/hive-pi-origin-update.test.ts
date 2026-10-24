@@ -19,7 +19,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 describe("provisioner-bound timer source", () => {
 	it("uses the verified URL and explicit branch, never an implicit upstream", () => {
 		const selected = prepare("base", source, "branch.main.remote\nevil\0", ["pull", "--ff-only"], { HIVE_TOKEN: "not-a-real-test-token", GIT_CONFIG_PARAMETERS: "bad", GIT_OBJECT_DIRECTORY: "/foreign" });
-		expect(selected.args.slice(-5)).toEqual(["pull", "--ff-only", "--no-recurse-submodules", source, "main"]);
+		expect(selected.args.slice(-5)).toEqual(["pull", "--ff-only", "--no-recurse-submodules", source, "refs/heads/main"]);
 		expect(selected.env.HIVE_TOKEN).toBeUndefined();
 		expect(selected.env.GIT_CONFIG_PARAMETERS).toBeUndefined();
 		expect(selected.env.GIT_OBJECT_DIRECTORY).toBeUndefined();
@@ -50,7 +50,7 @@ describe("provisioner-bound timer source", () => {
 		expect(() => prepare("overlay", privateSource, "", ["pull"], {}, { ...metadata, overlay: { ...metadata.overlay, branch: "" } })).toThrow();
 		expect(() => prepare("overlay", privateSource, "", ["pull"], {}, { ...metadata, overlay: { ...metadata.overlay, branch: "../wrong" } })).toThrow();
 	});
-	it.each([{ role: "base", selectedURL: source, branch: "main", local: "main" }, { role: "base", selectedURL: source, branch: "production", local: "maintenance" }, { role: "overlay", selectedURL: privateSource, branch: "production", local: "production" }])("fast-forwards $role through its installed symlink only to the verified branch despite another upstream", ({ role, selectedURL, branch, local }) => {
+	it.each([{ role: "base", selectedURL: source, branch: "main", local: "main" }, { role: "base", selectedURL: source, branch: "production", local: "maintenance" }, { role: "overlay", selectedURL: privateSource, branch: "production", local: "production" }, { role: "base", selectedURL: source, branch: "main", local: "main", hashShaped: true }])("fast-forwards $role through its installed symlink only to the verified branch despite another upstream", ({ role, selectedURL, branch, local, hashShaped }) => {
 		const root = mkdtempSync(join(tmpdir(), "hive-pi-origin-update-"));
 		roots.push(root);
 		const origin = join(root, "source.git");
@@ -64,12 +64,17 @@ describe("provisioner-bound timer source", () => {
 		writeFileSync(join(author, "value"), "first");
 		git(author, "add", ".");
 		git(author, "commit", "-m", "first");
-		git(author, "push", "origin", branch);
+		if (hashShaped) {
+			branch = git(author, "rev-parse", "HEAD");
+			local = branch;
+			git(author, "branch", "-m", branch);
+		}
+		git(author, "push", "origin", "HEAD:refs/heads/" + branch);
 		git(root, "clone", "-b", branch, origin, checkout);
 		if (local !== branch) git(checkout, "branch", "-m", local);
 		writeFileSync(join(author, "value"), "verified");
 		git(author, "commit", "-am", "verified");
-		git(author, "push", "origin", branch);
+		git(author, "push", "origin", "HEAD:refs/heads/" + branch);
 		const expected = git(author, "rev-parse", "HEAD");
 		git(checkout, "remote", "set-url", "origin", selectedURL);
 		// A bare pull chooses this unreachable upstream, not the verified URL.
@@ -93,7 +98,7 @@ describe("provisioner-bound timer source", () => {
 		git(root, "clone", "--bare", origin, foreign);
 		writeFileSync(join(author, "value"), "unapproved");
 		git(author, "commit", "-am", "unapproved");
-		git(author, "push", foreign, branch);
+		git(author, "push", foreign, "HEAD:refs/heads/" + branch);
 		git(checkout, "config", "url." + foreign + ".insteadOf", selectedURL);
 		const probeEnv = { ...env, PATH: process.env.PATH, GIT_CONFIG: replacement };
 		const priorRemote = git(checkout, "rev-parse", "refs/remotes/origin/" + branch);
@@ -104,7 +109,7 @@ describe("provisioner-bound timer source", () => {
 		git(checkout, "checkout", "-b", "unselected-local");
 		expect(() => execFileSync(process.execPath, [installedHelper, path, role, checkout, "pull", "--ff-only"], { env, stdio: "pipe" })).toThrow(/checkout branch differs/);
 		expect(git(checkout, "rev-parse", "HEAD")).toBe(before);
-		git(checkout, "checkout", local);
+		git(checkout, "switch", local);
 		execFileSync(process.execPath, [installedHelper, path, role, checkout, "pull", "--ff-only"], { env, stdio: "pipe" });
 		expect(git(checkout, "rev-parse", "HEAD")).toBe(expected);
 		expect(readFileSync(join(checkout, "value"), "utf8")).toBe("verified");

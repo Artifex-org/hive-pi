@@ -73,7 +73,7 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 	// network source. Network operations name the exact verified URL and branch.
 	let selectedOperation = ["rev-parse", "--verify", "refs/remotes/origin/" + branch + "^{commit}"];
 	if (operation[0] === "fetch") selectedOperation = ["fetch", "--prune", "--no-recurse-submodules", source.url, "+refs/heads/" + branch + ":refs/remotes/origin/" + branch];
-	if (operation[0] === "pull") selectedOperation = ["pull", "--ff-only", "--no-recurse-submodules", source.url, branch];
+	if (operation[0] === "pull") selectedOperation = ["pull", "--ff-only", "--no-recurse-submodules", source.url, "refs/heads/" + branch];
 	return { args: [...flags, "-C", checkout, ...selectedOperation], env, localRef };
 }
 
