@@ -85,7 +85,7 @@ it("opens fresh consent after expiry only with an explicit new ID and reuses it 
 	const granted = await reopened;
 	expect(granted.content[0].text).toContain("Workspace granted (approve).");
 	expect(granted.content[0].text).toContain(`cloned Artifex-org/hive-pi (branch main) into ${join(targetDir!, "hive-pi")}`);
-	expect(exec).toHaveBeenCalledExactlyOnceWith("env", ["GIT_TERMINAL_PROMPT=0", "git", "clone", "--branch", "main", "https://github.com/Artifex-org/hive-pi", join(targetDir!, "hive-pi")], expect.anything());
+	expect(exec).toHaveBeenCalledExactlyOnceWith("env", ["GIT_TERMINAL_PROMPT=0", "git", "-c", "http.followRedirects=false", "clone", "--branch=main", "--", "https://github.com/Artifex-org/hive-pi", join(targetDir!, "hive-pi")], expect.anything());
 	const concurrentRetry = await pendingRetry;
 	expect(concurrentRetry.content[0].text).toContain("already granted and delivered");
 	const retry = await tool.execute("retry", params);

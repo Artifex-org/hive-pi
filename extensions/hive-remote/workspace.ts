@@ -25,7 +25,7 @@
  * the agent can read and adapt to.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +36,7 @@ import type { HiveAuth } from "../hive-common/http.ts";
 import { fetchWorkspaceCatalog, requestAndWait, type WorkspaceGrantValue, type WorkspaceRepoGrant } from "./client.ts";
 import { registerGuardedTool } from "../guards-common/capability.ts";
 import { exposureFor } from "../loadout/policy.ts";
+import { nativeWorkspaceSource, nativeWorkspaceGitConfig, nativeWorkspaceGitContextEnv, nativeWorkspaceGitEnv, nativeWorkspaceTransportConflict, type WorkspaceCloneSource } from "./workspace-origin.ts";
 
 /** How often the pending request is polled while waiting for a decision. */
 const POLL_MS = 3_000;
@@ -117,12 +118,12 @@ export function isSafeRepoSlug(repo: unknown): repo is string {
 /**
  * Clone one granted repo into scratch, reporting the outcome as a line.
  *
- * Never throws. An already-present checkout is left untouched (the idempotent
- * case: a re-request of the same repo). The clone runs through `env
+ * Never throws. Existing files and refs remain untouched; native checkouts
+ * have their source-scoped transport configuration repaired on retry. The clone runs through `env
  * GIT_TERMINAL_PROMPT=0` so a private repo with no working credential fails fast
  * instead of blocking on a prompt no one can answer inside the sandbox.
  */
-async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, signal: AbortSignal | undefined): Promise<string> {
+async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth, signal: AbortSignal | undefined): Promise<string> {
 	const root = expandTargetDir(r.target_dir);
 	if (!root) {
 		return `- ${r.name}: could not resolve a scratch directory (target_dir=${JSON.stringify(r.target_dir)}). Clone ${r.repo} yourself under ~/.hive/scratch/.`;
@@ -140,28 +141,113 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, signal: AbortSi
 	if (!isSafeGrantName(r.name)) {
 		return `- ${r.name}: refused — a grant name must be a single path segment, not a path.`;
 	}
-	if (!isSafeRepoSlug(r.repo)) {
-		return `- ${r.name}: refused — ${JSON.stringify(r.repo)} is not an owner/name slug.`;
+	let source: WorkspaceCloneSource;
+	try {
+		if (r.source_provider === "hive") source = nativeWorkspaceSource(r);
+		else {
+			if (r.source_provider !== undefined && r.source_provider !== "github") throw new Error("Unsupported repository provider.");
+			if (!isSafeRepoSlug(r.repo)) throw new Error("Repository is not an owner/name slug.");
+			const expected = `https://github.com/${r.repo}`;
+			if (r.clone_url && r.clone_url.replace(/\.git$/, "") !== expected) throw new Error("GitHub clone URL does not match the approved repository.");
+			source = { url: r.clone_url || expected, native: false };
+		}
+	} catch (error) {
+		return `- ${r.name}: refused — ${error instanceof Error ? error.message : "invalid workspace identity"}`;
 	}
 	const dest = join(root, r.name);
-	if (existsSync(dest)) {
-		return `- ${r.name}: already present at ${dest} — left as-is (nothing re-cloned).`;
-	}
-
-	const args = ["GIT_TERMINAL_PROMPT=0", "git", "clone"];
-	if (r.branch) args.push("--branch", r.branch);
-	args.push(`https://github.com/${r.repo}`, dest);
-
 	try {
+		const prefix = source.native ? nativeWorkspaceGitEnv(auth.url, process.env, Boolean(source.helper)) : ["GIT_TERMINAL_PROMPT=0"];
+		const config = source.native ? nativeWorkspaceGitConfig(source) : [["http.followRedirects", "false"]];
+		const git = ["git", ...config.flatMap(([key, value]) => ["-c", key + "=" + value])];
+		if (existsSync(dest)) {
+			if (source.native) {
+				const remote = await pi.exec("env", [...prefix, ...git, "-C", dest, "config", "--get-all", "remote.origin.url"], { signal, timeout: CLONE_TIMEOUT_MS });
+				if (remote.code !== 0 || remote.stdout.trim() !== source.url) {
+					return `- ${r.name}: refused — existing checkout does not match the approved Origin URL; local work was preserved.`;
+				}
+				const top = await pi.exec("env", [...prefix, "git", "-C", dest, "rev-parse", "--show-toplevel"], { signal, timeout: CLONE_TIMEOUT_MS });
+				if (top.code !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(dest)) {
+					return `- ${r.name}: refused — destination is not the checkout root; local work was preserved.`;
+				}
+				const existing = await pi.exec("env", [...prefix, "git", "-C", dest, "config", "--null", "--list"], { signal, timeout: CLONE_TIMEOUT_MS });
+				if (existing.code !== 0 || nativeWorkspaceTransportConflict(source, existing.stdout)) {
+					return `- ${r.name}: refused — existing checkout has conflicting Git transport configuration; local work was preserved.`;
+				}
+				if (!await ordinaryNativeTransportSafe(pi, dest, source, signal)) {
+					return `- ${r.name}: refused — conflicting inherited Git transport configuration; local work was preserved.`;
+				}
+				if (!await configureNativeCheckout(pi, prefix, dest, source, signal)) {
+					return `- ${r.name}: scoped Git configuration failed; local work was preserved. Do not use the checkout until repaired.`;
+				}
+			}
+			return source.native
+				? `- ${r.name}: already present at ${dest} — scoped Git configuration verified; files and refs preserved.`
+				: `- ${r.name}: already present at ${dest} — left as-is (nothing re-cloned).`;
+		}
+		if (source.native) mkdirSync(root, { recursive: true });
+		const tls = source.native ? await ordinaryNativeTransportSafe(pi, root, source, signal) : [];
+		if (!tls) {
+			return `- ${r.name}: refused — conflicting inherited Git transport configuration; no clone was attempted.`;
+		}
+		const args = [...prefix, ...git, ...tls.flatMap(([key, value]) => ["-c", key + "=" + value]), "clone"];
+		if (r.branch) args.push("--branch=" + r.branch);
+		args.push("--", source.url, dest);
 		const res = await pi.exec("env", args, { signal, timeout: CLONE_TIMEOUT_MS });
 		if (res.code !== 0) {
 			const why = (res.stderr || res.stdout || "").trim().slice(0, 300);
-			return `- ${r.name}: clone failed (git exit ${res.code})${why ? `: ${why}` : ""}`;
+			return source.native ? `- ${r.name}: native clone failed (git exit ${res.code}); check explicit workspace read approval and the exact project source. No GitHub fallback was attempted.` : `- ${r.name}: clone failed (git exit ${res.code})${why ? `: ${why}` : ""}`;
 		}
-		return `- ${r.name}: cloned ${r.repo}${r.branch ? ` (branch ${r.branch})` : ""} into ${dest}`;
+		if (source.native && !await configureNativeCheckout(pi, prefix, dest, source, signal)) {
+			return `- ${r.name}: cloned into ${dest}, but scoped Git configuration failed; do not use the checkout until repaired.`;
+		}
+		if (source.native && !await ordinaryNativeTransportSafe(pi, dest, source, signal)) {
+			return `- ${r.name}: refused — cloned into ${dest}, but conflicting inherited Git transport configuration prevents ordinary use. Do not use the checkout until repaired.`;
+		}
+		return `- ${r.name}: cloned ${source.native ? source.url : r.repo}${r.branch ? ` (branch ${r.branch})` : ""} into ${dest}`;
 	} catch (err) {
 		return `- ${r.name}: clone failed: ${err instanceof Error ? err.message : "error"}`;
 	}
+}
+
+async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<Array<[string, string]> | undefined> {
+	const effective = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--show-scope", "--null", "--list"], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (effective.code !== 0) return undefined;
+	const entries = effective.stdout.split("\0");
+	for (let i = 0; i + 1 < entries.length; i += 2) {
+		const split = entries[i + 1].indexOf("\n");
+		const key = entries[i + 1].slice(0, split).toLowerCase();
+		if (key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entries[i + 1].slice(split + 1))) return undefined;
+		// Worktree and command scopes load after the repaired common configuration.
+		if (["worktree", "command"].includes(entries[i]) && key.startsWith("credential.")) {
+			if (/^credential\.[^.]+$/.test(key)) return undefined;
+			// Match each scope independently: helpers accumulate, unlike get-urlmatch’s winner.
+			const scope = entries[i + 1].slice(0, split).slice(0, key.lastIndexOf("."));
+			const match = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "-c", scope + ".hiveWorkspaceTransportProbe=1", "config", "--get-urlmatch", "credential.hiveWorkspaceTransportProbe", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
+			if (match.code !== 1) return undefined;
+		}
+	}
+	// Let Git resolve URL patterns and precedence rather than approximating them.
+	const http = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--null", "--get-urlmatch", "http", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (http.code !== 0 && http.code !== 1) return undefined;
+	const tls: Array<[string, string]> = [];
+	for (const entry of http.stdout.split("\0")) {
+		const split = entry.indexOf("\n");
+		const key = entry.slice(0, split), value = entry.slice(split + 1);
+		if ((["http.extraheader", "http.cookiefile"].includes(key) && Boolean(value)) || (key === "http.followredirects" && value !== "false")) return undefined;
+		if (["http.sslcainfo", "http.sslcapath", "http.version"].includes(key)) tls.push([key, value]);
+	}
+	return tls;
+}
+
+async function configureNativeCheckout(pi: ExtensionAPI, prefix: string[], dest: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<boolean> {
+	// Recreate the scoped helper after the generic reset, not in its old section.
+	const removed = await pi.exec("env", [...prefix, "git", "-C", dest, "config", "--local", "--unset-all", "credential." + source.url + ".helper"], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (removed.code !== 0 && removed.code !== 5) return false;
+	for (const [key, value] of nativeWorkspaceGitConfig(source)) {
+		const configured = await pi.exec("env", [...prefix, "git", "-C", dest, "config", "--local", "--replace-all", key, value], { signal, timeout: CLONE_TIMEOUT_MS });
+		if (configured.code !== 0) return false;
+	}
+	return true;
 }
 
 const DEPS_NOTE =
@@ -202,7 +288,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 			if (!catalog.ok) return fail(`Could not read the workspace catalog: ${catalog.error}.`);
 			if (catalog.entries.length === 0) return ok("No repos are configured as grantable in this Hive.");
 			const lines = catalog.entries.map(
-				(e) => `- ${e.name} (${e.repo}${e.default_branch ? `, default branch ${e.default_branch}` : ""})${e.description ? ` — ${e.description}` : ""}`,
+				(e) => `- ${e.name} (${e.clone_url || e.repo}${e.default_branch ? `, default branch ${e.default_branch}` : ""})${e.description ? ` — ${e.description}` : ""}`,
 			);
 			return ok(["Grantable repos:", ...lines].join("\n"));
 		},
@@ -269,7 +355,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 				case "timeout":
 					return fail(`No decision on "${repoName}" within the wait window — it may still be pending. Continue with other work; request it again later to rejoin the decision.`);
 				case "error":
-					return fail(`The workspace request for "${repoName}" could not be completed: ${decision.error ?? "unknown error"}.`);
+					return fail(`The workspace request for "${repoName}" could not be completed: ${decision.error ?? "unknown error"}.${decision.status === 409 ? " The approved source identity changed. Open fresh consent with a new explicit request_id; reuse that ID while pending. The old grant was not retargeted." : ""}`);
 			}
 
 			// approve | auto. A failed value fetch retains the approved verdict.
@@ -277,7 +363,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 				return fail(`"${repoName}" was already granted and delivered once in this session. Check the earlier request_workspace result for its checkout path or clone error. Delivery does not prove the clone succeeded; if no checkout exists, ask the operator for a new grant. Nothing was cloned by this call.`);
 			}
 			if (decision.error) {
-				return fail(`"${repoName}" was approved, but the grant could not be fetched: ${decision.error}. No repo was cloned; retry this request to rejoin the same decision.`);
+				return fail(`"${repoName}" was approved, but the grant could not be fetched: ${decision.error}. No repo was cloned; ${decision.status === 409 ? "the approved source identity changed. Open fresh consent with a new explicit request_id; the old grant was not retargeted." : "retry this request to rejoin the same decision."}`);
 			}
 			const grant = decision.grant;
 			if (!grant || !Array.isArray(grant.repos) || grant.repos.length === 0) {
@@ -286,7 +372,7 @@ export function registerWorkspaceTools(pi: ExtensionAPI, deps: WorkspaceDeps): v
 
 			const clones: string[] = [];
 			for (const r of grant.repos) {
-				clones.push(await cloneOne(pi, r, signal));
+				clones.push(await cloneOne(pi, r, auth, signal));
 			}
 			return ok([`Workspace granted (${decision.verdict}).`, ...clones, "", DEPS_NOTE].join("\n"));
 		},

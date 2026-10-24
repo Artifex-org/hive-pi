@@ -599,6 +599,13 @@ export interface RequestRow {
 
 /** One repo in a delivered workspace grant. */
 export interface WorkspaceRepoGrant {
+	source_provider?: "github" | "hive";
+	clone_url?: string;
+	project?: string;
+	project_id?: string;
+	repository_id?: string;
+	public_read?: boolean;
+	workspace_grant_id?: string;
 	/** Catalog name, and the checkout's directory basename under target_dir. */
 	name: string;
 	/** owner/repo, the GitHub clone source. */
@@ -621,6 +628,12 @@ export interface WorkspaceGrantValue {
 
 /** A grantable repo, from the readable workspace catalog. */
 export interface WorkspaceCatalogEntry {
+	source_provider?: "github" | "hive";
+	clone_url?: string;
+	project?: string;
+	project_id?: string;
+	repository_id?: string;
+	public_read?: boolean;
 	name: string;
 	repo: string;
 	default_branch?: string;

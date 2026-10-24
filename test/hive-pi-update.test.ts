@@ -48,10 +48,11 @@ function stubTools(home: string): { bin: string; log: string } {
 	return { bin, log };
 }
 
-function runUpdater(home: string, extraPath?: string, overlay = ""): void {
-	execFileSync(SCRIPT, [], {
+function runUpdater(home: string, extraPath?: string, overlay = "", script = SCRIPT, environment: NodeJS.ProcessEnv = {}): void {
+	execFileSync(script, [], {
 		env: {
 			...process.env,
+			...environment,
 			HOME: home,
 			XDG_STATE_HOME: join(home, "state"),
 			// And the CONFIG home, or this inherits the machine's and sources its
@@ -153,6 +154,61 @@ function checkout(root: string, origin: string, name: string) {
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })));
 
 describe("hive-pi-update", () => {
+	it("cannot mask a native source as legacy GitHub with replacement Git config", () => {
+		const { root, origin } = fixture();
+		const { home, repo } = checkout(root, origin, "masked-native");
+		const url = "https://origin.hiveci.io/origin/tenant/base.git";
+		git(repo, "remote", "set-url", "origin", url);
+		// Keep the old, vulnerable transport entirely local.
+		git(repo, "config", "url." + origin + ".insteadOf", url);
+		const replacement = join(root, "replacement.config");
+		writeFileSync(replacement, '[remote "origin"]\n url = https://github.com/example/base.git\n');
+		const tools = stubTools(home);
+		const before = git(repo, "rev-parse", "HEAD");
+		expect(() => runUpdater(home, tools.bin, "", SCRIPT, { GIT_CONFIG: replacement })).toThrow(/native source needs verified provisioning metadata/);
+		expect(git(repo, "rev-parse", "HEAD")).toBe(before);
+	});
+
+	it.each([false, true])("updates a selected production base with stale origin/main=%s through installed scripts", (staleMain) => {
+		const { root, origin, source } = fixture();
+		git(source, "checkout", "-b", "production");
+		git(source, "push", "-u", "origin", "production");
+		const { home, repo } = checkout(root, origin, "selected-branch");
+		git(repo, "branch", "-m", "maintenance");
+		git(repo, "branch", "--set-upstream-to=origin/production");
+		if (!staleMain) git(repo, "update-ref", "-d", "refs/remotes/origin/main");
+		const url = "https://origin.hiveci.io/origin/tenant/base.git";
+		git(repo, "remote", "set-url", "origin", url);
+		writeFileSync(join(source, "README"), "production update\n");
+		git(source, "add", "README");
+		git(source, "commit", "-m", "advance production");
+		git(source, "push");
+		const expected = git(source, "rev-parse", "HEAD");
+		const config = join(home, "config/hive-pi");
+		mkdirSync(config, { recursive: true });
+		writeFileSync(join(config, "update-sources.json"), JSON.stringify({ version: 1, base: { url, branch: "production", local_branch: "maintenance" } }));
+		const tools = stubTools(home);
+		symlinkSync(process.execPath, join(tools.bin, "node"));
+		const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+		writeFileSync(join(tools.bin, "git"), `#!${process.execPath}\nconst {spawnSync}=require('node:child_process'); const args=process.argv.slice(2).map(a=>!process.argv.includes("config")&&a===${JSON.stringify(url)}?${JSON.stringify(origin)}:a); const r=spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'}); process.exit(r.status??1);\n`, { mode: 0o755 });
+		const installed = join(home, ".local/bin/hive-pi-update");
+		const helper = join(home, ".local/lib/hive-pi/source-git.mjs");
+		mkdirSync(join(home, ".local/bin"), { recursive: true });
+		mkdirSync(join(home, ".local/lib/hive-pi"), { recursive: true });
+		symlinkSync(SCRIPT, installed);
+		symlinkSync(join(import.meta.dirname, "../workstation/.local/lib/hive-pi/source-git.mjs"), helper);
+		const before = git(repo, "rev-parse", "HEAD");
+		git(repo, "config", "--replace-all", "remote.origin.url", origin);
+		git(repo, "config", "--add", "remote.origin.url", url);
+		expect(() => runUpdater(home, tools.bin, "", installed)).toThrow(/origin differs/);
+		expect(git(repo, "rev-parse", "HEAD")).toBe(before);
+		git(repo, "config", "--replace-all", "remote.origin.url", url);
+		runUpdater(home, tools.bin, "", installed, { GIT_DIR: join(source, ".git"), GIT_WORK_TREE: source });
+		expect(git(repo, "rev-parse", "HEAD")).toBe(expected);
+		expect(git(repo, "branch", "--show-current")).toBe("maintenance");
+		expect(readFileSync(join(home, "state/hive-pi-update/available-revision"), "utf8").trim()).toBe(expected);
+		expect(readFileSync(join(home, "state/hive-pi-update/activated-revision"), "utf8").trim()).toBe(expected);
+	});
 	// THE REGRESSION. On the post-split layout the base tracks no settings.json,
 	// and the reset that stayed behind — `git checkout -- …/settings.json` —
 	// exits 1 on a pathspec git does not know. Under `set -Eeuo pipefail` that
