@@ -113,6 +113,7 @@ describe("native workspace grant provisioning", () => {
 	it.each([
 		["clean", "", ""],
 		["rewrite", "url.https://other.example/.insteadOf", "https://origin.hiveci.io/"],
+		["masked-rewrite", "url.https://other.example/.insteadOf", "https://origin.hiveci.io/"],
 		["header", "http.https://origin.hiveci.io/.extraHeader", "X-Unwanted: yes"],
 		["redirect", "http.https://origin.hiveci.io/.followRedirects", "true"],
 		["helper", "credential.https://origin.hiveci.io/.helper", "!unwanted-helper"],
@@ -123,8 +124,11 @@ describe("native workspace grant provisioning", () => {
 		execFileSync("git", ["-C", dest, "remote", "add", "origin", f.grant.clone_url!]);
 		if (key) execFileSync("git", ["-C", dest, "config", key, value]);
 		writeFileSync(join(dest, "local-work"), "preserve me");
+		const replacement = join(f.root, "replacement.config");
+		writeFileSync(replacement, '[remote "origin"]\n url = ' + f.grant.clone_url + '\n');
 		f.exec.mockImplementation(async (command, args) => {
-			const result = spawnSync(command, args, { encoding: "utf8" });
+			const env = _name === "masked-rewrite" ? { ...process.env, GIT_CONFIG: replacement } : process.env;
+			const result = spawnSync(command, args, { encoding: "utf8", env });
 			return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 		});
 		const result = await f.tools.get("request_workspace")!.execute("existing", { repo: "harness" });

@@ -54,7 +54,7 @@ export function nativeWorkspaceGitEnv(apiURL: string, environment: NodeJS.Proces
 		throw new Error("Inherited Hive credentials are not bound to this API URL; use matching managed session credentials.");
 	}
 	return [
-		"-u", "GIT_CONFIG_PARAMETERS", "-u", "GIT_CONFIG_SYSTEM",
+		"-u", "GIT_CONFIG", "-u", "GIT_CONFIG_PARAMETERS", "-u", "GIT_CONFIG_SYSTEM",
 		"-u", "GIT_DIR", "-u", "GIT_WORK_TREE", "-u", "GIT_COMMON_DIR",
 		"-u", "GIT_INDEX_FILE", "-u", "GIT_OBJECT_DIRECTORY", "-u", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "-u", "GIT_TEMPLATE_DIR",
 		...(!credentialed ? ["-u", "HIVE_TOKEN"] : []),

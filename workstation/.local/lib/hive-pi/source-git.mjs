@@ -16,7 +16,7 @@ function canonicalURL(raw) {
 
 function sourceGitEnvironment(metadata, role, environment) {
 	const env = { ...environment, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "", SSH_ASKPASS: "" };
-	for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_TEMPLATE_DIR"]) delete env[key];
+	for (const key of ["GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_TEMPLATE_DIR"]) delete env[key];
 	if (NATIVE_PATH.test(canonicalURL(metadata[role]?.url).pathname)) {
 		delete env.GIT_CONFIG_PARAMETERS;
 		Object.assign(env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "0" });
