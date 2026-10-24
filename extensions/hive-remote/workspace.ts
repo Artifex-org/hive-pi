@@ -216,8 +216,8 @@ async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, 
 		const split = entries[i + 1].indexOf("\n");
 		const key = entries[i + 1].slice(0, split).toLowerCase();
 		if (key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entries[i + 1].slice(split + 1))) return undefined;
-		// Command-scope resets run after the persisted helper, regardless of URL specificity.
-		if (entries[i] === "command" && key.startsWith("credential.")) {
+		// Worktree and command scopes load after the repaired common configuration.
+		if (["worktree", "command"].includes(entries[i]) && key.startsWith("credential.")) {
 			if (/^credential\.[^.]+$/.test(key)) return undefined;
 			// Match each scope independently: helpers accumulate, unlike get-urlmatch’s winner.
 			const scope = entries[i + 1].slice(0, split).slice(0, key.lastIndexOf("."));

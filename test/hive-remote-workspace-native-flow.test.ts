@@ -236,7 +236,7 @@ describe("native workspace grant provisioning", () => {
 		if (existing) expect(readFileSync(join(dest, "local-work"), "utf8")).toBe("preserve me");
 	});
 
-	it.each(["normal", "generic override", "scoped override", "host override"])("repairs reversed credential sections or refuses environment override (%s)", async (mode) => {
+	it.each(["normal", "generic override", "scoped override", "host override", "worktree override", "worktree public override"])("repairs reversed credential sections or refuses environment override (%s)", async (mode) => {
 		const f = fixture(false);
 		const dest = join(f.root, "harness");
 		execFileSync("git", ["init", dest]);
@@ -248,7 +248,13 @@ describe("native workspace grant provisioning", () => {
 		writeFileSync(join(bin, "hive"), mode === "host override" ? "#!/bin/sh\nexit 0\n" : '#!/bin/sh\nprintf "username=fixture\\npassword=fixture\\n"\n', { mode: 0o755 });
 		const marker = join(f.root, "legacy-helper-ran");
 		const env: NodeJS.ProcessEnv = { ...process.env, HOME: f.root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", PATH: bin + ":" + process.env.PATH };
-		if (mode !== "normal") Object.assign(env, {
+		if (mode.startsWith("worktree")) {
+			f.grant.public_read = mode === "worktree public override";
+			execFileSync("git", ["-C", dest, "config", "extensions.worktreeConfig", "true"]);
+			execFileSync("git", ["-C", dest, "config", "--worktree", "--add", "credential.helper", ""]);
+			execFileSync("git", ["-C", dest, "config", "--worktree", "--add", "credential.helper", `!f() { touch ${JSON.stringify(marker)}; echo username=legacy; echo password=legacy; }; f`]);
+		}
+		if (mode !== "normal" && !mode.startsWith("worktree")) Object.assign(env, {
 			GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: mode === "host override" ? "credential.https://origin.hiveci.io.helper" : "credential.helper", GIT_CONFIG_VALUE_0: "",
 			GIT_CONFIG_KEY_1: mode === "generic override" ? "credential.helper" : "credential." + (mode === "host override" ? "https://origin.hiveci.io" : f.grant.clone_url) + ".helper",
 			GIT_CONFIG_VALUE_1: `!f() { touch ${JSON.stringify(marker)}; echo username=legacy; echo password=legacy; }; f`,
