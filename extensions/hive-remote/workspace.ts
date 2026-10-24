@@ -213,11 +213,14 @@ async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, 
 		const key = entries[i + 1].slice(0, split).toLowerCase();
 		if (key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entries[i + 1].slice(split + 1))) return undefined;
 		// Command-scope resets run after the persisted helper, regardless of URL specificity.
-		if (entries[i] === "command" && /^credential\.[^.]+$/.test(key)) return undefined;
+		if (entries[i] === "command" && key.startsWith("credential.")) {
+			if (/^credential\.[^.]+$/.test(key)) return undefined;
+			// Match each scope independently: helpers accumulate, unlike get-urlmatch’s winner.
+			const scope = entries[i + 1].slice(0, split).slice(0, key.lastIndexOf("."));
+			const match = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "-c", scope + ".hiveWorkspaceTransportProbe=1", "config", "--get-urlmatch", "credential.hiveWorkspaceTransportProbe", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
+			if (match.code !== 1) return undefined;
+		}
 	}
-	const credential = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--show-scope", "--null", "--get-urlmatch", "credential", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
-	if (credential.code !== 0 && credential.code !== 1) return undefined;
-	if (credential.stdout.split("\0").some((entry, index) => index % 2 === 0 && entry === "command")) return undefined;
 	// Let Git resolve URL patterns and precedence rather than approximating them.
 	const http = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--null", "--get-urlmatch", "http", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
 	if (http.code !== 0 && http.code !== 1) return undefined;
