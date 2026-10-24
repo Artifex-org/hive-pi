@@ -5,7 +5,7 @@
  * and a fake Hive catalog.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -111,8 +111,15 @@ describe("static chart tool", () => {
 		try {
 			const packed = JSON.parse(execFileSync("npm", ["pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", root],
 				{ cwd: REPO, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+			// Materialize a packaging source, not pnpm's shared-inode cache tree.
+			// npm 11.17 stalls on this peer's hardlink groups, even in an exact copy.
+			const schemaPeer = join(root, "schema-peer");
+			cpSync(join(REPO, "node_modules", "typebox"), schemaPeer, { recursive: true, dereference: true });
+			expect(readdirSync(schemaPeer, { recursive: true, withFileTypes: true }).every(entry =>
+				!entry.isFile() || statSync(join(entry.parentPath, entry.name)).nlink === 1),
+			"Schema peer packaging source retained shared cache inodes").toBe(true);
 			const typebox = JSON.parse(execFileSync("npm", ["pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", root],
-				{ cwd: join(REPO, "node_modules", "typebox"), env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+				{ cwd: schemaPeer, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 			// Focus this hermetic fixture on the real packaged chart sources and required
 			// schema peer. Full-package consumer installation is measured separately;
 			// unrelated registry dependencies must not require an ambient npm cache here.
@@ -134,7 +141,8 @@ describe("static chart tool", () => {
 			}));
 			execFileSync("npm", ["install", "--omit=dev", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"],
 				{ cwd: root, env, stdio: "pipe" });
-			const output = execFileSync(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", `
+			// Do not inherit development-module search paths from the invoking toolchain.
+			const output = execFileSync(process.execPath, ["--no-global-search-paths", "--experimental-transform-types", "--input-type=module", "-e", `
 				import { createRequire, registerHooks, stripTypeScriptTypes } from "node:module";
 				import { readFileSync } from "node:fs";
 				import { pathToFileURL } from "node:url";

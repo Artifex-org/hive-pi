@@ -4,6 +4,51 @@ This is a restrictive diagnostic protocol, not SDK admission. Hive admission is
 default-off and independently verifies the owner, launch, session, node readiness
 and assigned account. Deploy the guarded runtime before enabling an owner.
 
+Profile discovery is separate from provider selection. Pinned Pi's explicit
+`--extension` path does **not** disable package/directory plugin discovery. A
+single `pi.extensions` directory entry can load multiple factories and lifecycle
+handlers. `test/claude-sdk-loader.test.ts` exercises that behavior and explicit
+entry deduplication through the real pinned loader and event runner using only
+synthetic plugins. `noExtensions: true` excludes discovered siblings, so it is
+**not** a substitute for the required complete private-profile composition.
+These offline tests execute no private profile or SDK/provider, and do not
+establish full-profile safety, bootstrap or installed readiness.
+
+## Private native transport primitive (not bootstrap authority)
+
+Linux `extensions/claude-sdk/native/private-ipc.c` uses public Node-API v8 and
+pinned, header-only `node-api-headers`. Build explicitly, never from an install
+hook or as an automatic runtime fallback:
+
+```sh
+node scripts/build-claude-sdk-private-ipc.mjs --output /absolute/private/artifact.node
+python3 scripts/claude-sdk-private-ipc-check.py
+```
+
+The sender accepts only inherited fd3 as a nonblocking Unix seqpacket socket,
+burns its loaded native instance before validation, retains a duplicate for the
+operation and invokes `SYS_sendmsg` once with `MSG_DONTWAIT | MSG_NOSIGNAL`.
+EINTR, EAGAIN, short send, malformed input and lost reply cannot restore that
+instance. A fresh JS consumer or require-cache deletion does not reset it. Node's
+`fs.writeSync` is not used: its libuv path retries EINTR. A local complete send
+is neither a parent reply, a purpose client grant nor an archive acknowledgment.
+The clock accessor returns Linux BOOTTIME, not a new deadline or authority.
+
+The Linux x86_64 CI fixture traces the direct Node child's initial thread and
+checks actual successful packet credentials against that retained child. Fault
+cases intercept entry, suppress kernel execution and synthesize syscall-exit
+EINTR/EAGAIN/short-send results; they are not real kernel-returned failures.
+The current C callback is synchronous; this is not an all-thread regression
+counter against a future worker fallback. The unprovisioned-fd fixture closes
+fd3 before Node starts, so it is not an isolated EBADF proof if Node reuses that
+number. Missing compiler/ptrace/platform support fails rather than skips. These are transport fixtures, not genuine Pi
+session/process binding, approved full-profile capture, a provider/private-service
+route, original-deadline enforcement, client ACK or installed readiness. Separate
+artifact verification/distribution and actual bootstrap integration remain
+required. Multiple native artifact copies or replacement processes must never
+recreate authority; the parent still has to enforce the one-use challenge and
+exact retained process/session independently of this loaded-instance latch.
+
 Only a launch explicitly marked `HIVE_CLAUDE_SDK_PILOT=1` registers
 `/claude-sdk-pilot --exclude claude-7`. Invoke it once in a fresh session.
 Its persistent launch-private attempt latch is acquired before arming and is
@@ -40,8 +85,10 @@ responsible. Native hooks, memory and compaction remain disabled by SDK options;
 Pi compaction is refused during the pilot. SDK models do not advertise a prompt
 cache TTL, so the core cache warmer has no eligible SDK model.
 
-The attempt deadline starts before latch/fixture setup, not after it. Expiry
-closes admission and fences late setup/read/reset completions from advancing the
+The local extension deadline starts before latch/fixture setup, not after it.
+It does **not** yet establish or enforce the original Hive DB acceptance +180s
+authority deadline across startup or restart; that remains an admission blocker.
+Local expiry closes admission and fences late setup/read/reset completions from advancing the
 protocol. Query and fixture cleanup start independently with a shared observation
 window of at most five seconds (or the shorter configured attempt duration).
 Artifact publication has its own equally bounded observation window, so a stalled
@@ -80,7 +127,15 @@ Missing or incomplete evidence is not success.
 The event is local: a production EventBus consumer and custom-message remote
 folding are not established. Existing ended-session JSONL upload is best-effort,
 and fresh-profile transcript retention through private-config teardown still
-requires verification. Before live admission, the controller must establish
+requires verification. Offline tests reopen real public `SessionManager.create`
+files: genuine pilot user messages are already on disk before the fake lease is
+called, and canonical tools/final outcomes survive a reopen. A refused fake lease
+also leaves the genuine prompt and failure outcome on disk with zero SDK queries.
+Unarmed positional input is persisted while refusing before leasing. These tests
+add no dummy messages or private flush flags. However, a fresh custom-only setup
+failure still creates no JSONL at all in pinned Pi 1.0.2; a passing in-memory append
+is not native persistence. None of these tests proves archival, owner readback,
+remote ACK or retention after node-private profile cleanup. Before live admission, the controller must establish
 owner-readable retrieval of the final sanitized outcome; local emission or a
 successful upload on an unrelated path is insufficient.
 
