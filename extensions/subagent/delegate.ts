@@ -852,8 +852,9 @@ export async function runSingleAgent(
 					turns: runState.turns,
 				};
 				currentResult.model = runState.model ?? currentResult.model;
-				currentResult.stopReason = runState.stopReason ?? currentResult.stopReason;
-				currentResult.errorMessage = runState.errorMessage ?? currentResult.errorMessage;
+				// Parent-owned termination outranks late buffered worker messages.
+				currentResult.stopReason = silentWorkerError ? "error" : runState.stopReason ?? currentResult.stopReason;
+				currentResult.errorMessage = silentWorkerError ?? runState.errorMessage;
 				currentResult.retries = runState.retries ?? currentResult.retries;
 				emitUpdate();
 			};

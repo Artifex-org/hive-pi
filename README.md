@@ -230,6 +230,26 @@ and nobody to continue it.
 recovery socket is unreachable from a sandbox (`connect EPERM …hive-recovery.sock`)
 instead of logging the same failure every interval.
 
+## Cybersecurity-error fallback
+
+`cybersecurity-fallback` automatically switches OpenAI/Codex or Anthropic sessions
+(including their OpenRouter routes and Azure OpenAI) to `zai/glm-5.3-flash` when a
+provider **error** explicitly names cyber-safety or a cybersecurity policy refusal.
+It does not inspect normal assistant text, tool output, or generic policy errors.
+After Pi's own retries finish, it continues once from the current transcript,
+keeping completed tool results and the original error visible. GLM stays selected
+for this session; defaults for new sessions do not change. Delegated native Pi
+workers load the same bounded recovery hook.
+
+The model comes from Pi's native catalogue and needs configured `zai` credentials.
+If it is missing or unauthenticated, the original failure is left intact and a
+warning explains why. A failed GLM request does not trigger another model switch.
+Cancellation, pending input, another recovery continuation, or an already changed
+model prevents this extension from starting a competing continuation. Aborting
+while model authentication is already in progress stops the continuation but may
+leave GLM selected: Pi's model-selection API itself is not cancellable. Virtual
+models retain their own routing policy.
+
 ## OpenAI Fast mode
 
 `extensions/fast` requests OpenAI's priority service tier ("Fast mode": about

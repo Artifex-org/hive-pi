@@ -119,7 +119,8 @@ describe("subagent worker invocation", () => {
 		// Raised 6 -> 7 for public-fetch/index.ts: hook-free, broker-only transport,
 		// with real SDK role-grant coverage in public-fetch-worker.test.ts.
 		// One launch-gated transport added; its exact lifecycle-only surface is pinned below.
-		expect(workerExtensionPaths().length).toBeLessThanOrEqual(8);
+		// One bounded cybersecurity-error recovery hook, pinned below; no agenda policies.
+		expect(workerExtensionPaths().length).toBeLessThanOrEqual(9);
 	});
 
 	it("loads the fast worker module, with its one hook and no tools or commands", () => {
@@ -167,6 +168,16 @@ describe("subagent worker invocation", () => {
 		expect(source).not.toMatch(/\bregisterTool\(|\bregisterCommand\(|\bregisterFlag\(/);
 	});
 
+	it("loads bounded cybersecurity recovery in workers without adding tools or commands", () => {
+		const path = workerExtensionPaths().find(path => path.endsWith("/extensions/cybersecurity-fallback/index.ts"));
+		expect(path).toBeDefined();
+		const source = readFileSync(path!, "utf8");
+		expect([...source.matchAll(/\bpi\.on\(\s*"([a-z_]+)"/g)].map(m => m[1])).toEqual([
+			"session_start", "session_shutdown", "before_agent_start", "input", "model_select", "agent_before_settle",
+		]);
+		expect(source).not.toMatch(/\bregisterTool\(|\bregisterCommand\(|\bregisterFlag\(/);
+	});
+
 	it("only reviewed protocol extensions register worker event hooks", () => {
 		// `workflow/index.ts` was the second entry until HIV-2904 merged that
 		// document into the plan. It is deliberately NOT replaced by
@@ -176,7 +187,7 @@ describe("subagent worker invocation", () => {
 		// `loadout/index.ts` appends the on-demand tool index to the system prompt
 		// and nothing else (pinned below): without it a worker spawned with no
 		// `--tools` list could not reach any deferred harness tool.
-		const allowedHooks = new Set(["opmode/index.ts", "fast/worker.ts", "loadout/index.ts", "claude-sdk/index.ts"]);
+		const allowedHooks = new Set(["opmode/index.ts", "fast/worker.ts", "loadout/index.ts", "claude-sdk/index.ts", "cybersecurity-fallback/index.ts"]);
 		const ours = workerExtensionPaths().filter((path) => path.includes("/extensions/"));
 		expect(ours.length, "expected at least one in-repo worker extension").toBeGreaterThan(0);
 		for (const path of ours) {
