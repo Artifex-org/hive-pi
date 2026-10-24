@@ -204,12 +204,19 @@ async function cloneOne(pi: ExtensionAPI, r: WorkspaceRepoGrant, auth: HiveAuth,
 }
 
 async function ordinaryNativeTransportSafe(pi: ExtensionAPI, directory: string, source: WorkspaceCloneSource, signal: AbortSignal | undefined): Promise<boolean> {
-	const effective = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--null", "--list"], { signal, timeout: CLONE_TIMEOUT_MS });
-	if (effective.code !== 0 || effective.stdout.split("\0").some(entry => {
-		const split = entry.indexOf("\n");
-		const key = entry.slice(0, split).toLowerCase();
-		return key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entry.slice(split + 1));
-	})) return false;
+	const effective = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--show-scope", "--null", "--list"], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (effective.code !== 0) return false;
+	const entries = effective.stdout.split("\0");
+	for (let i = 0; i + 1 < entries.length; i += 2) {
+		const split = entries[i + 1].indexOf("\n");
+		const key = entries[i + 1].slice(0, split).toLowerCase();
+		if (key.startsWith("url.") && key.endsWith(".insteadof") && source.url.startsWith(entries[i + 1].slice(split + 1))) return false;
+		// Command-scope resets run after the persisted helper, regardless of URL specificity.
+		if (entries[i] === "command" && /^credential\.[^.]+$/.test(key)) return false;
+	}
+	const credential = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--show-scope", "--null", "--get-urlmatch", "credential", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
+	if (credential.code !== 0 && credential.code !== 1) return false;
+	if (credential.stdout.split("\0").some((entry, index) => index % 2 === 0 && entry === "command")) return false;
 	// Let Git resolve URL patterns and precedence rather than approximating them.
 	const http = await pi.exec("env", [...nativeWorkspaceGitContextEnv(), "git", "-C", directory, "config", "--null", "--get-urlmatch", "http", source.url], { signal, timeout: CLONE_TIMEOUT_MS });
 	if (http.code !== 0 && http.code !== 1) return false;

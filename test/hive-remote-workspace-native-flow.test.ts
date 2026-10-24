@@ -236,7 +236,7 @@ describe("native workspace grant provisioning", () => {
 		if (existing) expect(readFileSync(join(dest, "local-work"), "utf8")).toBe("preserve me");
 	});
 
-	it("repairs reversed credential sections for ordinary private Git reads", async () => {
+	it.each(["normal", "generic override", "scoped override"])("repairs reversed credential sections or refuses environment override (%s)", async (mode) => {
 		const f = fixture(false);
 		const dest = join(f.root, "harness");
 		execFileSync("git", ["init", dest]);
@@ -246,15 +246,27 @@ describe("native workspace grant provisioning", () => {
 		const bin = join(f.root, "bin");
 		mkdirSync(bin);
 		writeFileSync(join(bin, "hive"), '#!/bin/sh\nprintf "username=fixture\\npassword=fixture\\n"\n', { mode: 0o755 });
-		const env = { ...process.env, HOME: f.root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", PATH: bin + ":" + process.env.PATH };
+		const marker = join(f.root, "legacy-helper-ran");
+		const env: NodeJS.ProcessEnv = { ...process.env, HOME: f.root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", PATH: bin + ":" + process.env.PATH };
+		if (mode !== "normal") Object.assign(env, {
+			GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "credential.helper", GIT_CONFIG_VALUE_0: "",
+			GIT_CONFIG_KEY_1: mode === "generic override" ? "credential.helper" : "credential." + f.grant.clone_url + ".helper",
+			GIT_CONFIG_VALUE_1: `!f() { touch ${JSON.stringify(marker)}; echo username=legacy; echo password=legacy; }; f`,
+		});
 		f.exec.mockImplementation(async (command, args) => {
 			const result = spawnSync(command, args, { encoding: "utf8", env });
 			return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 		});
 		const result = await f.tools.get("request_workspace")!.execute("repair", { repo: "harness" });
+		if (mode !== "normal" && result.content[0].text.includes("refused")) {
+			expect(result.content[0].text).toContain("conflicting inherited Git transport configuration");
+			expect(existsSync(marker)).toBe(false);
+			return;
+		}
 		expect(result.content[0].text).toContain("scoped Git configuration verified");
 		const fill = spawnSync("git", ["-C", dest, "credential", "fill"], { env, encoding: "utf8", input: "url=" + f.grant.clone_url + "\n\n" });
 		expect(fill.status, fill.stderr).toBe(0);
+		expect(existsSync(marker)).toBe(false);
 		expect(fill.stdout).toContain("password=fixture");
 	});
 
