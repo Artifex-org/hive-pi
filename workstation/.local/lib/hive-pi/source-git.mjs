@@ -37,10 +37,11 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 	if (source.ref) throw new Error("configured source is pinned; use the Hive-managed revision verifier instead of this timer");
 	const branch = source.branch;
 	if (typeof branch !== "string" || !branch) throw new Error("updater needs the provisioner-verified branch; reprovision before retrying");
-	runGit(["check-ref-format", "refs/heads/" + branch], {});
+	const env = sourceGitEnvironment(metadata, role, environment);
+	runGit(["check-ref-format", "refs/heads/" + branch], env);
 	if (typeof source.local_branch !== "string" || !source.local_branch) throw new Error("updater needs its provisioner-verified local branch; reprovision before retrying");
 	const localRef = "refs/heads/" + source.local_branch;
-	runGit(["check-ref-format", localRef], {});
+	runGit(["check-ref-format", localRef], env);
 	if (!["fetch", "pull", "remote-head"].includes(operation[0]) || (operation[0] === "remote-head" && operation.length !== 1) || operation.slice(1).some(arg => !["--prune", "--ff-only", "origin", "main"].includes(arg))) throw new Error("unsupported updater Git operation");
 	for (const entry of config.split("\0")) {
 		const split = entry.indexOf("\n");
@@ -52,7 +53,6 @@ export function prepareSourceGit(metadata, role, checkout, actual, config, opera
 			throw new Error("inherited Git URL rewrite, HTTP header or scoped HTTP configuration prevents verified source access");
 		}
 	}
-	const env = sourceGitEnvironment(metadata, role, environment);
 	const flags = ["-c", "http.followRedirects=false"];
 	if (native) {
 		flags.push("-c", "credential.helper=", "-c", "credential.useHttpPath=true", "-c", "http.extraHeader=");

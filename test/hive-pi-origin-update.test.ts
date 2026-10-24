@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -24,6 +24,16 @@ describe("provisioner-bound timer source", () => {
 		expect(selected.env.GIT_CONFIG_PARAMETERS).toBeUndefined();
 		expect(selected.env.GIT_OBJECT_DIRECTORY).toBeUndefined();
 		expect(selected.args.join(" ")).toContain("credential.helper=");
+	});
+	it("validates both branch refs using Git from the supplied sanitized PATH", () => {
+		const root = mkdtempSync(join(tmpdir(), "hive-pi-ref-path-"));
+		roots.push(root);
+		const marker = join(root, "calls");
+		const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+		writeFileSync(join(root, "git"), '#!/bin/sh\ntest -z "${GIT_DIR+x}" && test -z "${GIT_CONFIG+x}" || exit 77\nprintf "%s\\n" "$*" >> ' + JSON.stringify(marker) + '\nexec ' + JSON.stringify(realGit) + ' "$@"\n', { mode: 0o755 });
+		prepare("base", source, "", ["pull"], { PATH: root, GIT_DIR: "/foreign", GIT_CONFIG: "/foreign" });
+		expect(existsSync(marker)).toBe(true);
+		expect(readFileSync(marker, "utf8").trim().split("\n")).toEqual(["check-ref-format refs/heads/main", "check-ref-format refs/heads/main"]);
 	});
 	it("preserves supported TLS and HTTP tuning configuration", () => {
 		expect(() => prepare("base", source, "http.sslcainfo\n/fixture/trusted-ca.pem\0http.version\nHTTP/1.1\0")).not.toThrow();
